@@ -1,0 +1,130 @@
+/**
+ * Which format a pasted URL turns out to be.
+ *
+ * The two properties that matter are both about precedence. The native format
+ * must win everywhere, because reading a Yorozo repository as a foreign one
+ * would convert something that needs no conversion and lose its signature
+ * doing it. And the *body* must decide, because several of these ecosystems
+ * publish a file called `index.json` and mean different things by it.
+ */
+
+import { describe, expect, it } from 'vitest';
+
+import fixtures from '../../../fixtures/indexes.json';
+import { detectRepository, detectionCandidates } from './detect';
+
+type Fixture = { indexUrl: string; body: unknown; repoJson?: unknown };
+const catalogue = fixtures as unknown as Record<string, Fixture>;
+
+/** Serves exactly one document, and 404s everything else. */
+function serve(documents: Record<string, unknown>) {
+	return async (url: string) => {
+		if (url in documents) return JSON.stringify(documents[url]);
+		throw new Error(`nothing at ${url}`);
+	};
+}
+
+const NATIVE_INDEX = {
+	schemaVersion: 1,
+	name: 'A Yorozo repository',
+	updatedAt: '2026-09-08',
+	signingKey: null,
+	plugins: [
+		{
+			id: 'com.example.plugins.demo',
+			name: 'Demo',
+			version: '1.0.0',
+			download: 'https://example.invalid/demo.yorozoplugin',
+			sha256: 'ab'.repeat(32),
+			permissions: ['network'],
+			hosts: ['api.example.com']
+		}
+	]
+};
+
+describe('what gets tried, and in what order', () => {
+	it('puts the native candidates first', () => {
+		const { candidates } = detectionCandidates('https://github.com/owner/repo');
+
+		expect(candidates[0]).toBe('https://raw.githubusercontent.com/owner/repo/main/index.json');
+		expect(candidates).toContain(
+			'https://raw.githubusercontent.com/owner/repo/repo/index.min.json'
+		);
+	});
+
+	it('tries each URL once even though four adapters offer some of them', () => {
+		const { candidates } = detectionCandidates('https://github.com/owner/repo');
+		expect(new Set(candidates).size).toBe(candidates.length);
+	});
+
+	it('accepts the owner/repo shorthand and refuses anything not https', () => {
+		expect(detectionCandidates('owner/repo').candidates[0]).toMatch(
+			/^https:\/\/raw\.githubusercontent\.com\/owner\/repo\//
+		);
+		expect(() => detectionCandidates('http://example.invalid/index.json')).toThrow(/https/);
+		expect(() => detectionCandidates('   ')).toThrow(/Paste a repository URL/);
+	});
+});
+
+describe('the body decides, not the path', () => {
+	it('reads a Yorozo index as native even where a foreign adapter also looks', async () => {
+		const url = 'https://raw.githubusercontent.com/owner/repo/main/index.json';
+		const found = await detectRepository(
+			'https://github.com/owner/repo',
+			serve({ [url]: NATIVE_INDEX })
+		);
+
+		expect(found.index.format).toBe('yorozo');
+		expect(found.index.plugins[0].origin).toBeUndefined();
+	});
+
+	it.each(['aniyomi', 'hayase', 'lnreader', 'mangayomi'])(
+		'recognises a %s index by its contents',
+		async (format) => {
+			const fixture = catalogue[format];
+			const documents: Record<string, unknown> = {
+				[fixture.indexUrl]: fixture.body
+			};
+			const found = await detectRepository(fixture.indexUrl, serve(documents));
+
+			expect(found.index.format).toBe(format);
+			expect(found.indexUrl).toBe(fixture.indexUrl);
+		}
+	);
+
+	it('reports every URL it tried when nothing is there', async () => {
+		await expect(detectRepository('https://github.com/owner/repo', serve({}))).rejects.toThrow(
+			/raw\.githubusercontent\.com\/owner\/repo/
+		);
+	});
+
+	it('refuses a native index from a newer schema instead of guessing a format', async () => {
+		// A repository relying on a field this build ignores must fail loudly.
+		// Falling through to a foreign adapter would be the worst kind of guess.
+		const url = 'https://example.invalid/index.json';
+		await expect(
+			detectRepository(url, serve({ [url]: { ...NATIVE_INDEX, schemaVersion: 2 } }))
+		).rejects.toThrow(/index format 2/);
+	});
+
+	it('does not read a foreign index as a broken native one', async () => {
+		// The other half of the rule above, and the half that was wrong. A body
+		// with no `schemaVersion` at all is not claiming to be ours — several
+		// foreign indexes are plain JSON objects — but the native parser raises
+		// the same "index format" error for it, and rethrowing that stopped
+		// detection dead at the first candidate. An entire format could not be
+		// added, with an error naming a field its repository never claimed.
+		const fixture = catalogue['cloudstream'] as Fixture & {
+			pluginList: { url: string; body: unknown };
+		};
+		const found = await detectRepository(
+			fixture.indexUrl,
+			serve({
+				[fixture.indexUrl]: fixture.body,
+				[fixture.pluginList.url]: fixture.pluginList.body
+			})
+		);
+
+		expect(found.index.format).toBe('cloudstream');
+	});
+});

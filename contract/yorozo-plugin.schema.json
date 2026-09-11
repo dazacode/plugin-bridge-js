@@ -1,0 +1,251 @@
+{
+	"$schema": "https://json-schema.org/draft/2020-12/schema",
+	"$id": "https://yorozo.app/schema/yorozo-plugin.schema.json",
+	"title": "kuro plugin manifest",
+	"description": "Structure of a kuro content-source plugin's plugin.json. schemaVersion 1. This file is the published contract; cross-field rules a JSON Schema cannot express live in the plugin CLI and are documented in contract/plugin-api/ABI.md. Adapted from dazacode/swayve-plugins, whose manifest design this reuses rather than re-derives.",
+	"type": "object",
+	"additionalProperties": false,
+	"required": [
+		"schemaVersion",
+		"id",
+		"name",
+		"description",
+		"version",
+		"author",
+		"license",
+		"yorozoPluginApi",
+		"minimumYorozoVersion",
+		"platforms",
+		"capabilities",
+		"permissions",
+		"entrypoint"
+	],
+	"properties": {
+		"schemaVersion": {
+			"description": "Manifest schema version this plugin.json is written in. Currently 1.",
+			"type": "integer",
+			"minimum": 1
+		},
+		"id": {
+			"description": "Globally unique reverse-DNS plugin id, at least three segments. Written into stored SourceBindings, so it may never change once shipped.",
+			"$ref": "#/$defs/pluginId"
+		},
+		"name": {
+			"description": "Human readable name, shown in the source picker. No emoji.",
+			"type": "string",
+			"minLength": 1,
+			"maxLength": 64
+		},
+		"description": {
+			"description": "One paragraph describing what this plugin adds.",
+			"type": "string",
+			"minLength": 1,
+			"maxLength": 280
+		},
+		"version": {
+			"description": "Plugin version, strict SemVer 2.0.0.",
+			"$ref": "#/$defs/semver"
+		},
+		"author": { "$ref": "#/$defs/author" },
+		"license": {
+			"description": "SPDX licence identifier, for example Apache-2.0.",
+			"type": "string",
+			"minLength": 1,
+			"maxLength": 64,
+			"pattern": "^[A-Za-z0-9][A-Za-z0-9.+-]*$"
+		},
+		"yorozoPluginApi": {
+			"description": "Plugin ABI level this bundle targets. See contract/plugin-api/ABI.md.",
+			"type": "integer",
+			"minimum": 1
+		},
+		"minimumYorozoVersion": {
+			"description": "Lowest kuro client version this plugin runs on.",
+			"$ref": "#/$defs/semver"
+		},
+		"platforms": {
+			"description": "Surfaces the plugin supports. A plugin that needs a WebView must not claim macos, windows or linux -- PlatformCapabilities.hasWebView is false there (AGENTS.md rule 10).",
+			"type": "array",
+			"minItems": 1,
+			"uniqueItems": true,
+			"items": { "$ref": "#/$defs/platform" }
+		},
+		"capabilities": {
+			"description": "Which ABI methods this plugin implements. The host resolves plugins by capability, never by id.",
+			"type": "array",
+			"minItems": 1,
+			"uniqueItems": true,
+			"items": { "$ref": "#/$defs/capability" }
+		},
+		"permissions": {
+			"description": "Host facilities the plugin may touch. An unknown entry is a load refusal, never a silent drop.",
+			"type": "array",
+			"minItems": 0,
+			"uniqueItems": true,
+			"items": { "$ref": "#/$defs/permission" }
+		},
+		"entrypoint": {
+			"description": "The bundle's module name inside payload/, without extension. Also the plugin's directory name and the archive's filename stem.",
+			"type": "string",
+			"minLength": 1,
+			"maxLength": 64,
+			"pattern": "^[a-z][a-z0-9_]*$"
+		},
+		"homepage": { "$ref": "#/$defs/httpUrl" },
+		"repository": { "$ref": "#/$defs/httpUrl" },
+		"icon": { "$ref": "#/$defs/assetPath" },
+		"language": {
+			"description": "ISO 639-1 code for the content this source serves, or 'multi'.",
+			"type": "string",
+			"pattern": "^([a-z]{2}|multi)$"
+		},
+		"network": {
+			"description": "Outbound network declared up front. ctx.http refuses anything not matched here, and the user sees this list before installing.",
+			"$ref": "#/$defs/network"
+		},
+		"settings": {
+			"description": "Settings the HOST renders on the plugin's behalf, on every surface. A plugin never draws UI. A setting may choose among the hosts `network.hosts` already grants; it may never add one -- a value naming a host outside the grant is refused when it is set, and `ctx.http` refuses it again if it ever gets there.",
+			"type": "array",
+			"minItems": 0,
+			"maxItems": 32,
+			"items": { "$ref": "#/$defs/settingDescriptor" }
+		},
+		"timeouts": {
+			"description": "Plugin-requested timeout budget. The host still applies its own hard limits.",
+			"$ref": "#/$defs/timeouts"
+		},
+		"keywords": {
+			"type": "array",
+			"minItems": 0,
+			"maxItems": 10,
+			"uniqueItems": true,
+			"items": { "$ref": "#/$defs/keyword" }
+		}
+	},
+	"$defs": {
+		"semver": {
+			"$comment": "Strict SemVer 2.0.0, the regex published at semver.org.",
+			"type": "string",
+			"minLength": 5,
+			"maxLength": 128,
+			"pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-((?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\\.(?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\\+([0-9a-zA-Z-]+(?:\\.[0-9a-zA-Z-]+)*))?$"
+		},
+		"pluginId": {
+			"$comment": "Reverse-DNS, three or more lowercase segments.",
+			"type": "string",
+			"minLength": 5,
+			"maxLength": 128,
+			"pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*){2,}$"
+		},
+		"httpUrl": {
+			"type": "string",
+			"format": "uri",
+			"minLength": 8,
+			"maxLength": 512,
+			"pattern": "^https://[^\\s]+$"
+		},
+		"assetPath": {
+			"$comment": "Relative, inside assets/, no traversal, no drive letter, no backslash.",
+			"type": "string",
+			"minLength": 8,
+			"maxLength": 256,
+			"pattern": "^assets/(?:[A-Za-z0-9_-]+/)*[A-Za-z0-9_-]+\\.(?:png|svg)$"
+		},
+		"hostPattern": {
+			"$comment": "A hostname, optionally with a single leading *. wildcard label. A bare '*' is deliberately not expressible.",
+			"type": "string",
+			"minLength": 4,
+			"maxLength": 253,
+			"pattern": "^(\\*\\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$"
+		},
+		"keyword": {
+			"type": "string",
+			"minLength": 2,
+			"maxLength": 32,
+			"pattern": "^[a-z0-9][a-z0-9-]*$"
+		},
+		"author": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": ["name"],
+			"properties": {
+				"name": { "type": "string", "minLength": 1, "maxLength": 128 },
+				"url": { "$ref": "#/$defs/httpUrl" }
+			}
+		},
+		"platform": {
+			"enum": ["android", "ios", "macos", "windows", "linux", "web"]
+		},
+		"capability": {
+			"$comment": "One per ABI method. 'search' and 'episodes' and 'resolve' are the three a usable source implements.",
+			"enum": ["search", "episodes", "resolve", "browse"]
+		},
+		"permission": {
+			"$comment": "segment-transform-js is specified at API level 1 and NOT implemented; a host must refuse a plugin that declares it (ABI.md section 4.4).",
+			"enum": ["network", "storage", "webview", "segment-transform-js"]
+		},
+		"network": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": ["hosts"],
+			"properties": {
+				"hosts": {
+					"description": "Every host the plugin may reach. Enforced by the host before a packet leaves, not by the SDK.",
+					"type": "array",
+					"minItems": 1,
+					"maxItems": 32,
+					"uniqueItems": true,
+					"items": { "$ref": "#/$defs/hostPattern" }
+				}
+			}
+		},
+		"timeouts": {
+			"type": "object",
+			"additionalProperties": false,
+			"properties": {
+				"requestMs": { "type": "integer", "minimum": 1000, "maximum": 60000 },
+				"operationMs": { "type": "integer", "minimum": 1000, "maximum": 120000 }
+			}
+		},
+		"settingId": {
+			"type": "string",
+			"minLength": 1,
+			"maxLength": 48,
+			"pattern": "^[a-z][a-z0-9_]*$"
+		},
+		"settingDescriptor": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": ["id", "type", "label"],
+			"properties": {
+				"id": { "$ref": "#/$defs/settingId" },
+				"key": {
+					"description": "What the plugin's own code reads this setting by, when that differs from `id`. Present on a converted bundle, whose upstream preference keys are arbitrary strings while ids are not. The host stores and answers by `id`; this records the mapping so a derivation is auditable in the manifest rather than only in the converter.",
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 128
+				},
+				"type": {
+					"enum": ["select", "multiselect", "switch", "text"]
+				},
+				"label": { "type": "string", "minLength": 1, "maxLength": 64 },
+				"help": { "type": "string", "minLength": 1, "maxLength": 240 },
+				"default": {},
+				"options": {
+					"type": "array",
+					"minItems": 1,
+					"maxItems": 64,
+					"items": {
+						"type": "object",
+						"additionalProperties": false,
+						"required": ["value", "label"],
+						"properties": {
+							"value": { "type": "string", "minLength": 1, "maxLength": 64 },
+							"label": { "type": "string", "minLength": 1, "maxLength": 64 }
+						}
+					}
+				}
+			}
+		}
+	}
+}

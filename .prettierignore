@@ -1,0 +1,5 @@
+node_modules/
+packages/runtime/src/shims/generated/
+packages/core/src/kotlin/vendor/
+fixtures/
+bun.lock

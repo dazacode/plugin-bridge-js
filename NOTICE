@@ -1,0 +1,136 @@
+plugin-bridge-js
+================
+
+This file records third-party work this repository reimplements or derives
+from, and the licence under which that is done. It is not a list of
+dependencies — `package.json` is that. It exists
+because some of this repository's code was written by *reading a published
+program* rather than by using it, and that is a thing which has to be
+attributed rather than merely permitted.
+
+`contract/FOREIGN.md` §5.1 requires a converted plugin bundle to
+carry its upstream author, licence and repository. This file is the same rule
+pointing inward. `docs/adr/0004-compatibility-layer.md` §2.7 decides which
+licences it may point at.
+
+
+The Aniyomi base-class driver
+-----------------------------
+
+Files:
+
+    client-web/src/lib/plugins/foreign/shims/aniyomi-entry.ts
+    client-web/src/lib/plugins/foreign/shims/kotlin-runtime.ts
+        (the `KOTLIN_MODELS` section)
+
+An extension written for the Aniyomi client application is a *subclass*. Most
+of what makes one work lives in the class it extends — `AnimeHttpSource` and
+`ParsedAnimeHttpSource`, together with the models beside them — which is not in
+the extension's own file. To run one of those extensions, this project has to
+supply that class.
+
+It is supplied by **reimplementation, from the published source**, of the
+`source-api` module of the Aniyomi client application, as published by the
+`miwayomi` project under the **Apache License, Version 2.0**. The behaviour
+reimplemented is the driver half: which member is called in which order, what
+each default does when a subclass declares no override, and what each refuses.
+No Kotlin was copied; the reimplementation is TypeScript-emitted JavaScript
+with different structure, different names for its internals, and a different
+failure taxonomy (`contract/plugin-api/ABI.md` §5). What is *derived* is the
+behaviour, and the Apache-2.0 licence permits that with attribution, which this
+notice is.
+
+
+Episode numbering
+-----------------
+
+File:
+
+    client-web/src/lib/plugins/foreign/episode-recognition.ts
+
+A port of `EpisodeRecognition.kt` from the Aniyomi client application, also
+Apache-2.0.
+
+It is a port of the behaviour, not a copy of the text: the Kotlin object is
+re-expressed as one self-contained TypeScript function, because the same body
+is also emitted as source into converted plugin bundles, which cannot import
+anything. The algorithm — the patterns, their order, the `extra`/`omake`/
+`special` and `.a`-through-`.i` fractions, and `-1` for "no number found" — is
+reproduced exactly, and is pinned by tests written against the upstream
+doc-comment examples rather than against ours. Agreeing with the rest of the
+ecosystem about which episode is episode twelve is the entire reason to port it
+rather than invent one.
+
+No modification is claimed beyond that re-expression.
+
+
+The preference framework
+------------------------
+
+File:
+
+    client-web/src/lib/plugins/foreign/shims/kotlin-runtime.ts
+        (the `KOTLIN_PREFS` section)
+
+An extension in this format is configured through Android's preference
+framework: it declares a `PreferenceScreen` and reads the values back through
+`SharedPreferences`. Neither exists in a browser, and an extension that mentions
+either could not be translated at all until this build supplied them.
+
+They are supplied by **reimplementation, from the published source**, of the
+`android-compat` module of the same `miwayomi` project, under the **Apache
+License, Version 2.0** — `androidx/preference/Preference.kt`,
+`android/content/SharedPreferences.kt` and
+`android/content/res/CompatSharedPreferences.kt`. What is reproduced is the
+*shape*: which types exist, which properties an extension assigns on each, and
+what each getter answers when nothing is stored.
+
+Everything behind that shape is this project's own and is deliberately
+different. There are no widgets, because a plugin never draws UI
+(`contract/plugin-api/ABI.md` §1) — the values come from a manifest `settings`
+block the conversion derived and the host rendered. There is no file: the
+upstream store persists to a `.properties` file, and this one layers a per-run
+overlay over the host's settings and persists nothing, because a plugin does not
+get to edit a screen it is not allowed to draw. The property *names* are
+upstream's, because extensions assign them directly and renaming them would mean
+rewriting every assignment site.
+
+No Kotlin was copied.
+
+
+The driver and the numbering
+----------------------------
+
+    Copyright the Aniyomi contributors.
+    Licensed under the Apache License, Version 2.0.
+    https://github.com/aniyomiorg/aniyomi
+    https://www.apache.org/licenses/LICENSE-2.0
+
+The preference framework
+------------------------
+
+    Copyright the miwayomi contributors.
+    Licensed under the Apache License, Version 2.0.
+    https://github.com/miwayomi/miwayomi
+    https://www.apache.org/licenses/LICENSE-2.0
+
+Two attributions rather than one, because the `android-compat` module is
+miwayomi's own work rather than a copy of the client application's, while
+`source-api` and `EpisodeRecognition` are that application's. Both are
+Apache-2.0 and both were read as published source; recording whose is the point
+of this file.
+
+
+What was deliberately not read
+------------------------------
+
+Both reimplementations read *only* Apache-2.0 sources. Two other projects solve
+adjacent problems and were **not** read for this work, because their licences
+would reach further into this repository than a compatibility shim should:
+`Suwayomi-Server` (MPL-2.0, file-level copyleft) and `hoshi-io/apktojs`
+(AGPL-3.0). That is a deliberate boundary, recorded here so nobody re-derives
+it, and so nobody quietly crosses it later.
+
+`AGENTS.md` rule 9 applies to this file as it applies to every other. Naming a
+*client application* and a *file format* is allowed and is what the paragraphs
+above do. Naming a content source is not, and none is named here.
