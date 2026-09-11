@@ -408,3 +408,82 @@ describe('telling a bot check apart from a refusal', () => {
 		expect(payload.challenge).toBeUndefined();
 	});
 });
+
+/**
+ * The relay holds no cookies. It puts one header on the first hop and reports
+ * what came back; every question about scope belongs to `cookie-jar.ts`, one
+ * layer up. These pin the three parts that are this route's own business.
+ */
+describe('carrying a jar’s header, and reporting what a chain set', () => {
+	it('sends what the caller’s jar produced, on the first hop', async () => {
+		let carried: string | null = null;
+		await call(
+			{ url: 'https://a.example.invalid/', cookies: { send: 'session=abc' } },
+			(request) => {
+				carried = request.headers.get('cookie');
+				return new Response('ok');
+			}
+		);
+
+		expect(carried).toBe('session=abc');
+	});
+
+	it('refuses a Cookie smuggled in through the ordinary header map', async () => {
+		// `cookie` is not in FORWARDABLE and must stay out of it: a caller that
+		// could set one there could set any cookie for any host, with nothing
+		// recording that a credential had been sent. The jar's header arrives
+		// on its own field precisely so that it is greppable.
+		let carried: string | null = null;
+		await call(
+			{ url: 'https://a.example.invalid/', headers: { Cookie: 'session=smuggled' } },
+			(request) => {
+				carried = request.headers.get('cookie');
+				return new Response('ok');
+			}
+		);
+
+		expect(carried).toBeNull();
+	});
+
+	it('does not carry the header across a redirect, and reports each hop', async () => {
+		// A redirect is a different request, possibly to a different host, and
+		// this route has no jar with which to decide whether the cookie applies
+		// there. So it drops it, and reports what each hop set instead — the jar
+		// scopes those, and the plugin's next request carries them.
+		const carried: (string | null)[] = [];
+		const { payload } = await call(
+			{ url: 'https://a.example.invalid/one', cookies: { send: 'session=abc' } },
+			(request) => {
+				carried.push(request.headers.get('cookie'));
+				if (request.url.endsWith('/one')) {
+					return new Response(null, {
+						status: 302,
+						headers: {
+							location: 'https://b.example.invalid/two',
+							'set-cookie': 'hop=1'
+						}
+					});
+				}
+				return new Response('ok', { headers: { 'set-cookie': 'landed=2' } });
+			}
+		);
+
+		expect(carried).toEqual(['session=abc', null]);
+		expect(payload.setCookie).toEqual([
+			{ url: 'https://a.example.invalid/one', headers: ['hop=1'] },
+			{ url: 'https://b.example.invalid/two', headers: ['landed=2'] }
+		]);
+	});
+
+	it('says nothing about cookies to a caller that holds no jar', async () => {
+		// Without the key the response shape is what it was before jars existed,
+		// and `Set-Cookie` is still not one of the four headers forwarded.
+		const { payload } = await call(
+			{ url: 'https://a.example.invalid/' },
+			() => new Response('ok', { headers: { 'set-cookie': 'session=abc' } })
+		);
+
+		expect(payload.setCookie).toBeUndefined();
+		expect(payload.headers).not.toHaveProperty('set-cookie');
+	});
+});

@@ -65,6 +65,7 @@ function json(data: unknown, init?: { status?: number }): Response {
 	});
 }
 import { chainIsIncomplete, fetchTrusting, isPrivateAddress, issuersFor } from './aia';
+import { setCookiesOf } from './cookie-jar';
 
 /** Response body cap. A catalogue page or an embed page, not a video. */
 const MAX_BYTES = 4 * 1024 * 1024;
@@ -93,6 +94,17 @@ const FORWARDABLE = new Set([
 	'sec-fetch-site'
 ]);
 
+/**
+ * `cookie` is deliberately absent from `FORWARDABLE`, and stays absent.
+ *
+ * A caller that could put a cookie in `headers` could put *any* cookie there,
+ * for any host, with nothing recording that it happened. The jar's outbound
+ * header therefore arrives through its own field (`cookies.send`) rather than
+ * through the general allowlist, so that "this request carried a credential"
+ * is one grep and not a judgement about the contents of a map. See
+ * `cookie-jar.ts` for the state itself, which this route does not hold.
+ */
+
 export const relay = async (
 	request: Request,
 	fetch: typeof globalThis.fetch = globalThis.fetch
@@ -103,6 +115,19 @@ export const relay = async (
 		headers?: Record<string, string>;
 		body?: string | null;
 		follow?: boolean;
+		/**
+		 * Present when the caller holds a cookie jar on a plugin's behalf.
+		 *
+		 * Presence alone is the switch: without this key the route behaves
+		 * exactly as it did before jars existed, down to the response shape.
+		 * With it, `send` is put on the first hop and every `Set-Cookie` the
+		 * chain produced is reported back, tagged with the hop that sent it.
+		 *
+		 * The route stays **stateless**. It does not parse a cookie, does not
+		 * decide what a `Domain` means, and does not carry one across a
+		 * redirect — all of that is the jar's, in one place, host-side.
+		 */
+		cookies?: { send?: string };
 	};
 	try {
 		body = (await request.json()) as typeof body;
@@ -127,6 +152,12 @@ export const relay = async (
 		if (FORWARDABLE.has(name.toLowerCase())) headers.set(name, value);
 	}
 
+	// A jar-holding caller is answered with what each hop set; everyone else
+	// gets the response shape this route has always had.
+	const jarAware = body.cookies !== undefined && body.cookies !== null;
+	const send = typeof body.cookies?.send === 'string' ? body.cookies.send : '';
+	const setCookie: { url: string; headers: string[] }[] = [];
+
 	// Redirects are followed here rather than by `fetch`, so every hop is
 	// re-checked. `redirect: 'manual'` is what makes that possible.
 	let response: Response;
@@ -134,6 +165,17 @@ export const relay = async (
 	for (;;) {
 		const refusal = refuse(target);
 		if (refusal !== null) return json({ error: refusal }, { status: 403 });
+
+		// **The first hop only.** `send` was computed by the jar for the URL the
+		// caller asked for, and a redirect is a different request to a possibly
+		// different host — carrying the header along would be the route deciding
+		// a cookie's scope, which is the one thing it is not allowed to do. The
+		// hops that follow are therefore uncredentialled, and what they set is
+		// reported back instead, so the jar scopes it and the *next* request
+		// carries it. `delete` rather than "never set" because the header object
+		// is reused across hops.
+		if (hops === 0 && send.length > 0) headers.set('cookie', send);
+		else headers.delete('cookie');
 
 		const signal = AbortSignal.timeout(TIMEOUT_MS);
 		const outbound = {
@@ -172,6 +214,15 @@ export const relay = async (
 					{ status: 502 }
 				);
 			}
+		}
+
+		// Collected per hop, tagged with the hop, because a chain sets cookies at
+		// each step and they belong to the step that set them. Tagging them all
+		// with the URL the caller asked for is precisely how a cookie ends up
+		// filed against the wrong host.
+		if (jarAware) {
+			const headersSet = setCookiesOf(response.headers);
+			if (headersSet.length > 0) setCookie.push({ url: target.toString(), headers: headersSet });
 		}
 
 		const location = response.headers.get('location');
@@ -239,8 +290,11 @@ export const relay = async (
 		}
 	}
 
-	// Only the headers a plugin has any business reading. A `Set-Cookie` would
-	// be both useless to it and a thing worth not handing around.
+	// Only the headers a plugin has any business reading. A `Set-Cookie` is
+	// still not among them, and the jar did not change that: it is reported on
+	// its own field below, to a *host* that holds it, and `sandbox-host.ts`
+	// strips that field before the payload reaches the isolate. A plugin sees
+	// the same four headers it always saw.
 	const returned: Record<string, string> = {};
 	for (const name of ['content-type', 'content-length', 'location', 'retry-after']) {
 		const value = response.headers.get(name);
@@ -256,7 +310,8 @@ export const relay = async (
 		headers: returned,
 		body: text,
 		...(unread === null ? {} : { unread }),
-		...(challenge === null ? {} : { challenge })
+		...(challenge === null ? {} : { challenge }),
+		...(setCookie.length === 0 ? {} : { setCookie })
 	});
 };
 

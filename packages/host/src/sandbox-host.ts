@@ -33,6 +33,7 @@
  */
 
 import { NetworkFailure, NotFoundFailure, ValidationFailure } from '@plugin-bridge/core/errors';
+import { CookieJar } from './net/cookie-jar';
 import { hostMatches } from './host-match';
 import { plausibleTld } from './host-names';
 import {
@@ -74,6 +75,15 @@ export interface RunnablePlugin {
 	readonly id: string;
 	readonly name: string;
 	readonly hosts: readonly string[];
+	/**
+	 * `manifest.permissions`, which is where a plugin opts in to a facility.
+	 *
+	 * Read here for one entry — `cookies` — because a jar is authority the
+	 * viewer was shown before installing, and a plugin that did not ask for one
+	 * must not quietly acquire it. Absent is treated as "asked for nothing",
+	 * which is what a caller that predates this field means.
+	 */
+	readonly permissions?: readonly string[];
 	/** Absent for a plugin that was published for Yorozo in the first place. */
 	readonly converted?: ConversionRecord;
 }
@@ -216,6 +226,27 @@ export class PluginSandbox {
 	 */
 	private readonly learned = new Set<string>();
 
+	/**
+	 * This plugin's cookies, or null when it did not ask for any.
+	 *
+	 * `docs/adr/0005-network-boundaries.md` §3 is the specification and
+	 * `net/cookie-jar.ts` is the implementation; what this field is for is the
+	 * two constraints that can only be true *here*:
+	 *
+	 * - **Per plugin.** It is an instance field on the sandbox, so its lifetime
+	 *   is the plugin's and there is no way to reach another plugin's. Two
+	 *   sandboxes for the same plugin id are two jars, which is the conservative
+	 *   reading of "per plugin" and the one a reload gets.
+	 * - **In memory, and gone on unload.** Nothing writes it anywhere, and
+	 *   `dispose()` empties it. A jar that outlived its sandbox would be a
+	 *   credential a viewer has no way to clear.
+	 *
+	 * Null rather than an empty jar when the permission is absent, so that
+	 * "this plugin has no cookies" and "this plugin has none *yet*" are
+	 * different states rather than the same one read twice.
+	 */
+	private readonly cookies: CookieJar | null;
+
 	/** Where this runtime's own explanations go. Never a control flow. */
 	private readonly log: HostLog;
 
@@ -225,6 +256,7 @@ export class PluginSandbox {
 	) {
 		this.storage = options.storage ?? new Map<string, string>();
 		this.log = options.log ?? NO_LOG;
+		this.cookies = (plugin.permissions ?? []).includes('cookies') ? new CookieJar() : null;
 	}
 
 	/** Starts an isolate, evaluates `source`, and returns once it is ready. */
@@ -333,6 +365,11 @@ export class PluginSandbox {
 		this.disposed = true;
 		this.worker?.terminate();
 		this.worker = null;
+		// Emptied rather than left to the collector. Dropping the reference
+		// would be enough for memory and is not enough for a reader auditing
+		// the lifetime — this is the line that makes "the jar does not survive
+		// an unload" a fact about the code rather than about the runtime.
+		this.cookies?.clear();
 		this.failAll(new NetworkFailure('This plugin was stopped.'));
 	}
 
@@ -508,6 +545,18 @@ export class PluginSandbox {
 			follow?: boolean;
 		};
 
+		// Attached here, on the way out, and never anywhere the plugin can see.
+		//
+		// The allowlist check above has already run, which is what makes the
+		// jar's own scoping the *second* guard rather than the only one: a
+		// cookie can only ever be sent on a request this plugin was already
+		// permitted to make, to the one host that set it.
+		//
+		// An empty header is omitted rather than sent, so a plugin with the
+		// permission and no cookies yet produces the same bytes on the wire as
+		// one without it.
+		const cookie = this.cookies?.header(url) ?? '';
+
 		const fetcher = this.options.fetcher ?? NO_NETWORK;
 		const response = await fetcher('/api/plugin-fetch', {
 			method: 'POST',
@@ -517,6 +566,10 @@ export class PluginSandbox {
 				method: options.method ?? 'GET',
 				headers: options.headers ?? {},
 				body: options.body ?? null,
+				// Presence of the key is what tells the route a jar is held, so
+				// a plugin without the permission gets the route's pre-jar
+				// behaviour exactly, including its response shape.
+				...(this.cookies === null ? {} : { cookies: cookie === '' ? {} : { send: cookie } }),
 				// Only sent when the caller said no, so the route's default stays
 				// the route's own business rather than something every request
 				// restates.
@@ -564,7 +617,34 @@ export class PluginSandbox {
 			url?: unknown;
 			body?: unknown;
 			headers?: Record<string, unknown>;
+			setCookie?: unknown;
 		};
+
+		// The jar takes what each hop set, and the field is then **deleted**.
+		//
+		// Deleted rather than merely not read: `payload` is handed to the
+		// isolate wholesale a few lines down, so leaving it there would hand a
+		// plugin the credential this whole design exists to keep from it. That
+		// is the one line in this file where forgetting something is a
+		// vulnerability rather than a bug, which is why it is not conditional
+		// on the plugin having the permission — a route that answered with a
+		// `setCookie` we did not ask for still must not have it forwarded.
+		const events = payload.setCookie;
+		delete payload.setCookie;
+		if (this.cookies !== null && Array.isArray(events) && events.length > 0) {
+			for (const event of events as { url?: unknown; headers?: unknown }[]) {
+				if (typeof event?.url !== 'string' || !Array.isArray(event.headers)) continue;
+				this.cookies.absorb(
+					event.url,
+					event.headers.filter((one): one is string => typeof one === 'string')
+				);
+			}
+			this.log('took cookies from a response', {
+				plugin: this.plugin.id,
+				host,
+				held: this.cookies.size
+			});
+		}
 
 		// Only for a converted plugin. A native bundle is signed and its host
 		// list is a promise its author made and a viewer accepted; widening

@@ -318,7 +318,26 @@ const NAMED_OBSTACLES: readonly {
 	// other use of reflection, with nothing at runtime able to tell them apart.
 	// Left unrefused it surfaced as `undefined is not an object` at *load*,
 	// which names nothing and takes the whole bundle with it.
-	{ pattern: /\bjavaClass\b/, name: 'the JVM class object' }
+	{ pattern: /\bjavaClass\b/, name: 'the JVM class object' },
+	// The two cookie shapes the host jar cannot honour, refused by name rather
+	// than left to the passthrough allowlist, because both had a way past it.
+	//
+	// `loadForRequest` hands a plugin the cookies it holds, which is the one
+	// thing `docs/adr/0005-network-boundaries.md` §3 forbids outright: the host
+	// carries the state and the plugin never reads it. Naming it here rather
+	// than simply omitting it from `HOST_METHODS` catches the *declaration*
+	// too — a class implementing okhttp's `CookieJar` declares both halves of
+	// the interface, and the call would then be a declared method and pass. It
+	// is also what stops a custom jar quietly becoming the no-op that
+	// `saveFromResponse` now is.
+	{ pattern: /\bloadForRequest\b/, name: 'reading a cookie jar' },
+	// `CookieManager.getInstance().getCookie(url)` is the WebView's cookie
+	// store, which this host does not have and will not grow (§4 of the same
+	// ADR). The capitalised receiver made it a cross-file object reference,
+	// which is exempt from the passthrough allowlist, so it converted cleanly
+	// and died inside the sandbox as `CookieManager is not defined` — a runtime
+	// mystery in place of a refusal with a name on it.
+	{ pattern: /\bCookieManager\b/, name: 'the WebView cookie store' }
 ];
 
 /** The obstacle this node's own text names, if any. Checked leaf-first. */
@@ -891,6 +910,23 @@ export const HOST_METHODS: ReadonlySet<string> = new Set([
 	'isSuccessful',
 	'close',
 	'stop',
+	// The two cookie calls the host jar makes true, rather than merely
+	// tolerable. `ADR-0005` §3: the plugin declares intent, the host carries
+	// the state — so both of these are statements of intent the host has
+	// already acted on, and the runtime answers them as no-ops.
+	//
+	// `.cookieJar(…)` on a client builder says "carry cookies on this client".
+	// A plugin holding the `cookies` permission has a jar on every request it
+	// makes, so the setting is satisfied before it is written. Supplying a jar
+	// with logic of its own does not slip through here: an `object : CookieJar`
+	// is refused as an anonymous object, and a named class implementing the
+	// interface declares `loadForRequest`, which is refused by name above.
+	//
+	// `.saveFromResponse(url, cookies)` says "remember what this response set".
+	// The host absorbed those cookies before the response reached the plugin at
+	// all, so the call is an acknowledgement of work already done.
+	'cookieJar',
+	'saveFromResponse',
 
 	// url building
 	'newBuilder',

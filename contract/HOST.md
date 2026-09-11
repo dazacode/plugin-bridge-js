@@ -120,6 +120,32 @@ decided by `sandbox-host.ts` against `manifest.network.hosts` before anything
 leaves, and a proxy that has one is applying a _second, independent_ limit —
 see §3.1.
 
+#### 2.1.1 The cookie jar, which is not a capability a host supplies
+
+`ABI.md` §2 specifies a per-plugin, per-host, in-memory jar for a plugin that
+declares `permissions: ["network", "cookies"]`. It is **not** in the table
+above and a host is not asked for one, which is the design rather than an
+omission: the jar is runtime state living beside the allowlist in
+`sandbox-host.ts`, on the side of the boundary that knows which plugin is
+asking. A host that supplied its own would be a second answer to "whose cookie
+is this", and the answers would eventually differ.
+
+What a host is obliged to do is **nothing**, and that is checkable. The jar
+reaches the wire through two fields on the proxy's existing request and
+response bodies:
+
+| Direction | Field                             | Meaning                                               |
+| --------- | --------------------------------- | ----------------------------------------------------- |
+| request   | `cookies: { send?: string }`      | The caller holds a jar; `send` is the `Cookie` value. |
+| response  | `setCookie: { url, headers[] }[]` | What each hop set, tagged with the hop that set it.   |
+
+Both are absent unless a plugin declared the permission, so a host that has
+never heard of cookies serves a jar-holding plugin correctly by ignoring them —
+it simply carries no session, which is the pre-jar behaviour. The rules a host
+must **not** break are in `docs/security.md` §2: `cookie` stays out of the
+forwardable request-header allowlist, `Set-Cookie` stays out of the four
+response headers a plugin reads, and the header is put on the first hop only.
+
 The runtime addresses the proxy by path — `/api/plugin-fetch` — in **every**
 host, which is not a browser detail that leaked: it is the contract, and a host
 without a server answers it itself. The headless host calls the browser route's

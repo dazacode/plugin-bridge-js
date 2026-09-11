@@ -359,6 +359,25 @@ describe('what stands in the way, as against how far it got', () => {
 		}
 	});
 
+	// ADR-0005 §3 split cookies down the middle: the host now keeps a
+	// per-plugin, per-host, in-memory jar, so installing one and saving to one
+	// are ordinary conversions and must stop being counted as a boundary.
+	// Reading a jar, and the WebView's cookie store, stay refused by design —
+	// which is what this column is for.
+	it('files only the cookie shapes the jar refuses as a boundary', () => {
+		for (const obstacle of [
+			'reading a cookie jar',
+			'`.loadForRequest()`',
+			'the WebView cookie store',
+			'`.getCookie()`'
+		]) {
+			expect(reachOf(row({ status: 'broken', obstacles: [obstacle] }))).toBe('native');
+		}
+		for (const obstacle of ['`.cookieJar()`', '`.saveFromResponse()`']) {
+			expect(reachOf(row({ status: 'broken', obstacles: [obstacle] }))).toBe('widen');
+		}
+	});
+
 	it('does not count a site that is gone against the converter', () => {
 		expect(
 			reachOf(

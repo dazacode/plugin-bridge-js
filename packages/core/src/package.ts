@@ -130,6 +130,36 @@ export interface BundleInput {
 	readonly repository?: string;
 	/** The original author's own page, when the foreign metadata names one. */
 	readonly authorUrl?: string;
+
+	/**
+	 * Whether the translated module asks the host to carry cookies for it.
+	 *
+	 * Decided by the adapter with `namesCookieJar`, over the *translated*
+	 * module rather than this bundle's source — an entrypoint is the extension
+	 * wrapped in our runtime, and the runtime contains the jar shims, so
+	 * reading the whole thing would say yes for every plugin ever converted.
+	 * The same reasoning, and the same trap, as the host list two fields up.
+	 */
+	readonly usesCookies?: boolean;
+}
+
+/**
+ * Whether a translated module installs or saves to a cookie jar.
+ *
+ * The manifest's `cookies` permission is an opt-in a viewer is shown before
+ * installing, so it has to be derived from something auditable rather than
+ * granted to every conversion. These are the two calls the passthrough
+ * allowlist admits for exactly this purpose (`kotlin/subset.ts`); the shapes
+ * the jar cannot honour are refused at conversion and so cannot appear in a
+ * module that got this far.
+ *
+ * Over-eager on purpose, in the direction that costs nothing: a module with an
+ * unrelated method of its own called `saveFromResponse` would declare a
+ * permission it never uses, which shows one more line on a consent screen. The
+ * opposite error is a plugin whose session silently never carries.
+ */
+export function namesCookieJar(translatedSource: string): boolean {
+	return /\.(?:cookieJar|saveFromResponse)\s*\(/.test(translatedSource);
 }
 
 export class PackagingError extends Error {
@@ -232,7 +262,12 @@ export function convertedManifest(input: BundleInput): Record<string, unknown> {
 		minimumYorozoVersion: '0.0.0',
 		platforms: ['android', 'ios', 'macos', 'windows', 'linux', 'web'],
 		capabilities: ['search', 'episodes', 'resolve'],
-		permissions: ['network'],
+		// `cookies` is the host-held jar of ADR-0005 §3 and it adds nothing to
+		// `ctx` — a plugin cannot read a cookie either way. It is a permission
+		// rather than a default because it is state the host keeps on this
+		// plugin's behalf, and a viewer is entitled to see that named before
+		// they install. A plugin that does not ask does not get one.
+		permissions: input.usesCookies === true ? ['network', 'cookies'] : ['network'],
 		entrypoint: ENTRYPOINT,
 		network: { hosts },
 		// Run back through the manifest reader rather than trusted as built:

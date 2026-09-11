@@ -271,9 +271,26 @@ describe('naming the obstacle rather than the category', () => {
 		['Class.forName("x")', 'reflection'],
 		['launch { load() }', 'launch {}'],
 		['android.os.Build.VERSION', 'an android.* API'],
-		['operator fun get(index: Int) = 1', 'a custom operator overload']
+		['operator fun get(index: Int) = 1', 'a custom operator overload'],
+		// The two halves of the cookie story that the host jar cannot honour.
+		// `loadForRequest` hands a plugin the cookies the host holds, which
+		// ADR-0005 §3 forbids outright; `CookieManager` is the WebView's store,
+		// which this host has none of. Named here rather than left to the
+		// passthrough allowlist because both had a way past it — a declared
+		// method for the first, a capitalised receiver for the second.
+		['loadForRequest(url)', 'reading a cookie jar'],
+		['CookieManager.getInstance()', 'the WebView cookie store']
 	])('names %s as %s', (text, expected) => {
 		expect(namedObstacle(text)).toBe(expected);
+	});
+
+	it('no longer refuses installing or saving to a cookie jar', () => {
+		// The host keeps a per-plugin, per-host, in-memory jar and attaches it
+		// itself, so both of these are statements of intent it has already acted
+		// on. Reading one back is still refused, above: that is the constraint
+		// rather than an unimplemented half.
+		expect(namedObstacle('cookieJar(jar)')).toBeNull();
+		expect(namedObstacle('saveFromResponse(url, cookies)')).toBeNull();
 	});
 
 	it('no longer refuses the Android preference framework', () => {

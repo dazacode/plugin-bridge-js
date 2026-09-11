@@ -271,8 +271,14 @@ function reasonsOf(row: ScoredListing): { reason: string; kind: 'named' | 'messa
  * translator's names for constructs, not prose. Each one is here because the
  * thing it needs is outside what a portable runtime in a browser tab can be:
  * a real WebView, a second JavaScript engine to run untrusted script in, the
- * JVM's cipher and signature providers, a cookie jar the transport does not
- * keep, a thread, a socket to listen on.
+ * JVM's cipher and signature providers, a thread, a socket to listen on.
+ *
+ * Cookies used to be on that list in full and are now on it in part. The host
+ * keeps a per-plugin, per-host, in-memory jar (ADR-0005 §3), so setting one and
+ * saving to one are ordinary conversions; what stays here is the half the jar
+ * cannot honour — an extension *reading* its own jar, and the WebView's cookie
+ * store. Those are refusals by design rather than gaps, which is exactly what
+ * this column is for.
  *
  * Deliberately a short list of specific names rather than a pattern. A blanket
  * rule would quietly reclassify tomorrow's ordinary gap as a boundary, and the
@@ -285,10 +291,12 @@ const NATIVE_CAPABILITIES: readonly RegExp[] = [
 	/SecureRandom/,
 	/\.initSign\(\)/,
 	/\.addInterceptor\(\)/,
+	// Both spellings: the passthrough allowlist refuses a call as `.name()`, and
+	// the scanner refuses the same shape by the name `NAMED_OBSTACLES` gives it.
 	/\.loadForRequest\(\)/,
+	/reading a cookie jar/,
 	/\.getCookie\(\)/,
-	/\.saveFromResponse\(\)/,
-	/cookieJar/,
+	/WebView cookie store/,
 	// android.os.Handler — posting to a looper this host does not have. It sits
 	// beside the thread cases rather than beside the API gaps: an extension
 	// reaching for one wants work to happen somewhere else, and there is no

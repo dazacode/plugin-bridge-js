@@ -32,7 +32,7 @@ import { describe, expect, it } from 'vitest';
 import { openPluginArchive } from '@plugin-bridge/core/archive';
 import { SUPER_MEMBERS } from '@plugin-bridge/core/kotlin/subset';
 import { aniyomiEntrypoint } from '@plugin-bridge/runtime/shims/aniyomi-entry';
-import { packageBundle } from '@plugin-bridge/core/package';
+import { namesCookieJar, packageBundle } from '@plugin-bridge/core/package';
 
 const PLUGIN_ID = 'app.yorozo.converted.aniyomi.example';
 const BASE_URL = 'https://watch.example.invalid';
@@ -208,6 +208,8 @@ async function convert(translated = TRANSLATED): Promise<Uint8Array> {
 			className: 'Extension',
 			baseUrl: BASE_URL
 		}),
+		// Asked of the translated module, exactly as `aniyomi.ts` asks it.
+		usesCookies: namesCookieJar(translated),
 		license: 'Apache-2.0',
 		repository: 'https://github.com/owner/repo'
 	});
@@ -235,6 +237,23 @@ describe('the bundle a translated extension becomes', () => {
 	it('identifies as the id its manifest declares', async () => {
 		// The sandbox refuses a bundle whose code disagrees with its manifest.
 		expect((await load()).id).toBe(PLUGIN_ID);
+	});
+
+	it('asks for cookies only when the translated module says it needs them', async () => {
+		// The jar is authority a viewer is shown before installing, so it is a
+		// declared permission rather than something every conversion gets. The
+		// question is asked of the *translated* module: an entrypoint carries
+		// our own runtime, and our own runtime contains the jar shims, so
+		// reading the whole bundle would answer yes for everything ever built.
+		const plain = await openPluginArchive(await convert());
+		expect(plain.permissions).toEqual(['network']);
+
+		const jarred = await openPluginArchive(
+			await convert(
+				`${TRANSLATED}\nconst __uses = (c, u, r) => c.cookieJar.saveFromResponse(u, r);\n`
+			)
+		);
+		expect(jarred.permissions).toEqual(['network', 'cookies']);
 	});
 });
 

@@ -102,6 +102,52 @@ a redirect _landing_ does. An allowed host answering "go here" is the same
 hand-off whether the walk was taken or read, and treating the read one as
 weaker would refuse the plugin's very next request.
 
+### `permission: "cookies"` — state the host carries, and the plugin does not
+
+A plugin that declares `cookies` in `manifest.permissions` gets a **cookie
+jar**, and it gets it by having one rather than by being handed one. There is
+no `ctx.cookies`, no method that returns a cookie, and no new field on a
+response. The plugin declares the intent; the host carries the state.
+
+Normatively, for every host implementing this port:
+
+1. The jar is **per plugin**. One plugin's cookies are never visible to
+   another, and two runs of the same plugin are two jars.
+2. The jar is **per host**. A cookie is bound to the exact hostname that set
+   it, and is sent on no other. `Domain` may **narrow** that binding and may
+   never widen it: a `Domain` covering the setting host is stored as the
+   setting host, and a `Domain` the setting host is not inside is refused.
+3. The jar is **in memory only**. It is never written to disk, never read from
+   or written to the host's own cookie store, and does not survive the plugin
+   being unloaded.
+4. The jar is **never readable by plugin code**. A host must not expose a
+   cookie's name, value or existence through `ctx`, through response headers,
+   or through any other channel a bundle can observe. `Set-Cookie` remains
+   absent from the headers a response carries — the relay forwards four, and
+   that list is unchanged — with or without this permission.
+5. The jar is **opt-in**. A plugin that does not declare `cookies` behaves
+   exactly as one did before the permission existed, down to the bytes on the
+   wire. `cookies` requires `network`; without it there is nothing to carry.
+6. A cookie is only ever attached to a request that **already passed the host
+   allowlist**, so the jar grants no reach. The plugin could always make the
+   request; it simply could not carry state between two of them.
+
+`Secure` is honoured and costs nothing, because every plugin request is https.
+`HttpOnly` is recorded and cannot be weaker than the floor, because no cookie
+is reachable from plugin code in the first place. `Expires` and `Max-Age` are
+honoured for **expiry** and never for persistence. `SameSite` is ignored: it
+describes whether a cookie rides along on a request a user's page did not make
+on purpose, and every request here is one a plugin made deliberately, from no
+origin — the per-host rule above is already stricter than any of its values.
+
+A host that cannot meet all six **must not honour the permission at all**. A
+jar that leaks across plugins or across hosts is worse than no jar, and a plugin
+that silently carries no session fails visibly at the source rather than
+quietly at the boundary.
+
+The reasoning, and the two capabilities decided against alongside this one, are
+in `docs/adr/0005-network-boundaries.md` §3.
+
 ### `ctx.settings` — values for `manifest.settings`
 
 ```ts
