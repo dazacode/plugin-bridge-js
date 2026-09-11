@@ -106,7 +106,7 @@ acquire to close that gap, with the count each capability is worth.
 
 ## Licence
 
-**Not yet chosen.** See [`docs/licensing.md`](docs/licensing.md): the choice has
-to carry the `NOTICE` obligations for the parts of this repository that were
-reimplemented from an Apache-2.0 project, and it must be made before this
-repository is published.
+**Apache-2.0.** See [`LICENSE`](LICENSE) for the text and [`NOTICE`](NOTICE) for
+the work this repository reimplements from other projects — if you redistribute
+this, `NOTICE` goes with it. [`docs/licensing.md`](docs/licensing.md) explains
+why that licence and not another.

@@ -1,28 +1,28 @@
-# Licensing — unresolved, and blocking publication
+# Licensing
 
-**This repository has no `LICENSE` file yet, and must not be made public until
-it has one.** Without one, the default is "all rights reserved": nobody may use,
-copy or contribute to it, which is the opposite of the intent.
+**This repository is licensed under the Apache License, Version 2.0.** The full
+text is in `LICENSE`; the copyright line and the third-party attributions are in
+`NOTICE`.
 
-This file states what the choice has to accommodate, so that it is made once and
-correctly rather than by reflex.
+This file records _why_ that licence, because the reason is a real obligation
+rather than a preference.
 
-## What the choice must accommodate
+## Why Apache-2.0
 
-### 1. `NOTICE` is not optional
+### `NOTICE` is not optional here
 
 Two parts of this repository were written by **reading a published program**
 rather than by using it — the Aniyomi base-class driver and the preference
-framework, both reimplemented from an Apache-2.0 project and both recorded in
-`NOTICE`. Apache-2.0 §4(d) requires that attribution travel with the work.
-Whatever licence is chosen, `NOTICE` ships with it and stays accurate.
+framework, both reimplemented from an Apache-2.0 project, both recorded in
+`NOTICE`. Apache-2.0 §4(d) requires that attribution travel with the work, and
+Apache-2.0 is the only common choice whose text already says what to do with a
+`NOTICE` file. MIT does not forbid this; it leaves the obligation implicit,
+which is the wrong property for a file whose whole job is to be explicit.
 
-Apache-2.0 is therefore the _safest_ outgoing choice, because it is the licence
-that already knows what to do with a `NOTICE` file. MIT does not forbid this,
-but it leaves the obligation implicit, which is worse for a file whose whole job
-is to be explicit.
+**If you redistribute this, `NOTICE` goes with it.** That is the one condition
+this licence adds beyond attribution and the patent grant.
 
-### 2. The vendored binaries have their own terms
+### The vendored binaries keep their own terms
 
 `packages/core/src/kotlin/vendor/` holds two committed wasm artefacts:
 
@@ -32,31 +32,32 @@ is to be explicit.
 | `tree-sitter-kotlin.wasm` | MIT (grammar), Unlicense (the build) |
 
 Both licence texts are committed beside them. Neither is copyleft and neither
-constrains the outgoing choice; they must simply keep their own files.
+constrains the outgoing choice — they simply keep their own files, which is why
+those files are not reformatted or moved.
 
-### 3. Nothing here is a content source
+### MPL-2.0 was considered and rejected
+
+Not on its merits, but for consistency: `NOTICE` records that an MPL-2.0
+dependency was deliberately _not read_ during this project's development, and
+adopting the licence here would sit oddly beside that decision.
+
+## What the licence does not cover
 
 Rule 9 — no content source, no catalogue, no extractor host, in code, comments,
-tests, fixtures, defaults or examples — is a project rule, not a licence term,
-but it is the rule that makes publishing this safe at all. It has been audited
-for this repository: every host named anywhere in it is RFC 2606 reserved
-(`*.example.invalid`, `*.invalid`, `example.com`) or a code forge
+tests, fixtures, defaults or examples — is a **project rule, not a licence
+term**. It is the rule that makes publishing this safe at all, and it binds
+contributors regardless of what the licence permits.
+
+Audited at publication: every host named anywhere in this repository is RFC 2606
+reserved (`*.example.invalid`, `*.invalid`, `example.com`) or a code forge
 (`github.com`, `raw.githubusercontent.com`). A repository index is a **runtime
 argument**, never a default.
 
-Anyone adding a test, a fixture or an example inherits that rule. See
-`docs/security.md` and `CONTRIBUTING.md`.
+See `docs/security.md` and `CONTRIBUTING.md`.
 
-## The options, briefly
+## Applying the header
 
-| Licence        | Fits because                                                                            | Costs                                                                                                                                                                                      |
-| -------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Apache-2.0** | Already handles `NOTICE`; explicit patent grant; the upstream this derives from uses it | Longer text; a `NOTICE` obligation on redistributors                                                                                                                                       |
-| **MIT**        | Shortest, most familiar, maximally permissive                                           | Attribution obligation for the reimplemented parts becomes implicit rather than structural                                                                                                 |
-| **MPL-2.0**    | File-level copyleft would keep improvements to the translator public                    | Deliberately _not_ chosen elsewhere in this project's history — `NOTICE` records that an MPL dependency was refused rather than read, and adopting it here would be inconsistent with that |
-
-**Recommendation: Apache-2.0**, for reason 1. It is the only one of the three
-whose text already carries the obligation this repository actually has.
-
-This is a decision for the repository's owner, not for a tool. Nothing has been
-chosen here.
+Per-file headers are _recommended_ by the Apache appendix, not required, and are
+deliberately absent here: these files carry unusually dense explanatory comments
+already, and a fifteen-line boilerplate above each would bury the part a reader
+needs. `LICENSE` plus `NOTICE` at the root is the whole grant.
