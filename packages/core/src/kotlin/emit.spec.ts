@@ -3064,6 +3064,41 @@ describe('a name declared somewhere the emitter had not looked', () => {
 		expect(emitted.js).toContain('async build(');
 	});
 
+	it('awaits the crypto operations, which are synchronous in Kotlin only', () => {
+		// `crypto.subtle` is promise-returning and `javax.crypto` is not, so the
+		// four operations that touch a key are `async` in the runtime shim and
+		// nothing at the call site says so. Un-awaited, `String(cipher.doFinal(…))`
+		// is `[object Promise]` — a plausible string that travels a long way
+		// before anything notices it is not the plaintext.
+		const source = kt(
+			'class Demo : Source() {',
+			'    fun label(data: ByteArray): String = String(open(data))',
+			'    private fun open(data: ByteArray): ByteArray {',
+			'        val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")',
+			'        cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key(), "AES"), IvParameterSpec(iv()))',
+			'        return cipher.doFinal(data)',
+			'    }',
+			'    private fun key(): ByteArray = ByteArray(16)',
+			'    private fun iv(): ByteArray = ByteArray(16)',
+			'}'
+		);
+
+		const emitted = translate(source);
+
+		expect(emitted.refusals).toEqual([]);
+		expect(emitted.js).toContain('await cipher.doFinal(');
+		// And outward: the member holding the `await` is `async`, and the member
+		// that merely calls it awaits in turn. That second hop is the one that
+		// hides the failure when it is missing.
+		expect(emitted.js).toContain('async open(');
+		expect(emitted.js).toContain('await this.open(');
+		expect(emitted.js).toContain('async label(');
+		// `init` and the two specs stay synchronous, which is what keeps the
+		// asynchronous surface to the operations themselves.
+		expect(emitted.js).toContain('cipher.init(');
+		expect(emitted.js).not.toContain('await cipher.init(');
+	});
+
 	it('awaits `.execute()`, which Kotlin blocks on', () => {
 		// Only `awaitSuccess()` was routed through a helper the emitter knows to
 		// await. `execute()` was a plain passthrough, so an extension written the
@@ -3199,7 +3234,11 @@ describe('refusing by name', () => {
 			inClass('    fun tap() = client.newBuilder().addInterceptor(Interceptor { it })'),
 			'an okhttp Interceptor'
 		],
-		['crypto', inClass('    fun key() = Cipher.getInstance("AES")'), 'javax.crypto'],
+		[
+			'a key derivation',
+			inClass('    fun key() = KeyGenerator.getInstance("AES").generateKey()'),
+			'javax.crypto'
+		],
 		[
 			'an embedded engine',
 			inClass('    fun unpack(s: String) = QuickJs.create().evaluate(s)'),

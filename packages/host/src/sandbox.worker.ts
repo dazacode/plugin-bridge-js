@@ -36,6 +36,8 @@
 
 /// <reference lib="webworker" />
 
+import { CRYPTO } from './crypto.ts';
+
 interface HostRequest {
 	readonly id: number;
 	readonly kind: 'load' | 'searchCatalog' | 'listEpisodes' | 'resolve' | 'browse';
@@ -246,7 +248,6 @@ const BYTES = {
 	}
 };
 
-/** The response shape `ctx.http` hands a plugin. */
 function makeResponse(raw: {
 	status: number;
 	url: string;
@@ -311,6 +312,7 @@ function makeContext() {
 		},
 		text: TEXT,
 		bytes: BYTES,
+		crypto: CRYPTO,
 		locale,
 		signal: new AbortController().signal
 	};

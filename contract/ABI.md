@@ -71,6 +71,7 @@ interface SourceContext {
 	readonly signal: AbortSignal;
 	readonly text: TextCodecs; // TextEncoder/TextDecoder shims
 	readonly bytes: ByteCodecs; // base64/hex, engine-independent
+	readonly crypto: CryptoPrimitives; // WebCrypto, one named operation at a time
 	readonly locale: string; // BCP-47, may lack a region
 }
 ```
@@ -101,6 +102,42 @@ The host that a `Location` names becomes reachable for that plugin, exactly as
 a redirect _landing_ does. An allowed host answering "go here" is the same
 hand-off whether the walk was taken or read, and treating the read one as
 weaker would refuse the plugin's very next request.
+
+### `ctx.crypto` — WebCrypto, one named operation at a time
+
+```ts
+interface CryptoPrimitives {
+	randomBytes(length: number): Uint8Array;
+	aes(
+		direction: 'encrypt' | 'decrypt',
+		mode: 'AES-CBC' | 'AES-GCM',
+		key: Uint8Array,
+		iv: Uint8Array,
+		data: Uint8Array,
+		tagBits?: number
+	): Promise<Uint8Array>;
+	hmac(hash: Hash, key: Uint8Array, data: Uint8Array): Promise<Uint8Array>;
+	generateEcKeyPair(curve: 'P-256' | 'P-384' | 'P-521'): Promise<EcKeyPair>;
+	ecdsaSign(keys: EcKeyPair, hash: Hash, data: Uint8Array): Promise<Uint8Array>;
+	ecdsaVerify(keys: EcKeyPair, hash: Hash, sig: Uint8Array, data: Uint8Array): Promise<boolean>;
+}
+// Hash is 'SHA-1' | 'SHA-256' | 'SHA-384' | 'SHA-512'.
+// EcKeyPair carries `publicJwk` — kty, crv, x, y — exported at generation.
+```
+
+The `crypto` global stays absent (§6). This is why: handing a bundle
+`crypto.subtle` would grant whatever algorithms the engine happens to ship,
+including the ones a converter's refusals are _about_. Each operation above is
+one somebody asked for, and an algorithm outside the unions is refused by name
+rather than mapped onto a neighbouring one — a plugin that believes it is doing
+ECB and is in fact doing CBC is a plugin that looks like it works.
+
+Asynchronous, because `crypto.subtle` is. A synchronous surface would mean
+reimplementing a cipher in a security-sensitive path, which is the worse trade.
+
+`publicJwk` is exported when the pair is generated rather than on demand, so
+that reading a coordinate off a public key is a property read and not a promise
+somebody forgets to await.
 
 ### `ctx.settings` — values for `manifest.settings`
 
@@ -328,7 +365,9 @@ API level 1 requires:
   reason and one the collapse did not touch.
 - **No `TextEncoder`/`TextDecoder`/`atob`/`btoa` globals.** Use `ctx.text` and
   `ctx.bytes`; the SDK shims them per engine.
-- **No `crypto` global, no `crypto.subtle`.** The SDK provides what is needed.
+- **No `crypto` global, no `crypto.subtle`.** `ctx.crypto` (§2) is what is
+  provided, and it is a named-operation surface rather than the whole of
+  `subtle` for the reason given there.
 - **No `structuredClone`, no `Array.prototype.at`, no `Object.groupBy`.**
 
 **The four bullets above have not been re-decided.** Each was written against

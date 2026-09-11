@@ -22,8 +22,10 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import { loadKotlinGrammar, type KotlinParser } from './grammar';
 import { RUNTIME_GLOBALS, RUNTIME_HELPERS } from './runtime-api';
 import {
+	cryptoObstacle,
 	describeRefusals,
 	EXTENSION_METHODS,
+	factoryTransformation,
 	FREE_FUNCTIONS,
 	GLOBAL_NAMES,
 	HOST_METHODS,
@@ -266,7 +268,15 @@ describe('naming the obstacle rather than the category', () => {
 		['Injekt.get<Application>()', 'Injekt.get'],
 		['WebView(context)', 'WebView'],
 		['Interceptor { chain -> chain.proceed(chain.request()) }', 'an okhttp Interceptor'],
-		['Cipher.getInstance("AES")', 'javax.crypto'],
+		['KeyGenerator.getInstance("AES")', 'javax.crypto'],
+		// The transformation string, which is the leaf the scanner reaches and
+		// the only place the mode is knowable.
+		['AES/ECB/PKCS5Padding', 'the `AES/ECB/PKCS5Padding` cipher'],
+		['DESede/CBC/PKCS5Padding', 'the `DESede/CBC/PKCS5Padding` cipher'],
+		['RSA/ECB/PKCS1Padding', 'the `RSA/ECB/PKCS1Padding` cipher'],
+		['SHA256withRSA', 'the `SHA256withRSA` signature'],
+		['HmacMD5', 'the `HmacMD5` MAC'],
+		['secp256k1', 'the `secp256k1` curve'],
 		['QuickJs.create()', 'an embedded JavaScript engine'],
 		['Class.forName("x")', 'reflection'],
 		['launch { load() }', 'launch {}'],
@@ -289,6 +299,44 @@ describe('naming the obstacle rather than the category', () => {
 
 	it('lets ordinary scraper code through', () => {
 		expect(namedObstacle('document.select("div.card a[href]").map { it.text() }')).toBeNull();
+	});
+
+	it('tells a key’s algorithm from a cipher mode, which are both `"AES"`', () => {
+		// The one string this cannot answer from the leaf alone, and the reason
+		// `scanObstacles` also asks the *call*. `SecretKeySpec(key, "AES")`
+		// names the key's algorithm and is supported;
+		// `Cipher.getInstance("AES")` is ECB by the JCE's provider default and
+		// is not. Refusing the first would refuse every AES-CBC extension for
+		// the line that sets up its key; accepting the second would hand back a
+		// cipher in the wrong mode.
+		expect(namedObstacle('AES')).toBeNull();
+		expect(cryptoObstacle('AES', true)).toBe('the `AES` cipher');
+		expect(factoryTransformation('Cipher.getInstance("AES")')).toBe('AES');
+		expect(factoryTransformation('SecretKeySpec(key, "AES")')).toBeNull();
+		// Built at run time, so there is no literal to read and the refusal is
+		// the runtime's instead.
+		expect(factoryTransformation('Cipher.getInstance(chosen)')).toBeNull();
+	});
+
+	it('refuses a bare AES where it is a transformation and nowhere else', () => {
+		const inside = kt(
+			'class Demo {',
+			'    fun open(data: ByteArray): ByteArray {',
+			'        val cipher = Cipher.getInstance("AES")',
+			'        return cipher.doFinal(data)',
+			'    }',
+			'}'
+		);
+		const beside = kt(
+			'class Demo {',
+			'    fun key(bytes: ByteArray) = SecretKeySpec(bytes, "AES")',
+			'}'
+		);
+
+		expect(scanObstacles(parse(inside).root, 'open').map((one) => one.kind)).toContain(
+			'the `AES` cipher'
+		);
+		expect(scanObstacles(parse(beside).root, 'key')).toEqual([]);
 	});
 });
 

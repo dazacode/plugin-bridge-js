@@ -96,6 +96,7 @@
 
 import { walk, type KNode, type KotlinTree } from './ast';
 import {
+	AWAITED_HOST_METHODS,
 	COMMENT_KINDS,
 	DECODING_METHODS,
 	EXTENSION_METHODS,
@@ -298,7 +299,17 @@ const RECEIVER_BUILDERS: ReadonlySet<string> = new Set([
 /** `java.net.URLEncoder`, and the other packages written out in full. */
 const QUALIFIED_GLOBAL = /^(?:java|javax|kotlin|android)\.[\w.]*?\.?(\w+)$/;
 
-const BLOCKING_CALLS = /\.(?:execute|awaitSuccess|await)\s*\(|\bThread\s*\.\s*sleep\s*\(/;
+/**
+ * The calls that make a member `async` whether or not it said `suspend`.
+ *
+ * `.execute()` blocks in Kotlin and cannot here; the crypto four are
+ * `AWAITED_HOST_METHODS`, which the runtime shim implements over
+ * `crypto.subtle` and which are therefore promises. `blockingMembers` reads
+ * this off a member's *source text* and propagates to a fixpoint, so a helper
+ * that decrypts makes its callers `async` too.
+ */
+const BLOCKING_CALLS =
+	/\.(?:execute|awaitSuccess|await|doFinal|generateKeyPair|verify)\s*\(|(?<!\bMath)\.sign\s*\(|\bThread\s*\.\s*sleep\s*\(/;
 
 /**
  * The SharedPreferences readers, which share four names with org.json.
@@ -2313,7 +2324,17 @@ class Emitter {
 					// promise itself, and the extension played `[object
 					// Promise]`. Class methods were already tracked this way;
 					// a file-scope `suspend fun` was not tracked at all.
-					if (this.hasModifier(child, 'suspend')) this.moduleSuspends.add(declared);
+					//
+					// `BLOCKING_CALLS` for the same reason it is consulted for
+					// class members (`blockingMembers`): a file-scope helper
+					// that fetches or decrypts is `async` here whatever Kotlin
+					// called it, and the shared extractor files this ecosystem
+					// carries are written as file-scope functions rather than
+					// as classes — so without this the whole crypto surface
+					// would be awaited inside a class and not outside one.
+					if (this.hasModifier(child, 'suspend') || BLOCKING_CALLS.test(child.text)) {
+						this.moduleSuspends.add(declared);
+					}
 				}
 			}
 
@@ -4517,6 +4538,10 @@ class Emitter {
 			return `${receiverText}${safe ? '?.' : '.'}${name}`;
 		}
 		const call = `${receiverText}${safe ? '?.' : '.'}${name}(${argumentsText.join(', ')})`;
+		// A runtime method that returns a promise where the Kotlin returned a
+		// value. Asked before `declaredSuspends`, because a file that declares
+		// its own `sign` has already taken the `declared` branch above.
+		if (!declared && AWAITED_HOST_METHODS.has(name)) return this.awaited(call);
 		return declared && this.declaredSuspends.has(name) ? this.awaited(call) : call;
 	}
 

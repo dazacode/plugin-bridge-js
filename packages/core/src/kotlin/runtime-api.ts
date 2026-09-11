@@ -560,15 +560,36 @@ export const RUNTIME_GLOBALS = [
 	'JsonObject',
 	'LruCache',
 	'Log',
-	/* kotlin.random.Random. `SecureRandom` is a different promise and stays
-	   refused. */
+	/* kotlin.random.Random, which is `Math.random` and promises nothing. Its
+	   neighbour `SecureRandom` is the one that does, and is separate below. */
 	'Random',
 	/* java.net.URLEncoder/URLDecoder — form encoding, not encodeURIComponent. */
 	'URLEncoder',
 	'URLDecoder',
 	/* java.security.MessageDigest — MD5, SHA-1, SHA-256. A hash is a pure
-	   function of its bytes, which is what separates it from javax.crypto. */
+	   function of its bytes, so it is computed in the runtime itself and stays
+	   synchronous; everything below has a key and cannot be. */
 	'MessageDigest',
+
+	/* javax.crypto and the keyed half of java.security, answered by
+	   `ctx.crypto` (ABI.md §2) rather than implemented in the bundle. Each is a
+	   name an extension writes at a construction site — `SecretKeySpec(key,
+	   "AES")`, `SecureRandom()` — so it has to be a bundle-scope name rather
+	   than a `__k` helper, exactly as `Base64` and `MessageDigest` are.
+
+	   The operations that touch a key are asynchronous, because `crypto.subtle`
+	   is: see `AWAITED_HOST_METHODS` in `subset.ts` for the four method names
+	   the emitter awaits, and `cryptoObstacle` for the algorithms that are
+	   still refused by name because WebCrypto does not have them. */
+	'SecureRandom',
+	'SecretKeySpec',
+	'IvParameterSpec',
+	'GCMParameterSpec',
+	'ECGenParameterSpec',
+	'Cipher',
+	'Mac',
+	'Signature',
+	'KeyPairGenerator',
 	'ConnectionPool',
 	'Mutex',
 

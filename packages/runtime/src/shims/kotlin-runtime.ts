@@ -3301,8 +3301,17 @@ var __k = {
    * The charset argument is checked rather than ignored: encoding as UTF-8
    * where the Kotlin asked for ISO-8859-1 differs silently for every character
    * above 0x7f, and the failure would be a signature that does not verify.
+   *
+   * java.math.BigInteger spells its own, unrelated method the same way, and an
+   * affine coordinate is the one BigInteger this runtime hands out. Without the
+   * branch it fell through to the string case and encoded the number's DECIMAL
+   * DIGITS as UTF-8 — 77 plausible bytes where 32 were wanted, which is a JWK
+   * for a public key nobody holds.
    */
   toByteArray: function (value, charset) {
+    if (value !== null && typeof value === 'object' && value.__bigInteger === true) {
+      return value.toByteArray();
+    }
     __utf8Only(charset);
     if (value === null || value === undefined) return __host().text.encode('');
     if (typeof value === 'string') return __host().text.encode(value);
@@ -6494,9 +6503,11 @@ var Log = (function () {
  * kotlin.random.Random.
  *
  * Deliberately Math.random and not a crypto source: kotlin.random.Random makes
- * no security promise either, and an extension reaching for one spells it
- * SecureRandom, which stays refused. Answering that name with a weak generator
- * would be the silent kind of wrong this runtime refuses to be.
+ * no security promise either, and an extension that wants one spells it
+ * SecureRandom - which is a separate name below, answered by ctx.crypto's
+ * getRandomValues. Answering *this* name with a crypto source would cost
+ * entropy for nothing; answering the other one with Math.random would be the
+ * silent kind of wrong this runtime refuses to be, which is why they are two.
  *
  * nextBytes fills IN PLACE and answers the same array, as Kotlin does, because
  * the idiom is ByteArray(16).also(Random::nextBytes) and also() hands back its
@@ -6774,6 +6785,537 @@ function __sha256(bytes) {
   var out = [];
   for (var n2 = 0; n2 < 8; n2 += 1) {
     out.push((h[n2] >>> 24) & 0xff, (h[n2] >>> 16) & 0xff, (h[n2] >>> 8) & 0xff, h[n2] & 0xff);
+  }
+  return out;
+}
+
+/* --- javax.crypto and java.security --------------------------------------- */
+
+/**
+ * The JCE surface, answered by ctx.crypto.
+ *
+ * ## What this is and is not
+ *
+ * MessageDigest above is a pure function of its bytes, which is why it could be
+ * computed here. Everything in this block has a key, and a key is a capability:
+ * it is answered by the host's WebCrypto through 'ctx.crypto' (ABI.md §2) and
+ * never by an implementation written in this file. Nothing here reimplements a
+ * cipher, and nothing here may: a hand-rolled AES in a security-sensitive path
+ * is the trade this runtime refuses to make, even to avoid an await.
+ *
+ * ## Asynchronous, and where that stops
+ *
+ * 'crypto.subtle' returns promises and javax.crypto does not, so the operations
+ * that actually touch a key - doFinal, sign, verify, generateKeyPair - are
+ * async, and the emitter awaits them by name (see AWAITED_HOST_METHODS in
+ * subset.ts). Everything else is synchronous on purpose:
+ *
+ * - 'getInstance' only chooses an algorithm, so it parses and refuses here.
+ * - 'init' / 'initSign' / 'initialize' only record a key and a parameter set;
+ *   the import that needs a promise happens inside the operation.
+ * - 'update' buffers. That is exact for Mac and Signature, whose JCE update
+ *   returns void - and it is NOT exact for Cipher, whose update returns the
+ *   blocks completed so far. Cipher.update therefore refuses rather than
+ *   pretending, because a caller that concatenated update() and doFinal()
+ *   would get the plaintext twice or not at all.
+ * - a generated key pair exports its public JWK eagerly, so 'x', 'y', 'crv'
+ *   and 'kty' are property reads rather than promises nobody awaits.
+ *
+ * ## What refuses, and why each one has to
+ *
+ * WebCrypto has no ECB, no DES, no RC4 and no raw RSA, so an extension naming
+ * one is refused at CONVERSION time by the algorithm string it wrote (see
+ * 'cryptoObstacle' in subset.ts). That is the refusal that matters, and it is
+ * why the scanner also reads the argument of a getInstance call rather than
+ * only the leaf: a conversion that never happened cannot be caught by anything.
+ *
+ * A transformation assembled at run time has no literal to read, so it lands
+ * here and refuses through __k.unsupported. Be honest about what that is worth:
+ * it throws an ordinary Error, and getInstance in this ecosystem often sits
+ * inside a runCatching, which catches one. So this is a backstop that names the
+ * algorithm in a log and stops THIS call, not a refusal the extension cannot
+ * swallow. Returning null instead would be strictly worse — that is the JCE's
+ * own "unavailable" signal and the caller is written to carry on past it.
+ *
+ * Mapping an unsupported mode onto a supported one is the one thing that must
+ * never happen here. AES/ECB answered as AES/CBC decrypts to rubbish, reports
+ * nothing, and is exactly the plausible-but-wrong output this runtime exists to
+ * prevent.
+ */
+
+/** The JCE hash names, as WebCrypto spells them. Nothing else is offered. */
+var CRYPTO_HASHES = { SHA1: 'SHA-1', SHA256: 'SHA-256', SHA384: 'SHA-384', SHA512: 'SHA-512' };
+
+/** The JCE curve names, as WebCrypto spells them. */
+var CRYPTO_CURVES = {
+  secp256r1: 'P-256',
+  prime256v1: 'P-256',
+  secp384r1: 'P-384',
+  secp521r1: 'P-521'
+};
+
+/** Half the raw ECDSA signature, per curve: the width of r and of s. */
+var CRYPTO_COORDS = { 'P-256': 32, 'P-384': 48, 'P-521': 66 };
+
+function __cryptoRefuse(what) {
+  __k.unsupported('This converted extension asked for ' + what + ', which this build does not implement.');
+}
+
+/** A JCE digest name as WebCrypto's, or a refusal naming the one it asked for. */
+function __cryptoHash(name) {
+  var key = __str(name).toUpperCase().replace(/-/g, '');
+  var found = CRYPTO_HASHES[key];
+  if (found === undefined) __cryptoRefuse('the ' + __str(name) + ' hash');
+  return found;
+}
+
+/** Bytes out, as the SIGNED numeric list a Kotlin ByteArray actually is. */
+function __cryptoArray(bytes) {
+  var out = [];
+  for (var i = 0; i < bytes.length; i += 1) {
+    var byte = bytes[i] & 0xff;
+    out.push(byte > 127 ? byte - 256 : byte);
+  }
+  return out;
+}
+
+/**
+ * java.security.SecureRandom, which is ctx.crypto.randomBytes.
+ *
+ * nextBytes fills IN PLACE and answers the same array, exactly as Random above
+ * does and for the same reason: the idiom is ByteArray(16).also(rng::nextBytes)
+ * and also() hands back its receiver.
+ */
+function SecureRandom() {
+  return {
+    nextBytes: function (bytes) {
+      var target = __arr(bytes);
+      var random = __host().crypto.randomBytes(target.length);
+      for (var i = 0; i < target.length; i += 1) {
+        target[i] = random[i] > 127 ? random[i] - 256 : random[i];
+      }
+      return target;
+    },
+    generateSeed: function (size) {
+      return __cryptoArray(__host().crypto.randomBytes(Number(size)));
+    },
+    nextInt: function (bound) {
+      var bytes = __host().crypto.randomBytes(4);
+      var value = ((bytes[0] << 24) | (bytes[1] << 16) | (bytes[2] << 8) | bytes[3]) >>> 0;
+      if (bound === undefined) return value | 0;
+      return value % Number(bound);
+    },
+    nextLong: function () {
+      var bytes = __host().crypto.randomBytes(4);
+      return ((bytes[0] << 24) | (bytes[1] << 16) | (bytes[2] << 8) | bytes[3]) | 0;
+    }
+  };
+}
+
+/** javax.crypto.spec.SecretKeySpec, which is a key and the name of its cipher. */
+function SecretKeySpec(key, algorithm) {
+  return {
+    __secretKey: true,
+    algorithm: __str(algorithm),
+    bytes: __bytesOf(key),
+    getAlgorithm: function () { return __str(algorithm); },
+    getEncoded: function () { return __cryptoArray(__bytesOf(key)); },
+    getFormat: function () { return 'RAW'; }
+  };
+}
+
+/** javax.crypto.spec.IvParameterSpec. */
+function IvParameterSpec(iv) {
+  return { __iv: __bytesOf(iv), __tagBits: null, getIV: function () { return __cryptoArray(__bytesOf(iv)); } };
+}
+
+/**
+ * javax.crypto.spec.GCMParameterSpec(tagBits, iv).
+ *
+ * The tag length is carried rather than dropped: GCM with a 96-bit tag and GCM
+ * with a 128-bit tag produce different ciphertext lengths, and a peer that
+ * expects one and is sent the other rejects the message.
+ */
+function GCMParameterSpec(tagBits, iv) {
+  return {
+    __iv: __bytesOf(iv),
+    __tagBits: Number(tagBits),
+    getIV: function () { return __cryptoArray(__bytesOf(iv)); },
+    getTLen: function () { return Number(tagBits); }
+  };
+}
+
+/** java.security.spec.ECGenParameterSpec, whose curve name is the whole of it. */
+function ECGenParameterSpec(name) {
+  var curve = CRYPTO_CURVES[__str(name)];
+  if (curve === undefined) __cryptoRefuse('the ' + __str(name) + ' curve');
+  return { __curve: curve, getName: function () { return __str(name); } };
+}
+
+/**
+ * A JCE transformation string, as the mode ctx.crypto offers.
+ *
+ * The JCE's own default for a bare 'AES' is ECB, which is why a bare 'AES'
+ * refuses here rather than being read as the CBC somebody probably meant.
+ * Padding is checked and not ignored: WebCrypto's AES-CBC always applies PKCS#7
+ * (which is PKCS#5 over 16-byte blocks - the same bytes under two names), and
+ * AES-GCM never pads, so a transformation asking for the other combination is
+ * asking for output this cannot produce.
+ */
+function __cipherSpec(transformation) {
+  var text = __str(transformation);
+  var parts = text.split('/');
+  var algorithm = __str(parts[0]).toUpperCase();
+  var mode = parts.length > 1 ? __str(parts[1]).toUpperCase() : '';
+  var padding = parts.length > 2 ? __str(parts[2]).toUpperCase() : '';
+
+  if (algorithm !== 'AES' || mode === '') __cryptoRefuse('the ' + text + ' cipher');
+  if (mode === 'CBC') {
+    if (padding !== 'PKCS5PADDING' && padding !== 'PKCS7PADDING') {
+      __cryptoRefuse('the ' + text + ' cipher');
+    }
+    return { mode: 'AES-CBC' };
+  }
+  if (mode === 'GCM') {
+    if (padding !== 'NOPADDING' && padding !== '') __cryptoRefuse('the ' + text + ' cipher');
+    return { mode: 'AES-GCM' };
+  }
+  __cryptoRefuse('the ' + text + ' cipher');
+}
+
+/** javax.crypto.Cipher, over the two AES modes WebCrypto has. */
+var Cipher = {
+  ENCRYPT_MODE: 1,
+  DECRYPT_MODE: 2,
+  getInstance: function (transformation) {
+    var spec = __cipherSpec(transformation);
+    var direction = null;
+    var key = null;
+    var iv = null;
+    var tagBits = null;
+    return {
+      init: function (mode, secret, parameters) {
+        direction = Number(mode) === 2 ? 'decrypt' : 'encrypt';
+        if (secret === null || secret === undefined || secret.__secretKey !== true) {
+          __cryptoRefuse('a cipher key this build cannot read');
+        }
+        key = secret.bytes;
+        iv = parameters === null || parameters === undefined ? null : parameters.__iv;
+        tagBits =
+          parameters === null || parameters === undefined || parameters.__tagBits === null
+            ? null
+            : parameters.__tagBits;
+        if (iv === null || iv === undefined) {
+          // No IV means the provider generates one for encryption and the
+          // caller reads it back off the cipher. That is a second value to
+          // carry and nothing in reach asks for it, so it refuses rather than
+          // silently using zeros - which would be a real key with no IV at all.
+          __cryptoRefuse('a cipher initialised without an IV');
+        }
+        return this;
+      },
+      update: function () {
+        // JCE's Cipher.update answers the blocks completed so far. Buffering
+        // and answering nothing would change what the caller received, so this
+        // refuses. Mac and Signature buffer because their update returns void.
+        __cryptoRefuse('a streaming Cipher.update()');
+      },
+      doFinal: async function (data) {
+        if (direction === null) __cryptoRefuse('a cipher used before init()');
+        var out = await __host().crypto.aes(
+          direction,
+          spec.mode,
+          key,
+          iv,
+          __bytesOf(data),
+          tagBits === null ? undefined : tagBits
+        );
+        return __cryptoArray(out);
+      },
+      getIV: function () { return iv === null ? null : __cryptoArray(iv); }
+    };
+  }
+};
+
+/** javax.crypto.Mac - HMAC, whose update() really does only accumulate. */
+var Mac = {
+  getInstance: function (algorithm) {
+    var text = __str(algorithm);
+    if (text.slice(0, 4).toUpperCase() !== 'HMAC') __cryptoRefuse('the ' + text + ' MAC');
+    var hash = __cryptoHash(text.slice(4));
+    var key = null;
+    var pending = [];
+    return {
+      init: function (secret) {
+        if (secret === null || secret === undefined || secret.__secretKey !== true) {
+          __cryptoRefuse('a MAC key this build cannot read');
+        }
+        key = secret.bytes;
+        pending = [];
+        return this;
+      },
+      update: function (data) {
+        pending = pending.concat(Array.prototype.slice.call(__bytesOf(data)));
+        return this;
+      },
+      reset: function () { pending = []; return this; },
+      doFinal: async function (data) {
+        if (key === null) __cryptoRefuse('a MAC used before init()');
+        var all = data === undefined || data === null
+          ? pending
+          : pending.concat(Array.prototype.slice.call(__bytesOf(data)));
+        pending = [];
+        return __cryptoArray(await __host().crypto.hmac(hash, key, new Uint8Array(all)));
+      }
+    };
+  }
+};
+
+/**
+ * java.security.KeyPairGenerator, for EC and nothing else.
+ *
+ * RSA is absent deliberately: WebCrypto's RSA is RSASSA-PKCS1/PSS and OAEP, not
+ * the raw modular exponentiation a JCE 'RSA/ECB/NoPadding' asks for, and the
+ * two are not interchangeable. An extension naming RSA refuses.
+ */
+var KeyPairGenerator = {
+  getInstance: function (algorithm) {
+    var text = __str(algorithm).toUpperCase();
+    if (text !== 'EC' && text !== 'ECDSA') __cryptoRefuse('a ' + __str(algorithm) + ' key pair');
+    var curve = 'P-256';
+    return {
+      initialize: function (spec) {
+        if (spec !== null && spec !== undefined && typeof spec.__curve === 'string') {
+          curve = spec.__curve;
+          return this;
+        }
+        // KeyPairGenerator.initialize(keysize) picks a curve by bit length for
+        // EC, and the mapping is the provider's rather than the spec's. Naming
+        // the curve is the only unambiguous form, so the other one refuses.
+        __cryptoRefuse('an EC key pair sized by bit length rather than by curve');
+      },
+      generateKeyPair: async function () {
+        var pair = await __host().crypto.generateEcKeyPair(curve);
+        return __keyPair(pair);
+      }
+    };
+  }
+};
+
+/**
+ * The generated pair, with its public half already a JWK.
+ *
+ * Both spellings are answered because both are written: Kotlin reads the Java
+ * getters as properties, so 'pair.public' and 'pair.getPublic()' are one thing.
+ */
+function __keyPair(pair) {
+  var publicKey = {
+    __ecPublic: pair,
+    algorithm: 'EC',
+    format: 'JWK',
+    kty: pair.publicJwk.kty,
+    crv: pair.publicJwk.crv,
+    x: pair.publicJwk.x,
+    y: pair.publicJwk.y,
+    w: {
+      affineX: __coordinate(pair.publicJwk.x),
+      affineY: __coordinate(pair.publicJwk.y)
+    },
+    getAlgorithm: function () { return 'EC'; },
+    getFormat: function () { return 'JWK'; }
+  };
+  var privateKey = { __ecPrivate: pair, algorithm: 'EC', getAlgorithm: function () { return 'EC'; } };
+  return {
+    public: publicKey,
+    private: privateKey,
+    getPublic: function () { return publicKey; },
+    getPrivate: function () { return privateKey; }
+  };
+}
+
+/**
+ * An affine coordinate, as much of java.math.BigInteger as it is read through.
+ *
+ * The Kotlin this stands in for spends a dozen lines assembling a JWK by hand:
+ * it takes 'publicKey.w.affineX', calls toByteArray(), and pads the result to
+ * the coordinate width. The JWK is already exported here - 'x' and 'y' above
+ * are it - but the hand-assembling code still has to run, so the coordinate has
+ * to answer to the name that code uses.
+ *
+ * toByteArray() is Java's exactly: big-endian two's complement, which for a
+ * positive number means a leading zero byte whenever the top bit is set. The
+ * JWK coordinate is fixed-width and unsigned, so that leading zero is the only
+ * difference and it is the one the padding code is written around. Getting it
+ * wrong by one byte is a JWK that encodes a different public key.
+ *
+ * This is NOT a BigInteger. It answers toByteArray() and toString(); arithmetic
+ * is refused at conversion time, because a method this runtime does not name is
+ * one the emitter has no passthrough for.
+ */
+function __coordinate(base64url) {
+  var bytes = Base64.decode(__str(base64url), Base64.URL_SAFE);
+  var unsigned = __bytesOf(bytes);
+  return {
+    __bigInteger: true,
+    bytes: unsigned,
+    toByteArray: function () {
+      var out = [];
+      var at = 0;
+      while (at < unsigned.length - 1 && unsigned[at] === 0) at += 1;
+      if ((unsigned[at] & 0x80) !== 0) out.push(0);
+      for (var i = at; i < unsigned.length; i += 1) {
+        out.push(unsigned[i] > 127 ? unsigned[i] - 256 : unsigned[i]);
+      }
+      return out;
+    },
+    bitLength: function () {
+      var at = 0;
+      while (at < unsigned.length && unsigned[at] === 0) at += 1;
+      if (at === unsigned.length) return 0;
+      var bits = (unsigned.length - at - 1) * 8;
+      for (var high = unsigned[at]; high > 0; high >>= 1) bits += 1;
+      return bits;
+    },
+    toString: function (radix) {
+      if (radix === undefined || Number(radix) === 10) return __decimalOf(unsigned);
+      if (Number(radix) !== 16) __cryptoRefuse('a BigInteger in base ' + __str(radix));
+      var hex = __k.toHexString(__cryptoArray(unsigned)).replace(/^0+/, '');
+      return hex.length === 0 ? '0' : hex;
+    }
+  };
+}
+
+/** Big-endian unsigned bytes as their decimal digits, which BigInteger prints. */
+function __decimalOf(bytes) {
+  var digits = [0];
+  for (var i = 0; i < bytes.length; i += 1) {
+    var carry = bytes[i];
+    for (var j = 0; j < digits.length; j += 1) {
+      var cell = digits[j] * 256 + carry;
+      digits[j] = cell % 10;
+      carry = Math.floor(cell / 10);
+    }
+    while (carry > 0) {
+      digits.push(carry % 10);
+      carry = Math.floor(carry / 10);
+    }
+  }
+  return digits.reverse().join('');
+}
+
+/**
+ * java.security.Signature, over ECDSA.
+ *
+ * ## The one translation that is not a rename
+ *
+ * The JCE answers a DER-encoded SEQUENCE of two INTEGERs; WebCrypto answers the
+ * raw 'r || s' of IEEE P1363. A peer that verifies what a JVM produced is
+ * expecting DER, so raw bytes handed over as a signature simply fail to verify
+ * - silently, at the far end, with nothing here to say why. So sign() encodes
+ * and verify() decodes. That is ASN.1, not cryptography: no key material is
+ * touched and no primitive is reimplemented.
+ */
+var Signature = {
+  getInstance: function (algorithm) {
+    var text = __str(algorithm);
+    var split = text.toLowerCase().indexOf('with');
+    if (split <= 0) __cryptoRefuse('the ' + text + ' signature');
+    var scheme = text.slice(split + 4).toUpperCase();
+    if (scheme !== 'ECDSA') __cryptoRefuse('the ' + text + ' signature');
+    var hash = __cryptoHash(text.slice(0, split));
+    var keys = null;
+    var pending = [];
+    return {
+      initSign: function (key) {
+        if (key === null || key === undefined || key.__ecPrivate === undefined) {
+          __cryptoRefuse('a signing key this build cannot read');
+        }
+        keys = key.__ecPrivate;
+        pending = [];
+        return this;
+      },
+      initVerify: function (key) {
+        if (key === null || key === undefined || key.__ecPublic === undefined) {
+          __cryptoRefuse('a verifying key this build cannot read');
+        }
+        keys = key.__ecPublic;
+        pending = [];
+        return this;
+      },
+      update: function (data) {
+        pending = pending.concat(Array.prototype.slice.call(__bytesOf(data)));
+        return this;
+      },
+      sign: async function () {
+        if (keys === null) __cryptoRefuse('a signature used before initSign()');
+        var message = new Uint8Array(pending);
+        pending = [];
+        var raw = await __host().crypto.ecdsaSign(keys, hash, message);
+        return __cryptoArray(__derSignature(raw));
+      },
+      verify: async function (signature) {
+        if (keys === null) __cryptoRefuse('a signature used before initVerify()');
+        var message = new Uint8Array(pending);
+        pending = [];
+        var width = CRYPTO_COORDS[keys.curve];
+        var raw = __rawSignature(__bytesOf(signature), width);
+        if (raw === null) return false;
+        return __host().crypto.ecdsaVerify(keys, hash, raw, message);
+      }
+    };
+  }
+};
+
+/** Raw 'r || s' as the DER SEQUENCE the JCE answers. */
+function __derSignature(raw) {
+  var half = raw.length >> 1;
+  var body = __derInteger(raw.subarray(0, half)).concat(__derInteger(raw.subarray(half)));
+  return [0x30].concat(__derLength(body.length), body);
+}
+
+/** One DER INTEGER: minimal length, and a leading zero when the top bit is set. */
+function __derInteger(bytes) {
+  var at = 0;
+  while (at < bytes.length - 1 && bytes[at] === 0) at += 1;
+  var value = [];
+  if ((bytes[at] & 0x80) !== 0) value.push(0);
+  for (var i = at; i < bytes.length; i += 1) value.push(bytes[i]);
+  return [0x02].concat(__derLength(value.length), value);
+}
+
+function __derLength(length) {
+  if (length < 0x80) return [length];
+  if (length < 0x100) return [0x81, length];
+  return [0x82, (length >> 8) & 0xff, length & 0xff];
+}
+
+/**
+ * The DER SEQUENCE back as raw 'r || s', or null when it is not one.
+ *
+ * null rather than a throw: verify() answers false for a signature it cannot
+ * read, which is what a JCE Signature does with a malformed one, and a
+ * malformed signature is a failed verification rather than a broken plugin.
+ */
+function __rawSignature(der, width) {
+  var at = 0;
+  if (der.length < 8 || der[at] !== 0x30) return null;
+  at += 1;
+  if (der[at] === 0x81) at += 2;
+  else if (der[at] === 0x82) at += 3;
+  else at += 1;
+  var out = new Uint8Array(width * 2);
+  for (var half = 0; half < 2; half += 1) {
+    if (der[at] !== 0x02) return null;
+    at += 1;
+    var length = der[at];
+    at += 1;
+    if (length > der.length - at) return null;
+    var from = at;
+    var size = length;
+    while (size > 1 && der[from] === 0) { from += 1; size -= 1; }
+    if (size > width) return null;
+    for (var i = 0; i < size; i += 1) out[half * width + width - size + i] = der[from + i];
+    at += length;
   }
   return out;
 }

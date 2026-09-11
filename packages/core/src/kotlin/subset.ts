@@ -284,8 +284,23 @@ const NAMED_OBSTACLES: readonly {
 	{ pattern: /\bInjekt\b/, name: 'Injekt.get' },
 	{ pattern: /\b(?:WebView|WebSettings|WebViewClient)\b/, name: 'WebView' },
 	{ pattern: /\bInterceptor\b/, name: 'an okhttp Interceptor' },
+	// Narrowed rather than deleted when `ctx.crypto` arrived. What is left is
+	// the part of javax.crypto that still has no honest answer:
+	//
+	// - `KeyGenerator` and `SecretKeyFactory` *derive* a key — from a password,
+	//   from a seed — and the derivation is the provider's, not the spec's.
+	// - `KeyStore`, `KeyFactory` and the encoded key specs read a key out of a
+	//   DER blob, which is a parser this does not have.
+	// - `CipherInputStream` / `CipherOutputStream` are streaming, and the one
+	//   thing WebCrypto has no shape for at all.
+	//
+	// The supported half — `Cipher`, `Mac`, `Signature`, `KeyPairGenerator`,
+	// `SecretKeySpec`, `IvParameterSpec` — is refused by *algorithm* instead;
+	// see `cryptoObstacle`, which reads the transformation string an extension
+	// wrote and refuses the modes WebCrypto does not have.
 	{
-		pattern: /\bjavax\.crypto\b|\b(?:Cipher|SecretKeySpec|IvParameterSpec|KeyGenerator)\b/,
+		pattern:
+			/\bjavax\.crypto\b|\b(?:KeyGenerator|SecretKeyFactory|KeyStore|KeyFactory|PBEKeySpec|X509EncodedKeySpec|PKCS8EncodedKeySpec|CipherInputStream|CipherOutputStream)\b/,
 		name: 'javax.crypto'
 	},
 	{
@@ -321,8 +336,140 @@ const NAMED_OBSTACLES: readonly {
 	{ pattern: /\bjavaClass\b/, name: 'the JVM class object' }
 ];
 
+/* ── algorithms ───────────────────────────────────────────────────────────── */
+
+/**
+ * A JCE algorithm string, by the shape a JCE algorithm string has.
+ *
+ * The scanner asks its questions of *leaves*, and a transformation is written
+ * as a string literal — so `Cipher.getInstance("AES/ECB/PKCS5Padding")` reaches
+ * `cryptoObstacle` as the `string_content` node `AES/ECB/PKCS5Padding`, which
+ * is the only place the mode is knowable at conversion time.
+ *
+ * Anchored on the WHOLE leaf, and the alternatives each require a digest or a
+ * cipher name rather than a loose keyword. That matters: every string in an
+ * extension is a leaf, so a pattern loose enough to match `\bDES\b` inside
+ * prose would refuse a member for a word in a title. A transformation string is
+ * the entire literal or it is not one.
+ */
+const CRYPTO_SPEC =
+	/^(?:AES|AESWrap|DES|DESede|TripleDES|RC2|RC4|ARCFOUR|Blowfish|ChaCha20|RSA|PBEWith[A-Za-z0-9]+|PBKDF2With[A-Za-z0-9]+)(?:\/[A-Za-z0-9]+){0,2}$/;
+
+/** `SHA256withECDSA` and its relatives, which name a digest and a scheme. */
+const SIGNATURE_SPEC = /^(?:MD[245]|SHA-?\d+)with([A-Za-z0-9]+)$/i;
+
+/** `HmacSHA256` and its relatives. */
+const MAC_SPEC = /^Hmac(MD5|SHA-?\d+)$/i;
+
+/**
+ * The transformations `ctx.crypto` genuinely performs.
+ *
+ * WebCrypto's AES-CBC always applies PKCS#7, which over a 16-byte block is
+ * byte-for-byte PKCS#5 — the same padding under two names, which is why both
+ * spellings are here and why `AES/CBC/NoPadding` is not.
+ */
+const SUPPORTED_TRANSFORMS: ReadonlySet<string> = new Set([
+	'AES/CBC/PKCS5PADDING',
+	'AES/CBC/PKCS7PADDING',
+	'AES/GCM/NOPADDING'
+]);
+
+/** The digests WebCrypto signs and MACs over. */
+const SUPPORTED_HASHES: ReadonlySet<string> = new Set(['SHA1', 'SHA256', 'SHA384', 'SHA512']);
+
+/**
+ * The one algorithm name that is ambiguous out of context.
+ *
+ * `"AES"` is written in two places and means two things. As a transformation it
+ * is ECB — the JCE's provider default, which WebCrypto does not have and which
+ * must refuse. As the second argument to `SecretKeySpec(key, "AES")` it names
+ * the key's algorithm, which is supported, and refusing it there would refuse
+ * every AES-CBC extension for the line that sets up its key.
+ *
+ * A leaf carries no context, so the leaf scan does not refuse it and
+ * `factoryTransformation` — which only asks about a string that is literally
+ * the argument of a `Cipher.getInstance(…)` — does. `DES` and its neighbours
+ * are not here because this build supports them in neither position.
+ */
+const AMBIGUOUS_ALGORITHMS: ReadonlySet<string> = new Set(['AES']);
+
+/** The static factories whose first argument is an algorithm rather than a key's. */
+const CRYPTO_FACTORY =
+	/(?:^|\b)(?:Cipher|Mac|Signature|KeyPairGenerator)\s*\.\s*getInstance\s*\(\s*"([^"\\$]*)"\s*[),]/;
+
+/**
+ * The algorithm a `getInstance` call names, when it names one literally.
+ *
+ * Read off the call's own source text rather than by walking to the argument,
+ * because the question is only worth asking of a node whose *shape* is already
+ * known — the same technique `BLOCKING_CALLS` uses. A transformation built from
+ * a variable has no literal here and is refused by the runtime instead, by
+ * name, through a failure the extension cannot swallow.
+ */
+export function factoryTransformation(text: string): string | null {
+	const found = CRYPTO_FACTORY.exec(text);
+	return found === null ? null : found[1];
+}
+
+/**
+ * The algorithm this text names and this build does not implement.
+ *
+ * `ctx.crypto` is AES-CBC, AES-GCM, HMAC and ECDSA over the three NIST curves,
+ * because that is what WebCrypto has. Everything else an extension can write
+ * into a `getInstance` has to refuse *here*, at conversion, by the name the
+ * author used — and refuse rather than be mapped onto a neighbour:
+ *
+ * - **No ECB anywhere.** WebCrypto does not implement it, and a bare `"AES"`
+ *   means ECB in the JCE's own defaults, so both refuse. Answering either with
+ *   CBC produces a plugin that decrypts to rubbish and reports nothing.
+ * - **No DES, DESede, RC2, RC4, Blowfish or ChaCha20.** None exist in
+ *   WebCrypto, and a cipher is not something to reimplement here.
+ * - **No RSA.** WebCrypto's RSA is RSASSA-PKCS1-v1_5, PSS and OAEP — padded
+ *   schemes — where the JCE's `"RSA"` is raw modular exponentiation with the
+ *   padding named separately. They are not interchangeable.
+ * - **No PBE or PBKDF2.** A derivation is a promise about iteration count and
+ *   salt handling, and getting it wrong yields a key that is simply different.
+ *
+ * `MessageDigest` is not asked about: a digest name is hyphenated (`SHA-256`),
+ * matches none of these shapes, and is answered synchronously in the runtime
+ * over its own published algorithms.
+ */
+export function cryptoObstacle(text: string, asTransformation = false): string | null {
+	if (CRYPTO_SPEC.test(text)) {
+		if (SUPPORTED_TRANSFORMS.has(text.toUpperCase())) return null;
+		if (!asTransformation && AMBIGUOUS_ALGORITHMS.has(text.toUpperCase())) return null;
+		return `the \`${text}\` cipher`;
+	}
+	const signature = SIGNATURE_SPEC.exec(text);
+	if (signature !== null) {
+		const hash = text.slice(0, text.toLowerCase().indexOf('with')).toUpperCase().replace(/-/g, '');
+		const scheme = signature[1].toUpperCase();
+		if (scheme === 'ECDSA' && SUPPORTED_HASHES.has(hash)) return null;
+		return `the \`${text}\` signature`;
+	}
+	const mac = MAC_SPEC.exec(text);
+	if (mac !== null) {
+		const hash = mac[1].toUpperCase().replace(/-/g, '');
+		return SUPPORTED_HASHES.has(hash) ? null : `the \`${text}\` MAC`;
+	}
+	// A curve is named as a bare string too, and `secp256k1` is one character
+	// from a curve WebCrypto has and is not one it has.
+	if (/^(?:secp|prime|brainpool|sect)[a-z0-9]+$/.test(text)) {
+		return /^(?:secp256r1|prime256v1|secp384r1|secp521r1)$/.test(text)
+			? null
+			: `the \`${text}\` curve`;
+	}
+	return null;
+}
+
 /** The obstacle this node's own text names, if any. Checked leaf-first. */
 export function namedObstacle(text: string): string | null {
+	// Asked first, because it is the specific question: `cryptoObstacle` names
+	// the algorithm the author wrote, where the table below can only name the
+	// package it came from. A refusal that says `AES/ECB/PKCS5Padding` tells
+	// the reader which line to look at; one that says `javax.crypto` does not.
+	const algorithm = cryptoObstacle(text);
+	if (algorithm !== null) return algorithm;
 	for (const { pattern, name } of NAMED_OBSTACLES) {
 		if (pattern.test(text)) return name;
 	}
@@ -873,6 +1020,36 @@ export const HOST_METHODS: ReadonlySet<string> = new Set([
 	'digest',
 	'update',
 	'reset',
+
+	// javax.crypto and java.security, whose objects are built by a static
+	// `getInstance` — a capitalised receiver, which passes through on its own —
+	// and then driven through these. The four that touch a key are also in
+	// `AWAITED_HOST_METHODS`.
+	//
+	// These are the widest names in this table, and `init`, `sign` and `verify`
+	// are the ones to be uneasy about: the allowlist is by *name*, so a `.sign()`
+	// on something that is not a `Signature` now passes through and dies at run
+	// time where it used to be refused at conversion. That is the trade every
+	// entry here makes, and it is made knowingly rather than overlooked — the
+	// alternative is resolving the receiver's type, which this emitter does not
+	// do for anything and would be a guess where it matters most.
+	'init',
+	'doFinal',
+	'initSign',
+	'initVerify',
+	'sign',
+	'verify',
+	'initialize',
+	'generateKeyPair',
+	'getPublic',
+	'getPrivate',
+	'getEncoded',
+	'getIV',
+	// `BigInteger.toByteArray()` on an affine coordinate, which is how the
+	// Kotlin this replaces assembles a JWK by hand. `toByteArray` is a String
+	// method in `EXTENSION_METHODS` too; the helper tells the two apart by what
+	// it is handed.
+	'bitLength',
 	// `response.body.contentType()`, the header verbatim.
 	'contentType',
 	// `Random::nextBytes`, passed to `also` to fill a ByteArray in place.
@@ -1000,6 +1177,33 @@ export const HOST_METHODS: ReadonlySet<string> = new Set([
 	'compareAndSet',
 	'updateAndGet',
 	'getAndUpdate'
+]);
+
+/**
+ * Passthrough methods that return a promise, and so must be awaited.
+ *
+ * Kotlin's `javax.crypto` is synchronous and `crypto.subtle` is not, so the
+ * four operations that actually touch a key are `async` in the runtime shim.
+ * Nothing at the call site says so — `cipher.doFinal(bytes)` reads as a
+ * `ByteArray` in both languages — and an un-awaited one is a Promise handed to
+ * `String(…)`, which answers `[object Promise]` and encrypts nothing. That is
+ * the same failure `SUPER_SUSPEND_MEMBERS` exists to prevent, decided the same
+ * way: from the runtime's own shape rather than inferred at the call site.
+ *
+ * The emitter's `awaited()` marks the enclosing frame `async`, and
+ * `BLOCKING_CALLS` carries that outward to whatever calls *it* — so a member
+ * that decrypts becomes `async` and its callers await it, transitively.
+ *
+ * Only these four, and each is a name javax.crypto and java.security own.
+ * `init`, `initSign` and `update` stay synchronous because the shim keeps them
+ * so: a key is recorded rather than imported, and the import happens inside the
+ * operation, which is what keeps the asynchronous surface this small.
+ */
+export const AWAITED_HOST_METHODS: ReadonlySet<string> = new Set([
+	'doFinal',
+	'sign',
+	'verify',
+	'generateKeyPair'
 ]);
 
 /**
@@ -1208,6 +1412,20 @@ export const GLOBAL_NAMES: ReadonlySet<string> = new Set([
 	'LruCache',
 	'Random',
 	'MessageDigest',
+
+	// javax.crypto and the keyed half of java.security. See `RUNTIME_GLOBALS`
+	// for why each is a bundle-scope name, and `cryptoObstacle` below for the
+	// algorithms that are still refused rather than answered.
+	'SecureRandom',
+	'SecretKeySpec',
+	'IvParameterSpec',
+	'GCMParameterSpec',
+	'ECGenParameterSpec',
+	'Cipher',
+	'Mac',
+	'Signature',
+	'KeyPairGenerator',
+
 	'URLEncoder',
 	'URLDecoder',
 	'Log',
@@ -1714,6 +1932,21 @@ function scanInto(node: KNode, memberName: string, found: Untranslatable[]): voi
 	if (outOfScope !== undefined) {
 		found.push({ kind: outOfScope, line: node.line, memberName });
 		return;
+	}
+
+	// The one question a leaf cannot answer. `"AES"` is a supported key
+	// algorithm and an unsupported cipher mode, and only the call it sits in
+	// says which — so it is asked here, of the call, where `Cipher.getInstance`
+	// is still visible above the string.
+	if (node.type === 'call_expression') {
+		const transformation = factoryTransformation(node.text);
+		if (transformation !== null) {
+			const refused = cryptoObstacle(transformation, true);
+			if (refused !== null) {
+				found.push({ kind: refused, line: node.line, memberName });
+				return;
+			}
+		}
 	}
 
 	// Named obstacles are matched on the smallest node whose text contains

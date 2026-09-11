@@ -615,7 +615,10 @@ describe('what is refused, and in which words', () => {
 
 		expect(refusal).toContain('WebView');
 		expect(refusal).toContain('a background thread');
-		expect(refusal).toContain('javax.crypto');
+		// The algorithm rather than the package: `ctx.crypto` answers AES-CBC
+		// and AES-GCM, and a bare `"AES"` is ECB by the JCE's own default — so
+		// what is refused here is the mode, and the sentence has to say which.
+		expect(refusal).toContain('the `AES` cipher');
 		expect(refusal).toContain('an embedded JavaScript engine');
 		expect(refusal).toContain('the filesystem');
 	}, 60_000);
