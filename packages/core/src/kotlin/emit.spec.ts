@@ -831,6 +831,68 @@ describe('control flow', () => {
 		expect(await demo.size([1, 2, 3])).toBe(3);
 	});
 
+	it('keeps a labelled return local to the blocks that are real callbacks', async () => {
+		// `withContext`, bare `with`, `async` and `by lazy` all become a real
+		// JavaScript function, and each one's frame was carrying no label — so
+		// `return@withContext` was compared against `null` and refused as
+		// "crossing a lambda" while crossing nothing at all.
+		//
+		// None of the four is one of Kotlin's inline scope functions, which is
+		// what makes the fix safe rather than convenient: a bare `return` inside
+		// any of them does not compile in Kotlin either, so the only return an
+		// extension can write is the labelled one, and it leaves exactly the
+		// function this emitter already produces.
+		const demo = instantiate(
+			inClass(
+				'    val floor by lazy {',
+				'        if (limit < 0) return@lazy 0',
+				'        limit',
+				'    }',
+				// Negative, so the `by lazy` guard actually fires and `floor` is the
+				// value the labelled return carried rather than the block's last line.
+				'    val limit = -1',
+				'    fun pick(items: List<Int>) = runBlocking {',
+				'        withContext(Dispatchers.Default) {',
+				'            if (items.isEmpty()) return@withContext floor',
+				'            items.first()',
+				'        }',
+				'    }',
+				'    fun width(text: String) = with(text) {',
+				'        if (isEmpty()) return@with floor',
+				'        length',
+				'    }'
+			)
+		);
+
+		expect(await demo.pick([7, 8])).toBe(7);
+		expect(await demo.pick([])).toBe(0);
+		expect(demo.width('abcd')).toBe(4);
+		expect(demo.width('')).toBe(0);
+	});
+
+	it('still refuses a labelled return that crosses a callback', () => {
+		// The label names the `withContext`, but the jump is written inside a
+		// `map` callback — there is no `return` in JavaScript that leaves both.
+		// Labelling the frame must not turn this one into a guess.
+		const source = kt(
+			'class Demo : Source() {',
+			'    fun go(rows: List<String>): String = runBlocking {',
+			'        withContext(Dispatchers.Default) {',
+			'            rows.map { row ->',
+			'                if (row.isEmpty()) return@withContext "none"',
+			'                row',
+			'            }.first()',
+			'        }',
+			'    }',
+			'}'
+		);
+
+		const emitted = translate(source);
+		expect(emitted.refusals.flatMap((one) => one.obstacles.map((o) => o.kind))).toContain(
+			'a `return@withContext` crossing a lambda'
+		);
+	});
+
 	it('drops the type annotation a `for` binding may carry', () => {
 		// `for (item: MatchResult in matches)` passed through gives
 		// `for (const item: MatchResult of …)`, which is a SyntaxError in the

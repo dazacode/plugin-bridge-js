@@ -2205,7 +2205,7 @@ class Emitter {
 		if (called === 'lazy') {
 			const lambda = this.lambdaOf(call);
 			if (lambda === null) this.refuse(delegate, 'a `lazy` without a block');
-			const body = this.functionScope('lambda', null, [], () => block(this.lambdaLines(lambda)));
+			const body = this.functionScope('lambda', called, [], () => block(this.lambdaLines(lambda)));
 			return `${body.isAsync ? 'async ' : ''}() => ${body.text}`;
 		}
 
@@ -4533,14 +4533,23 @@ class Emitter {
 		// one thread. The dispatcher is dropped and the block is awaited.
 		if (name === 'withContext') {
 			if (lambda === null) this.refuse(callee, 'a `withContext` with no block');
-			const body = this.functionScope('lambda', null, [], () => block(this.lambdaLines(lambda)));
+			// Labelled, like every other block that becomes a real callback.
+			// `withContext` is not one of Kotlin's inline scope functions, so a
+			// bare `return` inside it is a compile error there and the only
+			// return an extension can write is `return@withContext` — which
+			// leaves exactly this arrow, and is what the async IIFE yields.
+			// Without the label it was compared against `null` and refused as
+			// "crossing a lambda" while crossing nothing at all.
+			const body = this.functionScope('lambda', labelled ?? name, [], () =>
+				block(this.lambdaLines(lambda))
+			);
 			return this.awaited(`(async () => ${body.text})()`);
 		}
 		if (name === 'with') {
 			if (lambda === null || args.length !== 1) this.refuse(callee, 'a `with` of an unusual shape');
 			const before = this.asyncLambdas;
 			const subject = this.expr(this.argumentValue(args[0]));
-			const call = `${this.helper('run')}(${subject}, ${this.lambda(lambda, true, labelled)})`;
+			const call = `${this.helper('run')}(${subject}, ${this.lambda(lambda, true, labelled ?? name)})`;
 			return this.asyncLambdas > before ? this.awaited(call) : call;
 		}
 		if (name === 'synchronized' && lambda !== null && args.length === 1) {
@@ -4560,7 +4569,7 @@ class Emitter {
 		}
 		if (name === 'async') {
 			if (lambda === null) this.refuse(callee, 'an `async` with no block');
-			return `${this.helper('async')}(${this.lambda(lambda, false, labelled)})`;
+			return `${this.helper('async')}(${this.lambda(lambda, false, labelled ?? name)})`;
 		}
 		if (name === 'runBlocking') {
 			// The sandbox has one thread and no way to block on a promise, so the
