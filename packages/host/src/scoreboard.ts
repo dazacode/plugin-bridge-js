@@ -296,8 +296,26 @@ const NATIVE_CAPABILITIES: readonly RegExp[] = [
 	/Handler\(/,
 	/a background thread/,
 	/Thread\(/,
+	// A plugin that stands up its own HTTP server on localhost — ADR-0006.
+	//
+	// The foreign idiom serves `/m3u8` and `/segment` from a loopback port so
+	// that per-request headers survive to every segment and an AES key can be
+	// fetched under them. A plugin that *listens* outlives its call, holds a
+	// port and is reachable by anything else on the machine, and the browser
+	// host could not offer one at any price. `StreamPipeline` supplies the same
+	// behaviour declaratively, so this is a boundary and not a backlog item.
+	//
+	// `ForwardingSource` and `PlaylistServer` were here first, spotted as two
+	// unrelated names before the cluster was read as one thing.
 	/ForwardingSource/,
 	/PlaylistServer/,
+	/NanoHTTPD/,
+	/startServer/,
+	/getListeningPort\(\)/,
+	/\.createLocalUrl\(\)/,
+	/\.createProxyUrl\(\)/,
+	/\.segmentProxyUrl\(\)/,
+	/\.alwaysNeedsProxy\(\)/,
 	/an android\.\* API/
 ];
 

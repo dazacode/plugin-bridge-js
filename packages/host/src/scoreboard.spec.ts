@@ -342,6 +342,23 @@ describe('what stands in the way, as against how far it got', () => {
 		expect(reachOf(row({ status: 'broken', obstacles: ['`.flatMapIndexed()`'] }))).toBe('widen');
 	});
 
+	// ADR-0006. Every one of these was already landing in `native` — on a
+	// *different* obstacle the same listing happened to also carry, because an
+	// extension elaborate enough to run a server usually also decrypts
+	// something. Take the cipher away and it read as `widen`, which promises a
+	// translator improvement that cannot arrive: the host has no port to bind.
+	it('files a plugin that runs its own HTTP server as a boundary', () => {
+		for (const obstacle of [
+			'`super.getListeningPort()`',
+			'`.createLocalUrl()`',
+			'`.createProxyUrl()`',
+			'`.segmentProxyUrl()`',
+			'`.alwaysNeedsProxy()`'
+		]) {
+			expect(reachOf(row({ status: 'broken', obstacles: [obstacle] }))).toBe('native');
+		}
+	});
+
 	it('does not count a site that is gone against the converter', () => {
 		expect(
 			reachOf(

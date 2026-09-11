@@ -22,6 +22,12 @@ stopped being compatibility questions once they were measured against a real
 catalogue. **`ADR-0005` decides them**, with the counts each is worth: read that
 before proposing work on any of the three.
 
+A fourth, found later by reading the shared libraries rather than the
+per-listing refusals: **at least 14 listings run their own HTTP server on
+localhost** so that per-request headers survive to every HLS segment.
+**`docs/adr/0006-local-http-server.md` decides it** — refused permanently,
+because `StreamPipeline` already supplies the same behaviour declaratively.
+
 ## 0. This is a continuation, not a new direction
 
 `NOTICE` already records two pieces of this repository as reimplementations
