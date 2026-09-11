@@ -249,10 +249,13 @@ not the purpose.
 
 ## Roadmap
 
-- **Have Yorozo consume this rather than its own copy.** Yorozo still carries
-  its own convert-and-verify path from before the extraction. Until it delegates
-  to `packages/host/src/catalogue.ts`, the two can drift — and drift between two
-  hosts is exactly what the second host exists to catch.
+Recently closed: the client now consumes these packages instead of carrying its
+own copy; `host` is split into the portable port and its Node implementation;
+and adapter discovery is inverted — `@plugin-bridge/adapters` owns the list of
+ecosystems and `core` no longer imports a single one of them, so adding an
+ecosystem is no longer a change to the package that is meant to know nothing
+about any particular one.
+
 - **De-couple the contract specs.** `contract/` is normative and now lives here,
   but the four documents still read as Yorozo's. A contributor arriving cold
   should not have to know Yorozo to read them.
@@ -262,11 +265,13 @@ not the purpose.
   recommends only one of them. With the compatibility loop closed these are the
   only remaining work that could move the count, which is why they are a
   decision for a person rather than the next thing to build.
-- **Second ecosystem, second opinion.** `packages/adapters` names six and one is
-  measured. The claim this repository actually makes — that the Kotlin
-  front-end is ecosystem-agnostic — is untested until a second adapter is
-  driven against a real catalogue, and that is a better use of effort than any
-  remaining listing in the first.
+- **A third ecosystem, to find what two did not.** Two are now measured, and
+  the claim that the Kotlin front-end is one front-end rather than the engine
+  has survived its first real test — a JavaScript ecosystem reached the same ABI
+  with core frozen (`docs/compatibility-sora.md`). Two is enough to disprove
+  "it only does Aniyomi" and not enough to call the abstraction settled. The
+  remaining adapters are `browse-only` for reasons of their own, so a third
+  would mean a new one.
 
 ## Licence
 

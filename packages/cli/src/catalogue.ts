@@ -52,6 +52,7 @@ import {
 } from '@plugin-bridge/host/scoreboard';
 import { checkListing } from '@plugin-bridge/host/catalogue';
 import { detectRepository } from '@plugin-bridge/core/detect';
+import { FOREIGN_ADAPTERS } from '@plugin-bridge/adapters';
 import { checkKey, loadChecks, saveChecks, type CheckResult } from '@plugin-bridge/core/check';
 import { CONVERTER_VERSION } from '@plugin-bridge/core/package';
 import type { RepositoryPlugin } from '@plugin-bridge/core/repository-index';
@@ -257,7 +258,7 @@ async function run(): Promise<void> {
 	// Detection rather than a single parser: an index may be any of the six
 	// ecosystems, and each names its listings differently. `detectRepository`
 	// tries the spellings a pasted URL could mean and returns ours.
-	const detected = await detectRepository(options.indexUrl, text);
+	const detected = await detectRepository(options.indexUrl, text, FOREIGN_ADAPTERS);
 	const index = detected.index;
 	const listings = index.plugins.slice(0, options.limit);
 	const capabilities = {

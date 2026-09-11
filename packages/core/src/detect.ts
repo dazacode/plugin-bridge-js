@@ -35,39 +35,17 @@ import {
 	type ForeignAdapter,
 	type TextFetcher
 } from './adapter';
-import { aniyomiAdapter } from '@plugin-bridge/adapters/aniyomi';
-import { cloudstreamAdapter } from '@plugin-bridge/adapters/cloudstream';
-import { hayaseAdapter } from '@plugin-bridge/adapters/hayase';
-import { lnreaderAdapter } from '@plugin-bridge/adapters/lnreader';
-import { mangayomiAdapter } from '@plugin-bridge/adapters/mangayomi';
-import { soraAdapter } from '@plugin-bridge/adapters/sora';
 import type { ForeignFormat } from './formats';
 
 /**
- * Ordered, and the order is a policy.
+ * The adapters are passed in, never imported.
  *
- * The two formats with a distinctive filename come first, so the common case
- * costs one request. `mangayomi` and `hayase` both answer to a bare
- * `index.json` and are separated by their body, not their position — but
- * `hayase` is checked first because its entries carry a `manifestVersion`
- * field that nothing else does, making it the cheaper negative.
+ * Core is what an adapter is written against, so importing every adapter here
+ * pointed the dependency the wrong way and made adding an ecosystem a change to
+ * this package. `@plugin-bridge/adapters` owns the list; these functions take
+ * it. See that package's `index.ts` for why it is a list rather than a registry
+ * adapters sign themselves into.
  */
-export const FOREIGN_ADAPTERS: readonly ForeignAdapter[] = [
-	soraAdapter,
-	aniyomiAdapter,
-	lnreaderAdapter,
-	cloudstreamAdapter,
-	hayaseAdapter,
-	mangayomiAdapter
-];
-
-export function adapterFor(format: ForeignFormat): ForeignAdapter {
-	const adapter = FOREIGN_ADAPTERS.find((candidate) => candidate.format === format);
-	if (adapter === undefined) {
-		throw new ValidationFailure(`This build does not know the "${format}" plugin format.`);
-	}
-	return adapter;
-}
 
 export interface DetectedRepository {
 	readonly indexUrl: string;
@@ -106,7 +84,10 @@ function normalise(pasted: string): URL {
  * `<repo>/main/index.json`, and without this a repository that is none of them
  * would be fetched four times before failing.
  */
-export function detectionCandidates(pasted: string): {
+export function detectionCandidates(
+	pasted: string,
+	adapters: readonly ForeignAdapter[]
+): {
 	url: URL;
 	candidates: string[];
 } {
@@ -122,7 +103,7 @@ export function detectionCandidates(pasted: string): {
 
 	// Native first, always. See this file's header.
 	for (const candidate of resolveIndexCandidates(pasted)) add(candidate);
-	for (const adapter of FOREIGN_ADAPTERS) {
+	for (const adapter of adapters) {
 		for (const candidate of adapter.candidates(url)) add(candidate);
 	}
 	return { url, candidates };
@@ -162,9 +143,10 @@ function claimsOurs(body: string): boolean {
 
 export async function detectRepository(
 	pasted: string,
-	getText: TextFetcher
+	getText: TextFetcher,
+	adapters: readonly ForeignAdapter[]
 ): Promise<DetectedRepository> {
-	const { candidates } = detectionCandidates(pasted);
+	const { candidates } = detectionCandidates(pasted, adapters);
 	const attempted: string[] = [];
 
 	for (const candidate of candidates) {
@@ -198,7 +180,7 @@ export async function detectRepository(
 			}
 		}
 
-		for (const adapter of FOREIGN_ADAPTERS) {
+		for (const adapter of adapters) {
 			try {
 				return {
 					indexUrl: candidate,

@@ -24,7 +24,7 @@ import { describe, expect, it } from 'vitest';
 import fixtures from '../../../fixtures/indexes.json';
 import { openPluginArchive, PluginArchiveError } from '@plugin-bridge/core/archive';
 import { hostsInSource, wildcardFor, type ConversionServices } from '@plugin-bridge/core/adapter';
-import { adapterFor } from '@plugin-bridge/core/detect';
+import { adapterFor } from './index';
 import { convertedManifest, toSemver, writeZip } from '@plugin-bridge/core/package';
 import type { RepositoryPlugin } from '@plugin-bridge/core/repository-index';
 

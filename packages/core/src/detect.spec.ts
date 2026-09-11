@@ -8,6 +8,7 @@
  * publish a file called `index.json` and mean different things by it.
  */
 
+import { FOREIGN_ADAPTERS } from '@plugin-bridge/adapters';
 import { describe, expect, it } from 'vitest';
 
 import fixtures from '../../../fixtures/indexes.json';
@@ -44,7 +45,7 @@ const NATIVE_INDEX = {
 
 describe('what gets tried, and in what order', () => {
 	it('puts the native candidates first', () => {
-		const { candidates } = detectionCandidates('https://github.com/owner/repo');
+		const { candidates } = detectionCandidates('https://github.com/owner/repo', FOREIGN_ADAPTERS);
 
 		expect(candidates[0]).toBe('https://raw.githubusercontent.com/owner/repo/main/index.json');
 		expect(candidates).toContain(
@@ -53,16 +54,18 @@ describe('what gets tried, and in what order', () => {
 	});
 
 	it('tries each URL once even though four adapters offer some of them', () => {
-		const { candidates } = detectionCandidates('https://github.com/owner/repo');
+		const { candidates } = detectionCandidates('https://github.com/owner/repo', FOREIGN_ADAPTERS);
 		expect(new Set(candidates).size).toBe(candidates.length);
 	});
 
 	it('accepts the owner/repo shorthand and refuses anything not https', () => {
-		expect(detectionCandidates('owner/repo').candidates[0]).toMatch(
+		expect(detectionCandidates('owner/repo', FOREIGN_ADAPTERS).candidates[0]).toMatch(
 			/^https:\/\/raw\.githubusercontent\.com\/owner\/repo\//
 		);
-		expect(() => detectionCandidates('http://example.invalid/index.json')).toThrow(/https/);
-		expect(() => detectionCandidates('   ')).toThrow(/Paste a repository URL/);
+		expect(() =>
+			detectionCandidates('http://example.invalid/index.json', FOREIGN_ADAPTERS)
+		).toThrow(/https/);
+		expect(() => detectionCandidates('   ', FOREIGN_ADAPTERS)).toThrow(/Paste a repository URL/);
 	});
 });
 
@@ -71,7 +74,8 @@ describe('the body decides, not the path', () => {
 		const url = 'https://raw.githubusercontent.com/owner/repo/main/index.json';
 		const found = await detectRepository(
 			'https://github.com/owner/repo',
-			serve({ [url]: NATIVE_INDEX })
+			serve({ [url]: NATIVE_INDEX }),
+			FOREIGN_ADAPTERS
 		);
 
 		expect(found.index.format).toBe('yorozo');
@@ -85,7 +89,7 @@ describe('the body decides, not the path', () => {
 			const documents: Record<string, unknown> = {
 				[fixture.indexUrl]: fixture.body
 			};
-			const found = await detectRepository(fixture.indexUrl, serve(documents));
+			const found = await detectRepository(fixture.indexUrl, serve(documents), FOREIGN_ADAPTERS);
 
 			expect(found.index.format).toBe(format);
 			expect(found.indexUrl).toBe(fixture.indexUrl);
@@ -93,9 +97,9 @@ describe('the body decides, not the path', () => {
 	);
 
 	it('reports every URL it tried when nothing is there', async () => {
-		await expect(detectRepository('https://github.com/owner/repo', serve({}))).rejects.toThrow(
-			/raw\.githubusercontent\.com\/owner\/repo/
-		);
+		await expect(
+			detectRepository('https://github.com/owner/repo', serve({}), FOREIGN_ADAPTERS)
+		).rejects.toThrow(/raw\.githubusercontent\.com\/owner\/repo/);
 	});
 
 	it('refuses a native index from a newer schema instead of guessing a format', async () => {
@@ -103,7 +107,11 @@ describe('the body decides, not the path', () => {
 		// Falling through to a foreign adapter would be the worst kind of guess.
 		const url = 'https://example.invalid/index.json';
 		await expect(
-			detectRepository(url, serve({ [url]: { ...NATIVE_INDEX, schemaVersion: 2 } }))
+			detectRepository(
+				url,
+				serve({ [url]: { ...NATIVE_INDEX, schemaVersion: 2 } }),
+				FOREIGN_ADAPTERS
+			)
 		).rejects.toThrow(/index format 2/);
 	});
 
@@ -122,7 +130,8 @@ describe('the body decides, not the path', () => {
 			serve({
 				[fixture.indexUrl]: fixture.body,
 				[fixture.pluginList.url]: fixture.pluginList.body
-			})
+			}),
+			FOREIGN_ADAPTERS
 		);
 
 		expect(found.index.format).toBe('cloudstream');

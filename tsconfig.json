@@ -15,6 +15,7 @@
 		"paths": {
 			"@plugin-bridge/core/*": ["packages/core/src/*"],
 			"@plugin-bridge/runtime/*": ["packages/runtime/src/*"],
+			"@plugin-bridge/adapters": ["packages/adapters/src/index.ts"],
 			"@plugin-bridge/adapters/*": ["packages/adapters/src/*"],
 			"@plugin-bridge/host/*": ["packages/host/src/*"],
 			"@plugin-bridge/host-node/*": ["packages/host-node/src/*"]

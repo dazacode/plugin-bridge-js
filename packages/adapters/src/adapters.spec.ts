@@ -20,7 +20,7 @@ import {
 	ForeignFormatError,
 	type ConversionServices
 } from '@plugin-bridge/core/adapter';
-import { FOREIGN_ADAPTERS, adapterFor } from '@plugin-bridge/core/detect';
+import { FOREIGN_ADAPTERS, adapterFor } from './index';
 import { CERTIFICATE_KEY_PREFIX } from '@plugin-bridge/adapters/aniyomi';
 import type { ForeignFormat } from '@plugin-bridge/core/formats';
 

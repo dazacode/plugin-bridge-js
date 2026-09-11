@@ -12,7 +12,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { DEFAULT_REFS, looksLikeFile, parseRepositoryUrl, rawCandidates } from './git-hosts';
-import { FOREIGN_ADAPTERS } from './detect';
+import { FOREIGN_ADAPTERS } from '@plugin-bridge/adapters';
 
 const repo = (href: string) => parseRepositoryUrl(new URL(href));
 

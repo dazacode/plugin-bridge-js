@@ -17,7 +17,7 @@
  * which is the property the whole scoreboard rests on.
  */
 
-import { adapterFor } from '@plugin-bridge/core/detect';
+import { adapterFor } from '@plugin-bridge/adapters';
 import { openPluginArchive, type PluginBundle } from '@plugin-bridge/core/archive';
 import type { CheckResult } from '@plugin-bridge/core/check';
 import { CONVERTER_VERSION } from '@plugin-bridge/core/package';
