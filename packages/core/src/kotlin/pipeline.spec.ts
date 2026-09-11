@@ -1189,3 +1189,85 @@ describe('what the runtime is asked for', () => {
 		expect(result.usedRuntime).toEqual(['substringAfter', 'trim']);
 	});
 });
+
+/**
+ * Cookies, split down the middle.
+ *
+ * The host keeps a per-plugin, per-host, in-memory jar and attaches it on the
+ * way out (`docs/adr/0005-network-boundaries.md` §3), so an extension that
+ * *installs* a jar or *saves* to one is asking for behaviour it already has and
+ * converts. An extension that *reads* one is asking for the thing that design
+ * refuses — the host carries the state and the plugin never sees it — and must
+ * still be refused by name rather than quietly handed an empty list.
+ */
+describe('the cookie shapes that convert, and the ones that still refuse', () => {
+	it('converts a client that installs a jar and saves responses to it', async () => {
+		const result = await convertKotlin(
+			[
+				{
+					path: 'Demo.kt',
+					source: kt(
+						'class Demo : Source() {',
+						'    override val baseUrl = "https://example.invalid"',
+						'',
+						'    fun clientFor() = client.newBuilder().cookieJar(jar).build()',
+						'',
+						'    fun remember(url: HttpUrl, response: Response) =',
+						'        client.cookieJar.saveFromResponse(url, response.headers)',
+						'}'
+					)
+				}
+			],
+			{ parser }
+		);
+
+		expect(result.refusals).toEqual([]);
+		expect(result.js).toContain('.cookieJar(');
+		expect(result.js).toContain('.saveFromResponse(');
+	});
+
+	it('refuses an extension that reads its own jar, by name', async () => {
+		const result = await convertKotlin(
+			[
+				{
+					path: 'Demo.kt',
+					source: kt(
+						'class Demo : Source() {',
+						'    override val baseUrl = "https://example.invalid"',
+						'',
+						'    fun stolen(url: HttpUrl) = client.cookieJar.loadForRequest(url)',
+						'}'
+					)
+				}
+			],
+			{ parser }
+		);
+
+		expect(result.refusals.map((one) => one.member)).toContain('stolen');
+		expect(result.js).not.toContain('loadForRequest');
+	});
+
+	it('refuses the WebView cookie store rather than letting it die in the sandbox', async () => {
+		// A capitalised receiver is a cross-file object reference, which is
+		// exempt from the passthrough allowlist — so this used to convert
+		// cleanly and fail inside the isolate as `CookieManager is not
+		// defined`, which names nothing anybody can act on.
+		const result = await convertKotlin(
+			[
+				{
+					path: 'Demo.kt',
+					source: kt(
+						'class Demo : Source() {',
+						'    override val baseUrl = "https://example.invalid"',
+						'',
+						'    fun stored(url: String) = CookieManager.getInstance().getCookie(url)',
+						'}'
+					)
+				}
+			],
+			{ parser }
+		);
+
+		expect(result.refusals.map((one) => one.member)).toContain('stored');
+	});
+});

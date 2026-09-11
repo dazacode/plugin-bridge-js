@@ -38,14 +38,58 @@ which holds the whole network policy:
   and headers, and says the body was not read — rather than handing back an
   empty page that reads as a working request.
 - **Four response headers forwarded** — `content-type`, `content-length`,
-  `location`, `retry-after`. `Set-Cookie` is dropped: a cookie handed to
-  untrusted code is a credential handed to untrusted code. See
-  `docs/adr/0005-network-boundaries.md` for the constrained jar that would
-  change this, and what it is worth.
+  `location`, `retry-after`. `Set-Cookie` is **still** not one of them: a cookie
+  handed to untrusted code is a credential handed to untrusted code, and that
+  has not changed. See below for the jar, which is how a plugin carries a
+  session without ever seeing one.
 
 The relay is framework-free so that a web server, the headless isolate and a
 test all run the _same_ policy. A host that routed around it would be running
 plugins under different rules than this repository states.
+
+### 2.1 The cookie jar
+
+A plugin that declares `permissions: ["cookies"]` has a jar, specified
+normatively in `contract/ABI.md` §2 and reasoned about in
+`docs/adr/0005-network-boundaries.md` §3. The posture, stated as bounds rather
+than as features:
+
+- **The jar is host state, not a plugin API.** It lives in `PluginSandbox`
+  (`packages/host/src/sandbox-host.ts`), one instance per running plugin. There
+  is no `ctx.cookies`, no method that returns a cookie, and no response field
+  carrying one. A plugin cannot enumerate cookies for a host it set them on,
+  let alone for one it did not.
+- **A cookie never crosses a host boundary.** It is bound to the exact hostname
+  that set it. `Domain` narrows and never widens: covering the setting host
+  stores it as the setting host, and not covering it is refused outright.
+- **A cookie never crosses a plugin boundary**, because the jar is a field on
+  the sandbox rather than anything a second sandbox can name.
+- **A cookie never reaches disk.** In memory only, never the host's own cookie
+  store, and `dispose()` empties it — so unloading a plugin is what clearing its
+  jar means.
+- **The jar grants no reach.** A cookie is only ever attached to a request that
+  already passed the per-plugin host allowlist. The plugin could always make the
+  request; it could not previously carry state between two of them.
+- **Opt-in.** Without the permission the bytes on the wire are what they were
+  before the jar existed, in both directions.
+
+Two things the relay does **not** do, and both are load-bearing:
+
+- `cookie` is not in the forwardable request-header allowlist and must stay out
+  of it. The jar's header arrives on a field of its own (`cookies.send`) so that
+  "this request carried a credential" is one grep rather than a judgement about
+  the contents of a map. A caller who could put a cookie in the general header
+  map could put any cookie there, for any host.
+- The header is put on the **first hop only**. The relay holds no jar and must
+  not guess whether a cookie applies to a redirect's target; it drops the header
+  and reports what each hop set instead, tagged with the hop, so that the jar
+  scopes it and the plugin's next request carries it.
+
+What is deliberately still refused, rather than half-supported: an extension
+**reading** its own jar (`loadForRequest`), and the WebView cookie store
+(`CookieManager`). Both are refused by name at conversion — the first because
+handing cookies to plugin code is the thing this design exists to prevent, the
+second because there is no WebView and `§4` of the ADR says there will not be.
 
 ## 3. Rule 9 — no content source, anywhere
 

@@ -5335,6 +5335,34 @@ function __noInterceptor(name) {
 }
 
 /**
+ * okhttp's CookieJar, as much of it as the host can honour.
+ *
+ * The host keeps a per-plugin, per-host, in-memory jar and attaches it to every
+ * request on the way out (ADR-0005 section 3). So an extension that installs a
+ * jar is asking for behaviour it already has, and the two halves of the
+ * interface land in very different places:
+ *
+ * - 'saveFromResponse' is an acknowledgement. The host absorbed the response's
+ *   'Set-Cookie' headers before the response reached the extension, so there is
+ *   nothing left to do and doing nothing is correct rather than a shortcut.
+ * - 'loadForRequest' hands the caller the cookies. That is the one thing the
+ *   design forbids: the host carries the state and the extension never reads
+ *   it, so a plugin cannot enumerate cookies for a host it did not set them on.
+ *   It is refused at conversion by name; this thrower is the floor under that,
+ *   for a route into it nobody has thought of yet.
+ */
+var __cookieJar = {
+  saveFromResponse: function () {},
+  loadForRequest: function () {
+    throw new Error(
+      'This converted extension reads its own cookie jar. Yorozo holds the cookies host-side ' +
+      'and attaches them itself, and does not hand them to plugin code, so the extension can ' +
+      'be converted but not run as written.'
+    );
+  }
+};
+
+/**
  * A builder, whose one load-bearing setting is the redirect policy.
  *
  * Timeouts belong to the host's transport: accepting them changes nothing an
@@ -5368,6 +5396,11 @@ function __clientBuilder(follow) {
     // The SSL variant is about an https-to-http downgrade during a walk the
     // host does not expose, so there is nothing here for it to change.
     followSslRedirects: function () { return builder; },
+    // 'cookieJar(jar)' says "carry cookies on this client". A plugin holding
+    // the 'cookies' permission has a host-side jar on every request it makes,
+    // so the setting is already true; a jar with logic of its own never reaches
+    // here, because conversion refuses it. See __cookieJar.
+    cookieJar: function () { return builder; },
     retryOnConnectionFailure: function () { return builder; },
     build: function () { return redirects === false ? __clientWith(false) : client; }
   };
@@ -5395,7 +5428,8 @@ function __clientWith(follow) {
         stop: function () {}
       };
     },
-    newBuilder: function () { return __clientBuilder(follow); }
+    newBuilder: function () { return __clientBuilder(follow); },
+    cookieJar: __cookieJar
   };
   return made;
 }

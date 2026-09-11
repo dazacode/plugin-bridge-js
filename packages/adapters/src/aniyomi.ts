@@ -52,7 +52,7 @@ import {
 } from '@plugin-bridge/core/git-hosts';
 import { obstacleSites } from '@plugin-bridge/core/obstacles';
 import { attributionFrom } from '@plugin-bridge/core/attribution';
-import { packageBundle } from '@plugin-bridge/core/package';
+import { namesCookieJar, packageBundle } from '@plugin-bridge/core/package';
 import { aniyomiPreferences, settingKeyMap } from '@plugin-bridge/core/preferences';
 import {
 	extensionDirectory,
@@ -431,6 +431,10 @@ export const aniyomiAdapter: ForeignAdapter = {
 			origin,
 			settings,
 			entrypointSource,
+			// Over the emitted module, for the same reason the host list above
+			// is: the entrypoint carries our own runtime, and our own runtime
+			// carries the jar shims.
+			usesCookies: namesCookieJar(conversion.js),
 			license: credit.license,
 			licenseText: source.licenseText ?? undefined,
 			repository: credit.repository,

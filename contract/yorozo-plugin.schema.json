@@ -181,8 +181,8 @@
 			"enum": ["search", "episodes", "resolve", "browse"]
 		},
 		"permission": {
-			"$comment": "segment-transform-js is specified at API level 1 and NOT implemented; a host must refuse a plugin that declares it (ABI.md section 4.4).",
-			"enum": ["network", "storage", "webview", "segment-transform-js"]
+			"$comment": "segment-transform-js is specified at API level 1 and NOT implemented; a host must refuse a plugin that declares it (ABI.md section 4.4). cookies requires network and grants the host-held jar specified in ABI.md section 2 -- it adds no API to ctx, because the plugin never reads a cookie.",
+			"enum": ["network", "storage", "webview", "cookies", "segment-transform-js"]
 		},
 		"network": {
 			"type": "object",
