@@ -8,7 +8,7 @@
 // format — *how many listings pass all five steps* — and it answers it by
 // running the same code the browser client runs when somebody presses Install,
 // on the second implementation of the host port
-// (`client-web/src/lib/host/headless-plugin-host.ts`).
+// (`packages/host-node/src/headless-plugin-host.ts`).
 //
 // The verdicts are supposed to match a tab's row for row. That is the whole
 // value of a second host, and a disagreement is a port bug rather than a quirk

@@ -1,4 +1,4 @@
-// Emits client-web/src/lib/plugins/foreign/shims/generated/dom-source.ts.
+// Emits packages/runtime/src/shims/generated/dom-source.ts.
 //
 //   bun tool/gen-plugin-runtime.ts
 //
@@ -19,7 +19,7 @@
 // reason contract/build/tokens.css is: what ships must be reviewable in a diff,
 // and a converted bundle's digest must be a fact about its input rather than
 // about which machine converted it. `bun tool/gen-plugin-runtime.ts --check`
-// is the drift gate (also `bun run check:generated` from client-web); the
+// is the drift gate (a consumer may wrap it as its own script); the
 // companion `shims/dom-source.spec.ts` checks the committed copy evaluates and
 // still exports what the entry shims call.
 //
@@ -61,7 +61,7 @@ export function pinnedBun(manifestSource: string): string {
 	const match = /^bun@(\d+)\.(\d+)\./.exec(declared ?? '');
 	if (match === null) {
 		throw new Error(
-			`client-web/package.json needs a "packageManager": "bun@<x.y.z>" field; found ${String(declared)}`
+			`this package.json needs a "packageManager": "bun@<x.y.z>" field; found ${String(declared)}`
 		);
 	}
 	return `${match[1]}.${match[2]}`;
@@ -92,7 +92,7 @@ export function assertPinnedBun(running: string, pinned: string): void {
 		`this generator is pinned to bun ${pinned}.x and is running under ${running}.\n` +
 			`Bundler identifier renaming differs across bun minors, so a build here would\n` +
 			`report drift that is not drift. Run it under bun ${pinned}.x, or move the pin\n` +
-			`deliberately: update "packageManager" in client-web/package.json, regenerate,\n` +
+			`deliberately: update "packageManager" in this package.json, regenerate,\n` +
 			`and commit the artefact together with the new pin.`
 	);
 }

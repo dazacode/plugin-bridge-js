@@ -4,7 +4,7 @@
 //
 // ## Why this exists
 //
-// `client-web/src/lib/plugins/` is 29,000 lines of ordinary portable
+// The runtime packages are tens of thousands of lines of ordinary portable
 // JavaScript — six foreign-format adapters, a Kotlin translator, the runtime
 // shims a converted bundle carries, and the sandbox host. ADR-0004 §2.2
 // measured what stood between it and running in any JavaScript host and found
@@ -58,7 +58,7 @@ import { createRequire } from 'node:module';
 import { join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-// The compiler is resolved from `client-web/`, which is the only place in this
+// The compiler is resolved from the repository root, which is the only place in this
 // repository with a `node_modules`. Parsing TypeScript with a regex over the
 // raw text was the alternative and it is worse in exactly the way that matters
 // here: a `/\\\//g` regex literal reads as the start of a line comment, and
