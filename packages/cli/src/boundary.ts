@@ -9,7 +9,7 @@
 // shims a converted bundle carries, and the sandbox host. ADR-0004 §2.2
 // measured what stood between it and running in any JavaScript host and found
 // nine import lines and four ambient capabilities. All of them are gone now
-// (`contract/plugin-api/HOST.md`), which makes this file the interesting one:
+// (`contract/HOST.md`), which makes this file the interesting one:
 // nothing *else* prevents the tenth import, and a runtime that is portable by
 // accident stops being portable on the first afternoon somebody is in a hurry.
 //
@@ -55,11 +55,40 @@ import { fileURLToPath } from 'node:url';
 // raw text was the alternative and it is worse in exactly the way that matters
 // here: a `/\\\//g` regex literal reads as the start of a line comment, and
 // everything after it stops being checked without anybody noticing.
-const require = createRequire(new URL('../client-web/package.json', import.meta.url));
+const require = createRequire(new URL('../../../package.json', import.meta.url));
 const ts = require('typescript') as typeof import('typescript');
 
-const ROOT = fileURLToPath(new URL('..', import.meta.url));
-const RUNTIME = resolve(ROOT, 'client-web/src/lib/plugins');
+const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
+/**
+ * Every package that ships inside a converted bundle or sits behind the port.
+ *
+ * `cli` is deliberately absent: it *is* a host, so it may read a filesystem and
+ * spawn a process. The rule is about the parts that must run anywhere.
+ */
+const RUNTIME_PACKAGES = ['core', 'runtime', 'adapters', 'host'].map((name) =>
+	resolve(ROOT, 'packages', name, 'src')
+);
+
+/**
+ * The files that **are** a host, and so may take what a host supplies.
+ *
+ * `packages/host` holds two different things: the *port* — the interface, the
+ * sandbox contract, the scoreboard — which must travel anywhere, and one
+ * *implementation* of it for Node, which exists precisely to reach for
+ * `process`, `fetch` and a filesystem and hand them over as capabilities.
+ * Checking the second against the rule would be asking a power socket not to
+ * touch the mains.
+ *
+ * A list rather than a directory, because the split is currently by file rather
+ * than by package. Splitting `host` into `port` and `host-node` would delete
+ * this constant, and is on the roadmap for that reason.
+ */
+const HOST_IMPLEMENTATIONS: ReadonlySet<string> = new Set([
+	'headless-plugin-host.ts',
+	'sandbox-bootstrap.ts',
+	'net/relay.ts',
+	'net/aia.ts'
+]);
 
 /**
  * Ambient host capabilities. A value use of one of these inside the runtime is
@@ -105,19 +134,27 @@ const EXEMPT: Readonly<Record<string, string>> = {
 	// without naming them. HOST.md §3 makes reproducing this an obligation on
 	// any host supplying its own isolate rather than a browser detail.
 	'sandbox.worker.ts': 'the isolate interior: it names ambient globals in order to delete them',
+	// The same job, one layer out: this turns a Node process into something no
+	// more capable than a browser Worker, which it cannot do without taking
+	// `globalThis` and deleting from it. It was never scanned before the
+	// packages were split out — it lived beside the host rather than inside the
+	// runtime directory — so this exemption is newly *visible* rather than newly
+	// true. HOST.md §5 makes reproducing the sealing an obligation on any host
+	// that supplies its own isolate.
+	'sandbox-bootstrap.ts': 'the isolate interior: it seals the realm it is given',
 	// The other side of the translation worker. Talks to `self`, holds no
 	// authority, and reaches nothing a plugin could observe.
-	'foreign/kotlin/translate.worker.ts': 'the translator isolate interior',
+	'kotlin/translate.worker.ts': 'the translator isolate interior',
 	// Optional scheduling hints, every one feature-detected with a fallback to
 	// `setTimeout` and `Date.now()`. A host cannot withhold these in a way that
 	// changes an answer — only how long it takes — so they are timing rather
 	// than capability. Argued in the file's own header.
-	'foreign/scheduling.ts': 'feature-detected scheduling hints, each with a baseline fallback',
+	'scheduling.ts': 'feature-detected scheduling hints, each with a baseline fallback',
 	// Bundle source, not host code. `tool/gen-plugin-runtime.ts` inlines this
 	// into every converted plugin, where `globalThis` is the *sandbox's* global
 	// and publishing the parser onto it is how the bundle's own runtime is
 	// reached. Its own header says nothing imports it at runtime.
-	'foreign/shims/runtime-entry.ts':
+	'shims/runtime-entry.ts':
 		'bundle source: the `globalThis` it writes to belongs to the sandbox, not the host'
 };
 
@@ -229,8 +266,8 @@ function isTypePosition(node: import('typescript').Node): boolean {
 	return false;
 }
 
-function checkFile(path: string): Violation[] {
-	const rel = relative(RUNTIME, path).split(sep).join('/');
+function checkFile(path: string, root: string): Violation[] {
+	const rel = relative(root, path).split(sep).join('/');
 	const exemption = EXEMPT[rel];
 	const text = readFileSync(path, 'utf8');
 	const file = ts.createSourceFile(path, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
@@ -255,17 +292,20 @@ function checkFile(path: string): Violation[] {
 			at(
 				node,
 				`imports \`${specifier}\`. The plugin runtime owns the types and failures it ` +
-					`needs and the app re-exports them; see contract/plugin-api/HOST.md §1.`
+					`needs and the app re-exports them; see contract/HOST.md §1.`
 			);
 			return;
 		}
-		if (!specifier.startsWith('.')) return; // a package, which travels fine
+		// A bare specifier is a package, which travels fine — including the
+		// workspace's own `@plugin-bridge/*`, which is how one package reaches
+		// another now that they are packages rather than folders.
+		if (!specifier.startsWith('.')) return;
 		const target = resolve(path, '..', specifier);
-		if (target === RUNTIME || target.startsWith(RUNTIME + sep)) return;
+		if (RUNTIME_PACKAGES.some((one) => target === one || target.startsWith(one + sep))) return;
 		at(
 			node,
 			`imports \`${specifier}\`, which resolves outside the runtime directory. ` +
-				`See contract/plugin-api/HOST.md §1.`
+				`See contract/HOST.md §1.`
 		);
 	};
 
@@ -301,7 +341,7 @@ function checkFile(path: string): Violation[] {
 				at(
 					node,
 					'constructs a `Worker` directly. An isolate arrives through ' +
-						'`WorkerFactory`; see contract/plugin-api/HOST.md §5.'
+						'`WorkerFactory`; see contract/HOST.md §5.'
 				);
 			}
 			if (
@@ -311,7 +351,7 @@ function checkFile(path: string): Violation[] {
 				at(
 					node,
 					'reads `import.meta`, which is a fact about the bundler rather than ' +
-						'about the runtime. See contract/plugin-api/HOST.md §5.'
+						'about the runtime. See contract/HOST.md §5.'
 				);
 			}
 			if (
@@ -324,7 +364,7 @@ function checkFile(path: string): Violation[] {
 				at(
 					node,
 					`takes the ambient \`${node.text}\`. Every host capability arrives through ` +
-						`\`$lib/plugins/host.ts\`; see contract/plugin-api/HOST.md §2.`
+						`\`$lib/plugins/host.ts\`; see contract/HOST.md §2.`
 				);
 			}
 		}
@@ -336,8 +376,15 @@ function checkFile(path: string): Violation[] {
 }
 
 function main(): void {
-	const files = sources(RUNTIME);
-	const violations = files.flatMap(checkFile);
+	const files = RUNTIME_PACKAGES.flatMap((root) =>
+		sources(root)
+			.map((path) => ({ path, root, rel: relative(root, path).split(sep).join('/') }))
+			// A spec is not the runtime: it never ships in a bundle and never runs
+			// in a host, so the one thing this rule protects does not apply to it.
+			.filter(({ rel }) => !rel.endsWith('.spec.ts'))
+			.filter(({ rel }) => !HOST_IMPLEMENTATIONS.has(rel))
+	);
+	const violations = files.flatMap(({ path, root }) => checkFile(path, root));
 
 	if (violations.length === 0) {
 		const exempt = Object.keys(EXEMPT).length;
@@ -358,7 +405,7 @@ function main(): void {
 	process.stderr.write(
 		'The runtime runs in four hosts (ADR-0004 §3) and only one of them is this\n' +
 			'browser. If the capability is real, add it to the port in\n' +
-			'client-web/src/lib/plugins/host.ts and implement it in the shell.\n'
+			'packages/host/src/host.ts and implement it in the shell.\n'
 	);
 	process.exit(1);
 }

@@ -146,15 +146,40 @@ any reasoning of ours (see `docs/adr/0005-network-boundaries.md`).
 Neither project is affiliated with this one, and neither endorses it. Any bug
 here is this repository's, not theirs.
 
+## Who it was built for
+
+This was built for **Yorozo**, a cross-platform client that reads plugins rather
+than shipping sources of its own. At the time of writing Yorozo is **still in
+development and not yet released**, so it is named here rather than linked.
+
+Everything in this repository was extracted from it, and the boundary was
+already there to cut along: Yorozo's plugin layer had no framework imports at
+all, because a host port had been specified before any of this was written. If
+you have the Yorozo codebase, this repository is the engine it is built around —
+the converter, the runtime, the sandbox and the relay are the same code, and
+Yorozo consumes them rather than duplicating them.
+
+**The dependency runs one way.** Nothing here imports Yorozo, knows its types,
+or assumes its UI; that is what the extraction was for, and it is enforced by
+`plugin-bridge boundary`. This repository is usable on its own, by a different
+client, or from a terminal with no client at all — Yorozo is the first consumer,
+not the purpose.
+
 ## Roadmap
 
-- **Consume this from its first client.** The application it was extracted from
-  still has its own copy of the convert-and-verify path. Until it delegates to
-  `packages/host/src/catalogue.ts`, the two can drift — and drift between two
+- **Have Yorozo consume this rather than its own copy.** Yorozo still carries
+  its own convert-and-verify path from before the extraction. Until it delegates
+  to `packages/host/src/catalogue.ts`, the two can drift — and drift between two
   hosts is exactly what the second host exists to catch.
 - **De-couple the contract specs.** `contract/` is normative and now lives here,
-  but the four documents still read as one product's. A contributor arriving
-  cold should not have to know that product to read them.
+  but the four documents still read as Yorozo's. A contributor arriving cold
+  should not have to know Yorozo to read them.
+- **Split `host` into the port and the Node implementation.** The package
+  currently holds both: the interface and sandbox contract, which must travel
+  anywhere, and one implementation that exists to reach for `process`, `fetch`
+  and a filesystem and hand them over. `plugin-bridge boundary` has to name the
+  second by file to know not to check it; separating them would delete that
+  list.
 - **Decide the network boundaries.** Cookies, site-side JavaScript and anti-bot
   handling are the three capabilities that would move the numbers above.
   `docs/adr/0005-network-boundaries.md` states what each is worth and
