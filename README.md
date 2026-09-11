@@ -130,10 +130,30 @@ diagnostic cleanup that will not move installability. The last release under
 the loop was **v42** — one false refusal removed, no verdict moved, no
 regression.
 
+### Phase 2 asks a different question
+
+`native` is a decision, not a law, so the next question is **what the portable
+runtime should become** so a foreign plugin no longer needs its original
+platform. Each boundary was re-examined for the behaviour an extension actually
+needs, and then _actually granted_ — its refusal temporarily lifted and the
+whole catalogue re-converted — because counting listings that mention a
+capability is an upper bound that granting it immediately disproves.
+
+The result, in one line: **granting every native capability, a WebView and an
+embedded JavaScript engine included, moves offline conversion from 65 to 79.**
+The boundary is not where the catalogue is lost. The safe, portable subset —
+WebCrypto, a constrained cookie jar, a declarative request policy — gets 10 of
+those 14, and the two capabilities with a real security cost are worth 4
+between them.
+
+[`docs/phase-2-capability-map.md`](docs/phase-2-capability-map.md) is the map,
+with the measurement, the ranking and what it does not claim.
+
 ## Documentation
 
 - [`docs/architecture.md`](docs/architecture.md) — how a translation happens
 - [`docs/compatibility.md`](docs/compatibility.md) — what is supported, refused, and why
+- [`docs/phase-2-capability-map.md`](docs/phase-2-capability-map.md) — what the runtime should become, measured
 - [`docs/security.md`](docs/security.md) — the sandbox, the network relay, and rule 9
 - [`docs/adding-an-adapter.md`](docs/adding-an-adapter.md) — adding an ecosystem
 - [`docs/adr/`](docs/adr) — the decisions, with their reasoning
