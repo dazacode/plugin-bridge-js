@@ -156,6 +156,15 @@ the rate a plugin actually gets a function of which host it is running on, and
 the relay's single retry for an incomplete certificate chain, which repairs a
 transport failure rather than re-asking a question.
 
+That retry is itself a host capability rather than something the relay does.
+Chasing the AIA extension needs a raw TLS socket and a trust store, which no
+browser has, so the relay states what it would need
+(`packages/host/src/net/chain-repair.ts`) and takes it from whoever runs it;
+`@plugin-bridge/host-node` supplies the one implementation. A host that
+supplies none is **not** degraded — in a browser the platform has already
+chased the extension before any of this code sees a response — and the relay
+then reports the transport failure exactly as it arrived.
+
 The runtime addresses the proxy by path — `/api/plugin-fetch` — in **every**
 host, which is not a browser detail that leaked: it is the contract, and a host
 without a server answers it itself. The headless host calls the browser route's
@@ -358,7 +367,11 @@ in 29,000 lines, and it lives in the shell
 runtime containing one would be a runtime only one bundler could build.
 
 The worker _bodies_ stay in the runtime. What a sandbox deletes from its own
-scope (§3.2) is a contract, not a per-host decision.
+scope (§3.2) is a contract, not a per-host decision. That line is a package
+boundary as well as a rule: the bodies are in `packages/host`, and what a
+particular runtime has to do to its own realm before running one —
+`packages/host-node/src/sandbox-bootstrap.ts`, which turns a Node process into
+something no more capable than a Worker — is in the package for that host.
 
 ---
 
@@ -427,8 +440,11 @@ JavaScript baseline rather than a gap.
 | `wasm`       | Vite asset URLs              | the same           | `node:fs`                                |
 | `log`        | the playback trace           | the playback trace | stderr                                   |
 
-The headless column is implemented: `client-web/src/lib/host/headless-plugin-host.ts`,
-driven by `tool/check-catalogue.ts`.
+The headless column is implemented: `packages/host-node/src/headless-plugin-host.ts`,
+driven by `plugin-bridge catalogue`. It is a separate package from the port it
+implements (`packages/host`) so that the port stays free of `process`, `node:`
+and a filesystem — a consumer that runs in a browser imports the port and drags
+none of this in.
 
 `stream` — executing a `StreamPipeline` — is deliberately **not** in this
 table. It is not a capability the plugin runtime asks for: the pipeline is data

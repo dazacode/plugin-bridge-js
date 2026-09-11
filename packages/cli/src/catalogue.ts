@@ -43,7 +43,7 @@
 import { writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-import { headlessPluginHost, sandboxReport } from '@plugin-bridge/host/headless-plugin-host';
+import { headlessPluginHost, sandboxReport } from '@plugin-bridge/host-node/headless-plugin-host';
 import {
 	renderScoreboard,
 	renderWhy,

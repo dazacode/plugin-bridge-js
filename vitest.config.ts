@@ -10,6 +10,10 @@ export default defineConfig({
 			'@plugin-bridge/core': at('./packages/core/src'),
 			'@plugin-bridge/runtime': at('./packages/runtime/src'),
 			'@plugin-bridge/adapters': at('./packages/adapters/src'),
+			// Longest first: `@plugin-bridge/host` is a prefix of
+			// `@plugin-bridge/host-node`, and vite takes the first alias that
+			// matches.
+			'@plugin-bridge/host-node': at('./packages/host-node/src'),
 			'@plugin-bridge/host': at('./packages/host/src')
 		}
 	},

@@ -76,13 +76,14 @@ argument, every time. See [`docs/security.md`](docs/security.md) for why.
 
 ## Layout
 
-| Package             | What is in it                                                                                                      |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `packages/core`     | The Kotlin front-end — grammar, subset, emitter, pipeline — and the format-agnostic conversion machinery           |
-| `packages/runtime`  | The shims a converted bundle is built from: the Kotlin standard library, a jsoup-shaped DOM, the ecosystem drivers |
-| `packages/adapters` | One adapter per ecosystem: `aniyomi`, `mangayomi`, `cloudstream`, `sora`, `hayase`, `lnreader`                     |
-| `packages/host`     | The host port, the sealed sandbox, a headless isolate, the network relay, the scoreboard                           |
-| `packages/cli`      | `plugin-bridge`                                                                                                    |
+| Package              | What is in it                                                                                                                                                                         |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/core`      | The Kotlin front-end — grammar, subset, emitter, pipeline — and the format-agnostic conversion machinery                                                                              |
+| `packages/runtime`   | The shims a converted bundle is built from: the Kotlin standard library, a jsoup-shaped DOM, the ecosystem drivers                                                                    |
+| `packages/adapters`  | One adapter per ecosystem: `aniyomi`, `mangayomi`, `cloudstream`, `sora`, `hayase`, `lnreader`                                                                                        |
+| `packages/host`      | The port every host implements: the sandbox contract, the network relay, the cookie jar and request policy, the scoreboard — portable, and it names nothing a browser does not have   |
+| `packages/host-node` | One implementation of that port, for Node: the child-process isolate and the sealing that makes it no more capable than a Worker, and the certificate-chain repair the relay asks for |
+| `packages/cli`       | `plugin-bridge`                                                                                                                                                                       |
 
 ## Status
 
@@ -236,12 +237,6 @@ not the purpose.
 - **De-couple the contract specs.** `contract/` is normative and now lives here,
   but the four documents still read as Yorozo's. A contributor arriving cold
   should not have to know Yorozo to read them.
-- **Split `host` into the port and the Node implementation.** The package
-  currently holds both: the interface and sandbox contract, which must travel
-  anywhere, and one implementation that exists to reach for `process`, `fetch`
-  and a filesystem and hand them over. `plugin-bridge boundary` has to name the
-  second by file to know not to check it; separating them would delete that
-  list.
 - **Decide the network boundaries.** Cookies, site-side JavaScript and anti-bot
   handling are the three capabilities that would move the numbers above.
   `docs/adr/0005-network-boundaries.md` states what each is worth and

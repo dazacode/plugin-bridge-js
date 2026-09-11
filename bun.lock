@@ -29,6 +29,10 @@
       "name": "@plugin-bridge/host",
       "version": "0.1.0",
     },
+    "packages/host-node": {
+      "name": "@plugin-bridge/host-node",
+      "version": "0.1.0",
+    },
     "packages/runtime": {
       "name": "@plugin-bridge/runtime",
       "version": "0.1.0",
@@ -46,6 +50,8 @@
     "@plugin-bridge/core": ["@plugin-bridge/core@workspace:packages/core"],
 
     "@plugin-bridge/host": ["@plugin-bridge/host@workspace:packages/host"],
+
+    "@plugin-bridge/host-node": ["@plugin-bridge/host-node@workspace:packages/host-node"],
 
     "@plugin-bridge/runtime": ["@plugin-bridge/runtime@workspace:packages/runtime"],
 

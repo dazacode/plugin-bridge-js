@@ -2,12 +2,13 @@
  * Turning a Node process into something no more capable than a browser Worker.
  *
  * This is the entry point of the headless host's isolate. It is **not** the
- * sandbox: `$lib/plugins/sandbox.worker.ts` is, and it is imported unchanged at
- * the bottom of this file. What lives here is only the adaptation — the part
- * that is a fact about Node rather than a fact about running a plugin.
- * `HOST.md` §5 draws that line: *the worker bodies stay in the runtime*, because
- * what a sandbox deletes from its own scope is a contract and not a per-host
- * decision.
+ * sandbox: `packages/host/src/sandbox.worker.ts` is, and it is imported
+ * unchanged at the bottom of this file. What lives here is only the adaptation
+ * — the part that is a fact about Node rather than a fact about running a
+ * plugin. `HOST.md` §5 draws that line: *the worker bodies stay in the port*,
+ * because what a sandbox deletes from its own scope is a contract and not a
+ * per-host decision. That line is now also a package boundary: the body is in
+ * `@plugin-bridge/host`, this adaptation is in `@plugin-bridge/host-node`.
  *
  * ## The caveat this file exists to answer
  *
@@ -327,7 +328,12 @@ export interface SandboxReady {
  */
 async function bootstrap(): Promise<void> {
 	useDataUrls();
-	await import('./sandbox.worker.ts');
+	// A relative path across the two packages, and it has to be one. This file
+	// is spawned as the *entry point* of a bare `node`, which strips types and
+	// resolves nothing else: no bundler, no workspace path mapping, no
+	// `node_modules` link to `@plugin-bridge/host`. The specifier the rest of
+	// this package writes would resolve here only by luck.
+	await import('../../host/src/sandbox.worker.ts');
 	const sealed = await refuseModuleResolution();
 	removeHostGlobals();
 	const remaining = leftovers();

@@ -66,7 +66,8 @@ import {
 	type WasmLoader,
 	type WorkerFactory
 } from '@plugin-bridge/host/host';
-import { relay } from './net/relay';
+import { relay } from '@plugin-bridge/host/net/relay';
+import { nodeChainRepair } from './net/aia';
 import type { SandboxReady } from './sandbox-bootstrap';
 
 /**
@@ -536,7 +537,17 @@ function headlessFetch(network: typeof fetch): HostFetch {
 		// The relay takes a `Request` and the `fetch` it should reach the world
 		// with — no framework event in between, which is what lets the same
 		// policy run under a web server, under this isolate, and in a test.
-		return await relay(new Request(`${LOCAL_ORIGIN}${PROXY_ROUTE}`, init), network);
+		//
+		// The third argument is the part only a Node host can supply: chasing
+		// AIA for a chain a source under-sent needs `node:tls`, so the relay
+		// asks for the repair and this host hands it over (`net/aia.ts`). A
+		// browser passes nothing there and loses nothing, because the platform
+		// has already done it.
+		return await relay(
+			new Request(`${LOCAL_ORIGIN}${PROXY_ROUTE}`, init),
+			network,
+			nodeChainRepair
+		);
 	};
 }
 

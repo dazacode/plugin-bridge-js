@@ -37,11 +37,23 @@
  *
  * Only the *retry* is runtime-specific. Discovery is plain sockets and plain
  * http, which both runtimes do the same way.
+ *
+ * ## Why this is in `host-node` and not beside the relay
+ *
+ * `node:tls`, `node:https` and `node:crypto` are the whole of the mechanism,
+ * and the relay has to run in a browser. So the relay states the capability
+ * (`@plugin-bridge/host/net/chain-repair`) and this file is the one
+ * implementation of it — handed to `relay` by the host that can perform it.
+ * In a browser the problem does not arise at all: the platform has already
+ * chased the AIA extension before any of our code sees a response.
  */
 
 import { X509Certificate } from 'node:crypto';
 import { request as httpsRequest } from 'node:https';
 import { connect as tlsConnect, rootCertificates, type PeerCertificate } from 'node:tls';
+
+import { isPrivateAddress } from '@plugin-bridge/host/net/addresses';
+import type { ChainRepair, ChainRepairRetry } from '@plugin-bridge/host/net/chain-repair';
 
 /** How far up a chain to chase. Two intermediates is already unusual. */
 const MAX_ISSUERS = 3;
@@ -274,14 +286,6 @@ function parseInfoAccess(raw: string | undefined): Record<string, string[]> {
 	return out;
 }
 
-interface RetryInit {
-	readonly method: string;
-	readonly headers: Headers;
-	readonly body: string | null;
-	readonly signal: AbortSignal;
-	readonly maxBytes: number;
-}
-
 /**
  * The request again, with the missing certificates added to the trust store.
  *
@@ -292,7 +296,7 @@ interface RetryInit {
 export async function fetchTrusting(
 	target: URL,
 	extraCa: readonly string[],
-	init: RetryInit
+	init: ChainRepairRetry
 ): Promise<Response> {
 	const bun = (globalThis as { Bun?: unknown }).Bun;
 	if (bun !== undefined) {
@@ -310,7 +314,11 @@ export async function fetchTrusting(
 }
 
 /** Node's https client, rebuilt into the `Response` the caller expects. */
-function nodeFetch(target: URL, extraCa: readonly string[], init: RetryInit): Promise<Response> {
+function nodeFetch(
+	target: URL,
+	extraCa: readonly string[],
+	init: ChainRepairRetry
+): Promise<Response> {
 	return new Promise((resolve, reject) => {
 		const request = httpsRequest(
 			target,
@@ -367,39 +375,15 @@ function nodeFetch(target: URL, extraCa: readonly string[], init: RetryInit): Pr
 }
 
 /**
- * The proxy's private-address floor, shared so an AIA URL is held to it too.
+ * The three of them as one capability, for a host to hand to `relay`.
  *
- * Literal addresses only, like the caller's: a hostname that *resolves*
- * privately still gets through, and closing that needs resolution before
- * connection which neither `fetch` nor this exposes.
+ * Grouped rather than passed as three functions because they are one decision
+ * — is this failure repairable, what is missing, ask again with it — and a
+ * host that had two of the three would be a host that retried without knowing
+ * what to trust.
  */
-export function isPrivateAddress(hostname: string): boolean {
-	const host = hostname.toLowerCase().replace(/^\[|\]$/g, '');
-
-	if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local')) return true;
-	// Unique-local (fc00::/7) and link-local (fe80::/10), and the colon is not
-	// decoration. A bare `startsWith('fc')` refuses every *hostname* beginning
-	// with those two letters — `fc2.example`, `fdn.example` — which is a shape
-	// content hosts really use, and the refusal read as a broken source rather
-	// than as our over-matching. An address always carries a colon inside its
-	// first four hex digits; a hostname never can, since `URL.hostname` has
-	// already taken any port off and the brackets are stripped above.
-	if (host === '::1' || /^(fe80|f[cd][0-9a-f]{0,2}):/.test(host)) return true;
-
-	const parts = host.split('.');
-	if (parts.length === 4 && parts.every((part) => /^\d{1,3}$/.test(part))) {
-		const [a, b] = parts.map(Number);
-		return (
-			a === 0 ||
-			a === 10 ||
-			a === 127 ||
-			(a === 169 && b === 254) || // link-local, and the cloud metadata endpoint
-			(a === 172 && b >= 16 && b <= 31) ||
-			(a === 192 && b === 168) ||
-			(a === 100 && b >= 64 && b <= 127) || // carrier-grade NAT
-			a >= 224 // multicast and reserved
-		);
-	}
-
-	return false;
-}
+export const nodeChainRepair: ChainRepair = {
+	chainIsIncomplete,
+	issuersFor,
+	fetchTrusting
+};

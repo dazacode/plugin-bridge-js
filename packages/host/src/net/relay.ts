@@ -42,9 +42,14 @@
  *
  * Sources routinely present a certificate chain missing its intermediate.
  * Browsers and curl chase the AIA extension to fill the gap; neither Node nor
- * bun does, so those hosts fail here and read as broken plugins. `aia.ts`
- * chases it, once, on exactly that error — with verification still on. See its
- * header for why that is not the same as trusting less.
+ * bun does, so those hosts fail here and read as broken plugins. Chasing it
+ * needs a raw TLS socket and a trust store, which is the least portable thing
+ * a host owns — so this route asks for the repair rather than performing it
+ * (`chain-repair.ts`), and `@plugin-bridge/host-node` is what supplies one.
+ * It is spent once, on exactly that error, with verification still on; see
+ * that file's header for why that is not the same as trusting less. A host
+ * that supplies no repair gets the transport failure reported as it arrived,
+ * which is what this route did before any repair existed.
  */
 
 /**
@@ -64,7 +69,8 @@ function json(data: unknown, init?: { status?: number }): Response {
 		headers: { 'content-type': 'application/json' }
 	});
 }
-import { chainIsIncomplete, fetchTrusting, isPrivateAddress, issuersFor } from './aia';
+import { isPrivateAddress } from './addresses';
+import type { ChainRepair } from './chain-repair';
 import { setCookiesOf } from './cookie-jar';
 
 /** Response body cap. A catalogue page or an embed page, not a video. */
@@ -107,7 +113,24 @@ const FORWARDABLE = new Set([
 
 export const relay = async (
 	request: Request,
-	fetch: typeof globalThis.fetch = globalThis.fetch
+	/**
+	 * The network, supplied rather than taken.
+	 *
+	 * This used to default to the ambient `fetch`, which was the one thing in
+	 * this file that assumed a host. Every caller already passed its own — a
+	 * server passes the platform's, a headless host passes a direct one, a spec
+	 * passes a function answering from fixtures — so the default was reaching
+	 * for a global nobody used.
+	 */
+	fetch: typeof globalThis.fetch,
+	/**
+	 * How to repair an under-sent certificate chain, if this host can.
+	 *
+	 * Null is the browser's answer and a perfectly good one: there, the
+	 * platform has already chased the AIA extension before our code sees a
+	 * response. See `chain-repair.ts`.
+	 */
+	repair: ChainRepair | null = null
 ): Promise<Response> => {
 	let body: {
 		url?: string;
@@ -192,16 +215,20 @@ export const relay = async (
 			// The one retryable failure: a chain missing its intermediate. The
 			// certificates are fetched from where the server's own leaf says
 			// they live, and the handshake is then made again with full
-			// verification — see `aia.ts`.
-			const issuers = chainIsIncomplete(error) ? await issuersFor(target) : [];
-			if (issuers.length === 0) {
+			// verification — see `chain-repair.ts`. A host that supplied no
+			// repair skips straight to reporting the failure, which is the
+			// answer a browser needs and the answer this route gave before the
+			// repair existed.
+			const issuers =
+				repair !== null && repair.chainIsIncomplete(error) ? await repair.issuersFor(target) : [];
+			if (repair === null || issuers.length === 0) {
 				return json(
 					{ error: `could not reach ${target.hostname}: ${why(error)}` },
 					{ status: 502 }
 				);
 			}
 			try {
-				response = await fetchTrusting(target, issuers, {
+				response = await repair.fetchTrusting(target, issuers, {
 					method,
 					headers,
 					body: outbound.body,
@@ -400,8 +427,9 @@ async function readCapped(response: Response, limit: number): Promise<string> {
  */
 function refuse(url: URL): string | null {
 	if (url.protocol !== 'https:') return 'a plugin may only make https requests';
-	// Shared with the AIA chase, which follows a URL an untrusted certificate
-	// named and so has to be held to the same floor.
+	// Shared with the AIA chase (`@plugin-bridge/host-node`), which follows a
+	// URL an untrusted certificate named and so has to be held to the same
+	// floor. That is why the check lives in `addresses.ts` rather than here.
 	if (isPrivateAddress(url.hostname)) return 'refusing a private address';
 	return null;
 }

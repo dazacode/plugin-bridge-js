@@ -68,9 +68,9 @@ export interface RateLimitRule {
  *
  * Only a *status* is retried. A request that threw — the proxy could not reach
  * the host at all — is not, and that is deliberate: a transport failure here
- * has already been through the relay's own one retry (`net/aia.ts`), and
- * re-issuing it would multiply a timeout by `attempts` inside a call that is
- * racing a deadline.
+ * has already been through the relay's own one retry (`net/chain-repair.ts`,
+ * where a host that has one supplies it), and re-issuing it would multiply a
+ * timeout by `attempts` inside a call that is racing a deadline.
  */
 export interface RetryRule {
 	/** Total attempts including the first. 1 means "do not retry". */

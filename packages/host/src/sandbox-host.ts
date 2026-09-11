@@ -679,8 +679,9 @@ export class PluginSandbox {
 				// Thrown rather than returned, so a policy never *retries* it: the
 				// policy names upstream statuses, and this is the proxy failing to
 				// produce one at all. The relay has already spent its own one retry
-				// (`net/aia.ts`) by the time it says this, and asking again would
-				// multiply a timeout by `attempts` inside a call racing a deadline.
+				// (`net/chain-repair.ts`, where the host running it has one) by the
+				// time it says this, and asking again would multiply a timeout by
+				// `attempts` inside a call racing a deadline.
 				throw new NetworkFailure(
 					detail === undefined
 						? `The plugin proxy returned ${response.status}.`

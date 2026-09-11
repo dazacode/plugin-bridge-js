@@ -13,28 +13,44 @@
  * and hides the real cause one or two `cause` links down, so a 502 that repeats
  * the wrapper tells the probe only what it already knew. The tests below pin
  * that the specific reason survives to the caller, and that the one failure
- * worth retrying — a chain missing its intermediate — is told apart from the
- * ones a second certificate cannot fix.
+ * worth retrying — a chain missing its intermediate — is the only one this
+ * route spends a chase on. *Which* failures those are is the repair's own
+ * question, and is pinned where the repair lives.
  *
- * `issuersFor` is the only thing stubbed. It opens a TLS socket to discover
- * what a host under-sent, and a spec that let it run would be doing DNS and a
- * handshake against a name that does not resolve; everything else in `aia.ts`,
- * including the two predicates tested here, is the real implementation.
+ * The chain repair is a stub, and is one here rather than mocked: the relay
+ * takes it as an argument (`chain-repair.ts`), so a spec supplies one the way
+ * a host does. The real implementation opens a TLS socket to discover what a
+ * host under-sent — a spec that let it run would be doing DNS and a handshake
+ * against a name that does not resolve — and it is Node-only, which is why it
+ * lives in `@plugin-bridge/host-node` and is tested there. What is pinned here
+ * is the relay's own half: that it asks before it spends anything, and that it
+ * spends nothing when the answer is no.
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { issuersFor } = vi.hoisted(() => ({
-	issuersFor: vi.fn(async (): Promise<string[]> => [])
-}));
-
-vi.mock('./aia', async (importOriginal) => ({
-	...(await importOriginal<typeof import('./aia')>()),
-	issuersFor
-}));
-
 import { relay } from './relay';
-import { chainIsIncomplete, isPrivateAddress } from './aia';
+import { isPrivateAddress } from './addresses';
+import type { ChainRepair } from './chain-repair';
+
+const issuersFor = vi.fn(async (): Promise<string[]> => []);
+
+/**
+ * A host's chain repair, reduced to what these tests need.
+ *
+ * `chainIsIncomplete` reads one `cause` level, which is all the errors below
+ * carry; the real predicate walks the chain and is pinned against every shape
+ * of it in `packages/host-node/src/net/aia.spec.ts`. Keeping a stub here is
+ * the point of the seam — the relay's behaviour must not depend on which host
+ * is answering.
+ */
+const repair: ChainRepair = {
+	chainIsIncomplete: (error) =>
+		(error as { cause?: { code?: unknown } } | null)?.cause?.code ===
+		'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+	issuersFor,
+	fetchTrusting: () => Promise.reject(new Error('no retry is expected in these tests'))
+};
 
 const BIG = String(8 * 1024 * 1024);
 
@@ -46,7 +62,8 @@ async function call(body: unknown, served: (request: Request) => Response) {
 			body: JSON.stringify(body)
 		}),
 		(async (input: RequestInfo | URL, init?: RequestInit) =>
-			served(new Request(String(input), init as RequestInit))) as typeof fetch
+			served(new Request(String(input), init as RequestInit))) as typeof fetch,
+		repair
 	);
 
 	return {
@@ -207,63 +224,6 @@ describe('a redirect the caller wants to read rather than take', () => {
 				})
 		);
 		expect(refused.status).toBe(403);
-	});
-});
-
-describe('deciding a chain is worth completing', () => {
-	it('recognises the leaf-signature failure at the top level', () => {
-		// The one error AIA chasing exists for: the server sent its leaf and
-		// nothing above it, so verification stopped for want of a certificate
-		// the leaf itself says where to find.
-		expect(
-			chainIsIncomplete(
-				tlsError('unable to verify the first certificate', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE')
-			)
-		).toBe(true);
-	});
-
-	it('finds it one and two cause levels down, which is how fetch reports it', () => {
-		// Reading `error.code` off what `fetch` throws finds nothing at all —
-		// the wrapper is a bare `TypeError` — and the retry that would have
-		// rescued the source never fires. The depth varies by runtime and by
-		// how the socket failed, so both shapes are pinned.
-		const inner = tlsError(
-			'unable to verify the first certificate',
-			'UNABLE_TO_VERIFY_LEAF_SIGNATURE'
-		);
-
-		expect(chainIsIncomplete(fetchFailed(inner))).toBe(true);
-		expect(chainIsIncomplete(fetchFailed(new Error('write EPROTO', { cause: inner })))).toBe(true);
-	});
-
-	it('refuses the failures another certificate cannot change', () => {
-		// Each of these is a conclusion, not a gap. Retrying them would trade
-		// one clear failure for two slow ones — a discovery handshake and a
-		// second request — and still report the same thing at the end.
-		expect(
-			chainIsIncomplete(fetchFailed(tlsError('certificate has expired', 'CERT_HAS_EXPIRED')))
-		).toBe(false);
-		expect(
-			chainIsIncomplete(
-				fetchFailed(tlsError('hostname/IP does not match', 'ERR_TLS_CERT_ALTNAME_INVALID'))
-			)
-		).toBe(false);
-		expect(chainIsIncomplete(fetchFailed(tlsError('getaddrinfo ENOTFOUND', 'ENOTFOUND')))).toBe(
-			false
-		);
-	});
-
-	it('says no to an error carrying no code at all', () => {
-		expect(chainIsIncomplete(new Error('something went wrong'))).toBe(false);
-	});
-
-	it('terminates on an error whose cause is itself', () => {
-		// Nothing forbids a library from building one, and a walk that trusted
-		// the chain to end would hang the request rather than fail it.
-		const looping: Error & { cause?: unknown } = new Error('round and round');
-		looping.cause = looping;
-
-		expect(chainIsIncomplete(looping)).toBe(false);
 	});
 });
 

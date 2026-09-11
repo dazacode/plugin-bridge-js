@@ -70,6 +70,27 @@ drifting; a name on one side and not the other fails a test rather than a viewer
 loader. Two hosts implement the port — a browser Worker and a headless Node
 isolate — and `host-equivalence` exists to prove they answer alike.
 
+The package is the port and nothing else, which is a property a consumer can
+rely on rather than a description: `plugin-bridge boundary` checks it the same
+way it checks the runtime, so nothing in it names `process`, `node:` or a
+filesystem, and a browser bundle that imports it drags none of those in.
+
+### 5.1 The Node implementation, kept separate on purpose
+
+`packages/host-node`. The isolate that is a child process and the sealing that
+makes it no more capable than a browser Worker, plus the one thing the relay
+cannot do for itself: repairing a certificate chain a source under-sent, which
+needs `node:tls` and a trust store. The relay states that as a capability
+(`packages/host/src/net/chain-repair.ts`) and this package supplies it; a
+browser supplies none and loses nothing, because there the platform has already
+chased it.
+
+The dependency runs one way — `host-node` imports `host`, never the reverse —
+and that is the whole reason the two are separate packages. The boundary check
+does not scan this one, because reaching for `process`, `fetch` and a
+filesystem and handing them over as capabilities is what a host implementation
+is for.
+
 ## Why the second host exists
 
 It is the conversion laboratory. `plugin-bridge catalogue` runs the same five

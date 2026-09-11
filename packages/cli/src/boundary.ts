@@ -21,6 +21,14 @@
 // left in EXEMPT is worker interiors, feature-detected timing hints, and bundle
 // source — no unfinished business.
 //
+// The Node host is no longer an exception at all. It used to be four file names
+// exempted inside `packages/host`; it is now `packages/host-node`, a package
+// this check does not scan, because a host implementation reaching for
+// `process` and a filesystem is what a host implementation is for. The
+// interfaces it implements stayed behind in `packages/host` and are checked
+// like everything else — which is the arrangement the exemption list was
+// standing in for.
+//
 // So the rule is checked rather than remembered, and it is checked at the two
 // places portability actually breaks:
 //
@@ -64,31 +72,19 @@ const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
  *
  * `cli` is deliberately absent: it *is* a host, so it may read a filesystem and
  * spawn a process. The rule is about the parts that must run anywhere.
+ *
+ * `host-node` is absent for the same reason, and that absence is the whole of
+ * what used to be a list of four file names here. `packages/host` held two
+ * different things — the *port*, which must travel anywhere, and one
+ * implementation of it for Node, which exists precisely to reach for
+ * `process`, `fetch` and a filesystem and hand them over as capabilities — and
+ * checking the second against this rule would be asking a power socket not to
+ * touch the mains. They are two packages now, so the exception is a package
+ * that is not named rather than four files that are.
  */
 const RUNTIME_PACKAGES = ['core', 'runtime', 'adapters', 'host'].map((name) =>
 	resolve(ROOT, 'packages', name, 'src')
 );
-
-/**
- * The files that **are** a host, and so may take what a host supplies.
- *
- * `packages/host` holds two different things: the *port* — the interface, the
- * sandbox contract, the scoreboard — which must travel anywhere, and one
- * *implementation* of it for Node, which exists precisely to reach for
- * `process`, `fetch` and a filesystem and hand them over as capabilities.
- * Checking the second against the rule would be asking a power socket not to
- * touch the mains.
- *
- * A list rather than a directory, because the split is currently by file rather
- * than by package. Splitting `host` into `port` and `host-node` would delete
- * this constant, and is on the roadmap for that reason.
- */
-const HOST_IMPLEMENTATIONS: ReadonlySet<string> = new Set([
-	'headless-plugin-host.ts',
-	'sandbox-bootstrap.ts',
-	'net/relay.ts',
-	'net/aia.ts'
-]);
 
 /**
  * Ambient host capabilities. A value use of one of these inside the runtime is
@@ -134,14 +130,6 @@ const EXEMPT: Readonly<Record<string, string>> = {
 	// without naming them. HOST.md §3 makes reproducing this an obligation on
 	// any host supplying its own isolate rather than a browser detail.
 	'sandbox.worker.ts': 'the isolate interior: it names ambient globals in order to delete them',
-	// The same job, one layer out: this turns a Node process into something no
-	// more capable than a browser Worker, which it cannot do without taking
-	// `globalThis` and deleting from it. It was never scanned before the
-	// packages were split out — it lived beside the host rather than inside the
-	// runtime directory — so this exemption is newly *visible* rather than newly
-	// true. HOST.md §5 makes reproducing the sealing an obligation on any host
-	// that supplies its own isolate.
-	'sandbox-bootstrap.ts': 'the isolate interior: it seals the realm it is given',
 	// The other side of the translation worker. Talks to `self`, holds no
 	// authority, and reaches nothing a plugin could observe.
 	'kotlin/translate.worker.ts': 'the translator isolate interior',
@@ -382,7 +370,6 @@ function main(): void {
 			// A spec is not the runtime: it never ships in a bundle and never runs
 			// in a host, so the one thing this rule protects does not apply to it.
 			.filter(({ rel }) => !rel.endsWith('.spec.ts'))
-			.filter(({ rel }) => !HOST_IMPLEMENTATIONS.has(rel))
 	);
 	const violations = files.flatMap(({ path, root }) => checkFile(path, root));
 
