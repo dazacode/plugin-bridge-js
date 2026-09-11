@@ -569,7 +569,42 @@ Two properties of the existing instrument worth not losing:
   listings and why `CLAUDE_HANDOFF.md` rule 5 says to address them by whole-
   extension gains.
 
-## 7. Licensing
+## 7. Where the pass stopped, and the two measurements that stopped it
+
+**The compatibility loop is closed for this phase.** 60 listings convert, load
+and run; every offline-convertible bundle loads cleanly; 5 of the 27 that are
+live and reachable complete the whole chain. The remaining blockers no longer
+unlock listings.
+
+Two measurements made that a conclusion rather than a mood, and both work the
+same way — count what a fix would unblock _alone_, then check what else the
+listing carries:
+
+|                                    | Listings carrying it | Listings it would unblock | Why                                                                                                                                                        |
+| ---------------------------------- | -------------------- | ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A local HTTP server on loopback    | ≥ 14                 | 0                         | Not a gap. `ABI.md` §4 replaces it declaratively — `adr/0006-local-http-server.md`                                                                         |
+| A non-local `return` from a lambda | 14                   | **0**                     | All 14 are already blocked by a native capability: WebView, `javax.crypto`, `.addInterceptor()`, `.loadForRequest()`, `.initSign()`, an embedded JS engine |
+
+The second is the one worth internalising. It had sat on the backlog since the
+translator's early days as the obvious next feature, and it survived there on
+its _frequency_. Co-occurrence is the test, not the count: a construct that
+appears in fourteen extensions and never decides one of them is not a blocker,
+it is a passenger.
+
+**What the last pass did find was diagnostics, twice.** A cluster classified
+`native` correctly but _by accident_, on an unrelated obstacle the same
+listings happened to also carry; and a refusal that named a construct the source
+did not contain — `withContext`, bare `with`, `async` and `by lazy` each built
+their frame with no label, so the one labelled return Kotlin permits inside them
+was refused as "crossing a lambda" while crossing nothing. Neither moved a
+number. Both were worth fixing, because a scoreboard is only worth what its
+reasons are worth.
+
+The work that remains is not translator work. It is the three capability
+decisions in `adr/0005`, the sources themselves, and cleanup that will not move
+installability.
+
+## 8. Licensing
 
 miwayomi is Apache-2.0. Its `source-api/` and `core-common/` are adapted from
 Aniyomi (Apache-2.0, `NOTICE-ANIYOMI.md`); its `android-compat/`, server and UI

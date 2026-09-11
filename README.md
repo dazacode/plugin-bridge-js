@@ -102,6 +102,34 @@ markup since the extension was written.
 `docs/adr/0005-network-boundaries.md` decides what this will and will not
 acquire to close that gap, with the count each capability is worth.
 
+### The compatibility pass is closed
+
+Those numbers are a stopping point rather than a snapshot. **The translator
+work has reached diminishing returns**: every offline-convertible bundle loads
+cleanly, and the blockers that remain no longer unlock listings — they are
+dominated by native capabilities and by sources that have changed or gone.
+
+Two measurements closed it, and both are the same shape:
+
+- **The local HTTP server cluster** — at least 14 listings stand up a loopback
+  server so per-request headers survive to every HLS segment. Not a gap: the
+  plugin ABI already replaces it declaratively.
+  `docs/adr/0006-local-http-server.md`.
+- **Non-local returns from lambdas** — 14 listings, and **0 of the 14** would
+  become installable from supporting them. Every one is already blocked by a
+  native capability. Broad support there is engineering effort with no
+  catalogue payoff.
+
+That second one is why blockers are ranked by **listings they would unblock
+alone**, never by how often they appear. Raw frequency is dominated by shared
+vendored libraries and by extensions that were never going to convert.
+
+What is left divides into three, none of which is translator work: native
+boundary decisions, external and source-side failures, and correctness or
+diagnostic cleanup that will not move installability. The last release under
+the loop was **v42** — one false refusal removed, no verdict moved, no
+regression.
+
 ## Documentation
 
 - [`docs/architecture.md`](docs/architecture.md) — how a translation happens
@@ -183,7 +211,14 @@ not the purpose.
 - **Decide the network boundaries.** Cookies, site-side JavaScript and anti-bot
   handling are the three capabilities that would move the numbers above.
   `docs/adr/0005-network-boundaries.md` states what each is worth and
-  recommends only one of them.
+  recommends only one of them. With the compatibility loop closed these are the
+  only remaining work that could move the count, which is why they are a
+  decision for a person rather than the next thing to build.
+- **Second ecosystem, second opinion.** `packages/adapters` names six and one is
+  measured. The claim this repository actually makes — that the Kotlin
+  front-end is ecosystem-agnostic — is untested until a second adapter is
+  driven against a real catalogue, and that is a better use of effort than any
+  remaining listing in the first.
 
 ## Licence
 
