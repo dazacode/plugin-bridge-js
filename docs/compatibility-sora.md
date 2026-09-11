@@ -47,14 +47,17 @@ the adapter moved.
 | **Verified playable**                 | **16** |
 
 **The last two rows are deliberately separate.** A resolved URL is a claim, not
-a stream. Each was range-requested and checked: content type, and an `#EXTM3U`
-sniff for a manifest whose server mislabels it. The 23 that did not answer
+a stream. Each is range-requested **in the same call that resolved it** and
+checked: content type, and an `#EXTM3U` sniff for a manifest whose server
+mislabels it. Verifying from a saved results file instead measures how long a
+signed token lived — on the first ecosystem that gap reported six playable
+streams where three play. The 23 that did not answer
 failed honestly — 404s, 500s, unverifiable certificate chains, one module that
 builds a URL with the host doubled into the path, and one that returns a joke
 string. None was a placeholder and none was a stringified object.
 
-For scale, the first ecosystem measured on the same day: **6 verified playable
-of roughly 35 live-and-reachable.**
+For scale, the first ecosystem measured the same way on the same day: **3
+verified playable**, from 6 resolved URLs, of 69 that convert and load.
 
 ---
 

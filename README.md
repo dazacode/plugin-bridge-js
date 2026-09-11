@@ -94,8 +94,14 @@ JavaScript for iOS and macOS — reaching the same ABI through the same host.
 |                                  | Kotlin ecosystem | JavaScript ecosystem       |
 | -------------------------------- | ---------------- | -------------------------- |
 | Listings measured                | 254              | 69                         |
-| Convert and load                 | 60               | **57 of 57 anime modules** |
-| **Verified playable end to end** | **6**            | **16**                     |
+| Convert and load                 | 69               | **57 of 57 anime modules** |
+| Return a stream URL              | 6                | 39                         |
+| **Verified playable end to end** | **3**            | **18**                     |
+
+**A returned URL is not playback.** Both ecosystems report the claim and the
+verified result as separate rows, and each URL is checked in the same call that
+produced it — a signed stream URL expires and is often bound to the resolving
+IP, so a saved one checked later measures how long a token lived.
 
 The second was measured with `packages/core` and `packages/host` **frozen**:
 every change it needed was in its own adapter, and it never touches the Kotlin
@@ -105,13 +111,25 @@ numbers before anyone checked them.
 
 ### The first ecosystem, in detail
 
-Honest numbers, from one 254-listing repository:
+Honest numbers, from one 254-listing repository. **Every row names the stage it
+measures**, because two of them used to be quoted interchangeably and they are
+not the same question:
 
-|                                                            |        |
-| ---------------------------------------------------------- | ------ |
-| Listings that convert, load and run                        | **60** |
-| Of those, live and reachable                               | **27** |
-| Of those, completing `search → episodes → resolve → fetch` | **5**  |
+|                                                     |        |
+| --------------------------------------------------- | ------ |
+| Listings measured                                   | 254    |
+| Convert (the translator produces a valid module)    | **69** |
+| Load and run (the module imports and answers)       | **69** |
+| Reach content (`search` or `browse` returns rows)   | 23     |
+| List episodes                                       | 14     |
+| Return a stream URL                                 | 6      |
+| **Verified playable** (that URL answers with media) | **3**  |
+
+The last two rows are separate on purpose. A resolved URL is a **claim**; three
+of those six are refused by the CDN the moment they are fetched. A signed stream
+URL also expires and is often bound to the resolving IP, so it is checked in the
+same call that produced it — checking a saved URL later measures how long a
+token lived, not whether the extension works.
 
 The gap is mostly **not** this software: 33 of the 60 never answer at all — 20
 behind an anti-bot challenge, 6 whose host does not resolve, 6 whose endpoint is
