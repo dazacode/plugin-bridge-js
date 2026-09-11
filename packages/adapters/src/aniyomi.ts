@@ -65,6 +65,7 @@ import {
 } from '@plugin-bridge/core/source-repo';
 import type { KotlinConversion } from '@plugin-bridge/core/kotlin/pipeline';
 import type { RepositoryIndex, RepositoryPlugin } from '@plugin-bridge/core/repository-index';
+import { formatProfile } from '@plugin-bridge/core/formats';
 import type { ForeignMedium } from '@plugin-bridge/core/formats';
 
 /**
@@ -431,10 +432,24 @@ export const aniyomiAdapter: ForeignAdapter = {
 			origin,
 			settings,
 			entrypointSource,
-			// Over the emitted module, for the same reason the host list above
-			// is: the entrypoint carries our own runtime, and our own runtime
-			// carries the jar shims.
-			usesCookies: namesCookieJar(conversion.js),
+			// Granted by the **format**, not read off the extension.
+			//
+			// `formatProfile('aniyomi').implicitCookies` is true because this
+			// format's own framework carries a jar on the shared client. The
+			// dominant use is therefore implicit — an extension doing a
+			// two-request session never writes a line about cookies — so reading
+			// the translated module finds nothing and the session silently never
+			// carries. `namesCookieJar` is still consulted, as the explicit half
+			// of the same question, and stays useful for any format whose
+			// framework makes no such guarantee.
+			//
+			// What this grants is only the constrained jar of `ABI.md` §2: per
+			// plugin, per already-granted host, in memory, gone at unload, and
+			// unreadable by plugin code. `loadForRequest` and `CookieManager`
+			// are refused at conversion, so nothing here hands an extension a
+			// cookie *API* — it gets the request continuity its own platform
+			// would have given it, and nothing else.
+			usesCookies: formatProfile('aniyomi').implicitCookies || namesCookieJar(conversion.js),
 			license: credit.license,
 			licenseText: source.licenseText ?? undefined,
 			repository: credit.repository,

@@ -287,6 +287,18 @@ export class PluginSandbox {
 		this.storage = options.storage ?? new Map<string, string>();
 		this.log = options.log ?? NO_LOG;
 		this.cookies = (plugin.permissions ?? []).includes('cookies') ? new CookieJar() : null;
+		if (this.cookies !== null) {
+			// Said once, at the start, because for most plugins carrying this
+			// permission *nothing in their own source asked for it*: the format
+			// adapter requested it on their behalf, because the foreign
+			// framework they were written against carried a jar (`formats.ts`,
+			// `implicitCookies`). Somebody reading a trace and looking for the
+			// line that turned state on would otherwise find no line at all.
+			this.log('stateful HTTP enabled by format adapter', {
+				plugin: plugin.id,
+				scope: 'per plugin, per already-granted host, in memory, cleared at unload'
+			});
+		}
 	}
 
 	/** Starts an isolate, evaluates `source`, and returns once it is ready. */

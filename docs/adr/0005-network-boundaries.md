@@ -97,6 +97,35 @@ above is cheap to hold in reserve.
 
 ---
 
+## 3b. Decided 2026-09-10 — the opt-in comes from the format, not the extension
+
+Built, and the measurement moved the design. §3 assumed a plugin would ask for a
+jar. Almost none do: **every listing whose source named a cookie API named
+`loadForRequest`** — the one call this ADR forbids outright — and the extensions
+that actually need continuity never mention cookies at all, because the
+framework they were written against installed a jar on the shared client.
+
+An opt-in derived from the translated module therefore finds nothing and the
+session silently never carries. So the grant is **format-level**: an adapter
+whose foreign framework carries cookies automatically requests the constrained
+jar for the bundles it produces (`formats.ts`, `implicitCookies`; true for
+`aniyomi`, false everywhere else).
+
+This does not widen the capability, and the bounds are the point:
+
+- only for a format whose framework already made that guarantee
+- only for hosts the plugin was already granted
+- in memory, cleared at unload
+- never readable by plugin code — `loadForRequest` and `CookieManager` stay
+  refused at conversion, and there is no enumeration or export
+- announced in diagnostics as **"stateful HTTP enabled by format adapter"**,
+  because for most plugins carrying it nothing in their own source asked
+
+The extension gains no cookie API. It gains the request continuity its original
+platform would have given it, and nothing else.
+
+---
+
 ## 4. Site-side JavaScript execution
 
 **What is missing.** A way to run the page's own scripts so that a player

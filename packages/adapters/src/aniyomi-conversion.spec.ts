@@ -32,6 +32,7 @@ import { describe, expect, it } from 'vitest';
 import { openPluginArchive } from '@plugin-bridge/core/archive';
 import { SUPER_MEMBERS } from '@plugin-bridge/core/kotlin/subset';
 import { aniyomiEntrypoint } from '@plugin-bridge/runtime/shims/aniyomi-entry';
+import { formatProfile } from '@plugin-bridge/core/formats';
 import { namesCookieJar, packageBundle } from '@plugin-bridge/core/package';
 
 const PLUGIN_ID = 'app.yorozo.converted.aniyomi.example';
@@ -208,8 +209,9 @@ async function convert(translated = TRANSLATED): Promise<Uint8Array> {
 			className: 'Extension',
 			baseUrl: BASE_URL
 		}),
-		// Asked of the translated module, exactly as `aniyomi.ts` asks it.
-		usesCookies: namesCookieJar(translated),
+		// Exactly as `aniyomi.ts` decides it: the format grants it, and the
+		// translated module is consulted only as the explicit half.
+		usesCookies: formatProfile('aniyomi').implicitCookies || namesCookieJar(translated),
 		license: 'Apache-2.0',
 		repository: 'https://github.com/owner/repo'
 	});
@@ -239,15 +241,24 @@ describe('the bundle a translated extension becomes', () => {
 		expect((await load()).id).toBe(PLUGIN_ID);
 	});
 
-	it('asks for cookies only when the translated module says it needs them', async () => {
-		// The jar is authority a viewer is shown before installing, so it is a
-		// declared permission rather than something every conversion gets. The
-		// question is asked of the *translated* module: an entrypoint carries
-		// our own runtime, and our own runtime contains the jar shims, so
-		// reading the whole bundle would answer yes for everything ever built.
+	it('asks for cookies because the format carries them, not because the module said so', async () => {
+		// This was once "only when the translated module says it needs them",
+		// and the measurement is what changed it: every listing whose *source*
+		// named a cookie API named the one that reads the jar, which is refused.
+		// The extensions that actually need continuity are the ones that never
+		// mention cookies at all, because the framework they were written
+		// against installed a jar on the shared client for them.
+		//
+		// So the grant comes from the format contract (`formats.ts`,
+		// `implicitCookies`) and a plain extension gets it. What it does *not*
+		// get is a cookie API: `loadForRequest` and `CookieManager` are refused
+		// at conversion, and the jar is per plugin, per already-granted host, in
+		// memory, and gone at unload.
 		const plain = await openPluginArchive(await convert());
-		expect(plain.permissions).toEqual(['network']);
+		expect(plain.permissions).toEqual(['network', 'cookies']);
 
+		// The explicit half still answers the same way, and still matters for a
+		// format whose framework makes no such guarantee.
 		const jarred = await openPluginArchive(
 			await convert(
 				`${TRANSLATED}\nconst __uses = (c, u, r) => c.cookieJar.saveFromResponse(u, r);\n`

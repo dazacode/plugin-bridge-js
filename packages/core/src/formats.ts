@@ -196,6 +196,30 @@ export interface FormatProfile {
 	 * different facts and a viewer deserves to know which one they hit.
 	 */
 	readonly refusal: string | null;
+	/**
+	 * Whether this format's own framework carries cookies for an extension
+	 * without the extension asking.
+	 *
+	 * A statement about the **foreign platform**, not about any one extension,
+	 * and that is the whole point of putting it here. The dominant cookie use in
+	 * these ecosystems is implicit: the framework installs a jar on the shared
+	 * client and the extension's code never names a cookie API at all. Deriving
+	 * the capability from the translated source therefore finds nothing and the
+	 * session silently never carries — the extension is not broken, it is simply
+	 * running somewhere that quietly dropped a guarantee its platform made.
+	 *
+	 * So the opt-in comes from the format contract. An adapter whose framework
+	 * makes that guarantee requests the **constrained** jar for the bundles it
+	 * produces (`ABI.md` §2): per plugin, per already-granted host, in memory,
+	 * cleared at unload, and never readable by plugin code. The extension gains
+	 * no cookie API — `loadForRequest` and `CookieManager` stay refused at
+	 * conversion, and there is no enumeration or export. It gains only the
+	 * request continuity its original framework would have given it.
+	 *
+	 * False is the honest default: a format whose framework does *not* do this
+	 * must not have plugins granted state they were never written to expect.
+	 */
+	readonly implicitCookies: boolean;
 }
 
 const PROFILES: Readonly<Record<ForeignFormat, FormatProfile>> = {
@@ -204,7 +228,8 @@ const PROFILES: Readonly<Record<ForeignFormat, FormatProfile>> = {
 		label: 'Sora',
 		tier: 'convert',
 		keyDocument: 'index',
-		refusal: null
+		refusal: null,
+		implicitCookies: false
 	},
 	hayase: {
 		format: 'hayase',
@@ -213,7 +238,8 @@ const PROFILES: Readonly<Record<ForeignFormat, FormatProfile>> = {
 		keyDocument: 'index',
 		refusal:
 			'Extensions in this format return torrents rather than streams, and Yorozo has no ' +
-			'torrent client. This repository browses, but nothing here can be installed yet.'
+			'torrent client. This repository browses, but nothing here can be installed yet.',
+		implicitCookies: false
 	},
 	lnreader: {
 		format: 'lnreader',
@@ -222,7 +248,8 @@ const PROFILES: Readonly<Record<ForeignFormat, FormatProfile>> = {
 		keyDocument: 'index',
 		refusal:
 			'Extensions in this format are novel sources. Yorozo is an anime client and has ' +
-			'nowhere to show them.'
+			'nowhere to show them.',
+		implicitCookies: false
 	},
 	mangayomi: {
 		format: 'mangayomi',
@@ -239,7 +266,8 @@ const PROFILES: Readonly<Record<ForeignFormat, FormatProfile>> = {
 		refusal:
 			'This source is written in Dart, and running one means providing a Dart ' +
 			'interpreter. Yorozo converts the JavaScript sources in this format; this is ' +
-			'not one of them.'
+			'not one of them.',
+		implicitCookies: false
 	},
 	aniyomi: {
 		format: 'aniyomi',
@@ -261,7 +289,12 @@ const PROFILES: Readonly<Record<ForeignFormat, FormatProfile>> = {
 		tier: 'convert',
 		// The listing file is a bare array; the key is in a sibling repo.json.
 		keyDocument: 'sibling',
-		refusal: null
+		refusal: null,
+		// `AnimeHttpSource` hands every extension a shared client that upstream
+		// builds with a real cookie jar, so an extension doing a two-request
+		// session never writes a line about cookies and is entitled to assume
+		// the second request carries what the first was given.
+		implicitCookies: true
 	},
 	cloudstream: {
 		format: 'cloudstream',
@@ -271,7 +304,8 @@ const PROFILES: Readonly<Record<ForeignFormat, FormatProfile>> = {
 		refusal:
 			'Extensions in this format are compiled Java, and running one means providing the ' +
 			'whole runtime it expects. The converter for this format is not built yet — this ' +
-			'repository browses, but nothing here can be installed.'
+			'repository browses, but nothing here can be installed.',
+		implicitCookies: false
 	}
 };
 
