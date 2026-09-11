@@ -33,8 +33,8 @@ The Aniyomi base-class driver
 
 Files:
 
-    client-web/src/lib/plugins/foreign/shims/aniyomi-entry.ts
-    client-web/src/lib/plugins/foreign/shims/kotlin-runtime.ts
+    packages/runtime/src/shims/aniyomi-entry.ts
+    packages/runtime/src/shims/kotlin-runtime.ts
         (the `KOTLIN_MODELS` section)
 
 An extension written for the Aniyomi client application is a *subclass*. Most
@@ -50,7 +50,7 @@ reimplemented is the driver half: which member is called in which order, what
 each default does when a subclass declares no override, and what each refuses.
 No Kotlin was copied; the reimplementation is TypeScript-emitted JavaScript
 with different structure, different names for its internals, and a different
-failure taxonomy (`contract/plugin-api/ABI.md` §5). What is *derived* is the
+failure taxonomy (`contract/ABI.md` §5). What is *derived* is the
 behaviour, and the Apache-2.0 licence permits that with attribution, which this
 notice is.
 
@@ -60,7 +60,7 @@ Episode numbering
 
 File:
 
-    client-web/src/lib/plugins/foreign/episode-recognition.ts
+    packages/core/src/episode-recognition.ts
 
 A port of `EpisodeRecognition.kt` from the Aniyomi client application, also
 Apache-2.0.
@@ -83,7 +83,7 @@ The preference framework
 
 File:
 
-    client-web/src/lib/plugins/foreign/shims/kotlin-runtime.ts
+    packages/runtime/src/shims/kotlin-runtime.ts
         (the `KOTLIN_PREFS` section)
 
 An extension in this format is configured through Android's preference
@@ -101,7 +101,7 @@ what each getter answers when nothing is stored.
 
 Everything behind that shape is this project's own and is deliberately
 different. There are no widgets, because a plugin never draws UI
-(`contract/plugin-api/ABI.md` §1) — the values come from a manifest `settings`
+(`contract/ABI.md` §1) — the values come from a manifest `settings`
 block the conversion derived and the host rendered. There is no file: the
 upstream store persists to a `.properties` file, and this one layers a per-run
 overlay over the host's settings and persists nothing, because a plugin does not
@@ -145,6 +145,6 @@ would reach further into this repository than a compatibility shim should:
 (AGPL-3.0). That is a deliberate boundary, recorded here so nobody re-derives
 it, and so nobody quietly crosses it later.
 
-`AGENTS.md` rule 9 applies to this file as it applies to every other. Naming a
+Rule 9 (`docs/security.md`) applies to this file as it applies to every other. Naming a
 *client application* and a *file format* is allowed and is what the paragraphs
 above do. Naming a content source is not, and none is named here.

@@ -8,6 +8,12 @@ This turns their extensions into one portable JavaScript plugin, running in a
 sealed sandbox behind a declared host port — so the same converted plugin runs
 in a browser tab, a desktop shell, a phone, or a terminal.
 
+**In practice this is mostly about [Aniyomi](https://github.com/aniyomiorg/aniyomi)
+extensions.** Aniyomi's are written in Kotlin against an Android base class, and
+they are the only ones translated from _source_ rather than from a published
+artifact — which is why the Kotlin front-end is the largest thing here. The
+other five adapters convert an artifact and are correspondingly thin.
+
 It is a **translator**, not an emulator. Nothing here pretends to be Android.
 
 ```
@@ -103,6 +109,56 @@ acquire to close that gap, with the count each capability is worth.
 - [`docs/security.md`](docs/security.md) — the sandbox, the network relay, and rule 9
 - [`docs/adding-an-adapter.md`](docs/adding-an-adapter.md) — adding an ecosystem
 - [`docs/adr/`](docs/adr) — the decisions, with their reasoning
+
+## What this builds on
+
+Two projects made this possible, in different ways. Both are Apache-2.0 and both
+were read as published source; `NOTICE` records exactly which files derive from
+which, and travels with any redistribution.
+
+### [Aniyomi](https://github.com/aniyomiorg/aniyomi)
+
+The client application whose extension format this primarily translates. An
+extension for it is a _subclass_ — most of what makes one work lives in the
+class it extends, which is not in the extension's own file — so running one
+anywhere else means supplying that class. Two things here come from Aniyomi:
+
+- the **base-class driver** (`source-api`): which member is called in which
+  order, what each default does when a subclass overrides nothing;
+- **episode numbering** (`EpisodeRecognition.kt`), ported behaviour-exactly and
+  pinned by tests written against upstream's own doc-comment examples — because
+  agreeing with the rest of the ecosystem about which episode is episode twelve
+  is the entire reason to port it rather than invent one.
+
+### [miwayomi](https://github.com/miwayomi/miwayomi)
+
+The reference implementation this was read against, and the reason several
+decisions here are what they are. miwayomi solves the same problem from the
+_other_ direction — it runs the real bytecode on a JVM behind a server — and
+having a second, working answer to "what does an extension believe is true about
+the world it runs in" is worth more than any amount of guessing. Its
+`android-compat` module is the source of the **preference framework** here.
+
+It was also useful where its answer was **no**: its `WebView` is a deliberate
+stub, which is a much stronger argument for refusing site-side JavaScript than
+any reasoning of ours (see `docs/adr/0005-network-boundaries.md`).
+
+Neither project is affiliated with this one, and neither endorses it. Any bug
+here is this repository's, not theirs.
+
+## Roadmap
+
+- **Consume this from its first client.** The application it was extracted from
+  still has its own copy of the convert-and-verify path. Until it delegates to
+  `packages/host/src/catalogue.ts`, the two can drift — and drift between two
+  hosts is exactly what the second host exists to catch.
+- **De-couple the contract specs.** `contract/` is normative and now lives here,
+  but the four documents still read as one product's. A contributor arriving
+  cold should not have to know that product to read them.
+- **Decide the network boundaries.** Cookies, site-side JavaScript and anti-bot
+  handling are the three capabilities that would move the numbers above.
+  `docs/adr/0005-network-boundaries.md` states what each is worth and
+  recommends only one of them.
 
 ## Licence
 
