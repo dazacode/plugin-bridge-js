@@ -559,6 +559,9 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 	['asUriPart', 'asQueryPart'],
 	['head', 'firstOrNull'],
 	['rateLimit', 'rateLimit'],
+	// The per-host sibling of the one above. Both are emitted with their period
+	// already resolved to milliseconds; see `rateLimitCall` in `emit.ts`.
+	['rateLimitHost', 'rateLimitHost'],
 	['stop', 'stop'],
 
 	// collections
@@ -854,6 +857,7 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 	['intersect', 'intersect'],
 	['partition', 'partition'],
 	['sortedArray', 'sortedArray'],
+	['copyOfRange', 'copyOfRange'],
 	['clear', 'clearAll'],
 	['stackTraceToString', 'stackTraceToString'],
 	['lineSequence', 'lineSequence'],

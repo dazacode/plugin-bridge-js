@@ -572,3 +572,30 @@ describe('the JCE vector this file decrypts', () => {
 		expect(hex(Array.from(out))).toHaveLength(32);
 	});
 });
+
+describe('the stdlib the crypto code slices key material with', () => {
+	it('copies a range out of a byte array, and refuses one that runs off the end', async () => {
+		// `copyOfRange` is plain Kotlin stdlib rather than a capability, and it
+		// is tested here because it is what this code slices key material with:
+		// three extensions reached `ctx.crypto` and then stopped on it, which is
+		// the shape of a capability that was granted one call short of useful.
+		const demo = await instantiate(
+			inClass(
+				'    fun middle(bytes: ByteArray): ByteArray = bytes.copyOfRange(1, 3)',
+				'    fun past(bytes: ByteArray): ByteArray = bytes.copyOfRange(0, 99)'
+			)
+		);
+
+		const source = new Uint8Array([9, 8, 7, 6]);
+		expect(unsigned(demo.middle(source))).toEqual([8, 7]);
+
+		// A copy, not a view: writing into the result must not reach the source.
+		const copy = demo.middle(source);
+		copy[0] = 0;
+		expect(source[1]).toBe(8);
+
+		// Kotlin throws; JavaScript's `slice` would clamp, and a clamped copy is
+		// a short key that decrypts to rubbish with nothing reporting it.
+		expect(() => demo.past(source)).toThrow(/copyOfRange/);
+	});
+});

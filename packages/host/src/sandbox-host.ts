@@ -44,6 +44,7 @@ import {
 	type HostLog,
 	type WorkerFactory
 } from './host';
+import { RequestGate, readPolicy } from './net/request-policy';
 import type { ConversionRecord } from '@plugin-bridge/core/formats';
 
 /** How long any one plugin call may take before its Worker is destroyed. */
@@ -120,6 +121,35 @@ interface Pending {
 	resolve: (value: unknown) => void;
 	reject: (error: unknown) => void;
 	timer: ReturnType<typeof setTimeout>;
+}
+
+/**
+ * What the proxy route answers with, as far as this side reads it.
+ *
+ * Deliberately loose: the fields are JSON that arrived from somewhere else, and
+ * every use below re-checks the one it wants rather than trusting the shape.
+ */
+interface ProxyPayload {
+	status?: unknown;
+	url?: unknown;
+	body?: unknown;
+	headers?: Record<string, unknown>;
+	/** What each redirect hop set, tagged with the hop. Deleted before the
+	 *  payload crosses into the isolate — see `fetchForPlugin`. */
+	setCookie?: unknown;
+}
+
+/**
+ * The same answer with the two things a request policy judges it by pulled out.
+ *
+ * `retryAfter` is lifted here and dropped again before the payload crosses back
+ * into the isolate: it is an instruction to the *host* about waiting, not a
+ * field the plugin ABI has, and `ctx.http` already hands the plugin the header
+ * itself in `headers`.
+ */
+interface PluginResponse extends ProxyPayload {
+	readonly status: number;
+	readonly retryAfter?: string;
 }
 
 /** One loaded plugin, running. */
@@ -332,6 +362,15 @@ export class PluginSandbox {
 	private readonly failures: string[] = [];
 
 	/**
+	 * The request policy this plugin declared, and the pacing state enforcing it.
+	 *
+	 * Host-side because this is the only side that sees every request. A limiter
+	 * inside the isolate would be one the isolate could decline to run, and the
+	 * window it keeps has to outlive any one call to mean anything.
+	 */
+	private readonly gate = new RequestGate();
+
+	/**
 	 * Everything this plugin may currently reach: what it declared, plus what
 	 * this run learned.
 	 *
@@ -463,6 +502,18 @@ export class PluginSandbox {
 				case 'http':
 					respond(true, await this.fetchForPlugin(call.args[0] as string, call.args[1]));
 					return;
+				case 'httpPolicy':
+					// Re-read rather than trusted. The isolate validated it too, so
+					// a plugin's own mistake throws at the line that made it — but
+					// the host does not take a sandbox's word for the shape of
+					// anything, and this one decides how long it will sleep for.
+					this.gate.declare(readPolicy(call.args[0]));
+					this.log('a plugin declared a request policy', {
+						plugin: this.plugin.id,
+						policy: this.gate.declared()
+					});
+					respond(true);
+					return;
 				case 'storageGet':
 					respond(true, this.storage.get(call.args[0] as string) ?? null);
 					return;
@@ -558,93 +609,122 @@ export class PluginSandbox {
 		const cookie = this.cookies?.header(url) ?? '';
 
 		const fetcher = this.options.fetcher ?? NO_NETWORK;
-		const response = await fetcher('/api/plugin-fetch', {
-			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({
-				url,
-				method: options.method ?? 'GET',
-				headers: options.headers ?? {},
-				body: options.body ?? null,
-				// Presence of the key is what tells the route a jar is held, so
-				// a plugin without the permission gets the route's pre-jar
-				// behaviour exactly, including its response shape.
-				...(this.cookies === null ? {} : { cookies: cookie === '' ? {} : { send: cookie } }),
-				// Only sent when the caller said no, so the route's default stays
-				// the route's own business rather than something every request
-				// restates.
-				...(options.follow === false ? { follow: false } : {})
-				// No `allowedHosts` here, and the field that used to be is gone
-				// rather than ignored. It claimed the route applied the plugin's
-				// allowlist a second time; the route never read it, and its own
-				// header explains why it does not — it has no way to know which
-				// plugin is asking, so it enforces a floor that holds whatever a
-				// caller claims (https only, no private address, capped size and
-				// time, every redirect hop re-checked). The allowlist is enforced
-				// here, in `fetchForPlugin`, before anything leaves. A comment
-				// promising a second gate is worse than no comment: it is what
-				// somebody reads when deciding how much this one has to do.
-			})
-		});
-
-		if (!response.ok) {
-			// The route says *why* it could not relay — which host, and what went
-			// wrong reaching it. Dropping that left a bare 502 in the console and
-			// a plugin failure nobody could act on.
-			const detail = await response
-				.json()
-				.then((payload: { error?: string }) => payload.error)
-				.catch(() => undefined);
-			// Kept before it is thrown, because the thing that throws is usually
-			// not the thing that reports. See `failures`.
-			const note = `${host}: ${detail ?? `the proxy returned ${response.status}`}`;
-			if (this.failures.length < MAX_REFUSED_REPORTED && !this.failures.includes(note)) {
-				this.failures.push(note);
-			}
-			this.log('outbound request failed', {
-				plugin: this.plugin.id,
-				host,
-				status: response.status,
-				detail
+		// The declared policy fills in what the request did not carry. Computed
+		// once rather than per attempt: a retry is the *same* request asked
+		// again, and a policy that changed between the two would make the second
+		// one a different question.
+		const headers = this.gate.headersFor(host, options.headers ?? {});
+		const attempt = async (): Promise<PluginResponse> => {
+			const response = await fetcher('/api/plugin-fetch', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					url,
+					method: options.method ?? 'GET',
+					headers,
+					body: options.body ?? null,
+					// Presence of the key is what tells the route a jar is held, so
+					// a plugin without the permission gets the route's pre-jar
+					// behaviour exactly, including its response shape.
+					...(this.cookies === null ? {} : { cookies: cookie === '' ? {} : { send: cookie } }),
+					// Only sent when the caller said no, so the route's default stays
+					// the route's own business rather than something every request
+					// restates.
+					...(options.follow === false ? { follow: false } : {})
+					// No `allowedHosts` here, and the field that used to be is gone
+					// rather than ignored. It claimed the route applied the plugin's
+					// allowlist a second time; the route never read it, and its own
+					// header explains why it does not — it has no way to know which
+					// plugin is asking, so it enforces a floor that holds whatever a
+					// caller claims (https only, no private address, capped size and
+					// time, every redirect hop re-checked). The allowlist is enforced
+					// here, in `fetchForPlugin`, before anything leaves. A comment
+					// promising a second gate is worse than no comment: it is what
+					// somebody reads when deciding how much this one has to do.
+				})
 			});
-			throw new NetworkFailure(
-				detail === undefined
-					? `The plugin proxy returned ${response.status}.`
-					: `The plugin proxy returned ${response.status}: ${detail}`
-			);
-		}
-		const payload = (await response.json()) as {
-			url?: unknown;
-			body?: unknown;
-			headers?: Record<string, unknown>;
-			setCookie?: unknown;
-		};
 
-		// The jar takes what each hop set, and the field is then **deleted**.
-		//
-		// Deleted rather than merely not read: `payload` is handed to the
-		// isolate wholesale a few lines down, so leaving it there would hand a
-		// plugin the credential this whole design exists to keep from it. That
-		// is the one line in this file where forgetting something is a
-		// vulnerability rather than a bug, which is why it is not conditional
-		// on the plugin having the permission — a route that answered with a
-		// `setCookie` we did not ask for still must not have it forwarded.
-		const events = payload.setCookie;
-		delete payload.setCookie;
-		if (this.cookies !== null && Array.isArray(events) && events.length > 0) {
-			for (const event of events as { url?: unknown; headers?: unknown }[]) {
-				if (typeof event?.url !== 'string' || !Array.isArray(event.headers)) continue;
-				this.cookies.absorb(
-					event.url,
-					event.headers.filter((one): one is string => typeof one === 'string')
+			if (!response.ok) {
+				// The route says *why* it could not relay — which host, and what went
+				// wrong reaching it. Dropping that left a bare 502 in the console and
+				// a plugin failure nobody could act on.
+				const detail = await response
+					.json()
+					.then((failed: { error?: string }) => failed.error)
+					.catch(() => undefined);
+				// Kept before it is thrown, because the thing that throws is usually
+				// not the thing that reports. See `failures`.
+				const note = `${host}: ${detail ?? `the proxy returned ${response.status}`}`;
+				if (this.failures.length < MAX_REFUSED_REPORTED && !this.failures.includes(note)) {
+					this.failures.push(note);
+				}
+				this.log('outbound request failed', {
+					plugin: this.plugin.id,
+					host,
+					status: response.status,
+					detail
+				});
+				// Thrown rather than returned, so a policy never *retries* it: the
+				// policy names upstream statuses, and this is the proxy failing to
+				// produce one at all. The relay has already spent its own one retry
+				// (`net/aia.ts`) by the time it says this, and asking again would
+				// multiply a timeout by `attempts` inside a call racing a deadline.
+				throw new NetworkFailure(
+					detail === undefined
+						? `The plugin proxy returned ${response.status}.`
+						: `The plugin proxy returned ${response.status}: ${detail}`
 				);
 			}
-			this.log('took cookies from a response', {
-				plugin: this.plugin.id,
-				host,
-				held: this.cookies.size
-			});
-		}
+			const answered = (await response.json()) as ProxyPayload;
+
+			// The jar takes what each hop set, and the field is then **deleted**.
+			//
+			// Deleted rather than merely not read: the payload is handed to the
+			// isolate wholesale, so leaving it there would hand a plugin the
+			// credential this whole design exists to keep from it. That is the one
+			// line in this file where forgetting something is a vulnerability
+			// rather than a bug, which is why it is not conditional on the plugin
+			// having the permission — a route that answered with a `setCookie` we
+			// did not ask for still must not have it forwarded.
+			//
+			// Inside `attempt` rather than after it: a retry is a second response,
+			// and a source that re-issues its session on the retry is the ordinary
+			// case rather than the odd one.
+			const events = answered.setCookie;
+			delete answered.setCookie;
+			if (this.cookies !== null && Array.isArray(events) && events.length > 0) {
+				for (const event of events as { url?: unknown; headers?: unknown }[]) {
+					if (typeof event?.url !== 'string' || !Array.isArray(event.headers)) continue;
+					this.cookies.absorb(
+						event.url,
+						event.headers.filter((one): one is string => typeof one === 'string')
+					);
+				}
+				this.log('took cookies from a response', {
+					plugin: this.plugin.id,
+					host,
+					held: this.cookies.size
+				});
+			}
+
+			return {
+				...answered,
+				// Normalised for the gate, which judges an attempt by the status the
+				// *source* gave and by what it said about waiting. A route that
+				// answered without a status is given one no policy can name, rather
+				// than a zero that a careless `onStatus` might match.
+				status: typeof answered.status === 'number' ? answered.status : -1,
+				retryAfter:
+					typeof answered.headers?.['retry-after'] === 'string'
+						? answered.headers['retry-after']
+						: undefined
+			};
+		};
+
+		// `retryAfter` is dropped rather than forwarded: it was lifted out of the
+		// headers for the gate's benefit, and inventing a response field the ABI
+		// does not have is how a plugin comes to depend on one.
+		const { retryAfter: _waited, ...payload } = await this.gate.run(host, attempt);
 
 		// Only for a converted plugin. A native bundle is signed and its host
 		// list is a promise its author made and a viewer accepted; widening

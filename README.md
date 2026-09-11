@@ -149,6 +149,20 @@ between them.
 [`docs/phase-2-capability-map.md`](docs/phase-2-capability-map.md) is the map,
 with the measurement, the ranking and what it does not claim.
 
+**The three it recommended are now built** — `ctx.crypto` over WebCrypto, the
+constrained per-plugin cookie jar, and a declarative request policy — and
+re-measuring against the real implementations is the most useful line in that
+document: **+4 conversions where the grants predicted +10.** A grant only
+suppresses a refusal, so it measures what the catalogue would do _if we ignored
+our own rules_. The cookie jar's predicted +3 required letting a plugin read its
+own jar, which the design forbids; the request policy's +1 required accepting an
+arbitrary interceptor lambda, which it refuses by rule.
+
+The policy earned its place anyway, for a reason no count predicted:
+`__k.rateLimit` was `function (value) { return value; }`, under a comment saying
+pacing was host-owned that the host never received. Every extension throttling
+itself to protect a source had been converted into one that does not.
+
 ## Documentation
 
 - [`docs/architecture.md`](docs/architecture.md) — how a translation happens

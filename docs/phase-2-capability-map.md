@@ -54,7 +54,7 @@ and only that capability — is granted.
 | --------------------------------------------- | --------------------------------------------------------------- | -------- | -------------------- | -------------------------------------------------------------------------------- | -------------------------------------------- | --------------- | ------------------------------------------------------ | ---------------- |
 | `javax.crypto`, `SecureRandom`, `.initSign()` | AES decrypt; random bytes; a P-256 keypair; sign a nonce        | 76       | **+4**               | `ctx.crypto` over **WebCrypto**                                                  | **Yes** — `subtle` is the same primitive set | Yes, everywhere | **Low** — pure computation, no new I/O or reachability | **Build first**  |
 | Cookie / session state                        | Carry a `Set-Cookie` value to the next request on the same host | 22       | **+3**               | The constrained per-plugin, per-host, in-memory jar `adr/0005` already specifies | Yes, host-side                               | Yes             | **Medium** — real, and already analysed                | **Build second** |
-| `.addInterceptor()`                           | Retry, re-sign, rate-limit, or re-header a request              | 83       | **+1**               | Declarative request policy on `ctx.http` — retry, rate limit, per-host headers   | Yes                                          | Yes             | Low–medium                                             | Design, defer    |
+| `.addInterceptor()`                           | Retry, re-sign, rate-limit, or re-header a request              | 83       | **+1**               | Declarative request policy on `ctx.http` — retry, rate limit, per-host headers   | Yes                                          | Yes             | Low–medium                                             | **Built**        |
 | Local HTTP server                             | Carry headers to every HLS segment; decrypt AES-128             | 13       | **+1**               | Already exists — `StreamPipeline` (`adr/0006`)                                   | n/a                                          | n/a             | None                                                   | **Closed**       |
 | Background threads, `Handler`                 | Run work later; memoise across calls                            | 76       | **+1**               | Nothing new. One thread is a correct translation                                 | Yes                                          | Yes             | None                                                   | Reject           |
 | Embedded JS engine                            | Evaluate a packed or obfuscated payload                         | 69       | **+1**               | Narrow, named unpackers only — never arbitrary evaluation                        | Partial                                      | Partial         | **High** if general                                    | Keep refused     |
@@ -132,7 +132,70 @@ ecosystem worth translating has extensions that decrypt something.
 
 ---
 
-## 5. Recommendation
+## 5. Built, and what the measurement said afterwards
+
+All three recommendations below were implemented. The catalogue was re-measured
+against the real implementations, and the result is the most useful thing in
+this document:
+
+|                | Predicted by the grant | **Measured, built**                          |
+| -------------- | ---------------------- | -------------------------------------------- |
+| Crypto         | +4                     | **+4**                                       |
+| Cookie jar     | +3                     | **0**                                        |
+| Request policy | +1                     | **0**                                        |
+| **Total**      | **+10**                | **+4** — 65 → 69 conversions, no regressions |
+
+**A shallow grant measures "if we ignored our own rules", not "if we built this
+properly."** That is the correction, and each miss has a different and instructive
+cause.
+
+**Crypto met its number exactly — but only after a stdlib gap was closed.**
+Three of the four listings reached the new `ctx.crypto` and then stopped on
+`.copyOfRange()`, which is plain Kotlin standard library and was simply never
+implemented. A capability granted one call short of useful is worth nothing, and
+nothing in the first-order count could show that: the grant had quietly included
+the helper. Worth remembering — **when a capability lands and the listings do not
+move, look for the ordinary call behind the extraordinary one.**
+
+**The cookie jar's +3 was an artifact of a grant that broke the design.** All
+three listings name `loadForRequest` — they read their own jar — and ADR-0005
+forbids exactly that: the host carries the state and the extension never reads
+it. The grant allowed the read because a grant only suppresses a refusal; it has
+no opinion about policy. So the correct implementation refuses all three, and the
++3 was never available without abandoning the constraint that made the feature
+acceptable.
+
+There is a second finding underneath it: the dominant cookie usage in this
+ecosystem is **implicit** — the upstream framework installs a jar on the shared
+client and the extension's own code never names a cookie API. Such a bundle has
+nothing for an opt-in to be derived from. So the jar's conversion value is zero
+and its _runtime_ value is real but unreachable until a per-format default is
+decided. That is a decision, not a bug.
+
+**The request policy's +1 was the same artifact.** Its one listing needs an
+arbitrary `addInterceptor { chain -> … }` lambda, which stays refused on the
+ADR-0006 §5 rule against recognising intent in arbitrary Kotlin, plus the WebView
+cookie store, which is now refused by name rather than converting cleanly and
+dying inside the sandbox.
+
+**The policy was still worth building, for a reason no count predicted.**
+`__k.rateLimit` was `function (value) { return value; }` — under a comment saying
+pacing was "host-owned", which the host never received. Every extension that
+throttled itself to protect a source was converted into one that does not, with
+nothing reporting it, and the symptom lands on a viewer as a block. The
+compatibility table listed that as "Partial — `__k.rateLimit` exists". A
+capability audit found a silent correctness bug, which is not what it was for.
+
+**What the three are actually worth, stated plainly:** +4 conversions, one silent
+rate-limit bug fixed, one class of runtime death (`CookieManager`) converted into
+a conversion-time refusal, and a cookie jar whose value is real but gated behind a
+decision nobody has made yet.
+
+---
+
+## 6. Recommendation
+
+_Written before the work; kept as it stood, with §5 as the correction._
 
 1. **`ctx.crypto`, WebCrypto-backed.** +4 measured, portable everywhere, low
    security cost, useful to every future ecosystem. The async propagation is the
@@ -144,6 +207,25 @@ ecosystem worth translating has extensions that decrypt something.
    portable answer to `.addInterceptor()`. Only +1 by itself, but it is the
    honest shape for a capability 83 listings reach for, and unlike the others it
    removes a _class_ of refusal rather than a name.
+
+   **Built** — `ABI.md` §2.1, `FOREIGN.md` §4.1.8. Two things about it are worth
+   recording here, because neither was what the row above predicted.
+
+   The first is that the **+1 was not the reason to do it.** The reason was a
+   silent wrong answer already shipping: `__k.rateLimit` accepted a limit,
+   returned its receiver and told nobody, so an extension that politely throttled
+   itself to one request a second was converted into one that does not. That is
+   not a missing feature, it is the failure mode this project's standing rule
+   exists to prevent, and it was sitting inside a helper the tables listed as
+   supported.
+
+   The second is that the **scope held.** What translates is the named
+   declarative helpers — `.rateLimit()`, `.rateLimitHost()`, and the two
+   interceptor objects the same library ships — whose meaning is their signature.
+   A hand-written `addInterceptor { chain -> … }` is still refused by name, on
+   `adr/0006` §5, and the recorded measurement that accepting its body unblocks
+   zero listings is unchanged and was not re-litigated.
+
 4. **Nothing else.** Threads, reflection and the JVM class object are correctly
    refused. A general embedded JavaScript engine and a WebView stay outside the
    portable runtime: together they are worth four listings, and they are the two

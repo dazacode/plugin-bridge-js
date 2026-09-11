@@ -146,6 +146,16 @@ must **not** break are in `docs/security.md` §2: `cookie` stays out of the
 forwardable request-header allowlist, `Set-Cookie` stays out of the four
 response headers a plugin reads, and the header is put on the first hop only.
 
+The same division holds for the **request policy** a plugin declares (`ABI.md`
+§2.1). Retry, pacing and per-host headers are applied by `sandbox-host.ts`
+_above_ this call, because that is the side that knows which plugin is asking
+and can hold a window across requests. A `fetch` supplied here must therefore
+not add pacing or retries of its own: a second limiter under this one would make
+the rate a plugin actually gets a function of which host it is running on, and
+`ABI.md`'s guarantee is that it is not. The one exception already in the tree is
+the relay's single retry for an incomplete certificate chain, which repairs a
+transport failure rather than re-asking a question.
+
 The runtime addresses the proxy by path — `/api/plugin-fetch` — in **every**
 host, which is not a browser detail that leaked: it is the contract, and a host
 without a server answers it itself. The headless host calls the browser route's
@@ -243,6 +253,16 @@ The port's contract is therefore the **capability set, not the isolate**. A
 host that runs a plugin in a more capable environment than the client's has not
 implemented this port; it has implemented something that looks like it and
 answers differently.
+
+**`ctx` is part of that capability set**, so an isolate built here owes the
+whole of `ABI.md` §2 — including `ctx.http.policy()`, and including the ordering
+guarantee that goes with it: a policy declared before a request must be in force
+for it. Over a message transport that is free, since `postMessage` and the
+stdio protocol both deliver in order. Over anything that reorders, the isolate
+half must not return from `policy()`'s caller before the declaration has been
+sent. A host that omits the method entirely is _told_ rather than silently
+unpaced: the converted runtime throws at the first request a declared limit
+would have governed, naming `ctx.http.policy`.
 
 This is not only a security statement. It is a _measurement_ statement, and
 that is what makes it urgent: ADR-0004 §6.2 makes a headless host the

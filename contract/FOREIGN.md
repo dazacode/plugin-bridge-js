@@ -508,6 +508,63 @@ downstream treats an empty id as _no_ id — a catalogue entry with one is
 dropped rather than emitted — so upstream's answer would delete a row instead
 of pointing it at the site root, which is what it means.
 
+#### 4.1.8 Interceptors: the two that translate, and the rest that do not
+
+An extension in this format configures its HTTP client by installing okhttp
+`Interceptor`s. There is no interceptor chain here — the host owns the transport
+and buffers the whole body — so the question is not "can we run one" but "can we
+read what one was for". The answer splits cleanly, and the split is the point.
+
+**Translated**, because the meaning is fixed by the signature and nothing has to
+be read out of a body. Each becomes a `RequestPolicy` the host enforces
+(`ABI.md` §2.1):
+
+| Written                                                     | Becomes                                     |
+| ----------------------------------------------------------- | ------------------------------------------- |
+| `.rateLimit(permits)`                                       | `rateLimit`, over one second                |
+| `.rateLimit(permits, period)`                               | `rateLimit`, `period` in seconds            |
+| `.rateLimit(permits, period, TimeUnit.X)`                   | `rateLimit`, in that unit                   |
+| `.rateLimit(permits, 250.milliseconds)`                     | `rateLimit`, from the `Duration` overload   |
+| `.rateLimitHost(url, permits[, period[, unit]])`            | `rateLimitByHost`, keyed by that url's host |
+| `.addInterceptor(RateLimitInterceptor(…))`                  | the same as `.rateLimit(…)`                 |
+| `.addInterceptor(SpecificHostRateLimitInterceptor(url, …))` | the same as `.rateLimitHost(…)`             |
+
+**The period is resolved to whole milliseconds by the emitter**, and this is not
+an optimisation. `300.milliseconds` is erased to the bare number `300` before
+any runtime helper sees it, so `rateLimit(1, 2)` and `rateLimit(1, 2.seconds)`
+would otherwise reach the runtime as identical arguments meaning two thousand
+milliseconds and two. A period written as anything but a literal, or in a unit
+finer than a millisecond, is **refused** — naming `.rateLimit()` and saying so —
+because the failure mode of guessing is an extension that asks a source for a
+thousand times more than it promised, and the symptom is a viewer whose address
+is blocked rather than an error anybody can read.
+
+**Refused, and staying refused:** every other interceptor, including
+`.addInterceptor { chain -> … }` with any body at all, an `Interceptor { … }`
+object, and a named interceptor class this list does not contain. The refusal
+names the construct.
+
+This is `docs/adr/0006-local-http-server.md` §5's rule applied a second time.
+Recognising what an interceptor body _means_ is recognising that the rest of it
+does nothing that matters, and the rest is where a challenge-solve fallback, a
+signing step and a cookie read live. The measurement agrees: accepting the body
+unblocks zero listings, because an extension whose interceptor does something
+worth recognising also reaches for `.proceed()` and a cookie jar, and those are
+blocking anyway.
+
+**What does not translate, and is not pretended to.** `retry` and
+`headersByHost` are part of the policy and no Kotlin shape maps onto either —
+there is no declarative retry helper in the shared libraries, and the default
+`User-Agent` an extension inherits is the _host's_ value rather than the
+extension's, so inventing one here would be fabricating a semantic. Both fields
+exist for plugins written for this ABI and for hand-written adapters (§2).
+
+**One divergence, stated rather than silent.** okhttp installs an interceptor on
+_a client_; the policy is per _plugin_. An extension that builds two clients and
+paces each gets the stricter of the two rules applied to both. That is slower
+than it asked for and never faster, which is the only direction in which being
+wrong here does not cost a viewer their access.
+
 ---
 
 ### 4.2 Torrent sources

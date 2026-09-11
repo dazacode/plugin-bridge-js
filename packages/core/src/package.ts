@@ -93,7 +93,7 @@ const ENTRYPOINT = 'source';
  * 34: `x.ifEmpty { return@map … }` is read as a guard, so the jump lands in the
  *     lambda it was written in.
  */
-export const CONVERTER_VERSION = 42;
+export const CONVERTER_VERSION = 43;
 
 export interface BundleInput {
 	readonly id: string;
