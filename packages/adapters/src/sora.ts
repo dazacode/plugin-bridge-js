@@ -42,7 +42,8 @@ import {
 	keepAnimeOnly,
 	ForeignFormatError,
 	type ConversionServices,
-	type ForeignAdapter
+	type ForeignAdapter,
+	type TextFetcher
 } from '@plugin-bridge/core/adapter';
 import {
 	DEFAULT_REFS,
@@ -103,11 +104,38 @@ function authorName(value: unknown): string {
  * progressive fails immediately and legibly, where the reverse buffers
  * forever.
  */
+/**
+ * What a module is for, from the manifest or from the library that listed it.
+ *
+ * **Both fields are free text and neither is an enum.** Measured across one
+ * live library of 69: manifests declare `type` as `anime`, but also
+ * `shows/movies/anime`, `anime/movies`, `movies/shows`, `mangas`, `novels`. The
+ * library's own `category` is written the same way. So both are read as a
+ * *mention* of anime rather than matched exactly.
+ *
+ * This is not a stylistic choice. Matching `type === 'anime'` exactly and
+ * treating every other non-empty value as manga dropped **22 anime modules of
+ * 56** from that library — they said `movies/shows/anime`, and a module that is
+ * filtered out is a module nothing ever explains.
+ *
+ * Defaulting to anime when neither field says anything is the existing
+ * behaviour and stays: this client has nowhere to put anything else, so a wrong
+ * `anime` shows a row that explains itself, and a wrong `manga` hides a module
+ * silently.
+ */
+function mediaKindOf(manifest: SoraManifest, category?: string): 'anime' | 'manga' {
+	const said = [manifest.type, category].filter(
+		(one): one is string => typeof one === 'string' && one.length > 0
+	);
+	if (said.length === 0) return 'anime';
+	return said.some((one) => /anime/i.test(one)) ? 'anime' : 'manga';
+}
+
 function containerOf(streamType: unknown): 'hls' | 'mp4' {
 	return String(streamType ?? '').toLowerCase() === 'mp4' ? 'mp4' : 'hls';
 }
 
-function listingOf(manifest: SoraManifest, indexUrl: string): RepositoryPlugin {
+function listingOf(manifest: SoraManifest, indexUrl: string, category?: string): RepositoryPlugin {
 	const scriptUrl = new URL(String(manifest.scriptUrl), indexUrl).toString();
 	const name = String(manifest.sourceName);
 
@@ -131,7 +159,7 @@ function listingOf(manifest: SoraManifest, indexUrl: string): RepositoryPlugin {
 			// A module declares `type`, and `anime` is the only value this client
 			// has anywhere to put. Anything else is classified as what it says it
 			// is so the row can explain itself.
-			mediaKind: manifest.type === 'anime' || manifest.type === undefined ? 'anime' : 'manga',
+			mediaKind: mediaKindOf(manifest, category),
 			isNsfw: false,
 			// Everything `convert` needs, resolved now while the manifest is in
 			// hand. Conversion then depends on the listing alone.
@@ -181,6 +209,89 @@ export const soraAdapter: ForeignAdapter = {
 			updatedAt: '',
 			signingKey: null,
 			plugins,
+			format: 'sora'
+		});
+	},
+
+	/**
+	 * A library index that *points at* manifests rather than embedding them.
+	 *
+	 * The third shape this format is published in, and the one a repository of
+	 * many modules actually uses: `{ modules: [{ manifestUrl, category, … }] }`,
+	 * where each entry names a manifest one fetch away. `parseIndex` handles the
+	 * two shapes that need no fetching — a pasted manifest, and a list with the
+	 * manifests inline — and this handles the one that does, which is why the
+	 * core's optional `loadIndex` hook exists at all.
+	 *
+	 * Delegating to `parseIndex` first is deliberate: that is the cheap answer,
+	 * it is the shape a person gets when they paste a single module, and a
+	 * library index never parses as one, so trying costs a JSON parse and
+	 * settles the question.
+	 */
+	async loadIndex(body: string, indexUrl: string, getText: TextFetcher): Promise<RepositoryIndex> {
+		let decoded: unknown;
+		try {
+			decoded = JSON.parse(body);
+		} catch {
+			throw new ForeignFormatError('not JSON');
+		}
+
+		const modules =
+			typeof decoded === 'object' && decoded !== null && !Array.isArray(decoded)
+				? (decoded as Record<string, unknown>)['modules']
+				: undefined;
+		const entries = Array.isArray(modules)
+			? modules.filter(
+					(one): one is Record<string, unknown> =>
+						typeof one === 'object' && one !== null && typeof one['manifestUrl'] === 'string'
+				)
+			: [];
+		if (entries.length === 0) return soraAdapter.parseIndex(body, indexUrl);
+
+		// Fetched a few at a time. A library of seventy modules is seventy
+		// requests to one host, and asking for them all at once is the shape
+		// that gets a repository to rate-limit a viewer who only wanted a list.
+		const manifests: { manifest: SoraManifest; url: string; category?: string }[] = [];
+		const failed: string[] = [];
+		const queue = [...entries];
+		const workers = Array.from({ length: Math.min(6, queue.length) }, async () => {
+			for (let next = queue.shift(); next !== undefined; next = queue.shift()) {
+				const url = new URL(String(next['manifestUrl']), indexUrl).toString();
+				try {
+					const found = unwrap(JSON.parse(await getText(url)));
+					// A manifest that does not parse is skipped, not fatal. One
+					// broken entry in a library of seventy is the repository's
+					// problem with that module, and refusing the whole list for it
+					// would make every other module unreachable.
+					if (found === null) failed.push(url);
+					else
+						manifests.push({
+							manifest: found,
+							url,
+							category: typeof next['category'] === 'string' ? next['category'] : undefined
+						});
+				} catch {
+					failed.push(url);
+				}
+			}
+		});
+		await Promise.all(workers);
+
+		if (manifests.length === 0) {
+			throw new ForeignFormatError('no module in this library had a readable manifest');
+		}
+
+		return keepAnimeOnly({
+			name: 'Sora modules',
+			updatedAt:
+				typeof (decoded as Record<string, unknown>)['lastUpdated'] === 'string'
+					? String((decoded as Record<string, unknown>)['lastUpdated'])
+					: '',
+			signingKey: null,
+			// Resolved against the manifest's own URL, not the library's: a
+			// manifest names its script relative to itself, and they sit in
+			// different directories.
+			plugins: manifests.map((one) => listingOf(one.manifest, one.url, one.category)),
 			format: 'sora'
 		});
 	},

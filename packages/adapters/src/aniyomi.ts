@@ -53,7 +53,8 @@ import {
 import { obstacleSites } from '@plugin-bridge/core/obstacles';
 import { attributionFrom } from '@plugin-bridge/core/attribution';
 import { namesCookieJar, packageBundle } from '@plugin-bridge/core/package';
-import { aniyomiPreferences, settingKeyMap } from '@plugin-bridge/core/preferences';
+import { settingKeyMap } from '@plugin-bridge/core/preferences';
+import { aniyomiPreferences } from './aniyomi-preferences';
 import {
 	extensionDirectory,
 	fetchExtensionSource,

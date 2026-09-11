@@ -14,7 +14,8 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { aniyomiPreferences, mangayomiPreferences, settingKeyMap } from './preferences';
+import { aniyomiPreferences } from '@plugin-bridge/adapters/aniyomi-preferences';
+import { mangayomiPreferences, settingKeyMap } from './preferences';
 
 /* ── the JavaScript ecosystem ─────────────────────────────────────────────── */
 
