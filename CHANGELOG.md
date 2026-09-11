@@ -1,5 +1,17 @@
 # Changelog
 
+**Versioning policy.** Release versions represent meaningful changes to Plugin
+Bridge's capabilities, architecture, or guarantees — not compatibility
+percentages. Compatibility measurements are evidence reported _with_ a release,
+not targets that determine _when_ one is made.
+
+Written down because the pressure runs the other way. A version number that
+tracks a compatibility percentage turns every release into an argument for
+grinding out one more extension, and this project has twice measured that loop
+to exhaustion and deliberately closed it. `v0.1.x` is for fixes to what has
+already been promised; a minor bump whose case is "the number went up" is not a
+minor bump.
+
 ## v0.1.0 — the first public architecture milestone
 
 **This is not a stability release.** The API is not stable, the network
@@ -8,7 +20,20 @@ measurement of one day against live sources that change without notice. What
 this tag marks is that the central architectural claim is now backed by
 evidence rather than intention.
 
-### What is proven
+### What is proven — and what is not
+
+**v0.1.0 demonstrates that Plugin Bridge is not Aniyomi-specific. It does not
+demonstrate that the common abstraction is final.** Two independent ecosystems
+through a frozen core falsifies the first concern. A third genuinely different
+ecosystem is what would begin testing the second, and the remaining named
+formats are `browse-only` for reasons of their own — so a third test means
+writing a new adapter, not running an existing one.
+
+The order mattered and is worth repeating on any future ecosystem: the second
+was measured against a **frozen** core _before_ anything was allowed to
+generalise. Had the core been reshaped first, every number after it would have
+been unfalsifiable — an abstraction reshaped to fit and an abstraction that
+already fit look identical once the work is done.
 
 **Two unrelated plugin ecosystems reach the same ABI through the same host.**
 One is written in Kotlin for Android, one in JavaScript for iOS and macOS. The
