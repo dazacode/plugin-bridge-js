@@ -51,3 +51,25 @@ repository and scores each listing into one of six columns:
 The useful ratio is **`portable` over live-and-reachable**, not over the whole
 catalogue: a repository is full of sources that are dead, moved, or behind an
 anti-bot challenge, and none of those measure this software.
+
+## Two ecosystems have been measured this way
+
+The columns above were designed against a Kotlin ecosystem and then used
+unchanged on a JavaScript one, which is the only real test of whether they
+describe _translation_ or describe one translator.
+
+|                   | Kotlin ecosystem | JavaScript ecosystem   |
+| ----------------- | ---------------- | ---------------------- |
+| convert and load  | 60 of 254        | 57 of 57 anime modules |
+| verified playable | 6                | 16                     |
+
+`compatibility-sora.md` has the second pass in full. Two things from it belong
+here rather than there, because they apply to any future measurement:
+
+- **A resolved URL is a claim, not a stream.** Count what answers, not what a
+  plugin returned, and report both numbers. On that catalogue 39 claimed and 16
+  answered.
+- **Never infer the ABI from returned objects.** Two silent harness bugs in one
+  day each produced a number that looked like a finding — one reported every
+  known-good source as broken, the other counted three stringified objects as
+  streams.

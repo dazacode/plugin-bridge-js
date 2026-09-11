@@ -87,6 +87,24 @@ argument, every time. See [`docs/security.md`](docs/security.md) for why.
 
 ## Status
 
+**Two ecosystems, one core.** The engine has now been driven end to end against
+two unrelated plugin ecosystems — one written in Kotlin for Android, one in
+JavaScript for iOS and macOS — reaching the same ABI through the same host.
+
+|                                  | Kotlin ecosystem | JavaScript ecosystem       |
+| -------------------------------- | ---------------- | -------------------------- |
+| Listings measured                | 254              | 69                         |
+| Convert and load                 | 60               | **57 of 57 anime modules** |
+| **Verified playable end to end** | **6**            | **16**                     |
+
+The second was measured with `packages/core` and `packages/host` **frozen**:
+every change it needed was in its own adapter, and it never touches the Kotlin
+front-end. [`docs/compatibility-sora.md`](docs/compatibility-sora.md) is that
+pass in full — including the two harness bugs that produced publishable-looking
+numbers before anyone checked them.
+
+### The first ecosystem, in detail
+
 Honest numbers, from one 254-listing repository:
 
 |                                                            |        |
@@ -168,6 +186,7 @@ itself to protect a source had been converted into one that does not.
 
 - [`docs/architecture.md`](docs/architecture.md) — how a translation happens
 - [`docs/compatibility.md`](docs/compatibility.md) — what is supported, refused, and why
+- [`docs/compatibility-sora.md`](docs/compatibility-sora.md) — the second ecosystem, and what it proved
 - [`docs/phase-2-capability-map.md`](docs/phase-2-capability-map.md) — what the runtime should become, measured
 - [`docs/security.md`](docs/security.md) — the sandbox, the network relay, and rule 9
 - [`docs/adding-an-adapter.md`](docs/adding-an-adapter.md) — adding an ecosystem
