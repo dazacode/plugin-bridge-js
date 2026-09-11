@@ -1921,8 +1921,37 @@ var __k = {
   /** Wall-clock milliseconds, matching System.currentTimeMillis(). */
   now: function () { return Date.now(); },
 
-  /** Preserve the synchronous call shape; transport pacing is host-owned. */
-  rateLimit: function (value) { return value; },
+  /**
+   * '.rateLimit(permits, period)' on an okhttp client builder.
+   *
+   * The period arrives already resolved to **whole milliseconds** by the
+   * emitter, which is the only place that can do it: 'rateLimit(1, 2)' means
+   * two seconds under the TimeUnit overload and 'rateLimit(1, 2.seconds)' means
+   * the same thing written another way, and by the time the runtime sees either
+   * one the literal has been erased to a number. See 'rateLimitPeriod' there,
+   * and the refusal it raises for a period it cannot read exactly.
+   *
+   * This used to return its receiver and do nothing at all. An extension that
+   * politely throttles itself to one request a second was therefore converted
+   * into one that does not — no error, no refusal, and a viewer whose address
+   * gets blocked by a source that was never asked rudely before.
+   */
+  rateLimit: function (receiver, permits, periodMs) {
+    __declareRateLimit(null, permits, periodMs);
+    return receiver;
+  },
+
+  /**
+   * '.rateLimitHost(url, permits, period)' — the same, scoped to one host.
+   *
+   * The url is a runtime value: it is almost always built from 'baseUrl' or
+   * from a preference, so only the host can know what it resolved to. Both an
+   * okhttp 'HttpUrl' and a plain string arrive here and both carry a host.
+   */
+  rateLimitHost: function (receiver, url, permits, periodMs) {
+    __declareRateLimit(__hostOfUrl(url), permits, periodMs);
+    return receiver;
+  },
 
   /** Stop/cancel a host-owned handle when it exposes that operation. */
   stop: function (value) {
@@ -4982,6 +5011,134 @@ function AtomicReference(initial) { return __atomic(initial === undefined ? null
  * to exist and to be distinct from every other one, which an empty object is.
  */
 function Any() { return {}; }
+
+/* --- the declarative request policy --------------------------------------- */
+
+/*
+ * What an extension asked for about *how* its requests are made, and the one
+ * place it is allowed to ask.
+ *
+ * okhttp's answer to all of this is an Interceptor: an object in a chain that
+ * may delay, re-header or re-issue a call. There is no chain here — the host
+ * owns the transport — so the named, declarative helpers the ecosystem's shared
+ * libraries expose are folded into a policy the host enforces (ABI.md 2.1), and
+ * a hand-written 'addInterceptor { chain -> ... }' stays refused by name. That
+ * boundary is adr/0006 section 5's: recognising what an arbitrary lambda means
+ * is exactly the intent-recognition this converter will not do.
+ *
+ * These live in the stdlib section rather than beside the client, so a bundle
+ * that carries the stdlib alone still has a complete answer for them.
+ */
+var __rateLimitAll = null;
+var __rateLimitByHost = {};
+var __policyVersion = 0;
+/*
+ * Starts level with the version, so an extension that declares nothing never
+ * calls ctx.http.policy at all. A host that has not implemented the method is
+ * then unaffected by this section existing, which is the difference between a
+ * new capability and a new requirement.
+ */
+var __policySent = 0;
+
+/* The host of an okhttp HttpUrl, of a string, or of neither. */
+function __hostOfUrl(value) {
+  if (value !== null && value !== undefined && typeof value.host === 'string') {
+    return String(value.host).toLowerCase();
+  }
+  var text = String(value === null || value === undefined ? '' : value);
+  var found = /^[a-zA-Z][a-zA-Z0-9+.-]*:\\/\\/([^/?#]*)/.exec(text);
+  var authority = found === null ? text : found[1];
+  return authority.replace(/^[^@]*@/, '').replace(/:[0-9]+$/, '').toLowerCase();
+}
+
+/*
+ * Keeps the stricter of two rules for one scope.
+ *
+ * An extension may build two clients and limit each — the catalogue's own
+ * '.rateLimit(2)' for the API and '.rateLimit(1)' for the images. The policy is
+ * per plugin rather than per client, so the two have to be one rule, and the
+ * stricter one is the only merge that can never send a source more than it was
+ * told it could have. Equal rates are decided by the smaller burst.
+ */
+function __stricterRate(held, rule) {
+  if (held === null || held === undefined) return rule;
+  var a = held.permits / held.periodMs;
+  var b = rule.permits / rule.periodMs;
+  if (b < a) return rule;
+  if (b > a) return held;
+  return rule.permits < held.permits ? rule : held;
+}
+
+/* Folds one declaration in. 'host' is null for the plugin-wide rule. */
+function __declareRateLimit(host, permits, periodMs) {
+  var wanted = Number(permits);
+  var period = Number(periodMs);
+  if (!Number.isInteger(wanted) || wanted < 1 || !Number.isInteger(period) || period < 1) {
+    throw new Error(
+      'This converted extension asked for a rate limit of ' + permits + ' per ' + periodMs +
+      'ms, which is not a rate this host can honour exactly.'
+    );
+  }
+  var rule = { permits: wanted, periodMs: period };
+  if (host === null) {
+    __rateLimitAll = __stricterRate(__rateLimitAll, rule);
+  } else if (host.length === 0) {
+    throw new Error('This converted extension rate-limited a host whose url named none.');
+  } else {
+    __rateLimitByHost[host] = __stricterRate(__rateLimitByHost[host], rule);
+  }
+  __policyVersion += 1;
+}
+
+function __policyOf() {
+  var policy = {};
+  if (__rateLimitAll !== null) policy.rateLimit = __rateLimitAll;
+  var named = Object.keys(__rateLimitByHost);
+  if (named.length > 0) {
+    policy.rateLimitByHost = {};
+    for (var i = 0; i < named.length; i += 1) {
+      policy.rateLimitByHost[named[i]] = __rateLimitByHost[named[i]];
+    }
+  }
+  return policy;
+}
+
+/*
+ * Hands the host the policy, once per change, before the first request it
+ * governs.
+ *
+ * Declared lazily rather than eagerly because '.rateLimit(...)' is written in a
+ * property initialiser, and a property initialiser may run before any plugin
+ * call has begun — there is no ctx to declare against yet. The version counter
+ * is what stops a re-declaration of an unchanged policy, which the host treats
+ * as a new policy and would otherwise reset the window for.
+ *
+ * A host with no ctx.http.policy is told, loudly, rather than quietly given a
+ * plugin whose rate limit does not exist. That silent drop is the bug this
+ * whole path was built to remove.
+ */
+function __syncPolicy() {
+  if (__policySent === __policyVersion) return;
+  var ctx = __host();
+  if (ctx.http === null || ctx.http === undefined || typeof ctx.http.policy !== 'function') {
+    throw new Error(
+      'This converted extension declares a request rate limit, and this host has no ' +
+      'ctx.http.policy() to honour it with.'
+    );
+  }
+  __policySent = __policyVersion;
+  var declared = ctx.http.policy(__policyOf());
+  if (declared !== null && declared !== undefined && typeof declared.catch === 'function') {
+    declared.catch(function (error) {
+      // Re-armed, so the next request tries again rather than proceeding
+      // unpaced on the strength of one refusal.
+      __policySent = __policyVersion - 1;
+      if (ctx.log !== null && ctx.log !== undefined && typeof ctx.log.warn === 'function') {
+        ctx.log.warn('the host refused this extension\\'s request policy: ' + __str(error && error.message ? error.message : error));
+      }
+    });
+  }
+}
 `;
 
 /**
@@ -5278,6 +5435,11 @@ function __responseOf(raw, text, request) {
 }
 
 async function __execute(request, follow) {
+  // Before the request rather than at declaration time: '.rateLimit(...)' is
+  // written in a property initialiser, which may run outside a plugin call
+  // where there is no ctx to declare against. Cheap — a version comparison —
+  // and it is the one place every converted request passes through.
+  __syncPolicy();
   var headers = typeof request.headers.toMap === 'function'
     ? request.headers.toMap()
     : request.headers;
@@ -5320,7 +5482,9 @@ function __noInterceptor(name) {
     throw new Error(
       'This converted extension installs an okhttp ' + name + '. Yorozo routes every request ' +
       'through the host, which has no interceptor chain, so the extension can be converted but ' +
-      'not run as written.'
+      'not run as written. The named declarative helpers do translate — .rateLimit() and ' +
+      '.rateLimitHost() become a host-enforced request policy — but an interceptor body is ' +
+      'arbitrary code and what it means cannot be read out of it.'
     );
   };
 }

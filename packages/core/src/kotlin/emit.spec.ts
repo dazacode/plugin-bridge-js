@@ -363,8 +363,24 @@ const helpers: Record<string, (...args: never[]) => unknown> = {
 	async: (fn: () => Any) => Promise.resolve().then(fn),
 	asJsoup: (response: { html: string }) => response.html,
 	httpUrl: (text: string) => text,
-	els: (value: Any) => value
+	els: (value: Any) => value,
+
+	// The two declarative rate limiters, recording what was declared. The
+	// *period in milliseconds* is the whole point of translating these — see
+	// `rateLimitCall` — so it is read back as a value here rather than matched
+	// in emitted text.
+	rateLimit: (receiver: Any, permits: Any, periodMs: Any) => {
+		declared.push({ host: null, permits: permits as number, periodMs: periodMs as number });
+		return receiver;
+	},
+	rateLimitHost: (receiver: Any, url: Any, permits: Any, periodMs: Any) => {
+		declared.push({ host: String(url), permits: permits as number, periodMs: periodMs as number });
+		return receiver;
+	}
 };
+
+/** What the fixtures above declared, most recent last. */
+const declared: { host: string | null; permits: number; periodMs: number }[] = [];
 
 /** Throws on any helper the emitter reaches for that nobody has written. */
 const runtime = new Proxy(helpers, {
@@ -3183,6 +3199,104 @@ describe('the receiver a member is actually called on', () => {
 	});
 });
 
+/* ── the declarative request policy ───────────────────────────────── */
+
+/**
+ * The rate limit an extension declared, as the runtime will receive it.
+ *
+ * The period is the interesting number and it is resolved **here**, in the
+ * emitter, because this is the last place that can be: `300.milliseconds` is
+ * erased to the bare `300` before any helper sees it, so `rateLimit(1, 2)` and
+ * `rateLimit(1, 2.seconds)` would otherwise reach `__k` as identical arguments
+ * meaning 2000ms and 2ms. Every row below is a spelling a shared library in
+ * this ecosystem actually offers.
+ */
+describe('declarative rate limits, translated onto the request policy', () => {
+	const rateLimited = (...lines: string[]) => {
+		declared.length = 0;
+		const demo = instantiate(inClass(...lines), {
+			network: { client: { newBuilder: () => ({ build: () => ({}) }) } }
+		});
+		// A `val` is emitted as a lazy getter, so reading it is what runs the
+		// initialiser the declaration is written in.
+		void demo.client;
+		return declared;
+	};
+
+	it.each([
+		['the bare form, whose period is one second', 'rateLimit(3)', { permits: 3, periodMs: 1000 }],
+		['a period in the default unit', 'rateLimit(1, 2)', { permits: 1, periodMs: 2000 }],
+		['a Long period', 'rateLimit(1, 2L)', { permits: 1, periodMs: 2000 }],
+		[
+			'an explicit TimeUnit',
+			'rateLimit(1, 500, TimeUnit.MILLISECONDS)',
+			{ permits: 1, periodMs: 500 }
+		],
+		[
+			'a TimeUnit in minutes',
+			'rateLimit(4, 1, TimeUnit.MINUTES)',
+			{ permits: 4, periodMs: 60_000 }
+		],
+		['a kotlin.time Duration', 'rateLimit(1, 2.seconds)', { permits: 1, periodMs: 2000 }],
+		['a sub-second Duration', 'rateLimit(1, 250.milliseconds)', { permits: 1, periodMs: 250 }],
+		[
+			'the interceptor object the same library ships',
+			'addInterceptor(RateLimitInterceptor(2, 3, TimeUnit.SECONDS))',
+			{ permits: 2, periodMs: 3000 }
+		]
+	])('translates %s', (_label, call, expected) => {
+		const source = `    override val client = network.client.newBuilder().${call}.build()`;
+		expect(rateLimited(source)).toEqual([{ host: null, ...expected }]);
+	});
+
+	it('carries the host through for a per-host limit', () => {
+		expect(
+			rateLimited(
+				'    override val client = network.client.newBuilder()',
+				'        .rateLimitHost("https://api.example.invalid".toHttpUrl(), 2, 5, TimeUnit.SECONDS)',
+				'        .build()'
+			)
+		).toEqual([{ host: 'https://api.example.invalid', permits: 2, periodMs: 5000 }]);
+	});
+
+	it("takes a host limit from the shared library's interceptor object too", () => {
+		expect(
+			rateLimited(
+				'    override val client = network.client.newBuilder()',
+				'        .addInterceptor(SpecificHostRateLimitInterceptor("https://api.example.invalid".toHttpUrl(), 1))',
+				'        .build()'
+			)
+		).toEqual([{ host: 'https://api.example.invalid', permits: 1, periodMs: 1000 }]);
+	});
+
+	it('declares both when an extension paces itself twice', () => {
+		expect(
+			rateLimited(
+				'    override val client = network.client.newBuilder()',
+				'        .rateLimit(5)',
+				'        .rateLimitHost("https://api.example.invalid".toHttpUrl(), 1)',
+				'        .build()'
+			)
+		).toEqual([
+			{ host: null, permits: 5, periodMs: 1000 },
+			{ host: 'https://api.example.invalid', permits: 1, periodMs: 1000 }
+		]);
+	});
+
+	it('leaves a rateLimit the extension declared itself alone', () => {
+		// A name this ecosystem reuses. An extension declaring its own
+		// `fun String.rateLimit()` means that one, and translating it as the okhttp
+		// helper would hand a request policy a string.
+		const demo = instantiate(
+			inClass(
+				'    fun paced(text: String): String = text.rateLimit()',
+				'    private fun String.rateLimit(): String = "[" + this + "]"'
+			)
+		);
+		expect(demo.paced('x')).toBe('[x]');
+	});
+});
+
 /* ── refusals ─────────────────────────────────────────────────────────────── */
 
 describe('refusing by name', () => {
@@ -3205,9 +3319,55 @@ describe('refusing by name', () => {
 			inClass('    fun unpack(s: String) = QuickJs.create().evaluate(s)'),
 			'an embedded JavaScript engine'
 		],
-		['a coroutine launch', inClass('    fun go() = launch { load() }'), 'launch {}']
+		['a coroutine launch', inClass('    fun go() = launch { load() }'), 'launch {}'],
+		[
+			// The construct this whole request-policy path is built around, and
+			// the one it does not touch. `adr/0006-local-http-server.md` §5:
+			// recognising what an arbitrary lambda *means* is the intent
+			// recognition this converter refuses, and the measurement is that
+			// accepting the body unblocks nothing — an extension whose
+			// interceptor does anything worth recognising also reaches for
+			// `.proceed()` and a cookie jar.
+			'a hand-written interceptor lambda',
+			inClass(
+				'    val tapped = client.newBuilder()',
+				'        .addInterceptor { chain -> chain.proceed(chain.request()) }',
+				'        .build()'
+			),
+			'`.addInterceptor()`'
+		],
+		[
+			'an interceptor object nobody has heard of',
+			inClass(
+				'    val tapped = client.newBuilder().addInterceptor(SigningInterceptor(key)).build()'
+			),
+			'`.addInterceptor()`'
+		],
+		[
+			'a rate limit whose period is not a literal',
+			inClass('    val paced = client.newBuilder().rateLimit(1, everySeconds).build()'),
+			'`.rateLimit()` with a period that is not a literal'
+		],
+		[
+			'a rate limit shorter than the host can wait out',
+			inClass('    val paced = client.newBuilder().rateLimit(1, 5, TimeUnit.NANOSECONDS).build()'),
+			'`.rateLimit()` over a period shorter than a millisecond'
+		]
 	])('refuses %s and names it', (_label, source, expected) => {
 		expect(refusalNames(source)).toContain(expected);
+	});
+
+	it('says the construct by name when an interceptor lambda is refused', () => {
+		const message = translate(
+			inClass(
+				'    val tapped = client.newBuilder().addInterceptor { it.proceed(it.request()) }.build()'
+			)
+		).refusals[0].obstacles[0].kind;
+
+		// Worth asserting separately from the table: the sentence a reader gets
+		// has to name `addInterceptor`, because "unsupported expression" tells
+		// whoever picks this up next exactly nothing about what to do.
+		expect(message).toContain('addInterceptor');
 	});
 
 	it('honours a written `super.` call, which is not the same as falling back', () => {

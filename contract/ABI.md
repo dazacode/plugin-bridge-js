@@ -83,6 +83,88 @@ timers beyond `setTimeout`, no DOM and no filesystem. The sandbox removes them;
 before a packet leaves. That check is the host's, not the SDK's — a plugin
 cannot opt out of it by not calling the SDK.
 
+### 2.1 `ctx.http.policy()` — the declarative request policy
+
+```ts
+interface HttpClient {
+	send(url: string, request?: HttpRequest): Promise<HttpResponse>;
+	text(url: string, request?: HttpRequest): Promise<string>;
+	json(url: string, request?: HttpRequest): Promise<unknown>;
+	policy(policy: RequestPolicy): Promise<void>; // ← new at API level 1
+}
+
+interface RequestPolicy {
+	retry?: {
+		attempts: number; // total attempts including the first, 1–5
+		onStatus: number[]; // statuses worth asking again, 100–599
+		backoffMs: number; // wait before the second attempt, 0–60000
+		multiplier?: number; // each further wait times this, 1–10; default 1
+	};
+	rateLimit?: RateLimitRule; // every request this plugin makes
+	rateLimitByHost?: Record<string, RateLimitRule>; // and, in addition, per host
+	headersByHost?: Record<string, Record<string, string>>;
+}
+
+interface RateLimitRule {
+	permits: number; // 1–1000
+	periodMs: number; // 1–600000
+}
+```
+
+**A plugin declares; the host enforces.** There is no interceptor, no chain and
+no callback in the request path — for the reason §4.4 gives for the byte path,
+and for a second one: pacing that lived inside the isolate would be pacing the
+isolate could decline to run. `policy()` replaces the whole policy, and an
+absent field means the host's default, which is no retry, no pacing, and no
+header the request did not carry.
+
+Normative, and an executor that breaks any of these is not implementing this
+document:
+
+1. **Ordering.** A policy declared before a request is in force for it. A host
+   whose transport is a message must therefore preserve order between the
+   declaration and the requests after it; the plugin need not await `policy()`,
+   which is what lets a converted extension declare one from a property
+   initialiser.
+2. **Rate limiting is a sliding window.** At most `permits` requests may be
+   _issued_ in any `periodMs`; the host holds the next one until the oldest of
+   the last `permits` has fallen out of the window. A fixed window is wrong and
+   is the likely implementation bug: it admits `2 × permits` across a boundary,
+   which is exactly the burst the source asked not to receive.
+3. **Both rules apply.** Where `rateLimit` and a matching `rateLimitByHost`
+   entry both exist, a request to that host spends a permit from each. Taking
+   only the more specific would let that host through at the _looser_ of the two
+   rates, and this is the direction in which being wrong costs a viewer their
+   access.
+4. **A permit is spent by issuing, not by returning**, and a retry spends one —
+   a retry is a request the source sees.
+5. **Only a status is retried.** A request that failed to produce one at all is
+   not re-issued, and neither is a status the policy did not name.
+6. **`Retry-After` wins over `backoffMs`** where the response carried one that
+   parses as seconds or as an HTTP date; a date in the past means "now". A wait
+   longer than 60s abandons the retry and returns the response, because a plugin
+   call does not live that long (`HOST.md` §3.1) and the alternative is spending
+   the deadline to fail anyway.
+7. **The request's own headers win** over `headersByHost`. The policy is a
+   default declared once; a header written at the call site is the more specific
+   of the two statements.
+8. **A malformed policy is refused, naming the field**, and the previous policy
+   stays in force. Ranges are the ones in the interface above; anything outside
+   one is refused rather than clamped.
+
+`headersByHost` is §4.1's field and is matched the same way — the patterns of
+`manifest.network.hosts`, most specific first, with an exact host beating a
+wildcard and a longer wildcard suffix beating a shorter one. It is the same
+concept one layer up: §4.1 is the headers a _stream_ needs across the hosts it
+spans, and this is the headers a _scrape_ needs across the hosts it spans.
+
+**What this does not offer, and will not.** There is no hook that runs per
+request. `docs/adr/0006-local-http-server.md` §5 is the standing rule and it
+binds here: the foreign ecosystem expresses all of this by installing an okhttp
+`Interceptor`, and an interceptor body is arbitrary code whose meaning cannot be
+read out of it. The named declarative helpers translate onto this policy
+(`FOREIGN.md`); a hand-written interceptor stays refused by name.
+
 ### `follow: false` — reading a redirect instead of taking it
 
 A request may carry `follow: false`, and then a 3xx is returned as the answer:

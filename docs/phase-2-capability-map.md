@@ -54,7 +54,7 @@ and only that capability — is granted.
 | --------------------------------------------- | --------------------------------------------------------------- | -------- | -------------------- | -------------------------------------------------------------------------------- | -------------------------------------------- | --------------- | ------------------------------------------------------ | ---------------- |
 | `javax.crypto`, `SecureRandom`, `.initSign()` | AES decrypt; random bytes; a P-256 keypair; sign a nonce        | 76       | **+4**               | `ctx.crypto` over **WebCrypto**                                                  | **Yes** — `subtle` is the same primitive set | Yes, everywhere | **Low** — pure computation, no new I/O or reachability | **Build first**  |
 | Cookie / session state                        | Carry a `Set-Cookie` value to the next request on the same host | 22       | **+3**               | The constrained per-plugin, per-host, in-memory jar `adr/0005` already specifies | Yes, host-side                               | Yes             | **Medium** — real, and already analysed                | **Build second** |
-| `.addInterceptor()`                           | Retry, re-sign, rate-limit, or re-header a request              | 83       | **+1**               | Declarative request policy on `ctx.http` — retry, rate limit, per-host headers   | Yes                                          | Yes             | Low–medium                                             | Design, defer    |
+| `.addInterceptor()`                           | Retry, re-sign, rate-limit, or re-header a request              | 83       | **+1**               | Declarative request policy on `ctx.http` — retry, rate limit, per-host headers   | Yes                                          | Yes             | Low–medium                                             | **Built**        |
 | Local HTTP server                             | Carry headers to every HLS segment; decrypt AES-128             | 13       | **+1**               | Already exists — `StreamPipeline` (`adr/0006`)                                   | n/a                                          | n/a             | None                                                   | **Closed**       |
 | Background threads, `Handler`                 | Run work later; memoise across calls                            | 76       | **+1**               | Nothing new. One thread is a correct translation                                 | Yes                                          | Yes             | None                                                   | Reject           |
 | Embedded JS engine                            | Evaluate a packed or obfuscated payload                         | 69       | **+1**               | Narrow, named unpackers only — never arbitrary evaluation                        | Partial                                      | Partial         | **High** if general                                    | Keep refused     |
@@ -144,6 +144,25 @@ ecosystem worth translating has extensions that decrypt something.
    portable answer to `.addInterceptor()`. Only +1 by itself, but it is the
    honest shape for a capability 83 listings reach for, and unlike the others it
    removes a _class_ of refusal rather than a name.
+
+   **Built** — `ABI.md` §2.1, `FOREIGN.md` §4.1.8. Two things about it are worth
+   recording here, because neither was what the row above predicted.
+
+   The first is that the **+1 was not the reason to do it.** The reason was a
+   silent wrong answer already shipping: `__k.rateLimit` accepted a limit,
+   returned its receiver and told nobody, so an extension that politely throttled
+   itself to one request a second was converted into one that does not. That is
+   not a missing feature, it is the failure mode this project's standing rule
+   exists to prevent, and it was sitting inside a helper the tables listed as
+   supported.
+
+   The second is that the **scope held.** What translates is the named
+   declarative helpers — `.rateLimit()`, `.rateLimitHost()`, and the two
+   interceptor objects the same library ships — whose meaning is their signature.
+   A hand-written `addInterceptor { chain -> … }` is still refused by name, on
+   `adr/0006` §5, and the recorded measurement that accepting its body unblocks
+   zero listings is unchanged and was not re-litigated.
+
 4. **Nothing else.** Threads, reflection and the JVM class object are correctly
    refused. A general embedded JavaScript engine and a WebView stay outside the
    portable runtime: together they are worth four listings, and they are the two

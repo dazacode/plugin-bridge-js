@@ -25,7 +25,7 @@
  * `example.invalid`.
  */
 
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 
 import {
 	requiredRuntimeNames,
@@ -61,8 +61,20 @@ function context(pages: Record<string, Page> = {}, settings: Record<string, stri
 	const sent: Sent[] = [];
 	const requests: Record<string, unknown>[] = [];
 	const logged: string[] = [];
+	const policies: Record<string, unknown>[] = [];
 	const ctx = {
 		http: {
+			/**
+			 * `ABI.md` §2.1's declaration, recorded rather than enforced.
+			 *
+			 * Enforcement is the host's (`host/net/request-policy.ts` is where it
+			 * is tested against a clock). What this side owes is that a limit an
+			 * extension declared *arrives*, which is the half that used to be
+			 * missing: `__k.rateLimit` returned its receiver and told nobody.
+			 */
+			async policy(declared: Record<string, unknown>) {
+				policies.push(declared);
+			},
 			async send(
 				url: string,
 				request: {
@@ -114,7 +126,7 @@ function context(pages: Record<string, Page> = {}, settings: Record<string, stri
 			warn: (message: string) => logged.push(message)
 		}
 	};
-	return { ctx, sent, requests, logged };
+	return { ctx, sent, requests, logged, policies };
 }
 
 /* ── the runtime, as a module ─────────────────────────────────────────────── */
@@ -128,6 +140,8 @@ interface Loaded {
 	enter(ctx: unknown): unknown;
 	hasJsoup: boolean;
 }
+
+let loads = 0;
 
 async function load(sections?: readonly KotlinRuntimeSection[]): Promise<Loaded> {
 	const full = sections === undefined || sections.length === KOTLIN_RUNTIME_SECTIONS.length;
@@ -145,7 +159,13 @@ async function load(sections?: readonly KotlinRuntimeSection[]): Promise<Loaded>
 	// The real Aniyomi bundle places the generated generic runtime before the
 	// Kotlin runtime and exposes this bridge as `__rt`. Keep the unit fixture
 	// small while still exercising the dependency explicitly.
-	const source = `${JS_RUNTIME}\nvar __rt = { unpackDeanEdwards: function (value) { return value === 'packed' ? 'decoded' : null; } };\n${kotlinRuntime(sections)}\n${probe}`;
+	// A serial number, because a `data:` URL is cached by its own text and two
+	// identical loads would hand back one module. Almost every test is happy
+	// with that — evaluating 44 KB of inlined parser per test is not free — but
+	// the runtime holds module state (the declared request policy), and a suite
+	// that shared it would have one test asserting another's declaration.
+	loads += 1;
+	const source = `${JS_RUNTIME}\nvar __rt = { unpackDeanEdwards: function (value) { return value === 'packed' ? 'decoded' : null; } };\n${kotlinRuntime(sections)}\n${probe}\n/* load ${loads} */`;
 	const url = `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`;
 	const module = (await import(/* @vite-ignore */ url)) as {
 		k: any;
@@ -1473,9 +1493,14 @@ describe('generic runtime helpers', () => {
 		expect(k.now()).toBeGreaterThan(0);
 	});
 
-	it('preserves rate-limit call shape and stops cancellable handles', () => {
+	it('returns the builder a rate limit was declared on, and stops handles', () => {
+		// The *shape* is what this asserts: `.rateLimit(n)` is written mid-chain
+		// and its value is the builder `.build()` is called on next. What the
+		// call now also does — declare a policy the host enforces — is asserted
+		// against a host in 'the declarative request policy' below, because this
+		// helper has no way to observe it.
 		const handle = { cancel: () => 'cancelled' };
-		expect(k.rateLimit(handle, 250)).toBe(handle);
+		expect(k.rateLimit(handle, 1, 250)).toBe(handle);
 		expect(k.stop(handle)).toBe('cancelled');
 		expect(k.stop({})).toBeUndefined();
 	});
@@ -1619,6 +1644,116 @@ describe('okhttp, over the host', () => {
 		await expect(
 			runtime.client.newCall(runtime.globals.GET('https://example.invalid/')).execute()
 		).rejects.toThrow();
+	});
+});
+
+/* ── the declarative request policy ───────────────────────────────────────── */
+
+/**
+ * The seam between what an extension declared and what the host is told.
+ *
+ * Enforcement is tested against a clock in `host/net/request-policy.spec.ts`.
+ * What is asserted here is the half that used to be missing entirely: that a
+ * limit reaches the host at all, before the request it governs, and only when
+ * one was actually declared.
+ *
+ * A fresh runtime per test, unlike every other block in this file. The policy
+ * an extension declares is module state, because a bundle is one module and a
+ * plugin is one isolate — so two tests sharing a runtime would share a limit,
+ * and the second would be asserting the first one's declaration.
+ */
+describe('the declarative request policy', () => {
+	let rt: Loaded;
+
+	beforeEach(async () => {
+		rt = await load();
+	});
+
+	const paced = async (declare: () => void) => {
+		const { ctx, policies, sent } = context({ 'https://api.example.invalid/': { body: 'ok' } });
+		rt.enter(ctx);
+		declare();
+		await rt.client.newCall(rt.globals.GET('https://api.example.invalid/')).execute();
+		return { policies, sent };
+	};
+
+	it('hands the host a rate limit before the first request it governs', async () => {
+		const { policies, sent } = await paced(() => {
+			rt.k.rateLimit(rt.client.newBuilder(), 3, 1000);
+		});
+
+		expect(policies).toEqual([{ rateLimit: { permits: 3, periodMs: 1000 } }]);
+		expect(sent).toHaveLength(1);
+	});
+
+	it('scopes a per-host limit by the host of whatever url it was given', async () => {
+		// The url is a runtime value — built from `baseUrl` or read out of a
+		// preference — so only this side can know what it resolved to. An okhttp
+		// HttpUrl and a plain string both arrive here and both carry a host.
+		const { policies } = await paced(() => {
+			rt.k.rateLimitHost(rt.client.newBuilder(), 'https://API.example.invalid/search?q=1', 1, 2000);
+		});
+
+		expect(policies).toEqual([
+			{ rateLimitByHost: { 'api.example.invalid': { permits: 1, periodMs: 2000 } } }
+		]);
+	});
+
+	it('keeps the stricter of two limits an extension declared', async () => {
+		// An extension may build two clients and pace each. The policy is per
+		// plugin, so the two have to become one rule — and the stricter one is
+		// the only merge that can never send a source more than it allowed.
+		const { policies } = await paced(() => {
+			rt.k.rateLimit(rt.client.newBuilder(), 5, 1000);
+			rt.k.rateLimit(rt.client.newBuilder(), 1, 1000);
+		});
+
+		expect(policies).toEqual([{ rateLimit: { permits: 1, periodMs: 1000 } }]);
+	});
+
+	it('declares once and not again, so the host does not reset its window', async () => {
+		const { ctx, policies } = context({ 'https://api.example.invalid/': { body: 'ok' } });
+		rt.enter(ctx);
+		rt.k.rateLimit(rt.client.newBuilder(), 2, 1000);
+
+		for (let n = 0; n < 3; n += 1) {
+			await rt.client.newCall(rt.globals.GET('https://api.example.invalid/')).execute();
+		}
+
+		expect(policies).toHaveLength(1);
+	});
+
+	it('says nothing to the host when no limit was declared', async () => {
+		// A runtime that declared an empty policy on every request would make
+		// `ctx.http.policy` a requirement on hosts rather than a capability.
+		const { ctx, policies } = context({ 'https://api.example.invalid/': { body: 'ok' } });
+		rt.enter(ctx);
+		await rt.client.newCall(rt.globals.GET('https://api.example.invalid/')).execute();
+
+		expect(policies).toEqual([]);
+	});
+
+	it('tells a host with no policy support rather than pacing nothing', async () => {
+		// The bug this whole path exists to remove is a declared limit that is
+		// quietly not a limit. A host that cannot honour one has to say so.
+		const { ctx } = context({ 'https://api.example.invalid/': { body: 'ok' } });
+		delete (ctx.http as unknown as Record<string, unknown>).policy;
+		rt.enter(ctx);
+		rt.k.rateLimit(rt.client.newBuilder(), 1, 1000);
+
+		await expect(
+			rt.client.newCall(rt.globals.GET('https://api.example.invalid/')).execute()
+		).rejects.toThrow(/ctx\.http\.policy/);
+	});
+
+	it('refuses a rate it could not honour exactly rather than rounding it', () => {
+		// The emitter resolves a period to whole milliseconds and refuses what it
+		// cannot read; this is the same rule one layer down, for a runtime handed
+		// something the emitter would never have produced.
+		expect(() => rt.k.rateLimit({}, 1, 0)).toThrow(/not a rate/);
+		expect(() => rt.k.rateLimit({}, 0, 1000)).toThrow(/not a rate/);
+		expect(() => rt.k.rateLimit({}, 1, 2.5)).toThrow(/not a rate/);
+		expect(() => rt.k.rateLimitHost({}, '', 1, 1000)).toThrow(/named none/);
 	});
 });
 

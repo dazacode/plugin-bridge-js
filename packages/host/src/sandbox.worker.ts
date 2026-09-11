@@ -53,7 +53,7 @@ interface HostReply {
 interface OutboundCall {
 	readonly outbound: true;
 	readonly id: number;
-	readonly method: 'http' | 'storageGet' | 'storageSet' | 'storageDelete' | 'log';
+	readonly method: 'http' | 'httpPolicy' | 'storageGet' | 'storageSet' | 'storageDelete' | 'log';
 	readonly args: unknown[];
 }
 
@@ -290,6 +290,28 @@ function makeContext() {
 				throw new Error(`${response.status} from ${url}`);
 			}
 			return response.json();
+		},
+		/**
+		 * Declares how this plugin's requests should be made (`ABI.md` §2.1).
+		 *
+		 * Nothing is enforced in here, and that is the design: a limiter inside
+		 * the isolate is one the isolate can decline to run. The declaration is
+		 * posted to the host, which holds the windows and does the waiting.
+		 *
+		 * Ordering needs no ceremony. `postMessage` delivers in order, so a
+		 * policy declared before a request is in force for it whether or not the
+		 * plugin awaited this — which is what lets a converted extension declare
+		 * one from a property initialiser, where there is nothing to await with.
+		 *
+		 * The shape is checked host-side, where the sleeping happens, and the
+		 * error names the field. The only check here is the one whose answer
+		 * would otherwise be "the host rejected `undefined`".
+		 */
+		policy(policy: unknown): Promise<void> {
+			if (policy === null || typeof policy !== 'object' || Array.isArray(policy)) {
+				throw new Error('ctx.http.policy() takes a request policy object.');
+			}
+			return callHost('httpPolicy', policy) as Promise<void>;
 		}
 	};
 

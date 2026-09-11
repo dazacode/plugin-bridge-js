@@ -92,6 +92,7 @@ export const RUNTIME_HELPERS = [
 	'trimMargin',
 	'encodeToString',
 	'rateLimit',
+	'rateLimitHost',
 	'stop',
 
 	/* Thrown by an extension that declares a member it does not implement.

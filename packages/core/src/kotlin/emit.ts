@@ -372,6 +372,27 @@ const DURATION_UNITS: ReadonlyMap<string, number> = new Map([
 ]);
 
 /**
+ * `java.util.concurrent.TimeUnit`, as milliseconds.
+ *
+ * The same table one enum over, and it exists for one caller: `rateLimitPeriod`
+ * needs the unit a rate limit was written in, and it needs it *here* — by the
+ * time the runtime sees the call the enum is an object with a `toMillis`, and
+ * asking that object at run time would be asking after the number it was meant
+ * to scale has already been taken for something else. The sub-millisecond two
+ * are listed so that a period written in them is refused by its period rather
+ * than by its unit being unrecognised.
+ */
+const TIME_UNITS: ReadonlyMap<string, number> = new Map([
+	['NANOSECONDS', 1 / 1_000_000],
+	['MICROSECONDS', 1 / 1000],
+	['MILLISECONDS', 1],
+	['SECONDS', 1000],
+	['MINUTES', 60_000],
+	['HOURS', 3_600_000],
+	['DAYS', 86_400_000]
+]);
+
+/**
  * `AnimeFilter` members an extension subclasses, spelled as the runtime spells
  * them.
  *
@@ -4407,6 +4428,25 @@ class Emitter {
 		// `this.any { … }` from inside it: same name, and only the lambda says
 		// which. A declaration cannot shadow a helper at a call site carrying one.
 		const shadowed = lambda === null && this.extensionFunctions.has(name);
+		// The two rate-limit helpers take their period as a *unit plus a number*,
+		// and the emitter is the only half of this converter that can still see
+		// which unit was written. Handled before the generic path because that
+		// path erases the distinction it needs. See `rateLimitCall`.
+		if ((name === 'rateLimit' || name === 'rateLimitHost') && lambda === null && !shadowed) {
+			return this.rateLimitCall(suffix, receiver, name, args);
+		}
+		// The same two limits, installed as the shared libraries' own interceptor
+		// objects rather than through the extension function. Only those two: a
+		// null answer falls through to the passthrough refusal, which is where
+		// every other interceptor — including an arbitrary lambda — belongs.
+		if (
+			(name === 'addInterceptor' || name === 'addNetworkInterceptor') &&
+			lambda === null &&
+			args.length === 1
+		) {
+			const declarative = this.declarativeInterceptor(suffix, receiver, args[0]);
+			if (declarative !== null) return declarative;
+		}
 		const helper = indexed
 			? 'getAt'
 			: scopeFunction && !shadowed
@@ -4940,6 +4980,137 @@ class Emitter {
 			fields.push(`${key}: ${this.expr(this.argumentValue(arg))}`);
 		}
 		return [...positional, `{ ${fields.join(', ')} }`];
+	}
+
+	/**
+	 * `.rateLimit(…)` and `.rateLimitHost(…)`, the two declarative helpers the
+	 * ecosystem's shared libraries offer in place of writing an interceptor.
+	 *
+	 * Emitted with the period already resolved to **whole milliseconds**,
+	 * because this is the last place that can do it. Both signatures exist in
+	 * the wild —
+	 *
+	 *     rateLimit(permits: Int, period: Long = 1, unit: TimeUnit = SECONDS)
+	 *     rateLimit(permits: Int, period: Duration = 1.seconds)
+	 *
+	 * — and `300.milliseconds` is erased to the number `300` before any runtime
+	 * helper sees it (`DURATION_UNITS`). So `rateLimit(1, 2)` and
+	 * `rateLimit(1, 2.seconds)` arrive at `__k` as the same two numbers meaning
+	 * 2000ms and 2ms respectively, and the runtime has no way back. Resolving it
+	 * here is not an optimisation; it is the difference between honouring a
+	 * source's limit and exceeding it by a thousand.
+	 *
+	 * A period this cannot read exactly is **refused**. The wrong answer is a
+	 * converted extension that asks a source for more than it promised, which
+	 * costs a viewer their access rather than throwing anything anybody sees.
+	 */
+	private rateLimitCall(suffix: KNode, receiver: KNode, name: string, args: KNode[]): string {
+		if (args.some((arg) => arg.allChildren.some((child) => child.type === '='))) {
+			// Reordering named arguments needs the callee's signature, which is in
+			// a library this converter does not read. `plainArguments` guesses in
+			// that position and is right often enough; here a guess is a wrong
+			// rate rather than a wrong value somebody notices.
+			this.refuse(suffix, `\`.${name}()\` with named arguments`);
+		}
+		// `rateLimitHost` takes the url first; everything after is the same.
+		const first = name === 'rateLimitHost' ? 1 : 0;
+		if (args.length < first + 1 || args.length > first + 3) {
+			this.refuse(suffix, `\`.${name}()\` with ${args.length} arguments`);
+		}
+		const periodMs = this.rateLimitPeriod(suffix, name, args[first + 1], args[first + 2]);
+		const parts = [this.expr(receiver)];
+		if (first === 1) parts.push(...this.argumentExpressions(args[0]));
+		parts.push(...this.argumentExpressions(args[first]));
+		parts.push(String(periodMs));
+		return `${this.helper(name)}(${parts.join(', ')})`;
+	}
+
+	/** The period of a rate limit, in milliseconds, or a refusal. */
+	private rateLimitPeriod(
+		suffix: KNode,
+		name: string,
+		period: KNode | undefined,
+		unit: KNode | undefined
+	): number {
+		// One second, which is the default in both signatures above. The single
+		// commonest spelling in the catalogue is the bare `.rateLimit(3)`.
+		if (period === undefined) return 1000;
+
+		const written = this.argumentValue(period).text.replace(/\s+/g, '');
+		const duration = /^([0-9][0-9_]*)\.([A-Za-z]+)$/.exec(written);
+		if (duration !== null) {
+			if (unit !== undefined) {
+				this.refuse(suffix, `\`.${name}()\` with both a \`Duration\` and a \`TimeUnit\``);
+			}
+			const factor = DURATION_UNITS.get(duration[2]);
+			if (factor === undefined) this.refuse(suffix, `\`.${name}()\` in \`${duration[2]}\``);
+			return this.wholeMillis(suffix, name, Number(duration[1].replace(/_/g, '')) * factor);
+		}
+
+		const plain = /^([0-9][0-9_]*)[Ll]?$/.exec(written);
+		if (plain === null) this.refuse(suffix, `\`.${name}()\` with a period that is not a literal`);
+		const count = Number(plain[1].replace(/_/g, ''));
+		// No unit written means the `TimeUnit` overload's default, which is
+		// seconds. The `Duration` overload cannot be reached by a bare integer —
+		// Kotlin would not compile it — so this is not a guess between the two.
+		if (unit === undefined) return this.wholeMillis(suffix, name, count * 1000);
+
+		const named = /^TimeUnit\.([A-Za-z]+)$/.exec(this.argumentValue(unit).text.replace(/\s+/g, ''));
+		if (named === null)
+			this.refuse(suffix, `\`.${name}()\` with a unit that is not a \`TimeUnit\``);
+		const factor = TIME_UNITS.get(named[1]);
+		if (factor === undefined) this.refuse(suffix, `\`.${name}()\` in \`TimeUnit.${named[1]}\``);
+		return this.wholeMillis(suffix, name, count * factor);
+	}
+
+	/**
+	 * A period the host can actually wait out, or a refusal naming it.
+	 *
+	 * Sub-millisecond units land here as a fraction and a period longer than the
+	 * call deadline lands here as a number nothing could honour. Both are
+	 * refused rather than rounded: `AGENTS.md`'s standing rule is that a
+	 * conservative refusal beats a silent wrong behaviour, and a rounded rate
+	 * limit is silent by construction.
+	 */
+	private wholeMillis(suffix: KNode, name: string, millis: number): number {
+		if (!Number.isInteger(millis) || millis < 1) {
+			this.refuse(suffix, `\`.${name}()\` over a period shorter than a millisecond`);
+		}
+		if (millis > 600_000) {
+			this.refuse(suffix, `\`.${name}()\` over a period of ${millis}ms`);
+		}
+		return millis;
+	}
+
+	/**
+	 * `.addInterceptor(…)` where the argument is a *named* declarative one.
+	 *
+	 * The shared libraries this ecosystem depends on ship two rate limiters as
+	 * constructors, and an extension may install either directly rather than
+	 * through the `.rateLimit()` extension function. Those have a fixed meaning
+	 * given by their own signature, so they translate onto the request policy
+	 * exactly as the extension function does.
+	 *
+	 * Returning null rather than refusing is the point: **everything else stays
+	 * refused** by the passthrough rule below, which is where a hand-written
+	 * `addInterceptor { chain -> … }` lands. `adr/0006-local-http-server.md` §5
+	 * is the rule — recognising what an arbitrary body *means* is exactly the
+	 * intent-recognition this converter will not do, and the measured value of
+	 * doing it anyway is zero listings, because a body that does something
+	 * worth recognising also reaches for `.proceed()` and a cookie.
+	 */
+	private declarativeInterceptor(suffix: KNode, receiver: KNode, arg: KNode): string | null {
+		const value = this.argumentValue(arg);
+		if (value.type !== 'call_expression') return null;
+		const call = this.flatten(value);
+		if (call.lambda !== null || call.callee.type !== 'simple_identifier') return null;
+		if (call.callee.text === 'RateLimitInterceptor') {
+			return this.rateLimitCall(suffix, receiver, 'rateLimit', call.args);
+		}
+		if (call.callee.text === 'SpecificHostRateLimitInterceptor') {
+			return this.rateLimitCall(suffix, receiver, 'rateLimitHost', call.args);
+		}
+		return null;
 	}
 
 	private argumentExpressions(arg: KNode): string[] {
