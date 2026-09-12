@@ -754,9 +754,57 @@ describe('a plugin that misbehaves', () => {
 			const rejected = expect(call).rejects.toThrowError(/did not answer/);
 			// Terminated, not merely abandoned: a runaway loop would otherwise
 			// keep a thread hot with nobody waiting for it.
-			await vi.advanceTimersByTimeAsync(31_000);
+			await vi.advanceTimersByTimeAsync(91_000);
 			await rejected;
 			expect(worker.terminated).toBe(true);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('says a call that ran out of time ran out of time', async () => {
+		// One call is several requests, and a host caps each of those on its
+		// own, so this budget expiring means "slow", never "the page changed".
+		// Read back out of the sentence it would mean neither: the wording
+		// contains no word any classifier looks for, and a caller matching on
+		// prose filed it as a source whose markup had moved on — telling a
+		// viewer the page was misread when it had never been fetched.
+		vi.useFakeTimers();
+		try {
+			const { sandbox } = start(async (kind) =>
+				kind === 'load' ? { id: PLUGIN.id } : new Promise(() => {})
+			);
+			const running = await sandbox;
+			const call = running.resolve('demo', { number: 1 } as never);
+			const failure = expect(call).rejects.toMatchObject({ isTimeout: true });
+			await vi.advanceTimersByTimeAsync(91_000);
+			await failure;
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('gives a call longer than the host gives any one of its requests', async () => {
+		// The inversion this pins. A resolve walks a catalogue page, a mirror
+		// page and often an embed; the browser host allows 45s for any single
+		// one of them. A call budget under that cannot be met by a source that
+		// is only slow — the plugin is terminated mid-request, having done
+		// nothing wrong. The number is asserted rather than described because
+		// the relationship lives in two repositories and neither can import
+		// the other's constant.
+		vi.useFakeTimers();
+		try {
+			const { sandbox, worker } = start(async (kind) =>
+				kind === 'load' ? { id: PLUGIN.id } : new Promise(() => {})
+			);
+			const running = await sandbox;
+			const call = running.listEpisodes('demo');
+			const rejected = expect(call).rejects.toThrowError(/did not answer within 90s/);
+			// Still running well past the host's single-request cap of 45s.
+			await vi.advanceTimersByTimeAsync(60_000);
+			expect(worker.terminated).toBe(false);
+			await vi.advanceTimersByTimeAsync(31_000);
+			await rejected;
 		} finally {
 			vi.useRealTimers();
 		}

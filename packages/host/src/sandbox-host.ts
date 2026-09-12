@@ -47,8 +47,34 @@ import {
 import { RequestGate, readPolicy } from './net/request-policy';
 import type { ConversionRecord } from '@plugin-bridge/core/formats';
 
-/** How long any one plugin call may take before its Worker is destroyed. */
-const CALL_TIMEOUT_MS = 30_000;
+/**
+ * How long any one plugin call may take before its Worker is destroyed.
+ *
+ * **It must exceed the host's own per-request cap, and by a wide margin.** One
+ * call is not one request: resolving an episode walks a catalogue page, then a
+ * mirror page, then often an embed, each a fresh round trip to an origin that
+ * may be slow. A budget below the host's single-request cap cannot be met by a
+ * source that is merely slow — the call is killed while a request it is
+ * legitimately waiting on is still inside its own allowance, and the plugin is
+ * *terminated* for it.
+ *
+ * That is what 30s was doing here. The browser host caps one request at 45s
+ * (`routes/api/plugin-fetch/+server.ts`), so a single slow page could spend the
+ * whole call budget and leave nothing for the two requests after it: measured
+ * against one converted source, the same episode page answered in 2.8s, 11.4s,
+ * 4.4s, 3.5s and 6.0s, and three of those in sequence is most of half a minute
+ * before anything has gone wrong.
+ *
+ * 90s is two of the host's worst-case requests plus room for the rest. It is
+ * not a target — a healthy resolve is a second or two — it is the point past
+ * which a plugin is not slow but stuck, and the only thing that distinguishes
+ * those is how long you are willing to wait.
+ *
+ * The relationship cannot be asserted from here: the host supplies `fetch` and
+ * this module is deliberately ignorant of what it does. Stating it is the most
+ * this side can do.
+ */
+const CALL_TIMEOUT_MS = 90_000;
 
 /** How long the initial module evaluation may take. */
 const LOAD_TIMEOUT_MS = 10_000;
@@ -439,7 +465,14 @@ export class PluginSandbox {
 				this.dispose();
 				reject(
 					new NetworkFailure(
-						`${this.plugin.name} did not answer within ${Math.round(timeoutMs / 1000)}s and was stopped.`
+						`${this.plugin.name} did not answer within ${Math.round(timeoutMs / 1000)}s and was stopped.`,
+						// Marked, not left to be read back out of the sentence.
+						// A caller deciding whether this was a slow source or a
+						// broken one should not have to match on prose — and a
+						// host that did would file this under "the page it
+						// reads has changed", which is the wrong story and the
+						// wrong advice: the page was never read.
+						{ isTimeout: true }
 					)
 				);
 			}, timeoutMs);
