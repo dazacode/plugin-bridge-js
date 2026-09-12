@@ -1083,9 +1083,10 @@ function __subtitlesOf(video) {
   for (const track of tracks) {
     if (!track || typeof track !== 'object') continue;
     const made = __subtitleTrack(
-      __absolute(String(track.url || ''), __BASE_URL),
+      track.url,
       String(track.lang || track.label || ''),
-      ''
+      '',
+      __BASE_URL
     );
     if (made !== null) out.push(made);
   }

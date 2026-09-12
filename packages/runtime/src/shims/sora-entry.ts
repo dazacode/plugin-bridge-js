@@ -161,23 +161,26 @@ function __episode(row, index) {
   };
 }
 
-/** A subtitle sidecar, when the module is one that returns them. */
+/**
+ * A subtitle sidecar, when the module is one that returns them.
+ *
+ * This used to build the track itself, which meant it also carried its own
+ * copy of "is this a url" — and that copy was \`__absolute(url || '')\` followed
+ * by a length check, so it accepted every value a module could return. Sora
+ * modules say \`"none"\` when a stream has no captions; resolved against the
+ * base that became a real url, and every episode grew a phantom default track
+ * pointing at a 404. \`__subtitleTrack\` is the shared guard, and it is asked
+ * before resolution for exactly that reason.
+ */
 function __subtitles(url) {
-  const value = __absolute(url || '', __BASE_URL);
-  if (value.length === 0) return undefined;
-  const format = /\\.srt(\\?|$)/i.test(value) ? 'srt' : /\\.ass(\\?|$)/i.test(value) ? 'ass' : 'vtt';
-  return [
-    {
-      // The module says nothing about which language this is, and inventing
-      // one would put a wrong label in the player's track menu.
-      languageCode: 'und',
-      label: 'Subtitles',
-      format: format,
-      url: value,
-      isEmbedded: false,
-      isDefault: true
-    }
-  ];
+  // The module says nothing about which language this is, and inventing one
+  // would put a wrong label in the player's track menu.
+  const track = __subtitleTrack(url, 'Subtitles', 'und', __BASE_URL);
+  if (track === null) return undefined;
+  // A Sora module returns at most one sidecar, so there is nothing to choose
+  // between and the only track there is, is the one the viewer wants on.
+  track.isDefault = true;
+  return [track];
 }
 
 /**

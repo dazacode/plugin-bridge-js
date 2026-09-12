@@ -655,9 +655,10 @@ function __tracks(value) {
   for (const row of value) {
     if (!row || typeof row !== 'object') continue;
     const track = __subtitleTrack(
-      __absolute(String(row.file || row.url || ''), __BASE_URL),
+      row.file || row.url,
       String(row.label || ''),
-      String(row.language || '')
+      String(row.language || ''),
+      __BASE_URL
     );
     if (track !== null) out.push(track);
   }
