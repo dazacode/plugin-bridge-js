@@ -88,16 +88,35 @@ const MAX_BYTES = 4 * 1024 * 1024;
  * cannot outlive it however many hops it takes, and raising it cannot be
  * multiplied by the shape of somebody else's redirect chain.
  *
- * ## Why it is a default and not the answer
+ * ## Why the number is what it is, and why it lives here
  *
  * A timeout here is reported to a plugin as the source being unreachable, so
- * the number decides which sources exist. A host that has a real reason for a
- * different ceiling — a player's own connection ladder, a check tool that would
- * rather wait — passes one through `options.timeoutMs`. The alternative is what
- * this file found in the wild: a host that agrees with the relay about every
- * rule except the one that decides every request, holding its own copy.
+ * this number decides which sources appear to exist. It is set against the
+ * population the relay exists to talk to, and that population is slow by a wide
+ * margin rather than a narrow one: measured against one converted source, five
+ * consecutive fetches of a single episode page answered in 2.8s, 11.4s, 4.4s,
+ * 3.5s and 6.0s to first byte, with the TCP connect at 10-60ms every time. It
+ * is the origin thinking, not the network.
+ *
+ * A 20s cap sat *inside* that spread, so the same page resolved or failed
+ * depending on which sample a caller happened to draw, and a site that works
+ * was filed as gone on a coin toss. That is why it is 45s, and why the number
+ * belongs to this file rather than to a host: it is a fact about the sources,
+ * not about who is asking.
+ *
+ * A host that is genuinely dead does not pay it. `ENOTFOUND`, `ECONNREFUSED`
+ * and a refused handshake all come back in milliseconds. The only case that
+ * waits the budget out is a host that accepts a connection and then says
+ * nothing, which is both rare and, from here, indistinguishable from a host
+ * that is merely slow.
+ *
+ * `options.timeoutMs` is for a caller whose ceiling is genuinely different —
+ * a test that would rather not wait, a tool that would rather wait longer — and
+ * not for a host restating this one. A host holding its own copy of this number
+ * is what put the browser route and this file 25 seconds apart without either
+ * of them being wrong on its own terms.
  */
-const DEFAULT_TIMEOUT_MS = 20_000;
+const DEFAULT_TIMEOUT_MS = 45_000;
 const MAX_REDIRECTS = 4;
 
 /**
