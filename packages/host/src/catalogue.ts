@@ -79,6 +79,41 @@ async function convertToBundle(
 }
 
 /**
+ * Everything the verifier needs from a host, assembled in one place.
+ *
+ * Exported, and used by the preflight as well as by `checkListing`, because the
+ * three capabilities below all went missing here once and the scoreboard
+ * reported it as an ecosystem that does not work. A preflight that assembled
+ * its *own* options would prove that the preflight works; running through this
+ * function is what makes it prove that the campaign does.
+ *
+ * - `createWorker` defaults to `NO_WORKER`, so without it every converted
+ *   listing fails at `load` saying this host cannot run plugins — on a host
+ *   that demonstrably can, since the conversion is already using two other
+ *   capabilities off the same object. All five steps happen after a sandbox
+ *   opens, so the `works` column was structurally zero rather than measured.
+ * - `fetcher` defaults to refusing rather than to an ambient `fetch`
+ *   (`HOST.md` §2), which is right, and means a caller that forgets it gets the
+ *   plugin refused at its first request.
+ * - `log` goes through so a plugin that explains itself on the way down is not
+ *   silent in the one tool whose output is a diagnosis.
+ */
+export function verifyOptionsFor(
+	capabilities: CheckCapabilities,
+	settings: Record<string, unknown>
+): Record<string, unknown> {
+	return {
+		settings,
+		reach: capabilities.reach,
+		createWorker: capabilities.host.sandbox,
+		fetcher: capabilities.host.fetch,
+		log: capabilities.host.log,
+		// Test overrides last, so a spec can replace any of the above.
+		...capabilities.verifyOptions
+	};
+}
+
+/**
  * One listing, converted and run, as a verdict.
  *
  * A conversion that never produced a bundle reports `failedAt: null` rather
@@ -136,32 +171,7 @@ export async function checkListing(
 	const result = await verifyConvertedPlugin(
 		{ id: bundle.id, name: listing.name, hosts: bundle.hosts, converted },
 		bundle.entrypointSource,
-		{
-			// The bundle's own declared defaults: nothing is installed yet, so
-			// there are no viewer choices to layer over them.
-			settings: settingValues(bundle.settings),
-			reach: capabilities.reach,
-			// The host's isolate. Without this the verifier falls back to
-			// `NO_WORKER`, and *every* converted listing fails at `load` saying
-			// this host cannot run plugins — on a host that demonstrably can,
-			// because `convertToBundle` above is already using two other
-			// capabilities off the same object. The five steps this file exists
-			// to run all happen after a sandbox opens, so the whole `works`
-			// column was structurally zero rather than measured.
-			createWorker: capabilities.host.sandbox,
-			// The host's network, for the same reason and with the same history:
-			// `SandboxOptions.fetcher` defaults to refusing rather than to an
-			// ambient `fetch` (HOST.md §2), which is right — and it means a
-			// caller that forgets it gets a plugin refused at its first request
-			// with "this host gives plugins no network access", on a host whose
-			// whole job is to have one.
-			fetcher: capabilities.host.fetch,
-			// Through to the host's log rather than dropped, so a plugin that
-			// explains itself on the way down is not silent in the one tool
-			// whose output is a diagnosis.
-			log: capabilities.host.log,
-			...capabilities.verifyOptions
-		}
+		verifyOptionsFor(capabilities, settingValues(bundle.settings))
 	);
 
 	return {

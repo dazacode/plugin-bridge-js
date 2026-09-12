@@ -56,6 +56,7 @@ import { FOREIGN_ADAPTERS } from '@plugin-bridge/adapters';
 import { checkKey, loadChecks, saveChecks, type CheckResult } from '@plugin-bridge/core/check';
 import { CONVERTER_VERSION } from '@plugin-bridge/core/package';
 import { createTreeLister } from '@plugin-bridge/core/git-trees';
+import { formatPreflight, runPreflight } from './preflight';
 import type { RepositoryPlugin } from '@plugin-bridge/core/repository-index';
 
 const SCHEMA = 'yorozo.catalogue-check.v1';
@@ -284,6 +285,36 @@ async function run(): Promise<void> {
 		// tab has and it does not.
 		listFiles: createTreeLister(text)
 	};
+
+	// Before a single listing is judged, the harness proves the capabilities it
+	// would be judging them with. A run that skipped this once reported an
+	// entire ecosystem as broken and was describing itself — see `preflight.ts`
+	// for the three, and for the rule that follows from them.
+	//
+	// The source repository is read off the first listing rather than guessed:
+	// it is the same field `convert` will use, so checking any other address
+	// would be checking something the campaign does not depend on.
+	const sourceRepository = listings
+		.map((listing) => listing.origin?.detail?.['sourceRepository'])
+		.find((value): value is string => typeof value === 'string' && value.length > 0);
+
+	const preflight = await runPreflight(capabilities, {
+		indexUrl: detected.indexUrl,
+		sourceRepository: sourceRepository ?? null
+	});
+	process.stderr.write(`Preflight:\n${formatPreflight(preflight)}\n\n`);
+	if (!preflight.ok) {
+		// No report, no scoreboard, no verdicts written — and in particular
+		// nothing said about any source. Every conclusion downstream of here
+		// would be a statement about the world resting on a part of this process
+		// that is not working, which is the whole failure this guards.
+		process.stderr.write(
+			'Preflight failed, so nothing was checked and no scoreboard was written.\n' +
+				'These are this harness\u2019s own capabilities, not the catalogue\u2019s: a verdict\n' +
+				'produced without them would read as an ecosystem that does not work.\n'
+		);
+		process.exit(1);
+	}
 
 	const remembered = options.fresh ? new Map<string, CheckResult>() : loadChecks(host.kv);
 	const results = new Map<string, CheckResult>(remembered);
