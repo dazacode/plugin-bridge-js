@@ -447,3 +447,80 @@ describe('carrying a jar’s header, and reporting what a chain set', () => {
 		expect(payload.headers).not.toHaveProperty('set-cookie');
 	});
 });
+
+describe('the budget a relayed call is held to', () => {
+	/** Mirrors `MAX_REDIRECTS` in the route, which is not exported. */
+	const MAX_REDIRECTS = 4;
+
+	/** A fetch double that hands the relay a walk of `hops` redirects. */
+	function walk(record: (signal: AbortSignal | undefined) => void, hops: number) {
+		let seen = 0;
+		return (async (_input: RequestInfo | URL, init?: RequestInit) => {
+			record(init?.signal ?? undefined);
+			seen += 1;
+			if (seen > hops) return new Response('landed', { status: 200 });
+			return new Response(null, {
+				status: 302,
+				headers: { location: `https://example.invalid/${seen + 1}` }
+			});
+		}) as typeof fetch;
+	}
+
+	it('is one signal for the whole walk, not one per hop', async () => {
+		// The bug this pins: the timeout was built *inside* the redirect loop,
+		// so a source that redirected four times got five budgets and the
+		// constant in the route described none of them. Identity is the whole
+		// assertion — one signal means one clock, whatever it is set to.
+		const signals: (AbortSignal | undefined)[] = [];
+
+		await relay(
+			new Request('https://local.invalid/api/plugin-fetch', {
+				method: 'POST',
+				body: JSON.stringify({ url: 'https://example.invalid/1' })
+			}),
+			walk((signal) => signals.push(signal), MAX_REDIRECTS),
+			repair
+		);
+
+		expect(signals).toHaveLength(MAX_REDIRECTS + 1);
+		expect(new Set(signals).size).toBe(1);
+		expect(signals[0]).toBeInstanceOf(AbortSignal);
+	});
+
+	it('takes the ceiling from the host when the host supplies one', async () => {
+		// A host whose limit is set by something real — a player's connection
+		// ladder — passes it in, and the relay's own default stops applying.
+		//
+		// Observed on a real clock, deliberately. `AbortSignal.timeout` is a
+		// platform timer and does not move under vitest's fake ones, and it does
+		// not report the number it was built with — so the only honest way to
+		// show which budget fired is to let one fire. 30ms is nothing like a
+		// production ceiling; what it proves is that the value the host passed is
+		// the value that decided, because the relay's own 20s default could not
+		// have ended this test.
+		let captured: AbortSignal | undefined;
+		const started = Date.now();
+
+		const response = await relay(
+			new Request('https://local.invalid/api/plugin-fetch', {
+				method: 'POST',
+				body: JSON.stringify({ url: 'https://slow.example.invalid/' })
+			}),
+			(async (_input: RequestInfo | URL, init?: RequestInit) => {
+				const signal = init?.signal as AbortSignal;
+				captured = signal;
+				// A host that accepts a connection and then says nothing — the one
+				// case that waits the whole budget out.
+				return new Promise<Response>((_resolve, reject) => {
+					signal.addEventListener('abort', () => reject(fetchFailed(signal.reason)));
+				});
+			}) as typeof fetch,
+			repair,
+			{ timeoutMs: 30 }
+		);
+
+		expect(captured?.aborted).toBe(true);
+		expect(Date.now() - started).toBeLessThan(5_000);
+		expect(response.status).toBe(502);
+	});
+});

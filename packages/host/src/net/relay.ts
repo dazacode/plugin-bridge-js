@@ -75,7 +75,29 @@ import { setCookiesOf } from './cookie-jar';
 
 /** Response body cap. A catalogue page or an embed page, not a video. */
 const MAX_BYTES = 4 * 1024 * 1024;
-const TIMEOUT_MS = 20_000;
+
+/**
+ * How long one relayed call may take, from the first hop to the last.
+ *
+ * ## One budget, not one per hop
+ *
+ * This used to be per hop — the signal was built inside the redirect loop — so
+ * the real ceiling was `MAX_REDIRECTS + 1` times the number and no single place
+ * stated it. A source that redirects four times could therefore spend five
+ * budgets while the file claimed one. Shared, the constant is the truth: a call
+ * cannot outlive it however many hops it takes, and raising it cannot be
+ * multiplied by the shape of somebody else's redirect chain.
+ *
+ * ## Why it is a default and not the answer
+ *
+ * A timeout here is reported to a plugin as the source being unreachable, so
+ * the number decides which sources exist. A host that has a real reason for a
+ * different ceiling — a player's own connection ladder, a check tool that would
+ * rather wait — passes one through `options.timeoutMs`. The alternative is what
+ * this file found in the wild: a host that agrees with the relay about every
+ * rule except the one that decides every request, holding its own copy.
+ */
+const DEFAULT_TIMEOUT_MS = 20_000;
 const MAX_REDIRECTS = 4;
 
 /**
@@ -130,7 +152,15 @@ export const relay = async (
 	 * platform has already chased the AIA extension before our code sees a
 	 * response. See `chain-repair.ts`.
 	 */
-	repair: ChainRepair | null = null
+	repair: ChainRepair | null = null,
+	/**
+	 * What this host decides differently, if anything.
+	 *
+	 * Deliberately one object rather than a fourth positional argument: the
+	 * next thing a host needs to set goes here without every existing caller
+	 * moving, and a host that needs nothing keeps passing three arguments.
+	 */
+	options: { readonly timeoutMs?: number } = {}
 ): Promise<Response> => {
 	let body: {
 		url?: string;
@@ -181,6 +211,10 @@ export const relay = async (
 	const send = typeof body.cookies?.send === 'string' ? body.cookies.send : '';
 	const setCookie: { url: string; headers: string[] }[] = [];
 
+	// Built once, outside the loop, because it is the budget for the whole walk
+	// and not for each leg of it. See `DEFAULT_TIMEOUT_MS`.
+	const signal = AbortSignal.timeout(options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+
 	// Redirects are followed here rather than by `fetch`, so every hop is
 	// re-checked. `redirect: 'manual'` is what makes that possible.
 	let response: Response;
@@ -200,7 +234,6 @@ export const relay = async (
 		if (hops === 0 && send.length > 0) headers.set('cookie', send);
 		else headers.delete('cookie');
 
-		const signal = AbortSignal.timeout(TIMEOUT_MS);
 		const outbound = {
 			method,
 			headers,
