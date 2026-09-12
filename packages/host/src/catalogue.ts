@@ -141,6 +141,25 @@ export async function checkListing(
 			// there are no viewer choices to layer over them.
 			settings: settingValues(bundle.settings),
 			reach: capabilities.reach,
+			// The host's isolate. Without this the verifier falls back to
+			// `NO_WORKER`, and *every* converted listing fails at `load` saying
+			// this host cannot run plugins — on a host that demonstrably can,
+			// because `convertToBundle` above is already using two other
+			// capabilities off the same object. The five steps this file exists
+			// to run all happen after a sandbox opens, so the whole `works`
+			// column was structurally zero rather than measured.
+			createWorker: capabilities.host.sandbox,
+			// The host's network, for the same reason and with the same history:
+			// `SandboxOptions.fetcher` defaults to refusing rather than to an
+			// ambient `fetch` (HOST.md §2), which is right — and it means a
+			// caller that forgets it gets a plugin refused at its first request
+			// with "this host gives plugins no network access", on a host whose
+			// whole job is to have one.
+			fetcher: capabilities.host.fetch,
+			// Through to the host's log rather than dropped, so a plugin that
+			// explains itself on the way down is not silent in the one tool
+			// whose output is a diagnosis.
+			log: capabilities.host.log,
 			...capabilities.verifyOptions
 		}
 	);

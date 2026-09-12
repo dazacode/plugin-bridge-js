@@ -55,6 +55,7 @@ import { detectRepository } from '@plugin-bridge/core/detect';
 import { FOREIGN_ADAPTERS } from '@plugin-bridge/adapters';
 import { checkKey, loadChecks, saveChecks, type CheckResult } from '@plugin-bridge/core/check';
 import { CONVERTER_VERSION } from '@plugin-bridge/core/package';
+import { createTreeLister } from '@plugin-bridge/core/git-trees';
 import type { RepositoryPlugin } from '@plugin-bridge/core/repository-index';
 
 const SCHEMA = 'yorozo.catalogue-check.v1';
@@ -265,7 +266,23 @@ async function run(): Promise<void> {
 		host,
 		download: bytes,
 		getText: text,
-		listFiles: async () => []
+		// The real tree lister, not a stub. This was `async () => []`, which
+		// made every aniyomi listing unconvertible *by construction*: that
+		// adapter locates an extension's Kotlin in the repository the artifact
+		// was built from, and it finds the files by listing the directory. With
+		// nothing listed it read `build.gradle`, found no `.kt` beside it, and
+		// refused with "the source could not be found in the repository it is
+		// built from" — a sentence about the catalogue under test, produced by
+		// this file. Every aniyomi run scored 0%, and the number was the tool's.
+		//
+		// `createTreeLister` bounds the document itself (`MAX_TREE_BYTES`) and
+		// caches the promise per repository and ref, so several listings
+		// converting at once share one request rather than racing into the rate
+		// limit. It is the same lister `web-plugin-registry.ts` hands the
+		// browser, which is the point: this tool exists to answer row for row
+		// what a tab would answer, and it cannot do that with a capability the
+		// tab has and it does not.
+		listFiles: createTreeLister(text)
 	};
 
 	const remembered = options.fresh ? new Map<string, CheckResult>() : loadChecks(host.kv);
