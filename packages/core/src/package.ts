@@ -92,8 +92,15 @@ const ENTRYPOINT = 'source';
  * 33: `by preferences.delegate(KEY, DEFAULT)` reads the settings store.
  * 34: `x.ifEmpty { return@map … }` is read as a guard, so the jump lands in the
  *     lambda it was written in.
+ *
+ * 35-43 moved the number without adding a line here. The gap is left visible
+ * rather than backfilled from memory, because a changelog nobody can check is
+ * worse than one with a hole in it.
+ *
+ * 44: a subtitle url is judged before it is made absolute, so a module's
+ *     `"none"` is no longer resolved into a caption track pointing at a 404.
  */
-export const CONVERTER_VERSION = 43;
+export const CONVERTER_VERSION = 44;
 
 export interface BundleInput {
 	readonly id: string;
