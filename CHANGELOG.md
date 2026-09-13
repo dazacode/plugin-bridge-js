@@ -12,6 +12,81 @@ to exhaustion and deliberately closed it. `v0.1.x` is for fixes to what has
 already been promised; a minor bump whose case is "the number went up" is not a
 minor bump.
 
+## v0.1.1 — fixes to what v0.1.0 promised
+
+No new capability, no new ecosystem, no architectural change. Every entry below
+is a bug fix or a hardening of behaviour v0.1.0 already claimed, which is what
+the policy above means by a patch release.
+
+### A whole ecosystem's modules could not load
+
+Sora modules are written for a runtime that evaluates them as a **classic
+script**, where top-level `this` is the global. Spliced into an ES module they
+get strict mode and no receiver, so a bundled UMD library whose header reads
+`root.CryptoJS = factory()` threw before a single request was made. The wrapper
+now calls with `globalThis`, and it has to be the real one: the UMD dance
+assigns onto the receiver and then reads the library back as a _free variable_,
+so a stand-in object takes the write and loses the read. Measured against a live
+library, five modules of fifty-one failed on this one cause.
+
+### A caption track pointing at a 404, on every episode
+
+A module returning the string `"none"` for a stream with no subtitles had it
+resolved against the source's base into `https://…/none`, built with
+`isDefault: true`, and fetched — which a viewer reads as subtitles being broken.
+The value is now judged before it is made absolute, in the shared guards rather
+than in each adapter's copy. `CONVERTER_VERSION` moves 43 → 44 so the fix
+reaches bundles already installed; those rows raise a reconversion notice.
+
+### Timeouts, and where the ceiling lives
+
+`AbortSignal.timeout` was built inside the redirect loop, so the real ceiling was
+`MAX_REDIRECTS + 1` times the number the file stated. It is one signal for the
+whole walk now. The per-call budget moves 30s → 90s, because one plugin call is
+several round trips and the host allows 45s for any single one of them; the
+relay's own default moves 20s → 45s, against a population measured answering the
+same page in 2.8s, 11.4s, 4.4s, 3.5s and 6.0s — a 20s cap sat inside that spread
+and filed working sites as gone on a coin toss. A timeout now sets `isTimeout` on
+`NetworkFailure`, so a host stops reporting it as the page having changed.
+
+### Two sentences about somebody else's repository, both of them false
+
+`api.github.com` allows 60 requests an hour unauthenticated, counted per address
+— and in a browser that address is the viewer's. When it ran out, every ref
+failed identically and the conversion reported that _the source could not be
+found in the repository it is built from_. `TreeError` now carries `rateLimited`
+and the message says what actually happened and that it is temporary.
+
+The catalogue harness had the same shape: three capabilities it never passed —
+`listFiles`, `createWorker`, `fetcher` — produced three plausible verdicts about
+the catalogue under test, each hiding the next. It now proves its own
+capabilities _by use_ before it judges anything, and refuses to write a report at
+all if it cannot.
+
+### Toolchain
+
+The bun pin moves 1.3.14 → 1.4.2, with the generated artefact regenerated and
+committed beside it so the two never disagree in history. The diff is six
+characters. The pin moved because the generated-artefact gate was silently not
+running on any 1.4 machine, and a gate that is quietly skipped is worth less than
+one that fails.
+
+### API surface
+
+Additive only; nothing removed, nothing changed shape. `TreeError.rateLimited`,
+an optional `options.timeoutMs` on the relay for a caller whose ceiling is
+genuinely different, and `verifyOptionsFor` in the host's catalogue module —
+extracted so the new CLI preflight and `checkListing` cannot assemble different
+options and prove different things.
+
+### No compatibility figures are attached to this release
+
+The classic-script fix emptied the `load` column for five modules, and re-driven
+afterwards every one of them stopped somewhere in its own source. The headline it
+was measured against did not move. A column that empties is a reclassification,
+not a compatibility gain — and per the policy above, it would not be a reason for
+a release either way.
+
 ## v0.1.0 — the first public architecture milestone
 
 **This is not a stability release.** The API is not stable, the network
