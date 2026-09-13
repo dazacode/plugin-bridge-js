@@ -21,7 +21,7 @@
 import {
 	convertedPluginId,
 	foreignListing,
-	keepAnimeOnly,
+	keepMediums,
 	refuseConversion,
 	ForeignFormatError,
 	type ForeignAdapter,
@@ -35,13 +35,15 @@ import type { RepositoryIndex } from '@plugin-bridge/core/repository-index';
  * `tvTypes` to a medium.
  *
  * Most providers in this ecosystem are live-action film and television, which
- * is neither anime nor any of the reading media — hence `other`, and hence the
- * row saying so instead of being mislabelled to fit three values.
+ * is exactly `live-action` — not a fallback pretending to be one of the
+ * reading media, and no longer a medium this build has nowhere to show,
+ * though the format's own tier (`browse-only`: compiled JVM bytecode, no
+ * converter yet) still refuses every listing regardless of what it serves.
  */
 function mediumOf(tvTypes: unknown): ForeignMedium {
 	const types = Array.isArray(tvTypes) ? tvTypes.map((t) => String(t).toLowerCase()) : [];
 	if (types.some((type) => type.includes('anime') || type === 'ova')) return 'anime';
-	return 'other';
+	return 'live-action';
 }
 
 function parsePluginList(body: string, listUrl: string, name: string): RepositoryIndex {
@@ -104,7 +106,7 @@ function parsePluginList(body: string, listUrl: string, name: string): Repositor
 		});
 	});
 
-	return keepAnimeOnly({
+	return keepMediums({
 		name,
 		updatedAt: '',
 		signingKey: null,

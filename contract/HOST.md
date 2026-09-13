@@ -49,9 +49,11 @@ on the app. Today that is:
 A type is moved only when the runtime genuinely _owns_ it. Where the app owns a
 type and the runtime merely mentions part of it, the runtime declares a
 narrower type of its own instead — `RunnablePlugin` is four fields of the app's
-`InstalledPlugin`, and `ForeignMedium` is a four-member union that is not the
-domain's three-member `MediaKind`. That is not duplication; it is the runtime
-refusing to read fields it has no business reading.
+`InstalledPlugin`, and `ForeignMedium` is its own union, not an alias of the
+domain's `MediaKind` — the two are free to have different members, and always
+have, even on the occasions their sizes happen to match. That is not
+duplication; it is the runtime refusing to read fields it has no business
+reading.
 
 ---
 

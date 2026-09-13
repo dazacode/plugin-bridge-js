@@ -12,6 +12,28 @@ to exhaustion and deliberately closed it. `v0.1.x` is for fixes to what has
 already been promised; a minor bump whose case is "the number went up" is not a
 minor bump.
 
+## v0.2.0 — a second medium, not just a second ecosystem
+
+`ForeignMedium` was `'anime' | 'manga' | 'novel' | 'other'`, and the only
+consumer-facing filter, `keepAnimeOnly()`, dropped everything but `'anime'`
+unconditionally. That was a real capability gap, not a fix: Cloudstream is a
+live-action film/TV ecosystem, already fully integrated, and every one of its
+listings was being discarded by policy rather than by anything about the
+listings themselves.
+
+`ForeignMedium` gains `'live-action'`. `keepAnimeOnly()` is now
+`keepMediums()`, filtering against an exported `SUPPORTED_MEDIUMS` set
+(`anime`, `live-action`) instead of a single hardcoded kind, and
+`refusalFor()`'s messaging follows. Cloudstream's classifier maps its `movie`/
+`tv` types to `'live-action'` instead of `'other'`; Sora's gains real
+manga/novel/live-action text matching instead of a two-way anime/manga guess.
+`ConversionRecord` carries the classified `mediaKind` through to the host
+catalogue, so a consumer can route a listing by medium without re-deriving it.
+
+The other four adapters (Aniyomi, Hayase, LNReader, Mangayomi) are unchanged
+in behavior — genuinely single-medium ecosystems gain nothing from a wider
+enum they were never going to produce values for.
+
 ## v0.1.3 — fixes to what v0.1.0 promised
 
 No new capability, no new ecosystem, no architectural change.

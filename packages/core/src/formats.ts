@@ -78,12 +78,15 @@ export type ForeignTier = 'convert' | 'browse-only';
 /**
  * What a foreign source serves.
  *
- * The domain's three kinds plus one, because one adapted ecosystem is a
- * general video client whose providers are largely live-action film and
- * television. Calling those `manga` to fit them into three values would put a
- * wrong sentence in front of a viewer; `other` lets the row say what is
- * actually true. Nothing outside this directory sees the widening — only
- * `anime` listings survive filtering, and only those reach the domain.
+ * Four members, matching the app's own `MediaKind` in spirit but not in
+ * identity — see the next section. `live-action` exists because one adapted
+ * ecosystem (Cloudstream) is a general video client whose providers are
+ * largely live-action film and television, and Sora's own free-text
+ * categories name the same thing; calling those `manga` to fit an
+ * anime/manga/novel taxonomy would put a wrong sentence in front of a viewer.
+ * Which mediums this build actually has somewhere to show is
+ * `SUPPORTED_MEDIUMS`, not "equals `'anime'`" — `manga` and `novel` remain
+ * unsupported and are refused the same way they always were.
  *
  * ## Why this is written out rather than derived from `MediaKind`
  *
@@ -92,17 +95,32 @@ export type ForeignTier = 'convert' | 'browse-only';
  * (AGENTS.md rule 3 — `Media` carries it as a discriminator), and the runtime
  * only ever *mentions* it, so moving it in here would have been dishonest: the
  * runtime would have owned a discriminator it does not decide. A narrower
- * local union is the truthful answer, and it is not a duplicate — this set has
- * four members and the domain's has three.
+ * local union is the truthful answer, and it is not a duplicate — the two are
+ * allowed to have different members, and did even before this one gained a
+ * fourth: the app's `manga`/`novel` are still out of scope and unpopulated,
+ * while this union needs a member for every medium a *foreign* index might
+ * plausibly claim, supported or not, because `refusalFor` has to name what it
+ * is refusing.
  *
- * What it costs is that the two can drift: a fourth kind added to the domain
- * would not appear here. That is the direction the drift should run. These
- * values come off *foreign* index rows, so what a listing may claim is decided
- * by what those ecosystems publish, not by what this client's own model grew;
- * and everything except `anime` is refused by `refusalFor` before it reaches
- * the domain, which is where a mismatch would otherwise matter.
+ * What it costs is that the two can drift silently in the other direction: a
+ * kind added to the domain would not appear here on its own. These values
+ * come off *foreign* index rows, so what a listing may claim is decided by
+ * what those ecosystems publish, not by what this client's own model grew,
+ * and `SUPPORTED_MEDIUMS` is the one place that has to be told when the
+ * domain's supported set changes.
  */
-export type ForeignMedium = 'anime' | 'manga' | 'novel' | 'other';
+export type ForeignMedium = 'anime' | 'live-action' | 'manga' | 'novel';
+
+/**
+ * Which mediums this build actually has somewhere to show.
+ *
+ * The one set `refusalFor` (install-time: is this listing refused for its
+ * medium?) and `adapter.ts`'s `keepMediums` (parse-time: does this listing
+ * even survive into a browsable list?) both read, so the two cannot disagree
+ * — a listing kept by one and refused by the other would be a row that shows
+ * up only to explain that it should not have.
+ */
+export const SUPPORTED_MEDIUMS: ReadonlySet<ForeignMedium> = new Set(['anime', 'live-action']);
 
 /**
  * What a converted plugin was made from.
@@ -135,6 +153,21 @@ export interface ConversionRecord {
 	 * facts (`FOREIGN.md` §6).
 	 */
 	readonly verified: boolean;
+	/**
+	 * What the originating listing served, copied from `ForeignOrigin.mediaKind`
+	 * at conversion time.
+	 *
+	 * Optional so that a row written before this field existed keeps working —
+	 * the same rule `settings` documents just above this interface's sibling
+	 * fields. Its purpose is entirely downstream of installation: a multi-source
+	 * search (`PluginSourceRepository.searchCatalog`) can skip asking a plugin
+	 * whose declared medium the current search has no use for, rather than
+	 * spinning up its sandbox to search a catalogue that predictably has
+	 * nothing relevant. Absent is treated as "ask anyway" wherever this is
+	 * read, never as a reason to exclude — an unclassified plugin is a gap in
+	 * information, not evidence it is the wrong kind.
+	 */
+	readonly mediaKind?: ForeignMedium;
 }
 
 /**
@@ -330,14 +363,8 @@ export function refusalFor(
 	medium: ForeignMedium,
 	detail?: Readonly<Record<string, unknown>>
 ): string | null {
-	if (medium === 'other') {
-		return (
-			'This source serves live-action film and television. Yorozo is an anime client ' +
-			'and has nowhere to show it.'
-		);
-	}
-	if (medium !== 'anime') {
-		return `This is a ${medium} source. Yorozo is an anime client and has nowhere to show it.`;
+	if (!SUPPORTED_MEDIUMS.has(medium)) {
+		return `This is a ${medium} source. Yorozo does not support that yet.`;
 	}
 
 	// A listing that ships a prebuilt implementation is installable whatever its

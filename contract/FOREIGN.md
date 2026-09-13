@@ -148,10 +148,14 @@ interface ForeignOrigin {
 	readonly foreignId: string;
 	/** Its own version string, compared verbatim; never parsed as semver. */
 	readonly foreignVersion: string;
-	readonly mediaKind: MediaKind;
+	readonly mediaKind: ForeignMedium;
 	readonly isNsfw: boolean;
 }
 ```
+
+`ForeignMedium` (`anime | live-action | manga | novel`), not the app's own
+`MediaKind` — deliberately a narrower, local union; `formats.ts` explains why
+the runtime may not own the app's discriminator, only mention it.
 
 `foreignVersion` is compared as an opaque string. Foreign ecosystems number
 however they like — an integer version code, a two-part `14.58`, a semver — and
@@ -575,17 +579,26 @@ is no torrent client in the product. The adapter ships so the format is
 recognised and the catalogue lists; install refuses with that sentence, and
 stops refusing when a torrent client exists.
 
-### 4.3 Non-anime sources
+### 4.3 Unsupported mediums
 
-`AGENTS.md` scopes the product to anime: no manga, no light novels. This is a
-per-_listing_ judgement and not a per-repository one — one ecosystem's own
-published catalogue is manga-only while third-party catalogues in the same
-format are entirely anime, so a format may not be written off on the strength of
-the catalogue its authors happen to publish. Listings whose `origin.mediaKind`
-is not `anime` are **filtered out of the browse list**
-and cannot be installed. A repository whose every listing was filtered says so
-explicitly — "this repository lists no anime sources" — rather than rendering an
-empty list, which reads as a broken fetch.
+`AGENTS.md` scopes the product to `anime` and `live-action` (movies and drama
+series): no manga, no light novels. This is a per-_listing_ judgement and not
+a per-repository one — one ecosystem's own published catalogue is manga-only
+while third-party catalogues in the same format serve something this build
+does show, so a format may not be written off on the strength of the
+catalogue its authors happen to publish. Listings whose `origin.mediaKind` is
+not in `SUPPORTED_MEDIUMS` (`formats.ts`) are **filtered out of the browse
+list** by `keepMediums` and cannot be installed. A repository whose every
+listing was filtered says so explicitly — "this repository lists no
+supported sources" — rather than rendering an empty list, which reads as a
+broken fetch.
+
+`live-action` is not the same claim as "anime". A listing correctly
+classified as `live-action` still answers to its _format's_ own tier: a
+Cloudstream listing, for instance, is now filtered in rather than dropped,
+and still refuses to install, because that format's artifact is compiled JVM
+bytecode with no converter yet (§4.1) — a fact about the format, unrelated to
+what the listing serves.
 
 ### 4.4 A format that is half convertible
 

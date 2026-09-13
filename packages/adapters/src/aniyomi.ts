@@ -36,7 +36,7 @@ import {
 	convertedPluginId,
 	foreignListing,
 	hostsFromUrls,
-	keepAnimeOnly,
+	keepMediums,
 	hostsInSource,
 	ForeignFormatError,
 	pretranslatedDescriptor,
@@ -219,7 +219,7 @@ export const aniyomiAdapter: ForeignAdapter = {
 			);
 		}
 
-		return keepAnimeOnly({
+		return keepMediums({
 			// Replaced by `loadIndex` when the sibling metadata is readable. Left
 			// as a plain description rather than a guess at the publisher's name.
 			name: 'Aniyomi extensions',

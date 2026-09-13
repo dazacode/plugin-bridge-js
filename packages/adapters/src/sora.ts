@@ -39,7 +39,7 @@ import {
 	foreignListing,
 	hostsFromUrls,
 	hostsInSource,
-	keepAnimeOnly,
+	keepMediums,
 	ForeignFormatError,
 	type ConversionServices,
 	type ForeignAdapter,
@@ -54,6 +54,7 @@ import {
 import { packageBundle } from '@plugin-bridge/core/package';
 import { soraEntrypoint } from '@plugin-bridge/runtime/shims/sora-entry';
 import type { RepositoryIndex, RepositoryPlugin } from '@plugin-bridge/core/repository-index';
+import type { ForeignMedium } from '@plugin-bridge/core/formats';
 
 /** The manifest fields this adapter reads. Everything else is ignored. */
 interface SoraManifest {
@@ -110,25 +111,34 @@ function authorName(value: unknown): string {
  * **Both fields are free text and neither is an enum.** Measured across one
  * live library of 69: manifests declare `type` as `anime`, but also
  * `shows/movies/anime`, `anime/movies`, `movies/shows`, `mangas`, `novels`. The
- * library's own `category` is written the same way. So both are read as a
- * *mention* of anime rather than matched exactly.
+ * library's own `category` is written the same way. So every value is read as
+ * a *mention* of a medium rather than matched exactly.
  *
  * This is not a stylistic choice. Matching `type === 'anime'` exactly and
- * treating every other non-empty value as manga dropped **22 anime modules of
- * 56** from that library — they said `movies/shows/anime`, and a module that is
- * filtered out is a module nothing ever explains.
+ * treating every other non-empty value as `manga` dropped **22 anime modules
+ * of 56** from that library — they said `movies/shows/anime`, and a module
+ * that is filtered out is a module nothing ever explains. The same reasoning
+ * is why a bare `shows/movies` — no anime, no manga, no novel mention at all —
+ * reads as `live-action` now rather than falling into `manga` by elimination:
+ * Sora is a general video-streaming ecosystem, and "no medium word matched"
+ * described a live-action provider a great deal more often than it described
+ * a manga one.
  *
  * Defaulting to anime when neither field says anything is the existing
- * behaviour and stays: this client has nowhere to put anything else, so a wrong
- * `anime` shows a row that explains itself, and a wrong `manga` hides a module
- * silently.
+ * behaviour and stays: this client has always had somewhere to put anime, so a
+ * wrong `anime` shows a row that explains itself, where a wrong `manga` or
+ * `novel` would have hidden a module silently before either of those could be
+ * shown at all.
  */
-function mediaKindOf(manifest: SoraManifest, category?: string): 'anime' | 'manga' {
+function mediaKindOf(manifest: SoraManifest, category?: string): ForeignMedium {
 	const said = [manifest.type, category].filter(
 		(one): one is string => typeof one === 'string' && one.length > 0
 	);
 	if (said.length === 0) return 'anime';
-	return said.some((one) => /anime/i.test(one)) ? 'anime' : 'manga';
+	if (said.some((one) => /anime/i.test(one))) return 'anime';
+	if (said.some((one) => /manga|comic/i.test(one))) return 'manga';
+	if (said.some((one) => /novel/i.test(one))) return 'novel';
+	return 'live-action';
 }
 
 function containerOf(streamType: unknown): 'hls' | 'mp4' {
@@ -240,7 +250,7 @@ export const soraAdapter: ForeignAdapter = {
 
 		const plugins = disambiguateIds(found.map((manifest) => listingOf(manifest, indexUrl)));
 
-		return keepAnimeOnly({
+		return keepMediums({
 			name: plugins.length === 1 ? plugins[0].name : 'Sora modules',
 			updatedAt: '',
 			signingKey: null,
@@ -317,7 +327,7 @@ export const soraAdapter: ForeignAdapter = {
 			throw new ForeignFormatError('no module in this library had a readable manifest');
 		}
 
-		return keepAnimeOnly({
+		return keepMediums({
 			name: 'Sora modules',
 			updatedAt:
 				typeof (decoded as Record<string, unknown>)['lastUpdated'] === 'string'

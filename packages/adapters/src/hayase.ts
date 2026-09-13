@@ -22,7 +22,7 @@ import {
 	convertedPluginId,
 	foreignListing,
 	hostsFromUrls,
-	keepAnimeOnly,
+	keepMediums,
 	refuseConversion,
 	ForeignFormatError,
 	type ForeignAdapter
@@ -110,7 +110,7 @@ export const hayaseAdapter: ForeignAdapter = {
 			});
 		});
 
-		return keepAnimeOnly({
+		return keepMediums({
 			name: 'Hayase extensions',
 			updatedAt: '',
 			signingKey: null,

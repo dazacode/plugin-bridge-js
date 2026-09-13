@@ -13,7 +13,7 @@
  * by name, because it needs an interpreter that does not exist here.
  *
  * The published catalogues under this format's own name are manga and novel
- * sources, which `keepAnimeOnly` filters out regardless of language
+ * sources, which `keepMediums` filters out regardless of language
  * (`contract/plugin-api/FOREIGN.md` §4.3). Third-party anime catalogues are
  * what this converter is for, and `itemType` is what tells them apart.
  */
@@ -23,7 +23,7 @@ import {
 	foreignListing,
 	hostsFromUrls,
 	hostsInSource,
-	keepAnimeOnly,
+	keepMediums,
 	refuseConversion,
 	ForeignFormatError,
 	type ConversionServices,
@@ -145,7 +145,7 @@ export const mangayomiAdapter: ForeignAdapter = {
 			});
 		});
 
-		return keepAnimeOnly({
+		return keepMediums({
 			name: 'Mangayomi sources',
 			updatedAt: '',
 			signingKey: null,

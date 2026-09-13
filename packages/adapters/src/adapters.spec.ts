@@ -3,8 +3,8 @@
  *
  * The behaviours worth pinning are not "it parses JSON" — they are the three
  * decisions that would be silently wrong: which format a body is, which
- * listings survive the anime-only filter, and why a row that cannot be
- * installed says so.
+ * listings survive the supported-mediums filter, and why a row that cannot
+ * be installed says so.
  *
  * Fixtures come from `contract/fixtures/foreign/indexes.json`, hand-written to
  * each format's shape. Nothing here reaches the network and no real repository
@@ -216,11 +216,23 @@ describe('Cloudstream', () => {
 		);
 
 		expect(index.name).toBe('Example providers');
-		// The film provider is `other`, not manga: calling live-action film a
-		// reading medium would put a wrong sentence in front of a viewer.
-		expect(index.plugins).toHaveLength(1);
-		expect(index.plugins[0].name).toBe('ExampleAnimeProvider');
-		expect(index.filteredOut).toBe(1);
+		// Both survive: the film provider is `live-action`, a medium this
+		// build now has somewhere to show, not a reading medium it does not.
+		// Neither installs regardless — Cloudstream's own tier (compiled JVM
+		// bytecode, no converter yet) refuses both alike.
+		expect(index.plugins).toHaveLength(2);
+		expect(index.plugins.map((plugin) => plugin.name).sort()).toEqual([
+			'ExampleAnimeProvider',
+			'ExampleFilmProvider'
+		]);
+		expect(index.plugins.map((plugin) => plugin.origin?.mediaKind).sort()).toEqual([
+			'anime',
+			'live-action'
+		]);
+		expect(index.filteredOut).toBe(0);
+		for (const plugin of index.plugins) {
+			expect(listingRefusal(plugin)).toMatch(/compiled Java/);
+		}
 	});
 
 	it('records the JVM twin for a converter that does not exist yet', async () => {

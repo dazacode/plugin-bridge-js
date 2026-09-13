@@ -15,7 +15,13 @@
 import type { ObstacleSite } from './obstacles';
 import type { FileLister } from './source-repo';
 import type { RepositoryIndex, RepositoryPlugin } from '@plugin-bridge/core/repository-index';
-import { formatProfile, refusalFor, type ForeignFormat, type ForeignOrigin } from './formats';
+import {
+	formatProfile,
+	refusalFor,
+	SUPPORTED_MEDIUMS,
+	type ForeignFormat,
+	type ForeignOrigin
+} from './formats';
 import type { WasmLoader, WorkerFactory } from '@plugin-bridge/host/host';
 import { plausibleTld } from '@plugin-bridge/host/host-names';
 
@@ -248,18 +254,25 @@ export function loadForeignIndex(
 }
 
 /**
- * Drops listings that are not anime, and counts what it dropped.
+ * Drops listings whose medium this build has nowhere to show, and counts what
+ * it dropped.
  *
  * Applied by each adapter as the last step rather than centrally, so that an
  * adapter which cannot tell what medium a listing serves has to say so by
- * choosing a fallback, instead of inheriting a guess made elsewhere.
+ * choosing a fallback, instead of inheriting a guess made elsewhere. Reads
+ * `SUPPORTED_MEDIUMS` rather than taking an allow-list, because every adapter
+ * wants the same answer and a parameter six call sites could each get wrong
+ * independently is a parameter this function does not need.
  */
-export function keepAnimeOnly(index: Omit<RepositoryIndex, 'filteredOut'>): RepositoryIndex {
-	const anime = index.plugins.filter((listing) => listing.origin?.mediaKind === 'anime');
+export function keepMediums(index: Omit<RepositoryIndex, 'filteredOut'>): RepositoryIndex {
+	const kept = index.plugins.filter((listing) => {
+		const medium = listing.origin?.mediaKind;
+		return medium !== undefined && SUPPORTED_MEDIUMS.has(medium);
+	});
 	return {
 		...index,
-		plugins: anime,
-		filteredOut: index.plugins.length - anime.length
+		plugins: kept,
+		filteredOut: index.plugins.length - kept.length
 	};
 }
 

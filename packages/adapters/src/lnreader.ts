@@ -15,7 +15,7 @@ import {
 	convertedPluginId,
 	foreignListing,
 	hostsFromUrls,
-	keepAnimeOnly,
+	keepMediums,
 	refuseConversion,
 	ForeignFormatError,
 	type ForeignAdapter
@@ -89,7 +89,7 @@ export const lnreaderAdapter: ForeignAdapter = {
 			});
 		});
 
-		return keepAnimeOnly({
+		return keepMediums({
 			name: 'LNReader plugins',
 			updatedAt: '',
 			signingKey: null,

@@ -165,7 +165,8 @@ export async function checkListing(
 		foreignVersion: listing.origin.foreignVersion,
 		convertedAt: now().toISOString(),
 		converterVersion: CONVERTER_VERSION,
-		verified: false
+		verified: false,
+		mediaKind: listing.origin.mediaKind
 	};
 
 	const result = await verifyConvertedPlugin(

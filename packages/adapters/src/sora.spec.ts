@@ -53,3 +53,51 @@ describe('a library that names two different modules alike', () => {
 		expect(plugins).toHaveLength(1);
 	});
 });
+
+describe('classifying a module Sora describes only in free text', () => {
+	it('defaults to anime when the manifest says nothing at all', () => {
+		const body = JSON.stringify([manifest('Unlabelled', 'x/x.js')]);
+		const { plugins } = soraAdapter.parseIndex(body, 'https://example.invalid/modules.json');
+		expect(plugins[0].origin?.mediaKind).toBe('anime');
+	});
+
+	it('reads a mention of anime wherever it sits in the type string', () => {
+		const body = JSON.stringify([{ ...manifest('Mixed', 'x/x.js'), type: 'shows/movies/anime' }]);
+		const { plugins } = soraAdapter.parseIndex(body, 'https://example.invalid/modules.json');
+		expect(plugins[0].origin?.mediaKind).toBe('anime');
+	});
+
+	/**
+	 * The regression this guards. Matching only `/anime/i` and treating every
+	 * other non-empty value as `manga` dropped 22 anime modules of 56 from a
+	 * live library that said things like `movies/shows/anime` — and separately
+	 * mislabelled every module that genuinely served live-action film as a
+	 * manga source, which is now supported and deserves its own kind rather
+	 * than the wrong one by elimination.
+	 */
+	it("classifies plain 'shows/movies' as live-action, not manga by elimination", () => {
+		const body = JSON.stringify([{ ...manifest('Film Site', 'x/x.js'), type: 'shows/movies' }]);
+		const { plugins } = soraAdapter.parseIndex(body, 'https://example.invalid/modules.json');
+		expect(plugins[0].origin?.mediaKind).toBe('live-action');
+	});
+
+	it('still keeps a manga catalogue out of the browse list', () => {
+		const body = JSON.stringify([{ ...manifest('Comics', 'x/x.js'), type: 'mangas' }]);
+		const { plugins, filteredOut } = soraAdapter.parseIndex(
+			body,
+			'https://example.invalid/modules.json'
+		);
+		expect(plugins).toHaveLength(0);
+		expect(filteredOut).toBe(1);
+	});
+
+	it('still keeps a novel catalogue out of the browse list', () => {
+		const body = JSON.stringify([{ ...manifest('Novels', 'x/x.js'), type: 'novels' }]);
+		const { plugins, filteredOut } = soraAdapter.parseIndex(
+			body,
+			'https://example.invalid/modules.json'
+		);
+		expect(plugins).toHaveLength(0);
+		expect(filteredOut).toBe(1);
+	});
+});
