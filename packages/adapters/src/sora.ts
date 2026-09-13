@@ -173,6 +173,29 @@ function listingOf(manifest: SoraManifest, indexUrl: string, category?: string):
 	});
 }
 
+/**
+ * A live library has listed the same declared name twice — two quality tiers
+ * of one site, or a plain duplicate entry — and `convertedPluginId` collapsed
+ * both onto one id, the one shape this format's id scheme did not plan for.
+ * Undetected, two rows share a Svelte keyed-each id and the render throws for
+ * the whole list, not just the pair.
+ *
+ * Rewritten from each colliding listing's own script URL rather than its
+ * position in the array, so the result does not depend on fetch order — and
+ * left untouched for every name that is not colliding, so this cannot move an
+ * id already written into a stored `SourceBinding`.
+ */
+function disambiguateIds(plugins: readonly RepositoryPlugin[]): RepositoryPlugin[] {
+	const byId = new Map<string, number>();
+	for (const plugin of plugins) byId.set(plugin.id, (byId.get(plugin.id) ?? 0) + 1);
+
+	return plugins.map((plugin) => {
+		if ((byId.get(plugin.id) ?? 0) <= 1) return plugin;
+		const artifactUrl = plugin.origin?.artifactUrl ?? '';
+		return { ...plugin, id: convertedPluginId('sora', `${plugin.name} ${artifactUrl}`) };
+	});
+}
+
 export const soraAdapter: ForeignAdapter = {
 	format: 'sora',
 
@@ -202,7 +225,7 @@ export const soraAdapter: ForeignAdapter = {
 		const found = entries.map(unwrap).filter((m): m is SoraManifest => m !== null);
 		if (found.length === 0) throw new ForeignFormatError('not a Sora module or library');
 
-		const plugins = found.map((manifest) => listingOf(manifest, indexUrl));
+		const plugins = disambiguateIds(found.map((manifest) => listingOf(manifest, indexUrl)));
 
 		return keepAnimeOnly({
 			name: plugins.length === 1 ? plugins[0].name : 'Sora modules',
@@ -291,7 +314,9 @@ export const soraAdapter: ForeignAdapter = {
 			// Resolved against the manifest's own URL, not the library's: a
 			// manifest names its script relative to itself, and they sit in
 			// different directories.
-			plugins: manifests.map((one) => listingOf(one.manifest, one.url, one.category)),
+			plugins: disambiguateIds(
+				manifests.map((one) => listingOf(one.manifest, one.url, one.category))
+			),
 			format: 'sora'
 		});
 	},
