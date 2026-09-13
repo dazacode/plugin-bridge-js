@@ -12,6 +12,26 @@ to exhaustion and deliberately closed it. `v0.1.x` is for fixes to what has
 already been promised; a minor bump whose case is "the number went up" is not a
 minor bump.
 
+## v0.1.2 — fixes to what v0.1.0 promised
+
+No new capability, no new ecosystem, no architectural change.
+
+### Two modules with the same declared name collided into one id
+
+A library can list one site twice — two quality tiers, or a plain duplicate
+entry — and the Sora adapter built a listing's id from its declared name
+alone. Two listings sharing a name shared an id, which is also the key the
+client renders its plugin list by, so the whole list failed to render, not
+just the pair. Found by browser-driving the production deployment: the plugins
+page threw `each_key_duplicate` and a listing could not be found by name.
+
+Colliding ids are now rewritten from each listing's own script URL rather than
+its position in the list, so a later fetch that returns the same modules in a
+different order cannot flip which listing gets which id. Every non-colliding
+name — the overwhelming majority — keeps exactly the id it already had, since
+that id is written into a stored `SourceBinding` and moving it would orphan an
+install.
+
 ## v0.1.1 — fixes to what v0.1.0 promised
 
 No new capability, no new ecosystem, no architectural change. Every entry below
