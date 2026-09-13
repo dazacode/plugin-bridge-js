@@ -50,6 +50,7 @@ import {
 	parseRepositoryUrl,
 	rawCandidates
 } from '@plugin-bridge/core/git-hosts';
+import { TreeError } from '@plugin-bridge/core/git-trees';
 import { obstacleSites } from '@plugin-bridge/core/obstacles';
 import { attributionFrom } from '@plugin-bridge/core/attribution';
 import { namesCookieJar, packageBundle } from '@plugin-bridge/core/package';
@@ -768,6 +769,19 @@ async function repositoryFiles(
 		const defaults =
 			repository.origin === 'https://github.com' ? ['HEAD', ...DEFAULT_REFS] : DEFAULT_REFS;
 		const refs = repository.ref === null ? defaults : [repository.ref, ...defaults];
+		/**
+		 * A refusal aimed at us, kept rather than swallowed with the rest.
+		 *
+		 * The catch below is right for what it was written for — a branch that
+		 * does not exist is the ordinary case — and wrong for the one failure
+		 * that is not about the repository at all. When the forge rate-limits
+		 * this address every ref fails identically, `null` comes back, and the
+		 * conversion goes on to report that the extension's source *could not be
+		 * found in the repository it is built from*. That sentence is a claim
+		 * about somebody else's repository, and it is false; the source is
+		 * there, and we ran out of requests. AGENTS.md rule 17 is exactly this.
+		 */
+		let refused: unknown = null;
 		for (const ref of [...new Set(refs)]) {
 			const root = rawCandidates({ ...repository, ref: null }, '', [ref])[0];
 			if (root === undefined) continue;
@@ -781,11 +795,14 @@ async function repositoryFiles(
 					.filter((url) => url.startsWith(root))
 					.map((url) => url.slice(root.length));
 				if (paths.length > 0) return { ref, paths };
-			} catch {
+			} catch (error) {
 				// A branch that does not exist is the ordinary case for one of the
-				// two; only both failing means anything.
+				// two; only both failing means anything. A refusal aimed at this
+				// address is not that, and is kept.
+				if (error instanceof TreeError && error.rateLimited) refused = error;
 			}
 		}
+		if (refused !== null) throw refused;
 		return null;
 	})();
 

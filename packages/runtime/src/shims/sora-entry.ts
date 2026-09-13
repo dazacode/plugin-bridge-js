@@ -89,6 +89,33 @@ const HOST_GATE = `
 function _0xB4F2() { return 'kuro-cranci-0001'; }
 `;
 
+/**
+ * The module's own code, wrapped so that it runs the way it was written to.
+ *
+ * ## The receiver is load-bearing
+ *
+ * These modules are written for a runtime that evaluates them as a **classic
+ * script**, where top-level `this` is the global object. Here they are spliced
+ * into an ES module, which is strict — so an IIFE invoked with no receiver gets
+ * `this === undefined`, and a bundled UMD library whose header reads
+ * `root.CryptoJS = factory()` with `root = this` throws
+ * *"Cannot set properties of undefined (setting 'CryptoJS')"*. At load, before
+ * a single request. Measured on a live library: **five modules of fifty-one, on
+ * that one cause** — the largest single thing standing between this ecosystem
+ * and a viewer, and not a property of any of the five.
+ *
+ * So the wrapper is `.call(globalThis)`, and it must be the **real** global
+ * rather than a stand-in object, because the UMD dance has two halves: the
+ * library assigns onto the receiver, and the module's own code then reads
+ * `CryptoJS` as a *free variable*. A plain object would take the write and lose
+ * the read, which is the same failure one step later and harder to see.
+ *
+ * What contains it is the isolate, not this line. A plugin already runs with
+ * its own global object, no filesystem, and only the network the host grants
+ * it; what it writes there is visible to nothing else and dies with the
+ * sandbox. Refusing the receiver would not buy safety — it buys a library that
+ * cannot initialise.
+ */
 export function soraEntrypoint(options: SoraEntrypointOptions): string {
 	const constants = [
 		`const __PLUGIN_ID = ${JSON.stringify(options.pluginId)};`,
@@ -104,7 +131,7 @@ ${HOST_GATE}
 
 /* --- the module, verbatim ------------------------------------------------ */
 
-const __module = (function () {
+const __module = ((function () {
 ${options.script}
 
   // Collected by name. A module declaring only some of these is a module that
@@ -116,7 +143,9 @@ ${options.script}
     extractEpisodes: typeof extractEpisodes === 'function' ? extractEpisodes : null,
     extractStreamUrl: typeof extractStreamUrl === 'function' ? extractStreamUrl : null
   };
-})();
+  // Called on the global, the way the runtime these modules were written for
+  // evaluates them. See soraEntrypoint's own comment for why.
+})).call(globalThis);
 
 /* --- the adapter --------------------------------------------------------- */
 

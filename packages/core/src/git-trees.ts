@@ -144,7 +144,38 @@ export function treeCandidates(repository: GitRepository, ref: string): string[]
 	];
 }
 
-export class TreeError extends Error {}
+export class TreeError extends Error {
+	/**
+	 * Whether the forge refused *this address*, rather than this repository.
+	 *
+	 * The distinction is the difference between a true sentence and a libel.
+	 * `api.github.com` allows **60 requests an hour unauthenticated**, counted
+	 * per address — and in a browser that address is the *viewer's*, shared with
+	 * everyone behind the same NAT. When it runs out every ref fails identically,
+	 * which is indistinguishable from a repository that has no branches unless
+	 * somebody looks at the status.
+	 *
+	 * Nobody did, and the consequence was a sentence about somebody else's
+	 * repository: *"the source could not be found in the repository it is built
+	 * from"*. It was there. We had run out of requests.
+	 */
+	readonly rateLimited: boolean;
+
+	constructor(message: string, options: { rateLimited?: boolean } = {}) {
+		super(message);
+		this.rateLimited = options.rateLimited === true;
+	}
+}
+
+/** Whether a failed fetch was the forge saying "not so fast". */
+function isRateLimit(error: unknown): boolean {
+	if (error instanceof TreeError) return error.rateLimited;
+	const message = error instanceof Error ? error.message : String(error);
+	// The status is in the message because that is how every `getText` this
+	// package is handed reports one — the headless host, the browser host and
+	// the CLI all throw `<status> from <url>`.
+	return /\b(403|429)\b/.test(message) && message.includes(GITHUB_API);
+}
 
 /**
  * Every file path in a tree document, whichever shape it came in.
@@ -219,6 +250,14 @@ export function createTreeLister(getText: TextFetcher): FileLister {
 				} catch (error) {
 					last = error;
 				}
+			}
+			if (isRateLimit(last)) {
+				throw new TreeError(
+					'the code host is rate-limiting this address, so the extension source could not be ' +
+						'read. It allows 60 requests an hour without an account. This is temporary and ' +
+						'says nothing about the repository.',
+					{ rateLimited: true }
+				);
 			}
 			throw last instanceof Error
 				? last
