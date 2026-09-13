@@ -184,15 +184,28 @@ function listingOf(manifest: SoraManifest, indexUrl: string, category?: string):
  * position in the array, so the result does not depend on fetch order — and
  * left untouched for every name that is not colliding, so this cannot move an
  * id already written into a stored `SourceBinding`.
+ *
+ * That still leaves one case: a library entry published twice, byte for byte
+ * — same name, same script. There is nothing about the second one to key an
+ * id on, so it is dropped rather than given one indistinguishable from the
+ * first. Whichever the source array names first survives; a true duplicate
+ * has no other listing to prefer over it.
  */
 function disambiguateIds(plugins: readonly RepositoryPlugin[]): RepositoryPlugin[] {
 	const byId = new Map<string, number>();
 	for (const plugin of plugins) byId.set(plugin.id, (byId.get(plugin.id) ?? 0) + 1);
 
-	return plugins.map((plugin) => {
+	const rewritten = plugins.map((plugin) => {
 		if ((byId.get(plugin.id) ?? 0) <= 1) return plugin;
 		const artifactUrl = plugin.origin?.artifactUrl ?? '';
 		return { ...plugin, id: convertedPluginId('sora', `${plugin.name} ${artifactUrl}`) };
+	});
+
+	const seen = new Set<string>();
+	return rewritten.filter((plugin) => {
+		if (seen.has(plugin.id)) return false;
+		seen.add(plugin.id);
+		return true;
 	});
 }
 

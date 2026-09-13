@@ -12,6 +12,20 @@ to exhaustion and deliberately closed it. `v0.1.x` is for fixes to what has
 already been promised; a minor bump whose case is "the number went up" is not a
 minor bump.
 
+## v0.1.3 — fixes to what v0.1.0 promised
+
+No new capability, no new ecosystem, no architectural change.
+
+### v0.1.2's fix left one shape uncovered
+
+Disambiguating a colliding id by the listing's own script URL does nothing for
+a library entry published twice, byte for byte — same declared name, same
+script — because there is then nothing about the second one to key an id on.
+Found the same way as v0.1.2's fix: browser-driving the production deployment
+against the same live library still threw `each_key_duplicate`, one pair
+narrower. The second copy is now dropped rather than given an id indistinguishable
+from the first — a true duplicate has no other listing to prefer over it.
+
 ## v0.1.2 — fixes to what v0.1.0 promised
 
 No new capability, no new ecosystem, no architectural change.

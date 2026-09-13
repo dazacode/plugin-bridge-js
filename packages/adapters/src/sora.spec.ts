@@ -41,4 +41,15 @@ describe('a library that names two different modules alike', () => {
 
 		expect(plugins[0].id).toBe('app.yorozo.converted.sora.only_one');
 	});
+
+	it('drops a listing published twice, byte for byte, rather than fake a second id', () => {
+		const body = JSON.stringify([
+			manifest('Same Name', 'one/one.js'),
+			manifest('Same Name', 'one/one.js')
+		]);
+
+		const { plugins } = soraAdapter.parseIndex(body, 'https://example.invalid/modules.json');
+
+		expect(plugins).toHaveLength(1);
+	});
 });
