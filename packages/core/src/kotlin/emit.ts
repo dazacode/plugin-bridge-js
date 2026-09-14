@@ -4523,8 +4523,14 @@ class Emitter {
 		}
 		if (extension !== undefined) {
 			// `element.getInfo("x")` calls `getInfo(element, "x")`: the receiver
-			// is the first argument, which is where the declaration put it.
-			if (lambda !== null) this.refuse(lambda, `a lambda passed to \`.${name}()\``);
+			// is the first argument, which is where the declaration put it. A
+			// trailing lambda is an ordinary last parameter under the same
+			// rule — `response.retryOn419 { req -> … }` calls `retryOn419(response,
+			// (req) => …)` — and `callArguments` already knows how to convert one;
+			// `receiverForm` is false because a locally declared extension's own
+			// function-type parameter is never itself a receiver lambda in any
+			// source measured (`fun Response.retryOn419(onRetry: (Request) ->
+			// Response)`, not `onRetry: Request.() -> Response`).
 			// `selfReference`, not a literal `this`: inside `SAnime.create().apply
 			// { … }` the block is a real `function` whose `this` is the *record*,
 			// so `this.fixLink(…)` looked for the extension on the SAnime and the
@@ -4539,7 +4545,7 @@ class Emitter {
 						? this.safe(name)
 						: `${this.safe(owner)}.${name}`;
 			const types = this.reifiedArguments(suffix, name, typeArgument);
-			const tail = this.plainArguments(name, args);
+			const tail = this.callArguments(name, args, lambda, labelled, false);
 			const call = `${callee}(${[...types, receiverText, ...tail].join(', ')})`;
 			if (!safe) return this.suspendMembers.has(name) ? this.awaited(call) : call;
 			const inner = `${callee}(${[...types, '__r', ...tail].join(', ')})`;

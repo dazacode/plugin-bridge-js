@@ -232,6 +232,51 @@ class Demo {
 		expect(tree.hasError).toBe(false);
 	});
 
+	it('reads a raw string ending in an odd run of backslashes', async () => {
+		// The pinned grammar treats a trailing backslash in a raw string as
+		// escaping the quote after it, a rule Kotlin raw strings do not have, and
+		// reads past the real terminator looking for one it does not consider
+		// escaped. `Regex("""\\x...""")` ends on two backslashes and is fine;
+		// `.replace("""\\""", """\""")` ends its second argument on one.
+		const parse = await loadKotlinGrammar(vendorWasm);
+		const tree = parse(`
+class Demo {
+    private fun unescape(value: String): String = value
+        .replace("""\\\\""", """\\""")
+}
+`);
+
+		expect(tree.hasError).toBe(false);
+	});
+
+	it('leaves a raw string ending in an even run of backslashes alone, because it already parses', async () => {
+		const parse = await loadKotlinGrammar(vendorWasm);
+		const tree = parse(`
+class Demo {
+    private val hexEscape = Regex("""\\\\x([0-9a-fA-F]{2})""")
+}
+`);
+
+		expect(tree.hasError).toBe(false);
+	});
+
+	it('does not respell a raw string ending in a backslash across a real newline', async () => {
+		// An ordinary string cannot hold a literal newline, so a raw string
+		// ending in an odd run of backslashes is left as the honest "could not
+		// parse" rather than respelled into a shape that would lose the newline
+		// — the same trigger as the passing case above, with a line break in the
+		// content instead of none.
+		const parse = await loadKotlinGrammar(vendorWasm);
+		const tree = parse(`
+class Demo {
+    private val body = """
+    line one \\"""
+}
+`);
+
+		expect(tree.hasError).toBe(true);
+	});
+
 	it('reads a generic call used as the right operand of an operator', async () => {
 		// The grammar resolves `<` … `>` `(` in favour of comparison there, and
 		// the result has no ERROR node: `y + f.pick<G>(1)` becomes

@@ -1983,6 +1983,26 @@ describe('extension functions', () => {
 		expect(demo.label(null) ?? null).toBeNull();
 		expect(demo.label('  x ')).toBe('x');
 	});
+
+	it('passes a trailing lambda through a declared extension function', () => {
+		// `response.retryOn419 { req -> … }` is `retryOn419(response, (req) =>
+		// …)` under the same rule as any other argument — the receiver first,
+		// the trailing lambda last — and used to be refused outright rather than
+		// converted, so nothing that shape appeared in ever installed.
+		const demo = instantiate(
+			inClass(
+				'    private fun Int.retryOnZero(onRetry: (Int) -> Int): Int {',
+				'        if (this != 0) return this',
+				'        return onRetry(this)',
+				'    }',
+				'',
+				'    fun result(value: Int) = value.retryOnZero { it + 1 }'
+			)
+		);
+
+		expect(demo.result(0)).toBe(1);
+		expect(demo.result(5)).toBe(5);
+	});
 });
 
 describe('scope functions with no receiver', () => {

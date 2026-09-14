@@ -230,8 +230,11 @@ function findHeaderEnd(source: string, start: number): number {
 function repairKnownGrammarGaps(source: string): string {
 	// Ahead of the mask, because the mask cannot read a multi-dollar string
 	// correctly either — what interpolates inside one is the question this
-	// rewrite answers.
-	const plain = multiDollarStrings(source);
+	// rewrite answers. Same reason `rawStringsEndingInBackslash` runs here
+	// rather than after: the mask calls `skipRawString` too, and a raw string
+	// this grammar cannot terminate correctly is exactly the input the mask
+	// would also get wrong.
+	const plain = rawStringsEndingInBackslash(multiDollarStrings(source));
 	const masked = maskLiteralsAndComments(plain);
 	// Descending, so an earlier edit's offsets are still the ones the mask
 	// computed once a later one has been spliced in.
@@ -349,6 +352,72 @@ function rewriteDollars(
 
 /** How a raw string spells a literal `$`: an interpolation of the character. */
 const LITERAL_DOLLAR_RAW = "${'$'}";
+
+/**
+ * A raw (triple-quoted) string whose content ends in an odd run of
+ * backslashes — `"""\"""`, one backslash immediately before the terminator.
+ *
+ * Kotlin raw strings have no escape mechanism: a backslash is exactly one
+ * character wherever it sits, and `"""..."""` ends at the first `"""` not
+ * followed by another quote (`skipRawString`, unchanged here because it
+ * already gets this right). The pinned grammar's raw-string scanner disagrees
+ * — it treats a trailing backslash as escaping the quote after it, the rule an
+ * *ordinary* string follows, and reads past the real terminator hunting for
+ * one it does not consider escaped. What it finds is the next `"""` anywhere
+ * later in the file, and everything between becomes one `ERROR`. Regex
+ * patterns are exactly the sources that end a string on a backslash —
+ * `Regex("""\\x...""")` is unaffected (an even run), `.replace("""\\""",
+ * """\""")` is not (the second argument ends on one).
+ *
+ * Fixed by respelling rather than masking: the value is what the extension
+ * runs on, so the raw string is rewritten into the ordinary escaped spelling
+ * of the same value — the one shape this grammar's normal-string handling
+ * reads correctly no matter how many backslashes it ends on. Skipped when the
+ * content holds a literal newline, which an ordinary string cannot spell, or a
+ * `${…}` block interpolation, whose own quotes and backslashes are Kotlin
+ * syntax rather than string content and must not be escaped along with it —
+ * nothing measured needs either, and this stays a respelling of exactly the
+ * cases it understands rather than a general raw-string rewriter.
+ */
+function rawStringsEndingInBackslash(source: string): string {
+	if (!source.includes('"""')) return source;
+	const edits: Edit[] = [];
+	let at = 0;
+	while (at < source.length) {
+		const character = source.charAt(at);
+		if (character === '/' && source.charAt(at + 1) === '/') {
+			while (at < source.length && source.charAt(at) !== '\n') at += 1;
+		} else if (character === '/' && source.charAt(at + 1) === '*') {
+			at += 2;
+			while (at < source.length && !source.startsWith('*/', at)) at += 1;
+			at = Math.min(source.length, at + 2);
+		} else if (character === '`') {
+			at += 1;
+			while (at < source.length && source.charAt(at) !== '`' && source.charAt(at) !== '\n') {
+				at += 1;
+			}
+			at += 1;
+		} else if (source.startsWith('"""', at)) {
+			const end = skipRawString(source, at + 3);
+			const content = source.slice(at + 3, Math.max(at + 3, end - 3));
+			const trailingBackslashes = /\\+$/.exec(content)?.[0].length ?? 0;
+			if (trailingBackslashes % 2 === 1 && !content.includes('\n') && !content.includes('${')) {
+				edits.push({ start: at, end, text: `"${content.replace(/[\\"]/g, '\\$&')}"` });
+			}
+			at = end;
+		} else if (character === '"' || character === "'") {
+			at = skipQuoted(source, at + 1, character);
+		} else {
+			at += 1;
+		}
+	}
+	if (edits.length === 0) return source;
+	let output = source;
+	for (const edit of edits.sort((left, right) => right.start - left.start)) {
+		output = output.slice(0, edit.start) + edit.text + output.slice(edit.end);
+	}
+	return output;
+}
 
 /**
  * `x + f.pick<Genre>(1)` — a generic call read as a chain of comparisons.
