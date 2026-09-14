@@ -65,7 +65,7 @@ import {
 	sourceRepositoryOf,
 	type SharedCache
 } from '@plugin-bridge/core/source-repo';
-import type { KotlinConversion } from '@plugin-bridge/core/kotlin/pipeline';
+import { readKotlinFast, type KotlinConversion } from '@plugin-bridge/core/kotlin/pipeline';
 import type { RepositoryIndex, RepositoryPlugin } from '@plugin-bridge/core/repository-index';
 import { formatProfile } from '@plugin-bridge/core/formats';
 import type { ForeignMedium } from '@plugin-bridge/core/formats';
@@ -379,7 +379,10 @@ export const aniyomiAdapter: ForeignAdapter = {
 		const baseUrl =
 			conversion.constants.stringConstants['baseUrl'] ||
 			baseUrlFromSupertype(source.files[0]?.source ?? '') ||
-			baseUrlFromPreference(source.files[0]?.source ?? '', conversion.constants.stringConstants);
+			baseUrlFromPreference(source.files[0]?.source ?? '', conversion.constants.stringConstants) ||
+			(conversion.superClass === 'AnimeSourceFactory'
+				? baseUrlFromFactoryTarget(source.files, source.files[0]?.source ?? '')
+				: '');
 		if (!baseUrl.startsWith('https://')) {
 			throw new ForeignFormatError(
 				`${listing.name} declares no https base URL that can be read without running it.`
@@ -519,6 +522,47 @@ function baseUrlFromPreference(
 	}
 	const literal = /"(https:\/\/[^"\s$]+)"/.exec(declared[1]);
 	return literal === null ? '' : literal[1];
+}
+
+/**
+ * The base url of an extension published as an `AnimeSourceFactory`.
+ *
+ * A factory's own class declares no `baseUrl` at all — one factory hands back
+ * several language variants of the *same* source, each a separate instance of
+ * a sibling class, and the domain lives on that class instead
+ * (`AnimeWorldIndiaFactory` naming `AnimeWorldIndia` nine times over is the
+ * shape). `createSources()` is the only place that says which class the
+ * factory actually builds, so the first constructor call it makes — skipping
+ * the collection builders `listOf`/`arrayOf`/… have to be written with — names
+ * the file to look in. Once that file is found, it is read exactly the way
+ * the entry file already was: a literal, then the two computed forms above.
+ */
+function baseUrlFromFactoryTarget(
+	files: readonly { path: string; source: string }[],
+	entrySource: string
+): string {
+	const body = /\bfun\s+createSources\s*\([^)]*\)[\s\S]{0,4000}/.exec(entrySource)?.[0];
+	if (body === undefined) return '';
+	const collectionBuilders = new Set([
+		'listOf',
+		'mutableListOf',
+		'arrayOf',
+		'sequenceOf',
+		'setOf',
+		'buildList'
+	]);
+	for (const call of body.matchAll(/\b([A-Z]\w*)\s*\(/g)) {
+		const name = call[1];
+		if (collectionBuilders.has(name)) continue;
+		const target = files.find((file) => new RegExp(`\\bclass\\s+${name}\\b`).test(file.source));
+		if (target === undefined) continue;
+		const found =
+			readKotlinFast(target.source).stringConstants['baseUrl'] ||
+			baseUrlFromSupertype(target.source) ||
+			baseUrlFromPreference(target.source, readKotlinFast(target.source).stringConstants);
+		if (found.startsWith('https://')) return found;
+	}
+	return '';
 }
 
 /**

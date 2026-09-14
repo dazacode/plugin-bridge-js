@@ -273,6 +273,56 @@ class ExampleHostExtractor {
 }
 `;
 
+/* ── an `AnimeSourceFactory`: several languages, one class, no baseUrl on it ── */
+
+const BUILD_GRADLE_FACTORY = `
+ext {
+    extName = 'Example Anime'
+    extClass = '.ExampleAnimeFactory'
+    extVersionCode = 3
+}
+
+apply from: "$rootDir/common.gradle"
+`;
+
+/** Names which class it builds; declares no `baseUrl` of its own. */
+const EXTENSION_FACTORY_KT = `
+package ${PACKAGE}
+
+class ExampleAnimeFactory : AnimeSourceFactory {
+    override fun createSources() = listOf(
+        ExampleAnime("en"),
+        ExampleAnime("fr"),
+    )
+}
+`;
+
+/** What the factory above actually builds, one instance per language. */
+const EXTENSION_FACTORY_TARGET_KT = `
+package ${PACKAGE}
+
+class ExampleAnime(override val lang: String) : ParsedAnimeHttpSource() {
+    override val name = "Example Anime"
+    override val baseUrl = "https://watch.example.invalid"
+    override val supportsLatest = false
+
+    override fun popularAnimeRequest(page: Int) = GET("$baseUrl/hot?page=$page", headers)
+
+    override fun popularAnimeSelector() = "li.card"
+
+    override fun popularAnimeNextPageSelector() = "a.next"
+}
+`;
+
+function repositoryFactory(): Map<string, string> {
+	return new Map([
+		['LICENSE', LICENCE],
+		['src/en/example/build.gradle', BUILD_GRADLE_FACTORY],
+		['src/en/example/ExampleAnimeFactory.kt', EXTENSION_FACTORY_KT],
+		['src/en/example/ExampleAnime.kt', EXTENSION_FACTORY_TARGET_KT]
+	]);
+}
+
 /**
  * The first paragraph of a real licence, which is all `spdxFromLicenseText`
  * reads. Carrying the whole of one here would be four hundred lines of fixture
@@ -553,6 +603,20 @@ class ExampleAnime : ParsedAnimeHttpSource() {
     }
 }
 `)
+		);
+
+		expect(bundle.hosts).toContain('watch.example.invalid');
+	}, 60_000);
+
+	it('reads a base url off the class an AnimeSourceFactory builds', async () => {
+		// A factory extension hands back several language variants of the same
+		// source, and the factory class itself declares no `baseUrl` at all — it
+		// lives on the class `createSources()` instantiates instead. The entry
+		// file is the factory (`extClass` in the build file names it), so the
+		// straightforward reads all look at the wrong file; only tracing
+		// `createSources()` to the class it builds finds the real one.
+		const bundle = await openPluginArchive(
+			await aniyomiAdapter.convert(await listing(), services(repositoryFactory()))
 		);
 
 		expect(bundle.hosts).toContain('watch.example.invalid');
