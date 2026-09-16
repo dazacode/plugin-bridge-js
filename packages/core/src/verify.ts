@@ -480,7 +480,20 @@ export async function verifyConvertedPlugin(
 
 /** A sentence for a viewer, naming the step and quoting the plugin. */
 export function describeVerification(name: string, result: VerificationResult): string {
-	if (result.ok) return `${name} answered a test search, episode list and stream.`;
+	if (result.ok) {
+		// A pass earned entirely by descriptors is a different sentence. The
+		// gate stopped failing those on purpose — what prevents playback is a
+		// capability, not the source — but saying "played a stream" of a run
+		// that played nothing swaps one wrong verdict for another.
+		if (result.streamCount === 0 && result.torrentCount > 0) {
+			return (
+				`${name} answered a test search and episode list, and offered ` +
+				`${result.torrentCount} peer-to-peer stream(s). Nothing was played: acquiring one ` +
+				`needs a client that can join a swarm.`
+			);
+		}
+		return `${name} answered a test search, episode list and stream.`;
+	}
 
 	const step = {
 		load: 'could not be loaded',
