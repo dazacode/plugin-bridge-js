@@ -123,6 +123,23 @@ export type ForeignMedium = 'anime' | 'live-action' | 'manga' | 'novel';
 export const SUPPORTED_MEDIUMS: ReadonlySet<ForeignMedium> = new Set(['anime', 'live-action']);
 
 /**
+ * Every medium something classified claims, from either shape of the record.
+ *
+ * One reader for the pair, so that no caller has to remember that `mediaKind`
+ * is the collapsed value and `mediaKinds` the real answer, and so that the
+ * fallbacks are written once. Empty means nothing was classified at all,
+ * which every caller treats as "ask anyway" — a gap in information is not
+ * evidence of the wrong medium.
+ */
+export function declaredMediums(
+	of: Pick<ConversionRecord, 'mediaKind' | 'mediaKinds'> | undefined
+): readonly ForeignMedium[] {
+	if (of === undefined) return [];
+	if (of.mediaKinds !== undefined && of.mediaKinds.length > 0) return of.mediaKinds;
+	return of.mediaKind === undefined ? [] : [of.mediaKind];
+}
+
+/**
  * What a converted plugin was made from.
  *
  * Present only when the bundle did not come from a Yorozo repository. It is
@@ -168,6 +185,17 @@ export interface ConversionRecord {
 	 * information, not evidence it is the wrong kind.
 	 */
 	readonly mediaKind?: ForeignMedium;
+	/**
+	 * Every medium the originating listing claimed, copied from
+	 * `ForeignOrigin.mediaKinds` at conversion time.
+	 *
+	 * This, not `mediaKind`, is what a medium filter must read: `mediaKind` is
+	 * one value because a row is filed under one medium, and a source that
+	 * declared three is not evidence against the other two. Absent means the
+	 * classification was single-valued, so a reader falls back to
+	 * `[mediaKind]` — and with `mediaKind` absent too, to asking anyway.
+	 */
+	readonly mediaKinds?: readonly ForeignMedium[];
 }
 
 /**
@@ -191,6 +219,25 @@ export interface ForeignOrigin {
 	/** Its own version string, never parsed. */
 	readonly foreignVersion: string;
 	readonly mediaKind: ForeignMedium;
+	/**
+	 * Every medium the listing claimed, not just the one it is filed under.
+	 *
+	 * Some ecosystems declare a *set*: a Sora manifest saying
+	 * `movies/shows/anime` serves all three, and Cloudstream's `tvTypes` is an
+	 * array. `mediaKind` has to collapse that to one value — a row is filed
+	 * under one medium, and `keepMediums`/`refusalFor` ask a yes-or-no question
+	 * — and collapsing it loses exactly the fact a consumer needs to route by
+	 * medium later. A drama site declaring `movies/shows/anime` files under
+	 * `anime` on the first mention and is then never asked for the live-action
+	 * it actually serves.
+	 *
+	 * So the set is carried alongside the collapsed value rather than instead
+	 * of it. `mediaKind` stays the listing's primary medium and is always the
+	 * first element. Absent means the adapter's classification was genuinely
+	 * single-valued — a Mangayomi `itemType` enum, an Aniyomi package name —
+	 * and a reader treats it as `[mediaKind]`, never as "no mediums".
+	 */
+	readonly mediaKinds?: readonly ForeignMedium[];
 	readonly isNsfw: boolean;
 	/**
 	 * Whatever else that format's converter needs, carried on the listing.

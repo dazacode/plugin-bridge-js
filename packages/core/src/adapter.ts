@@ -16,6 +16,7 @@ import type { ObstacleSite } from './obstacles';
 import type { FileLister } from './source-repo';
 import type { RepositoryIndex, RepositoryPlugin } from '@plugin-bridge/core/repository-index';
 import {
+	declaredMediums,
 	formatProfile,
 	refusalFor,
 	SUPPORTED_MEDIUMS,
@@ -266,8 +267,12 @@ export function loadForeignIndex(
  */
 export function keepMediums(index: Omit<RepositoryIndex, 'filteredOut'>): RepositoryIndex {
 	const kept = index.plugins.filter((listing) => {
-		const medium = listing.origin?.mediaKind;
-		return medium !== undefined && SUPPORTED_MEDIUMS.has(medium);
+		// Any supported medium keeps the listing. A module declaring
+		// `movies/shows/mangas` serves something this build can show, and
+		// dropping it because the medium it happens to be filed under is not
+		// supported would discard a working source over a tie-break.
+		const mediums = declaredMediums(listing.origin);
+		return mediums.some((medium) => SUPPORTED_MEDIUMS.has(medium));
 	});
 	return {
 		...index,
@@ -413,6 +418,10 @@ const SHARED_SUFFIXES = new Set([
 	'gitlab.io',
 	'blogspot.com',
 	'sourceforge.io',
+	// Every public repository's files, and every avatar and attachment GitHub
+	// serves, sit under one host on this domain. A module downloaded from
+	// `raw.githubusercontent.com` must not thereby be granted the rest of it.
+	'githubusercontent.com',
 	'amazonaws.com',
 	'cloudfront.net',
 	'azurewebsites.net',

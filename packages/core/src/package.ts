@@ -99,8 +99,14 @@ const ENTRYPOINT = 'source';
  *
  * 44: a subtitle url is judged before it is made absolute, so a module's
  *     `"none"` is no longer resolved into a caption track pointing at a 404.
+ *
+ * 45: a Sora module no longer declares the host it was downloaded from, and a
+ *     multi-medium declaration is carried as the set it is. Bumped so that
+ *     already-installed rows are re-converted: both facts are recorded at
+ *     conversion time, so a fixed converter changes nothing for a bundle that
+ *     is already on disk.
  */
-export const CONVERTER_VERSION = 44;
+export const CONVERTER_VERSION = 45;
 
 export interface BundleInput {
 	readonly id: string;

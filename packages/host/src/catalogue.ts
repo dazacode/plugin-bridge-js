@@ -166,7 +166,8 @@ export async function checkListing(
 		convertedAt: now().toISOString(),
 		converterVersion: CONVERTER_VERSION,
 		verified: false,
-		mediaKind: listing.origin.mediaKind
+		mediaKind: listing.origin.mediaKind,
+		mediaKinds: listing.origin.mediaKinds
 	};
 
 	const result = await verifyConvertedPlugin(

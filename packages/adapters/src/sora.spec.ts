@@ -101,3 +101,92 @@ describe('classifying a module Sora describes only in free text', () => {
 		expect(filteredOut).toBe(1);
 	});
 });
+
+/**
+ * The failure these guard, seen on a live install. KissAsian declares
+ * `movies/shows/anime` — a set — and was filed under `anime` on the first
+ * mention, after which the medium filter skipped it for every live-action
+ * title and the viewer's only installed source reported "No installed plugin
+ * serves that kind of media". A superset declaration is not an exclusion.
+ */
+describe('a module that declares more than one medium', () => {
+	it('keeps every medium it named, not just the one it is filed under', () => {
+		const body = JSON.stringify([
+			{ ...manifest('Drama Site', 'x/x.js'), type: 'movies/shows/anime' }
+		]);
+
+		const { plugins } = soraAdapter.parseIndex(body, 'https://example.invalid/modules.json');
+
+		expect(plugins[0].origin?.mediaKinds).toContain('anime');
+		expect(plugins[0].origin?.mediaKinds).toContain('live-action');
+	});
+
+	it('files it under the first medium named, exactly as before', () => {
+		const body = JSON.stringify([
+			{ ...manifest('Drama Site', 'x/x.js'), type: 'movies/shows/anime' }
+		]);
+
+		const { plugins } = soraAdapter.parseIndex(body, 'https://example.invalid/modules.json');
+
+		expect(plugins[0].origin?.mediaKind).toBe('anime');
+		expect(plugins[0].origin?.mediaKinds?.[0]).toBe('anime');
+	});
+
+	it('reads the library category as well as the manifest', async () => {
+		// The live case exactly: the manifest's own `type` and the library's
+		// `category` both say `movies/shows/anime`, and both are free text.
+		const body = JSON.stringify({
+			modules: [{ category: 'movies/shows/anime', manifestUrl: 'x/x.json' }]
+		});
+		const getText = async () =>
+			JSON.stringify({ ...manifest('Drama Site', 'x/x.js'), type: 'movies/shows/anime' });
+
+		const { plugins } = await soraAdapter.loadIndex!(
+			body,
+			'https://example.invalid/modules.json',
+			getText
+		);
+
+		expect(plugins[0].origin?.mediaKinds).toEqual(['anime', 'live-action']);
+	});
+
+	it('keeps a listing whose supported medium is not the one it is filed under', () => {
+		// `mangas/shows`: filed under live-action by precedence, but the point
+		// is that naming an unsupported medium first never drops it.
+		const body = JSON.stringify([{ ...manifest('Mixed Site', 'x/x.js'), type: 'mangas/shows' }]);
+
+		const { plugins, filteredOut } = soraAdapter.parseIndex(
+			body,
+			'https://example.invalid/modules.json'
+		);
+
+		expect(plugins).toHaveLength(1);
+		expect(filteredOut).toBe(0);
+		expect(plugins[0].origin?.mediaKinds).toContain('live-action');
+	});
+});
+
+describe('the hosts a converted module is granted', () => {
+	it('does not grant the host it was downloaded from', () => {
+		// `scriptUrl` is fetched once by the host, before any sandbox exists.
+		// Granting it gave every module published on GitHub raw a standing read
+		// of GitHub's user content for a request it never makes.
+		const body = JSON.stringify([
+			{
+				sourceName: 'Hosted On GitHub',
+				scriptUrl: 'https://raw.githubusercontent.com/someone/modules/main/x/x.js',
+				version: '1.0.0',
+				streamType: 'HLS',
+				baseUrl: 'https://example.invalid/'
+			}
+		]);
+
+		const { plugins } = soraAdapter.parseIndex(
+			body,
+			'https://raw.githubusercontent.com/someone/modules/main/modules.json'
+		);
+
+		expect(plugins[0].hosts).toContain('example.invalid');
+		expect(plugins[0].hosts.some((host) => host.includes('githubusercontent'))).toBe(false);
+	});
+});

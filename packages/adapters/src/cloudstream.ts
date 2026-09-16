@@ -40,10 +40,20 @@ import type { RepositoryIndex } from '@plugin-bridge/core/repository-index';
  * though the format's own tier (`browse-only`: compiled JVM bytecode, no
  * converter yet) still refuses every listing regardless of what it serves.
  */
-function mediumOf(tvTypes: unknown): ForeignMedium {
+function mediumsOf(tvTypes: unknown): ForeignMedium[] {
 	const types = Array.isArray(tvTypes) ? tvTypes.map((t) => String(t).toLowerCase()) : [];
-	if (types.some((type) => type.includes('anime') || type === 'ova')) return 'anime';
-	return 'live-action';
+	const anime = types.some((type) => type.includes('anime') || type === 'ova');
+	// `tvTypes` is a list, and a provider serving both says so by listing both.
+	// The live-action half is the default: an empty or unrecognised list is a
+	// film/TV provider in a film/TV ecosystem.
+	const liveAction =
+		!anime || types.some((type) => ['movie', 'tvseries', 'asiandrama', 'cartoon'].includes(type));
+	return anime ? (liveAction ? ['anime', 'live-action'] : ['anime']) : ['live-action'];
+}
+
+/** The one medium a provider is filed under: its first declared mention. */
+function mediumOf(tvTypes: unknown): ForeignMedium {
+	return mediumsOf(tvTypes)[0];
 }
 
 function parsePluginList(body: string, listUrl: string, name: string): RepositoryIndex {
@@ -91,6 +101,7 @@ function parsePluginList(body: string, listUrl: string, name: string): Repositor
 				foreignId: internalName,
 				foreignVersion: String(row['version'] ?? '0'),
 				mediaKind: mediumOf(row['tvTypes']),
+				mediaKinds: mediumsOf(row['tvTypes']),
 				isNsfw: Array.isArray(row['tvTypes'])
 					? row['tvTypes'].some((type) => String(type).toLowerCase() === 'nsfw')
 					: false,

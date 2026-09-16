@@ -149,6 +149,8 @@ interface ForeignOrigin {
 	/** Its own version string, compared verbatim; never parsed as semver. */
 	readonly foreignVersion: string;
 	readonly mediaKind: ForeignMedium;
+	/** Every medium the listing claimed; `mediaKind` is its first element. */
+	readonly mediaKinds?: readonly ForeignMedium[];
 	readonly isNsfw: boolean;
 }
 ```
@@ -156,6 +158,16 @@ interface ForeignOrigin {
 `ForeignMedium` (`anime | live-action | manga | novel`), not the app's own
 `MediaKind` — deliberately a narrower, local union; `formats.ts` explains why
 the runtime may not own the app's discriminator, only mention it.
+
+Some ecosystems declare a **set** rather than one medium: a Sora manifest's
+`type` of `movies/shows/anime` claims three, and Cloudstream's `tvTypes` is an
+array. `mediaKind` is the one the listing is filed under — its first declared
+medium — and `mediaKinds` is everything it claimed. A consumer routing by
+medium must read `mediaKinds` (via `declaredMediums`, which falls back to
+`[mediaKind]` and then to the empty list): a superset declaration is not
+evidence against the mediums it also named, and treating the collapsed value
+as exclusive skips a drama source for every live-action title it serves.
+Absent means the adapter's classification was genuinely single-valued.
 
 `foreignVersion` is compared as an opaque string. Foreign ecosystems number
 however they like — an integer version code, a two-part `14.58`, a semver — and
@@ -586,9 +598,11 @@ series): no manga, no light novels. This is a per-_listing_ judgement and not
 a per-repository one — one ecosystem's own published catalogue is manga-only
 while third-party catalogues in the same format serve something this build
 does show, so a format may not be written off on the strength of the
-catalogue its authors happen to publish. Listings whose `origin.mediaKind` is
-not in `SUPPORTED_MEDIUMS` (`formats.ts`) are **filtered out of the browse
-list** by `keepMediums` and cannot be installed. A repository whose every
+catalogue its authors happen to publish. Listings **none** of whose declared
+mediums (`origin.mediaKinds`, falling back to `origin.mediaKind`) are in
+`SUPPORTED_MEDIUMS` (`formats.ts`) are **filtered out of the browse list** by
+`keepMediums` and cannot be installed; one supported medium among several
+keeps the listing. A repository whose every
 listing was filtered says so explicitly — "this repository lists no
 supported sources" — rather than rendering an empty list, which reads as a
 broken fetch.

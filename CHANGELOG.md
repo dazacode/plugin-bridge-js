@@ -12,6 +12,44 @@ to exhaustion and deliberately closed it. `v0.1.x` is for fixes to what has
 already been promised; a minor bump whose case is "the number went up" is not a
 minor bump.
 
+## v0.2.1 — a declared set is not a declared exclusion
+
+Fixes to what v0.2.0 promised, found on a live install rather than in a
+measurement run.
+
+v0.2.0 gave every listing a classified `mediaKind` and said a consumer could
+route by it. Half these ecosystems declare a _set_, though — `movies/shows/anime`
+is the most common `type` in the measured Sora library, and Cloudstream's
+`tvTypes` is an array — and collapsing a set to its first mention turned a
+superset into an exclusion. KissAsian, a Korean/Chinese/Japanese/Thai drama
+source, declares `movies/shows/anime`, filed under `anime`, and was then never
+asked for a live-action title: the viewer's only installed source reported "No
+installed plugin serves that kind of media" for the content it actually serves.
+
+`ForeignOrigin` and `ConversionRecord` gain `mediaKinds`, the full declared
+set, with `mediaKind` staying its first element and the medium a row is filed
+under. `declaredMediums()` reads the pair, falling back to `[mediaKind]` and
+then to the empty list, so an unclassified plugin is still asked rather than
+excluded. `keepMediums()` keeps a listing with any supported medium instead of
+only a supported _primary_. Sora's classifier matches live-action words
+explicitly (`movies`, `shows`, `series`, `dramas`, `tv`, `films`) rather than
+inferring them from the absence of the other three, because a declaration
+naming both anime and shows has to produce both.
+
+Separately, a Sora listing no longer declares `scriptUrl`'s host among its
+granted hosts. That URL is where the module is downloaded from, fetched once
+by the host before any sandbox exists; a converted bundle has no business
+fetching its own source at runtime (`mangayomi.ts` already drops
+`sourceCodeUrl` for this reason). Every module published on GitHub raw was
+being granted a standing read of `raw.githubusercontent.com` for a request
+none of them makes — and `githubusercontent.com` joins `SHARED_SUFFIXES`, so
+the wildcard sibling that came with it, `*.githubusercontent.com`, is no
+longer granted to anything. That one covered every file GitHub serves for
+every public repository.
+
+`CONVERTER_VERSION` 44 → 45: both facts are recorded at conversion time, so
+already-installed rows need a re-conversion to pick them up.
+
 ## v0.2.0 — a second medium, not just a second ecosystem
 
 `ForeignMedium` was `'anime' | 'manga' | 'novel' | 'other'`, and the only

@@ -106,7 +106,21 @@ function authorName(value: unknown): string {
  * forever.
  */
 /**
- * What a module is for, from the manifest or from the library that listed it.
+ * Every medium a module is for, from the manifest or from the library that
+ * listed it.
+ *
+ * **These declarations are sets, and returning one value threw the rest
+ * away.** `movies/shows/anime` is the single most common `type` in the
+ * measured library, and it claims three mediums, not a first one. Collapsing
+ * it to `anime` on first mention filed KissAsian — a Korean/Chinese/Japanese
+ * drama site whose own description says *doramas asiáticos y películas* —
+ * under anime, after which the one filter that reads the medium never asked
+ * it for a live-action title again. The source looked broken; it was never
+ * asked.
+ *
+ * So this returns all of them, and `mediaKindOf` takes the first for the one
+ * place that genuinely needs a single value (which row a listing is filed
+ * under). Precedence for that first value is unchanged.
  *
  * **Both fields are free text and neither is an enum.** Measured across one
  * live library of 69: manifests declare `type` as `anime`, but also
@@ -118,11 +132,11 @@ function authorName(value: unknown): string {
  * treating every other non-empty value as `manga` dropped **22 anime modules
  * of 56** from that library — they said `movies/shows/anime`, and a module
  * that is filtered out is a module nothing ever explains. The same reasoning
- * is why a bare `shows/movies` — no anime, no manga, no novel mention at all —
- * reads as `live-action` now rather than falling into `manga` by elimination:
- * Sora is a general video-streaming ecosystem, and "no medium word matched"
- * described a live-action provider a great deal more often than it described
- * a manga one.
+ * is why an unrecognised word — no anime, no manga, no novel, none of the
+ * live-action words either — reads as `live-action` rather than falling into
+ * `manga` by elimination: Sora is a general video-streaming ecosystem, and
+ * "no medium word matched" described a live-action provider a great deal more
+ * often than it described a manga one.
  *
  * Defaulting to anime when neither field says anything is the existing
  * behaviour and stays: this client has always had somewhere to put anime, so a
@@ -130,15 +144,34 @@ function authorName(value: unknown): string {
  * `novel` would have hidden a module silently before either of those could be
  * shown at all.
  */
-function mediaKindOf(manifest: SoraManifest, category?: string): ForeignMedium {
+function mediaKindsOf(manifest: SoraManifest, category?: string): ForeignMedium[] {
 	const said = [manifest.type, category].filter(
 		(one): one is string => typeof one === 'string' && one.length > 0
 	);
-	if (said.length === 0) return 'anime';
-	if (said.some((one) => /anime/i.test(one))) return 'anime';
-	if (said.some((one) => /manga|comic/i.test(one))) return 'manga';
-	if (said.some((one) => /novel/i.test(one))) return 'novel';
-	return 'live-action';
+	if (said.length === 0) return ['anime'];
+
+	const found: ForeignMedium[] = [];
+	if (said.some((one) => /anime/i.test(one))) found.push('anime');
+	// `movies`, `shows`, `series`, `dramas`, `tv`: the words these manifests
+	// actually use for live-action. Matched explicitly rather than inferred
+	// from the absence of the others, because a declaration that names both
+	// anime *and* shows has to produce both, and "nothing else matched" cannot
+	// say that.
+	if (said.some((one) => /movie|show|series|drama|\btv\b|film/i.test(one))) {
+		found.push('live-action');
+	}
+	if (said.some((one) => /manga|comic/i.test(one))) found.push('manga');
+	if (said.some((one) => /novel/i.test(one))) found.push('novel');
+
+	// Something was declared and no medium word matched it. Sora is a general
+	// video-streaming ecosystem, so an unrecognised word described a
+	// live-action provider far more often than anything else — see above.
+	return found.length === 0 ? ['live-action'] : found;
+}
+
+/** The one medium a listing is filed under: its first declared mention. */
+function mediaKindOf(manifest: SoraManifest, category?: string): ForeignMedium {
+	return mediaKindsOf(manifest, category)[0];
 }
 
 function containerOf(streamType: unknown): 'hls' | 'mp4' {
@@ -156,20 +189,29 @@ function listingOf(manifest: SoraManifest, indexUrl: string, category?: string):
 		version: String(manifest.version ?? '1.0.0'),
 		author: authorName(manifest.author),
 		language: typeof manifest.language === 'string' ? manifest.language : null,
+		// `scriptUrl` is deliberately **not** here. It is where the module is
+		// downloaded from, not anywhere it goes: `convert` fetches it once
+		// through `services.fetchArtifact`, which is the host's own fetcher and
+		// runs before any sandbox exists, and a converted bundle has no business
+		// fetching its own source at runtime (`mangayomi.ts` drops
+		// `sourceCodeUrl` for exactly this reason). Including it granted every
+		// module published on GitHub raw a standing read of
+		// `raw.githubusercontent.com` — and, via the wildcard, of every file
+		// GitHub serves for every public repository — for a request none of them
+		// makes.
 		hosts: hostsFromUrls([
 			typeof manifest.baseUrl === 'string' ? manifest.baseUrl : null,
-			typeof manifest.searchBaseUrl === 'string' ? manifest.searchBaseUrl : null,
-			scriptUrl
+			typeof manifest.searchBaseUrl === 'string' ? manifest.searchBaseUrl : null
 		]),
 		origin: {
 			format: 'sora',
 			artifactUrl: scriptUrl,
 			foreignId: name,
 			foreignVersion: String(manifest.version ?? '1.0.0'),
-			// A module declares `type`, and `anime` is the only value this client
-			// has anywhere to put. Anything else is classified as what it says it
-			// is so the row can explain itself.
+			// The medium the row is filed under, and then everything the module
+			// actually claimed — these manifests routinely name three.
 			mediaKind: mediaKindOf(manifest, category),
+			mediaKinds: mediaKindsOf(manifest, category),
 			isNsfw: false,
 			// Everything `convert` needs, resolved now while the manifest is in
 			// hand. Conversion then depends on the listing alone.

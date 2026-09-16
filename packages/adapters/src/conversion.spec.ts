@@ -731,6 +731,15 @@ describe('the wildcard sibling a host is granted alongside', () => {
 		expect(wildcardFor('helper.someone.workers.dev')).toBe('*.someone.workers.dev');
 	});
 
+	it('treats GitHub user content as the shared suffix it is', () => {
+		// Every public repository's files are served from one host here. A
+		// module downloaded from `raw.githubusercontent.com` used to be granted
+		// `*.githubusercontent.com` alongside it — all of GitHub's user content,
+		// for a fetch it never makes.
+		expect(wildcardFor('raw.githubusercontent.com')).toBeNull();
+		expect(wildcardFor('avatars.githubusercontent.com')).toBeNull();
+	});
+
 	it('grants nothing when the shared suffix has no deeper label', () => {
 		// A bare `github.io` names no one and `*.github.io` names everyone, so
 		// there is no honest wildcard to give.
