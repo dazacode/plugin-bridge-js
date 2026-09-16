@@ -70,6 +70,15 @@ export interface StremioEntrypointOptions {
 	readonly baseUrl: string;
 	/** `movie`, `series`, and whatever else the manifest declared. */
 	readonly types: readonly string[];
+	/**
+	 * What the manifest says this addon answers: `stream`, `meta`, `catalog`.
+	 *
+	 * Load-bearing rather than descriptive. An addon that declares only
+	 * `stream` — which every torrent indexer is — has no episode list and
+	 * never claimed one, and asking anyway produced an empty answer the host
+	 * read as "this source does not have that episode".
+	 */
+	readonly resources: readonly string[];
 	/** Catalogue ids this addon will answer a `search` extra for. */
 	readonly searchable: readonly { readonly type: string; readonly id: string }[];
 	/**
@@ -92,6 +101,7 @@ export function stremioEntrypoint(options: StremioEntrypointOptions): string {
 		`const __PLUGIN_ID = ${JSON.stringify(options.pluginId)};`,
 		`const __BASE_URL = ${JSON.stringify(options.baseUrl.replace(/\/+$/, ''))};`,
 		`const __TYPES = ${JSON.stringify(options.types)};`,
+		`const __RESOURCES = ${JSON.stringify(options.resources ?? [])};`,
 		`const __SEARCHABLE = ${JSON.stringify(options.searchable)};`,
 		`const __CONFIG = ${JSON.stringify(options.config)};`
 	].join('\n');
@@ -161,6 +171,40 @@ function __segment(value) {
  * the host's binding carries one string. Splitting on the first colon keeps
  * the imdb id intact whatever it contains.
  */
+/**
+ * Whether the addon said it answers this resource.
+ *
+ * An empty list means the manifest was read before this was recorded, and the
+ * old behaviour — ask and see — is what those bundles get until they are
+ * converted again. \`resources\` is the addon's own statement of what it
+ * answers, so believing it costs nothing and doubting it costs a round trip.
+ */
+function __serves(name) {
+  return __RESOURCES.length === 0 || __RESOURCES.indexOf(name) >= 0;
+}
+
+/**
+ * The id to ask for streams with.
+ *
+ * Three cases, and only the first is the addon's own word. A source that
+ * enumerated its episodes gave us ids and we use them verbatim. A source that
+ * enumerated nothing is a stream-only addon, and the protocol's own convention
+ * is the id: \`<imdb>:<season>:<episode>\`, which is what every Stremio client
+ * sends and what these addons are built to answer.
+ *
+ * Without a season there is no id to build — a film has none and needs none,
+ * and a series whose catalogue could not say would be a guess that plays the
+ * wrong episode. The bare id is the honest ask in both cases.
+ */
+function __target(ref, episode) {
+  if (episode && episode.sourceEpisodeId) return episode.sourceEpisodeId;
+  if (ref.type !== 'series') return ref.id;
+  const season = episode && Number(episode.season);
+  const number = episode && Number(episode.number);
+  if (!Number.isFinite(season) || !Number.isFinite(number) || number <= 0) return ref.id;
+  return ref.id + ':' + season + ':' + number;
+}
+
 function __split(sourceMediaId) {
   const raw = String(sourceMediaId);
   const at = raw.indexOf(':');
@@ -327,6 +371,14 @@ export default {
    * that resolve. Episodes are addressed by the protocol's own
    * \`<imdb>:<season>:<episode>\` id, kept verbatim as the source episode id so
    * that \`resolve\` never has to rebuild one.
+   *
+   * **An addon that declares no \`meta\` resource has no list to give**, and
+   * that is not a failure either. A torrent indexer is exactly that: it knows
+   * which files exist for an id somebody hands it and nothing whatever about
+   * what a series contains. Asking it anyway produced an empty list, which the
+   * host read as "this source does not have episode 577" — an accusation about
+   * a question the addon never claimed to answer. It returns empty here too,
+   * and \`resolve\` builds the id instead.
    */
   async listEpisodes(sourceMediaId, ctx) {
     __enter(ctx);
@@ -334,6 +386,10 @@ export default {
     if (ref.type !== 'series') {
       return [{ number: 1, sourceEpisodeId: ref.id }];
     }
+
+    // Nothing to ask: the manifest never advertised this resource, and a
+    // request it did not advertise is a round trip spent to be told no.
+    if (!__serves('meta', ref.type)) return [];
 
     const body = await __ask('/meta/' + __segment(ref.type) + '/' + __segment(ref.id) + '.json');
     const videos = body && body.meta && Array.isArray(body.meta.videos) ? body.meta.videos : [];
@@ -362,7 +418,7 @@ export default {
   async resolve(sourceMediaId, episode, ctx) {
     __enter(ctx);
     const ref = __split(sourceMediaId);
-    const target = episode && episode.sourceEpisodeId ? episode.sourceEpisodeId : ref.id;
+    const target = __target(ref, episode);
 
     const body = await __ask('/stream/' + __segment(ref.type) + '/' + __segment(target) + '.json');
     const rows = body && Array.isArray(body.streams) ? body.streams : [];

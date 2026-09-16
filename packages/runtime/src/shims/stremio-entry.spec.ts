@@ -27,7 +27,8 @@ const BASE = 'https://addon.example.invalid/config=abc';
 
 async function load(
 	searchable: { type: string; id: string }[] = [{ type: 'series', id: 'example' }],
-	config: { id: string; key: string; type: string }[] = []
+	config: { id: string; key: string; type: string }[] = [],
+	resources: string[] = ['catalog', 'meta', 'stream']
 ): Promise<Plugin> {
 	const directory = await mkdtemp(join(tmpdir(), 'stremio-entry-'));
 	const file = join(directory, 'entry.mjs');
@@ -37,6 +38,7 @@ async function load(
 			pluginId: 'test.stremio',
 			baseUrl: BASE,
 			types: ['movie', 'series'],
+			resources,
 			searchable,
 			config
 		})
@@ -127,6 +129,65 @@ describe('listing what an addon has', () => {
 
 		expect(episodes).toEqual([{ number: 1, sourceEpisodeId: 'tt2' }]);
 		expect(asked).toEqual([]);
+	});
+});
+
+/**
+ * The case a torrent indexer is, and the one this got wrong for as long as it
+ * existed.
+ *
+ * Such an addon declares `stream` and nothing else. It holds no idea of what a
+ * series contains — only which files exist for an id somebody hands it — and
+ * the protocol's whole design is that some *other* addon supplies the meta.
+ * Asked for a list it has none, and reading that silence as "this source does
+ * not have episode 577" blames it for a question it never claimed to answer.
+ */
+describe('an addon that serves streams and nothing else', () => {
+	it('is not asked for a list it never advertised', async () => {
+		const plugin = await load(undefined, undefined, ['stream']);
+		const { ctx, asked } = context({ '/meta/series/tt1.json': META });
+
+		expect(await plugin.listEpisodes('series:tt1', ctx)).toEqual([]);
+		// Not merely empty — never asked. The round trip is the cost of
+		// treating an addon's own manifest as decoration.
+		expect(asked).toEqual([]);
+	});
+
+	it('is asked for the episode by the id the protocol defines', async () => {
+		// No list, so the host passes the number and the season it holds, and
+		// this builds the `<imdb>:<season>:<episode>` every Stremio client
+		// sends. Getting here is the difference between "no torrent for this"
+		// and a refusal invented one layer up.
+		const plugin = await load(undefined, undefined, ['stream']);
+		const { ctx, asked } = context({
+			'/stream/series/tt1:5:14.json': { streams: [{ url: 'https://cdn.example.invalid/a.mp4' }] }
+		});
+
+		const sources = await plugin.resolve('series:tt1', { number: 14, season: 5 }, ctx);
+
+		expect(asked).toEqual([`${BASE}/stream/series/tt1%3A5%3A14.json`]);
+		expect(sources).toHaveLength(1);
+	});
+
+	it('asks for the bare id when nobody could say which season', async () => {
+		// A film has no season and needs none. A series whose catalogue could
+		// not say would be a guess, and a guessed season plays the wrong
+		// episode — which is worse than not playing.
+		const plugin = await load(undefined, undefined, ['stream']);
+		const { ctx, asked } = context({ '/stream/series/tt1.json': { streams: [] } });
+
+		await plugin.resolve('series:tt1', { number: 14 }, ctx);
+
+		expect(asked).toEqual([`${BASE}/stream/series/tt1.json`]);
+	});
+
+	it('still prefers an id the addon gave us, when one did', async () => {
+		const plugin = await load(undefined, undefined, ['stream']);
+		const { ctx, asked } = context({ '/stream/series/tt1:1:2.json': { streams: [] } });
+
+		await plugin.resolve('series:tt1', { number: 99, season: 7, sourceEpisodeId: 'tt1:1:2' }, ctx);
+
+		expect(asked).toEqual([`${BASE}/stream/series/tt1%3A1%3A2.json`]);
 	});
 });
 

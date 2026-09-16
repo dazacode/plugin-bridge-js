@@ -562,6 +562,7 @@ export const stremioAdapter: ForeignAdapter = {
 				pluginId: listing.id,
 				baseUrl: base,
 				types: Array.isArray(detail['types']) ? (detail['types'] as string[]) : [],
+				resources: Array.isArray(detail['resources']) ? (detail['resources'] as string[]) : [],
 				searchable: Array.isArray(detail['searchable'])
 					? (detail['searchable'] as { type: string; id: string }[])
 					: [],
