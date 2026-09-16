@@ -83,6 +83,14 @@ typo.
 | `mangayomi`   | Mangayomi                  | `.js` or `.dart` source                         | `convert` †   | The JavaScript third converts; the Dart majority needs an interpreter; §4.4 |
 | `aniyomi`     | Aniyomi, Anikku, and forks | APK (R8-minified DEX), built from public Kotlin | `convert` ‡   | Never the artifact — the **source** it was built from; §4.1.1, §4.1.6       |
 | `cloudstream` | Cloudstream                | `.cs3` (DEX) and `.jar` (JVM)                   | `browse-only` | Same as above; §4.1                                                         |
+| `stremio`     | Stremio                    | none — a published HTTP protocol                | `convert` §   | Nothing to translate: the bundle is a client for the protocol; §4.6         |
+
+§ **This format has no artifact at all, which is why it is the cheapest of the
+seven.** An addon is an HTTP service with a published protocol rather than a
+program, so conversion produces a generated client for that protocol,
+parameterised by the addon's address — see §4.6. Nothing of the author's code
+is embedded, no bundle carries an upstream licence, and the same generated
+file serves every addon ever installed.
 
 ‡ **This tier is a statement about the source, not the artifact, and it is
 deliberately optimistic.** Nothing here opens an APK; §4.1.1 is the argument for
@@ -694,6 +702,72 @@ naming what was missing instead of a black screen, and the browse list marks the
 listing **Broken** with that reason rather than **Not testable**.
 
 ---
+
+### 4.6 A format with no artifact
+
+Every other format in this document is a program to be ported, and §4.1 states
+what that costs: "neither gets you the classpath, and the classpath is the
+work". Stremio addons are not programs. An addon is an HTTP service with a
+published protocol — `/manifest.json` describes it, and
+`/{resource}/{type}/{id}.json` serves catalogues, metadata, streams and
+subtitles.
+
+So conversion inverts. Instead of translating an artifact, the converter
+**generates a client** for the protocol and parameterises it with the addon's
+address. Consequences worth stating, because they are unlike the rest of this
+document:
+
+- **Nothing is fetched to convert.** Every addon-specific fact comes from the
+  manifest that was already read to make the listing.
+- **No upstream code is embedded**, so no bundle carries an upstream licence
+  and there is no derived work to attribute. `licenses/` is empty by
+  construction rather than by omission.
+- **One manifest is one listing.** There is no repository document naming many
+  extensions; the "repository" a viewer pastes _is_ the addon.
+- **Configuration lives in the URL.** An addon that needs a key hands the
+  viewer a URL with their settings in a path segment, so a configured addon
+  and a plain one differ only in the string pasted. The adapter treats
+  everything before `/manifest.json` as an opaque base, parses none of it and
+  logs none of it — it may carry a viewer's own account key. An addon
+  declaring `configurationRequired` is refused with the instruction to
+  configure it first, because installing the unconfigured URL would produce a
+  permanently empty source that looks like this client's fault.
+
+#### 4.6.1 Addressed by id, which is what the rest of the system gains
+
+The protocol is keyed on IMDB ids: `tt0944947` for a series and
+`tt0944947:1:5` for one episode. The host already holds that id, so this is
+the first adapted format that needs **no title matching at all**.
+
+That is not a local convenience. `catalog-matcher.ts` exists because a site
+scraper's ids are its own slugs, leaving titles as the only shared key — and
+titles are a weak one, which is why a binding carries a confidence and a
+trusted threshold. A source declaring `ForeignOrigin.idKinds` is saying it has
+a real key, and the host binds it exactly, at full confidence, without a
+search. `ConversionRecord.idKinds` carries that fact to the app.
+
+It also changes what verification can mean for such a source. A stream-only
+addon publishes `catalogs: []` and answers **every** search with nothing,
+however healthy it is — so `verify.ts` asks an id-addressed source about
+`DEFAULT_PROBE_IDS` instead of searching it. Running the search gate against
+one would fail it at `search` for declining to answer a question it never
+claimed to answer, which is exactly the source-level verdict AGENTS.md rule 17
+forbids.
+
+#### 4.6.2 What the protocol returns that cannot be played
+
+A stream object names its content in one of several mutually exclusive ways,
+and only `url` is an http link. `infoHash` is a torrent — §4.2 already settles
+that — `externalUrl` is a link to somebody else's player, and `ytId` needs an
+embed this client does not host.
+
+Measured against live addons: one returned **132 of 132** streams as
+`infoHash`, another **12 of 12** as `externalUrl`. So this is the common case,
+not an edge, and the shim reports it rather than returning an empty list:
+"answered with 67 torrent stream(s) and no direct link" names what happened
+and what would fix it, where an empty list would have been read as a broken
+source. A viewer's own debrid configuration is what turns those into `url`,
+and the addon does that itself, in the URL the viewer pasted.
 
 ## 5. Converting, and what it may not skip
 

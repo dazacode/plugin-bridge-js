@@ -47,7 +47,8 @@ export const REPOSITORY_FORMATS = [
 	'lnreader',
 	'mangayomi',
 	'aniyomi',
-	'cloudstream'
+	'cloudstream',
+	'stremio'
 ] as const;
 export type RepositoryFormat = (typeof REPOSITORY_FORMATS)[number];
 
@@ -65,7 +66,8 @@ export const FOREIGN_FORMATS = [
 	'lnreader',
 	'mangayomi',
 	'aniyomi',
-	'cloudstream'
+	'cloudstream',
+	'stremio'
 ] as const satisfies readonly ForeignFormat[];
 
 /**
@@ -140,6 +142,23 @@ export function declaredMediums(
 }
 
 /**
+ * A catalogue id a source can be addressed by directly, without being searched.
+ *
+ * The distinction this exists for: every other adapted ecosystem is a *site
+ * scraper* whose ids are its own slugs, so the only way to find a show is to
+ * search its catalogue by title and score what comes back — and a title is a
+ * weak key. One source calls a show `Men on a Mission`, another `Knowing
+ * Bros`, and the run of alternative spellings between them is why
+ * `catalog-matcher.ts` needs a trusted-match threshold at all.
+ *
+ * An addon addressed by IMDB id has no such problem: the host already holds
+ * that id from its metadata provider, so there is nothing to search, nothing
+ * to score and nothing to get wrong. A source declaring one of these is
+ * saying "hand me this id and I will answer", and the host binds it directly.
+ */
+export type ExternalIdKind = 'imdb';
+
+/**
  * What a converted plugin was made from.
  *
  * Present only when the bundle did not come from a Yorozo repository. It is
@@ -196,6 +215,15 @@ export interface ConversionRecord {
 	 * `[mediaKind]` — and with `mediaKind` absent too, to asking anyway.
 	 */
 	readonly mediaKinds?: readonly ForeignMedium[];
+	/**
+	 * External ids this source is addressed by, copied from
+	 * `ForeignOrigin.idKinds` at conversion time.
+	 *
+	 * What `CatalogSearchMatcher` reads to decide whether this source can be
+	 * bound without searching it. Absent is the ordinary case and means "search
+	 * it by title", which is what every row written before this existed meant.
+	 */
+	readonly idKinds?: readonly ExternalIdKind[];
 }
 
 /**
@@ -238,6 +266,14 @@ export interface ForeignOrigin {
 	 * and a reader treats it as `[mediaKind]`, never as "no mediums".
 	 */
 	readonly mediaKinds?: readonly ForeignMedium[];
+	/**
+	 * External catalogue ids this source can be addressed by directly.
+	 *
+	 * Absent or empty means the ordinary path: the host searches this source's
+	 * catalogue by title and scores the results. Present means it need not —
+	 * see `ExternalIdKind`.
+	 */
+	readonly idKinds?: readonly ExternalIdKind[];
 	readonly isNsfw: boolean;
 	/**
 	 * Whatever else that format's converter needs, carried on the listing.
@@ -375,6 +411,21 @@ const PROFILES: Readonly<Record<ForeignFormat, FormatProfile>> = {
 		// session never writes a line about cookies and is entitled to assume
 		// the second request carries what the first was given.
 		implicitCookies: true
+	},
+	stremio: {
+		format: 'stremio',
+		label: 'Stremio',
+		// The only format with nothing to translate. An addon is an HTTP
+		// service with a published protocol, so conversion produces a client
+		// for it rather than a port of it: no bytecode, no classpath, no
+		// template inference, and nothing of the author's code in the bundle.
+		// `FOREIGN.md` §4.4.
+		tier: 'convert',
+		// A manifest *is* the index here — one document describing one addon —
+		// so there is no sibling to look for and no key to find.
+		keyDocument: 'index',
+		refusal: null,
+		implicitCookies: false
 	},
 	cloudstream: {
 		format: 'cloudstream',

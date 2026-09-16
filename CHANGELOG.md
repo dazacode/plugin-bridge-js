@@ -12,6 +12,48 @@ to exhaustion and deliberately closed it. `v0.1.x` is for fixes to what has
 already been promised; a minor bump whose case is "the number went up" is not a
 minor bump.
 
+## v0.3.0 — a seventh ecosystem, and the first with nothing to translate
+
+Six adapters port programs. `FOREIGN.md` §4.1 states the cost plainly: an
+extension's artifact ships its own classes and nothing else, and "neither gets
+you the classpath, and the classpath is the work."
+
+Stremio addons are not programs. An addon is an HTTP service with a published
+protocol, so `stremio` converts by **generating a client** for that protocol
+rather than porting anything: nothing is fetched to convert, no upstream code
+is embedded, no bundle carries an upstream licence, and one generated file
+serves every addon ever installed. One manifest is one listing, and an addon
+configured on its own page differs only in the URL pasted — the adapter treats
+everything before `/manifest.json` as an opaque base it never parses or logs,
+because it may carry a viewer's own account key.
+
+**The format also brings the first real key.** The protocol is addressed by
+IMDB id (`tt0944947`, and `tt0944947:1:5` for an episode), so a source in it
+needs no title matching at all. That is new to this project, not just to this
+adapter: every other ecosystem is a site scraper whose ids are its own slugs,
+which is why bindings carry a confidence and a trusted threshold in the first
+place. `ForeignOrigin.idKinds` and `ConversionRecord.idKinds` carry the claim,
+and a host holding the id binds such a source exactly, without a search.
+
+`verify.ts` follows. A stream-only addon publishes `catalogs: []` and answers
+every search with nothing however healthy it is, so an id-addressed source is
+asked about `DEFAULT_PROBE_IDS` instead of searched — several, because a niche
+source legitimately lacks one title and that is not a fault. Where several are
+tried, the failure reported is the one that got _furthest_, since a probe that
+reached `resolve` describes the source while a later one failing at `episodes`
+describes the title.
+
+What the protocol returns is mostly unplayable here, and that is now said out
+loud. Measured live: one addon returned 132 of 132 streams as `infoHash`,
+another 12 of 12 as `externalUrl`. Torrents were already settled by §4.2, but
+returning an empty list for them reported a working addon as a broken one, so
+the shim names the count and the remedy instead — configuring the addon with a
+debrid account is what turns those into direct links.
+
+`keepMediums` and the plugins screen's badge now agree on multi-medium
+listings, and `wildcardFor` no longer widens GitHub user content. Both were
+carried in from the v0.2.1 work.
+
 ## v0.2.1 — a declared set is not a declared exclusion
 
 Fixes to what v0.2.0 promised, found on a live install rather than in a

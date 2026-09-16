@@ -167,7 +167,8 @@ export async function checkListing(
 		converterVersion: CONVERTER_VERSION,
 		verified: false,
 		mediaKind: listing.origin.mediaKind,
-		mediaKinds: listing.origin.mediaKinds
+		mediaKinds: listing.origin.mediaKinds,
+		idKinds: listing.origin.idKinds
 	};
 
 	const result = await verifyConvertedPlugin(

@@ -1,218 +1,271 @@
 {
-  "$comment": [
-    "Synthetic repository indexes, one per adapted extension format, used by",
-    "client-web/src/lib/plugins/foreign/*.spec.ts and available to any second",
-    "implementation of the same adapters.",
-    "",
-    "Every host here is example.invalid or example.com, which RFC 2606 and RFC",
-    "6761 reserve. AGENTS.md rule 9 forbids a real content source appearing in",
-    "this repository at all, and a fixture is exactly the place that rule gets",
-    "broken by accident: a URL that was convenient for one afternoon's testing",
-    "is a URL in the history forever. These are hand-written to the shape of",
-    "each format, never captured from a live repository.",
-    "",
-    "The shapes themselves are documented in contract/plugin-api/FOREIGN.md."
-  ],
-
-  "sora": {
-    "indexUrl": "https://example.invalid/modules/modules.json",
-    "body": [
-      {
-        "sourceName": "Example Anime",
-        "iconUrl": "https://example.invalid/icon.png",
-        "author": {
-          "name": "Example Author",
-          "url": "https://example.invalid/author"
-        },
-        "version": "1.2.0",
-        "language": "English (SUB)",
-        "streamType": "HLS",
-        "quality": "1080p",
-        "baseUrl": "https://watch.example.invalid/",
-        "searchBaseUrl": "https://watch.example.invalid/search?q=%s",
-        "scriptUrl": "https://example.invalid/modules/example/script.js",
-        "type": "anime",
-        "asyncJS": true,
-        "softsub": false
-      },
-      {
-        "sourceName": "Example Comics",
-        "author": "Someone",
-        "version": "0.3.1",
-        "language": "English",
-        "streamType": "MP4",
-        "baseUrl": "https://read.example.invalid/",
-        "scriptUrl": "./comics/script.js",
-        "type": "manga"
-      }
-    ]
-  },
-
-  "aniyomi": {
-    "indexUrl": "https://example.invalid/repo/index.min.json",
-    "body": [
-      {
-        "name": "Aniyomi: Example Anime",
-        "pkg": "org.example.aniyomi.animeextension.en.exampleanime",
-        "apk": "example-anime-v14.3.apk",
-        "lang": "en",
-        "code": 3,
-        "version": "14.3",
-        "nsfw": 0,
-        "sources": [
-          {
-            "name": "Example Anime",
-            "lang": "en",
-            "id": "1234567890123456789",
-            "baseUrl": "https://watch.example.invalid"
-          }
-        ]
-      },
-      {
-        "name": "Mihon: Example Comics",
-        "pkg": "org.example.mihon.extension.en.examplecomics",
-        "apk": "example-comics-v1.4.apk",
-        "lang": "en",
-        "code": 4,
-        "version": "1.4",
-        "nsfw": 0,
-        "sources": [
-          {
-            "name": "Example Comics",
-            "lang": "en",
-            "id": "9876543210987654321",
-            "baseUrl": "https://read.example.invalid"
-          }
-        ]
-      }
-    ],
-    "repoJson": {
-      "meta": {
-        "name": "Example extensions",
-        "shortName": "Example",
-        "website": "https://example.invalid/",
-        "signingKeyFingerprint": "3b1f9a7c2d5e4806af13bc90de2457681a9c0f3e5d7b28419ac6de035f81720b"
-      }
-    }
-  },
-
-  "hayase": {
-    "indexUrl": "https://example.invalid/hayase/index.json",
-    "body": [
-      {
-        "manifestVersion": 2,
-        "name": "Example Torrents",
-        "id": "example.torrents",
-        "version": "1.0.4",
-        "type": "torrent",
-        "accuracy": "medium",
-        "updatePeers": false,
-        "ratio": 0,
-        "media": "both",
-        "languages": ["ALL"],
-        "nsfw": false,
-        "url": "aHR0cHM6Ly90b3JyZW50cy5leGFtcGxlLmludmFsaWQ=",
-        "description": "An example torrent index.",
-        "icon": "https://example.invalid/icon.png",
-        "update": "https://example.invalid/hayase/index.json",
-        "code": "https://example.invalid/hayase/dist/example.js"
-      }
-    ]
-  },
-
-  "lnreader": {
-    "indexUrl": "https://example.invalid/plugins/.dist/plugins.min.json",
-    "body": [
-      {
-        "id": "examplenovels",
-        "name": "Example Novels",
-        "site": "https://novels.example.invalid/",
-        "lang": "English",
-        "version": "2.2.0",
-        "url": "https://example.invalid/plugins/.js/ExampleNovels.js",
-        "iconUrl": "https://example.invalid/plugins/icon.png"
-      }
-    ]
-  },
-
-  "mangayomi": {
-    "indexUrl": "https://example.invalid/mangayomi/index.json",
-    "body": [
-      {
-        "name": "Example Anime",
-        "id": 111222333,
-        "baseUrl": "https://watch.example.invalid",
-        "lang": "en",
-        "typeSource": "single",
-        "iconUrl": "https://example.invalid/icon.png",
-        "isNsfw": false,
-        "sourceCodeUrl": "https://example.invalid/mangayomi/javascript/anime/example.js",
-        "apiUrl": "",
-        "version": "0.0.9",
-        "isManga": false,
-        "itemType": 1,
-        "sourceCodeLanguage": 1
-      },
-      {
-        "name": "Example Comics",
-        "id": 444555666,
-        "baseUrl": "https://read.example.invalid",
-        "lang": "en",
-        "typeSource": "madara",
-        "iconUrl": "https://example.invalid/icon.png",
-        "isNsfw": false,
-        "sourceCodeUrl": "https://example.invalid/mangayomi/dart/manga/example.dart",
-        "apiUrl": "",
-        "version": "0.1.3",
-        "isManga": true,
-        "itemType": 0,
-        "sourceCodeLanguage": 0
-      }
-    ]
-  },
-
-  "cloudstream": {
-    "indexUrl": "https://example.invalid/cs/repo.json",
-    "body": {
-      "name": "Example providers",
-      "description": "An example provider repository.",
-      "manifestVersion": 1,
-      "pluginLists": ["https://example.invalid/cs/builds/plugins.json"]
-    },
-    "pluginList": {
-      "url": "https://example.invalid/cs/builds/plugins.json",
-      "body": [
-        {
-          "name": "ExampleAnimeProvider",
-          "internalName": "ExampleAnimeProvider",
-          "description": "An example anime provider.",
-          "authors": ["Example Author"],
-          "tvTypes": ["Anime", "AnimeMovie"],
-          "version": 7,
-          "apiVersion": 1,
-          "status": 1,
-          "fileSize": 20480,
-          "fileHash": "sha256-1111111111111111111111111111111111111111111111111111111111111111",
-          "url": "https://example.invalid/cs/builds/ExampleAnimeProvider.cs3",
-          "jarUrl": "https://example.invalid/cs/builds/ExampleAnimeProvider.jar",
-          "jarHash": "sha256-2222222222222222222222222222222222222222222222222222222222222222",
-          "iconUrl": "https://example.invalid/icon.png",
-          "repositoryUrl": "https://example.invalid/cs"
-        },
-        {
-          "name": "ExampleFilmProvider",
-          "internalName": "ExampleFilmProvider",
-          "description": "An example film provider.",
-          "authors": ["Example Author"],
-          "tvTypes": ["Movie", "TvSeries"],
-          "version": 2,
-          "apiVersion": 1,
-          "status": 1,
-          "fileSize": 18000,
-          "url": "https://example.invalid/cs/builds/ExampleFilmProvider.cs3",
-          "iconUrl": "https://example.invalid/icon.png"
-        }
-      ]
-    }
-  }
+	"$comment": [
+		"Synthetic repository indexes, one per adapted extension format, used by",
+		"client-web/src/lib/plugins/foreign/*.spec.ts and available to any second",
+		"implementation of the same adapters.",
+		"",
+		"Every host here is example.invalid or example.com, which RFC 2606 and RFC",
+		"6761 reserve. AGENTS.md rule 9 forbids a real content source appearing in",
+		"this repository at all, and a fixture is exactly the place that rule gets",
+		"broken by accident: a URL that was convenient for one afternoon's testing",
+		"is a URL in the history forever. These are hand-written to the shape of",
+		"each format, never captured from a live repository.",
+		"",
+		"The shapes themselves are documented in contract/plugin-api/FOREIGN.md."
+	],
+	"sora": {
+		"indexUrl": "https://example.invalid/modules/modules.json",
+		"body": [
+			{
+				"sourceName": "Example Anime",
+				"iconUrl": "https://example.invalid/icon.png",
+				"author": {
+					"name": "Example Author",
+					"url": "https://example.invalid/author"
+				},
+				"version": "1.2.0",
+				"language": "English (SUB)",
+				"streamType": "HLS",
+				"quality": "1080p",
+				"baseUrl": "https://watch.example.invalid/",
+				"searchBaseUrl": "https://watch.example.invalid/search?q=%s",
+				"scriptUrl": "https://example.invalid/modules/example/script.js",
+				"type": "anime",
+				"asyncJS": true,
+				"softsub": false
+			},
+			{
+				"sourceName": "Example Comics",
+				"author": "Someone",
+				"version": "0.3.1",
+				"language": "English",
+				"streamType": "MP4",
+				"baseUrl": "https://read.example.invalid/",
+				"scriptUrl": "./comics/script.js",
+				"type": "manga"
+			}
+		]
+	},
+	"aniyomi": {
+		"indexUrl": "https://example.invalid/repo/index.min.json",
+		"body": [
+			{
+				"name": "Aniyomi: Example Anime",
+				"pkg": "org.example.aniyomi.animeextension.en.exampleanime",
+				"apk": "example-anime-v14.3.apk",
+				"lang": "en",
+				"code": 3,
+				"version": "14.3",
+				"nsfw": 0,
+				"sources": [
+					{
+						"name": "Example Anime",
+						"lang": "en",
+						"id": "1234567890123456789",
+						"baseUrl": "https://watch.example.invalid"
+					}
+				]
+			},
+			{
+				"name": "Mihon: Example Comics",
+				"pkg": "org.example.mihon.extension.en.examplecomics",
+				"apk": "example-comics-v1.4.apk",
+				"lang": "en",
+				"code": 4,
+				"version": "1.4",
+				"nsfw": 0,
+				"sources": [
+					{
+						"name": "Example Comics",
+						"lang": "en",
+						"id": "9876543210987654321",
+						"baseUrl": "https://read.example.invalid"
+					}
+				]
+			}
+		],
+		"repoJson": {
+			"meta": {
+				"name": "Example extensions",
+				"shortName": "Example",
+				"website": "https://example.invalid/",
+				"signingKeyFingerprint": "3b1f9a7c2d5e4806af13bc90de2457681a9c0f3e5d7b28419ac6de035f81720b"
+			}
+		}
+	},
+	"hayase": {
+		"indexUrl": "https://example.invalid/hayase/index.json",
+		"body": [
+			{
+				"manifestVersion": 2,
+				"name": "Example Torrents",
+				"id": "example.torrents",
+				"version": "1.0.4",
+				"type": "torrent",
+				"accuracy": "medium",
+				"updatePeers": false,
+				"ratio": 0,
+				"media": "both",
+				"languages": [
+					"ALL"
+				],
+				"nsfw": false,
+				"url": "aHR0cHM6Ly90b3JyZW50cy5leGFtcGxlLmludmFsaWQ=",
+				"description": "An example torrent index.",
+				"icon": "https://example.invalid/icon.png",
+				"update": "https://example.invalid/hayase/index.json",
+				"code": "https://example.invalid/hayase/dist/example.js"
+			}
+		]
+	},
+	"lnreader": {
+		"indexUrl": "https://example.invalid/plugins/.dist/plugins.min.json",
+		"body": [
+			{
+				"id": "examplenovels",
+				"name": "Example Novels",
+				"site": "https://novels.example.invalid/",
+				"lang": "English",
+				"version": "2.2.0",
+				"url": "https://example.invalid/plugins/.js/ExampleNovels.js",
+				"iconUrl": "https://example.invalid/plugins/icon.png"
+			}
+		]
+	},
+	"mangayomi": {
+		"indexUrl": "https://example.invalid/mangayomi/index.json",
+		"body": [
+			{
+				"name": "Example Anime",
+				"id": 111222333,
+				"baseUrl": "https://watch.example.invalid",
+				"lang": "en",
+				"typeSource": "single",
+				"iconUrl": "https://example.invalid/icon.png",
+				"isNsfw": false,
+				"sourceCodeUrl": "https://example.invalid/mangayomi/javascript/anime/example.js",
+				"apiUrl": "",
+				"version": "0.0.9",
+				"isManga": false,
+				"itemType": 1,
+				"sourceCodeLanguage": 1
+			},
+			{
+				"name": "Example Comics",
+				"id": 444555666,
+				"baseUrl": "https://read.example.invalid",
+				"lang": "en",
+				"typeSource": "madara",
+				"iconUrl": "https://example.invalid/icon.png",
+				"isNsfw": false,
+				"sourceCodeUrl": "https://example.invalid/mangayomi/dart/manga/example.dart",
+				"apiUrl": "",
+				"version": "0.1.3",
+				"isManga": true,
+				"itemType": 0,
+				"sourceCodeLanguage": 0
+			}
+		]
+	},
+	"cloudstream": {
+		"indexUrl": "https://example.invalid/cs/repo.json",
+		"body": {
+			"name": "Example providers",
+			"description": "An example provider repository.",
+			"manifestVersion": 1,
+			"pluginLists": [
+				"https://example.invalid/cs/builds/plugins.json"
+			]
+		},
+		"pluginList": {
+			"url": "https://example.invalid/cs/builds/plugins.json",
+			"body": [
+				{
+					"name": "ExampleAnimeProvider",
+					"internalName": "ExampleAnimeProvider",
+					"description": "An example anime provider.",
+					"authors": [
+						"Example Author"
+					],
+					"tvTypes": [
+						"Anime",
+						"AnimeMovie"
+					],
+					"version": 7,
+					"apiVersion": 1,
+					"status": 1,
+					"fileSize": 20480,
+					"fileHash": "sha256-1111111111111111111111111111111111111111111111111111111111111111",
+					"url": "https://example.invalid/cs/builds/ExampleAnimeProvider.cs3",
+					"jarUrl": "https://example.invalid/cs/builds/ExampleAnimeProvider.jar",
+					"jarHash": "sha256-2222222222222222222222222222222222222222222222222222222222222222",
+					"iconUrl": "https://example.invalid/icon.png",
+					"repositoryUrl": "https://example.invalid/cs"
+				},
+				{
+					"name": "ExampleFilmProvider",
+					"internalName": "ExampleFilmProvider",
+					"description": "An example film provider.",
+					"authors": [
+						"Example Author"
+					],
+					"tvTypes": [
+						"Movie",
+						"TvSeries"
+					],
+					"version": 2,
+					"apiVersion": 1,
+					"status": 1,
+					"fileSize": 18000,
+					"url": "https://example.invalid/cs/builds/ExampleFilmProvider.cs3",
+					"iconUrl": "https://example.invalid/icon.png"
+				}
+			]
+		}
+	},
+	"stremio": {
+		"indexUrl": "https://addon.example.invalid/config=example/manifest.json",
+		"body": {
+			"id": "invalid.example.addon",
+			"version": "1.4.0",
+			"name": "Example Addon",
+			"description": "An example addon, for tests only.",
+			"types": [
+				"movie",
+				"series"
+			],
+			"resources": [
+				"stream",
+				{
+					"name": "meta",
+					"types": [
+						"series"
+					]
+				}
+			],
+			"catalogs": [
+				{
+					"type": "movie",
+					"id": "example-top",
+					"extra": [
+						{
+							"name": "search",
+							"isRequired": false
+						}
+					]
+				},
+				{
+					"type": "series",
+					"id": "example-unsearchable"
+				}
+			],
+			"idPrefixes": [
+				"tt"
+			],
+			"behaviorHints": {
+				"configurable": true,
+				"configurationRequired": false
+			}
+		}
+	}
 }

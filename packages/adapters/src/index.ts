@@ -24,6 +24,7 @@ import { hayaseAdapter } from './hayase';
 import { lnreaderAdapter } from './lnreader';
 import { mangayomiAdapter } from './mangayomi';
 import { soraAdapter } from './sora';
+import { stremioAdapter } from './stremio';
 
 /**
  * Ordered, and the order is a policy.
@@ -33,6 +34,12 @@ import { soraAdapter } from './sora';
  * `index.json` and are separated by their body, not their position — but
  * `hayase` is checked first because its entries carry a `manifestVersion`
  * field that nothing else does, making it the cheaper negative.
+ *
+ * `stremio` is last, and not because it is least. It is the one format whose
+ * document is a *single object* rather than a list, so its parse rejects every
+ * other format's index immediately and cannot be fooled by one — which also
+ * means nothing is gained by asking it early, and a viewer pasting one of the
+ * six list formats should not pay a request to find that out.
  */
 export const FOREIGN_ADAPTERS: readonly ForeignAdapter[] = [
 	soraAdapter,
@@ -40,7 +47,8 @@ export const FOREIGN_ADAPTERS: readonly ForeignAdapter[] = [
 	lnreaderAdapter,
 	cloudstreamAdapter,
 	hayaseAdapter,
-	mangayomiAdapter
+	mangayomiAdapter,
+	stremioAdapter
 ];
 
 export function adapterFor(format: ForeignFormat): ForeignAdapter {
@@ -57,5 +65,6 @@ export {
 	hayaseAdapter,
 	lnreaderAdapter,
 	mangayomiAdapter,
-	soraAdapter
+	soraAdapter,
+	stremioAdapter
 };

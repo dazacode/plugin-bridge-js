@@ -67,6 +67,14 @@ export interface VerifyOptions extends SandboxOptions {
 	 * on that show being in that catalogue.
 	 */
 	readonly probe?: string;
+	/**
+	 * Source media ids to ask about instead of searching.
+	 *
+	 * Used only for a source whose conversion record declares it is addressed
+	 * by an external id — see `DEFAULT_PROBE_IDS` for why such a source cannot
+	 * be checked by searching it.
+	 */
+	readonly probeIds?: readonly string[];
 	/** Overall ceiling. The sandbox enforces its own per-call timeout too. */
 	readonly budgetMs?: number;
 	/**
@@ -151,7 +159,39 @@ function headersOf(stream: StreamRow): Record<string, string> {
 	return out;
 }
 
+/** How far through the path a result got, for comparing two failures. */
+const STEP_ORDER: readonly VerificationStep[] = ['load', 'search', 'episodes', 'resolve', 'reach'];
+
+function reachedFurther(candidate: VerificationResult, incumbent: VerificationResult): boolean {
+	return (
+		STEP_ORDER.indexOf(candidate.failedAt ?? 'load') >
+		STEP_ORDER.indexOf(incumbent.failedAt ?? 'load')
+	);
+}
+
 const DEFAULT_PROBE = 'a';
+
+/**
+ * What to ask an id-addressed source about, when there is nothing to search.
+ *
+ * The counterpart to `DEFAULT_PROBE`, and it exists because that probe is
+ * unusable for a whole class of source. An addon addressed by catalogue id may
+ * publish no catalogues at all — the measured case returned `catalogs: []` —
+ * and searching one for `'a'` returns nothing however healthy it is. Running
+ * the search gate against it would fail every such source at `search` with
+ * "Searching this source returned nothing", which is rule 17's exact
+ * prohibition: a source-level verdict from a capability the check never had.
+ *
+ * Several ids rather than one, because a niche source legitimately carries
+ * neither the film nor the series a single probe would name, and "this one
+ * title is missing" is not "this source is broken". One answer passes.
+ *
+ * These are **work** ids, not sources: an IMDB id identifies a film the way an
+ * AniList id identifies a series, and rule 9 bars naming a site that serves
+ * media, which none of these is. One film and one series, because the two
+ * take different paths through a source and an addon may serve only one.
+ */
+const DEFAULT_PROBE_IDS: readonly string[] = ['movie:tt0133093', 'series:tt0944947'];
 const DEFAULT_BUDGET_MS = 60_000;
 
 /** Containers the players actually open. Anything else is not a pass. */
@@ -171,6 +211,7 @@ export async function verifyConvertedPlugin(
 ): Promise<VerificationResult> {
 	const {
 		probe = DEFAULT_PROBE,
+		probeIds = DEFAULT_PROBE_IDS,
 		budgetMs = DEFAULT_BUDGET_MS,
 		reach,
 		settings = {},
@@ -194,153 +235,218 @@ export async function verifyConvertedPlugin(
 			};
 		}
 
+		// Narrowed once, because the attempt closure below loses the assignment
+		// TypeScript can see in this scope and asserting inside it would be
+		// asserting the same fact several times.
+		const live: PluginSandbox = sandbox;
+
+		// A source the host addresses by id is never searched at play time, so
+		// searching it here would verify a path nothing uses — and for a source
+		// with no catalogue at all, would fail it for answering a question it
+		// never claimed to answer. The check runs what an install would.
+		const idAddressed = (plugin.converted?.idKinds ?? []).length > 0;
+
 		let entries: CatalogEntry[];
-		try {
-			const page = (await sandbox.searchCatalog(probe, 1)) as {
-				entries?: CatalogEntry[];
-			} | null;
-			entries = page?.entries ?? [];
-		} catch (error) {
-			return {
-				ok: false,
-				failedAt: 'search',
-				detail: messageOf(error),
-				...nothing
-			};
-		}
-		const first = entries.find((entry) => typeof entry.sourceMediaId === 'string');
-		if (first === undefined || outOfTime()) {
-			return {
-				ok: false,
-				failedAt: 'search',
-				detail:
-					(entries.length === 0
-						? 'Searching this source returned nothing.'
-						: 'Search results carried no id this client can use.') + alsoRefused(sandbox),
-				...nothing,
-				searchHits: entries.length
-			};
-		}
-
-		let episodes: EpisodeRow[];
-		try {
-			episodes = ((await sandbox.listEpisodes(String(first.sourceMediaId))) ?? []) as EpisodeRow[];
-		} catch (error) {
-			return {
-				ok: false,
-				failedAt: 'episodes',
-				detail: messageOf(error),
-				...nothing,
-				searchHits: entries.length
-			};
-		}
-		const episode = episodes.find((row) => typeof row.sourceEpisodeId === 'string');
-		if (episode === undefined || outOfTime()) {
-			return {
-				ok: false,
-				failedAt: 'episodes',
-				detail:
-					(episodes.length === 0
-						? 'That source listed no episodes for the first thing it found.'
-						: 'Its episode list carried no id this client can use.') + alsoRefused(sandbox),
-				...nothing,
-				searchHits: entries.length,
-				episodeCount: episodes.length
-			};
-		}
-
-		let streams: StreamRow[];
-		try {
-			streams = ((await sandbox.resolve(String(first.sourceMediaId), {
-				number: Number(episode.number) || 1,
-				sourceEpisodeId: String(episode.sourceEpisodeId)
-			})) ?? []) as StreamRow[];
-		} catch (error) {
-			return {
-				ok: false,
-				failedAt: 'resolve',
-				detail: messageOf(error),
-				...nothing,
-				searchHits: entries.length,
-				episodeCount: episodes.length
-			};
-		}
-
-		// https, and a container something can open. A resolved url that is
-		// neither is not a stream, however confidently it was returned.
-		const playable = streams.filter(
-			(stream) =>
-				typeof stream.url === 'string' &&
-				stream.url.startsWith('https://') &&
-				PLAYABLE.has(String(stream.container ?? 'hls'))
-		);
-
-		const counts = {
-			searchHits: entries.length,
-			episodeCount: episodes.length,
-			streamCount: playable.length
-		};
-
-		if (playable.length === 0) {
-			return {
-				ok: false,
-				failedAt: 'resolve',
-				detail:
-					(streams.length === 0
-						? 'That source returned no stream for its first episode.'
-						: 'The streams it returned are not https, or are in a format this client cannot play.') +
-					alsoRefused(sandbox),
-				...counts
-			};
-		}
-
-		// Returning a URL is not the same as having a stream. Where a probe is
-		// available, one is fetched — because a module that failed and a module
-		// that succeeded are otherwise indistinguishable from here.
-		if (reach !== undefined && !outOfTime()) {
-			let reached = false;
-			const refusals: string[] = [];
-			for (const stream of playable) {
-				try {
-					// The stream's own host is offered as reachable alongside
-					// everything else. Not a loophole: an extractor computes its
-					// final address out of a provider's payload, so it appears
-					// in no page and no manifest and neither the conversion nor
-					// the run's learning can have seen it. Playback reaches it
-					// the same way — `plugin-playback-repository.ts` seeds it
-					// into the stream ticket — so a probe that refused it would
-					// be failing sources that play, which is the one thing this
-					// gate must never do.
-					const outcome = await reach(String(stream.url), headersOf(stream), [
-						...(sandbox?.reachableHosts ?? plugin.hosts),
-						...hostsOf(stream.url)
-					]);
-					if (outcome.ok) {
-						reached = true;
-						break;
-					}
-					refusals.push(`${hostOf(String(stream.url))}: ${outcome.detail}`);
-				} catch (error) {
-					// One unreachable mirror is not a verdict; sources routinely
-					// return several and expect the player to fall through them.
-					refusals.push(`${hostOf(String(stream.url))}: ${messageOf(error)}`);
-					continue;
-				}
-			}
-			if (!reached) {
+		if (idAddressed) {
+			entries = probeIds.map((id) => ({ sourceMediaId: id }));
+		} else {
+			try {
+				const page = (await sandbox.searchCatalog(probe, 1)) as {
+					entries?: CatalogEntry[];
+				} | null;
+				entries = page?.entries ?? [];
+			} catch (error) {
 				return {
 					ok: false,
-					failedAt: 'reach',
-					// Every mirror, not just the first. A source that returns
-					// four addresses and is refused by all four for the same
-					// reason is telling you something a single line does not.
-					detail: `It resolved a stream, but nothing answered — ${unique(refusals).join('; ')}.`,
-					...counts
+					failedAt: 'search',
+					detail: messageOf(error),
+					...nothing
+				};
+			}
+			const found = entries.find((entry) => typeof entry.sourceMediaId === 'string');
+			if (found === undefined || outOfTime()) {
+				return {
+					ok: false,
+					failedAt: 'search',
+					detail:
+						(entries.length === 0
+							? 'Searching this source returned nothing.'
+							: 'Search results carried no id this client can use.') + alsoRefused(sandbox),
+					...nothing,
+					searchHits: entries.length
 				};
 			}
 		}
 
-		return { ok: true, failedAt: null, detail: null, ...counts };
+		const searchHits = idAddressed ? 0 : entries.length;
+
+		/**
+		 * One candidate, driven the whole way: episodes, a stream, and where a
+		 * probe exists, a fetch of it.
+		 *
+		 * A function rather than a straight line because an id-addressed source
+		 * gets more than one attempt, and the steps after the first are identical
+		 * either way — a second copy of them is how the searched path and the
+		 * id path would start reporting different things for the same failure.
+		 */
+		const attempt = async (candidate: string): Promise<VerificationResult> => {
+			let episodes: EpisodeRow[];
+			try {
+				episodes = ((await live.listEpisodes(candidate)) ?? []) as EpisodeRow[];
+			} catch (error) {
+				return {
+					ok: false,
+					failedAt: 'episodes',
+					detail: messageOf(error),
+					...nothing,
+					searchHits: searchHits
+				};
+			}
+			const episode = episodes.find((row) => typeof row.sourceEpisodeId === 'string');
+			if (episode === undefined || outOfTime()) {
+				return {
+					ok: false,
+					failedAt: 'episodes',
+					detail:
+						(episodes.length === 0
+							? 'That source listed no episodes for the first thing it found.'
+							: 'Its episode list carried no id this client can use.') + alsoRefused(sandbox),
+					...nothing,
+					searchHits: searchHits,
+					episodeCount: episodes.length
+				};
+			}
+
+			let streams: StreamRow[];
+			try {
+				streams = ((await live.resolve(candidate, {
+					number: Number(episode.number) || 1,
+					sourceEpisodeId: String(episode.sourceEpisodeId)
+				})) ?? []) as StreamRow[];
+			} catch (error) {
+				return {
+					ok: false,
+					failedAt: 'resolve',
+					detail: messageOf(error),
+					...nothing,
+					searchHits: searchHits,
+					episodeCount: episodes.length
+				};
+			}
+
+			// https, and a container something can open. A resolved url that is
+			// neither is not a stream, however confidently it was returned.
+			const playable = streams.filter(
+				(stream) =>
+					typeof stream.url === 'string' &&
+					stream.url.startsWith('https://') &&
+					PLAYABLE.has(String(stream.container ?? 'hls'))
+			);
+
+			const counts = {
+				searchHits: searchHits,
+				episodeCount: episodes.length,
+				streamCount: playable.length
+			};
+
+			if (playable.length === 0) {
+				return {
+					ok: false,
+					failedAt: 'resolve',
+					detail:
+						(streams.length === 0
+							? 'That source returned no stream for its first episode.'
+							: 'The streams it returned are not https, or are in a format this client cannot play.') +
+						alsoRefused(sandbox),
+					...counts
+				};
+			}
+
+			// Returning a URL is not the same as having a stream. Where a probe is
+			// available, one is fetched — because a module that failed and a module
+			// that succeeded are otherwise indistinguishable from here.
+			if (reach !== undefined && !outOfTime()) {
+				let reached = false;
+				const refusals: string[] = [];
+				for (const stream of playable) {
+					try {
+						// The stream's own host is offered as reachable alongside
+						// everything else. Not a loophole: an extractor computes its
+						// final address out of a provider's payload, so it appears
+						// in no page and no manifest and neither the conversion nor
+						// the run's learning can have seen it. Playback reaches it
+						// the same way — `plugin-playback-repository.ts` seeds it
+						// into the stream ticket — so a probe that refused it would
+						// be failing sources that play, which is the one thing this
+						// gate must never do.
+						const outcome = await reach(String(stream.url), headersOf(stream), [
+							...(sandbox?.reachableHosts ?? plugin.hosts),
+							...hostsOf(stream.url)
+						]);
+						if (outcome.ok) {
+							reached = true;
+							break;
+						}
+						refusals.push(`${hostOf(String(stream.url))}: ${outcome.detail}`);
+					} catch (error) {
+						// One unreachable mirror is not a verdict; sources routinely
+						// return several and expect the player to fall through them.
+						refusals.push(`${hostOf(String(stream.url))}: ${messageOf(error)}`);
+						continue;
+					}
+				}
+				if (!reached) {
+					return {
+						ok: false,
+						failedAt: 'reach',
+						// Every mirror, not just the first. A source that returns
+						// four addresses and is refused by all four for the same
+						// reason is telling you something a single line does not.
+						detail: `It resolved a stream, but nothing answered — ${unique(refusals).join('; ')}.`,
+						...counts
+					};
+				}
+			}
+
+			return { ok: true, failedAt: null, detail: null, ...counts };
+		};
+
+		const candidates = entries
+			.map((entry) => entry.sourceMediaId)
+			.filter((id): id is string => typeof id === 'string');
+		if (candidates.length === 0) {
+			return {
+				ok: false,
+				failedAt: 'search',
+				detail: 'This check had nothing to ask that source about.' + alsoRefused(sandbox),
+				...nothing
+			};
+		}
+
+		// One candidate for a searched source — the first result is what a
+		// viewer would have clicked. Several for an id-addressed one, where a
+		// missing title is a fact about the title and the next probe is the
+		// only way to tell that from a source that answers nothing.
+		// The failure kept is the one that got *furthest*, not the last one
+		// tried. A probe that reached `resolve` and found nothing playable is
+		// describing the source; a later probe failing at `episodes` because
+		// this addon has no metadata for that particular title is describing
+		// the title. Reporting the second would bury the first.
+		let worst: VerificationResult | null = null;
+		for (const candidate of candidates) {
+			const outcome = await attempt(candidate);
+			if (outcome.ok) return outcome;
+			if (worst === null || reachedFurther(outcome, worst)) worst = outcome;
+			if (!idAddressed || outOfTime()) break;
+		}
+		return (
+			worst ?? {
+				ok: false,
+				failedAt: 'resolve',
+				detail: 'Nothing this check asked about produced a stream.' + alsoRefused(sandbox),
+				...nothing
+			}
+		);
 	} finally {
 		sandbox?.dispose();
 	}
