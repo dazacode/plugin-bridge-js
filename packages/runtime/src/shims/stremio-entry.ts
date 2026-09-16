@@ -72,6 +72,19 @@ export interface StremioEntrypointOptions {
 	readonly types: readonly string[];
 	/** Catalogue ids this addon will answer a `search` extra for. */
 	readonly searchable: readonly { readonly type: string; readonly id: string }[];
+	/**
+	 * The addon's own configuration fields, as the host stores them.
+	 *
+	 * `id` is what `ctx.settings` answers to; `key` is what the addon spelled
+	 * it, and the difference matters because the segment sent back has to be
+	 * keyed the addon's way. Empty for an addon that declares no configuration,
+	 * which is most of them.
+	 */
+	readonly config: readonly {
+		readonly id: string;
+		readonly key: string;
+		readonly type: string;
+	}[];
 }
 
 export function stremioEntrypoint(options: StremioEntrypointOptions): string {
@@ -79,7 +92,8 @@ export function stremioEntrypoint(options: StremioEntrypointOptions): string {
 		`const __PLUGIN_ID = ${JSON.stringify(options.pluginId)};`,
 		`const __BASE_URL = ${JSON.stringify(options.baseUrl.replace(/\/+$/, ''))};`,
 		`const __TYPES = ${JSON.stringify(options.types)};`,
-		`const __SEARCHABLE = ${JSON.stringify(options.searchable)};`
+		`const __SEARCHABLE = ${JSON.stringify(options.searchable)};`,
+		`const __CONFIG = ${JSON.stringify(options.config)};`
 	].join('\n');
 
 	return `${JS_RUNTIME}
@@ -97,8 +111,39 @@ ${constants}
  * null and the caller treats it as empty, while a genuinely broken response
  * (unreachable, unparseable) throws and is reported.
  */
+/**
+ * The viewer's own configuration, as the one path segment this protocol sends
+ * it back in.
+ *
+ * The ecosystem's SDK parses that segment as JSON, so this builds the object
+ * the addon declared — keyed the way *it* spelled each field, not the way this
+ * host's schema had to normalise the id — and encodes it.
+ *
+ * Empty when nothing is set, and then the address is untouched. That matters
+ * for the common case: an addon configured on its own page carries its settings
+ * in the URL already, and appending a second, empty segment would change an
+ * address that was working.
+ */
+function __configSegment() {
+  if (!Array.isArray(__CONFIG) || __CONFIG.length === 0) return '';
+
+  const chosen = {};
+  let any = false;
+  for (const field of __CONFIG) {
+    if (field.type === 'switch') {
+      const on = __host().settings.boolean(field.id);
+      if (on === true) { chosen[field.key] = true; any = true; }
+      continue;
+    }
+    const value = __host().settings.string(field.id);
+    if (typeof value === 'string' && value.length > 0) { chosen[field.key] = value; any = true; }
+  }
+  if (!any) return '';
+  return '/' + encodeURIComponent(JSON.stringify(chosen));
+}
+
 async function __ask(path) {
-  const res = await fetchv2(__BASE_URL + path, { Accept: 'application/json' });
+  const res = await fetchv2(__BASE_URL + __configSegment() + path, { Accept: 'application/json' });
   if (res.status === 404) return null;
   if (!res.ok) throw new Error('The addon answered ' + res.status + '.');
   return await res.json();

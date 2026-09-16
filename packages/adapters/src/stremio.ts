@@ -46,6 +46,7 @@ import {
 	type ForeignAdapter
 } from '@plugin-bridge/core/adapter';
 import { looksLikeFile } from '@plugin-bridge/core/git-hosts';
+import { settingIdFor, type SettingDescriptor } from '@plugin-bridge/core/settings';
 import { packageBundle } from '@plugin-bridge/core/package';
 import { stremioEntrypoint } from '@plugin-bridge/runtime/shims/stremio-entry';
 import type { ForeignMedium } from '@plugin-bridge/core/formats';
@@ -60,6 +61,7 @@ interface StremioManifest {
 	readonly types?: unknown;
 	readonly resources?: unknown;
 	readonly catalogs?: unknown;
+	readonly config?: unknown;
 	readonly behaviorHints?: unknown;
 	readonly logo?: unknown;
 	readonly contactEmail?: unknown;
@@ -163,6 +165,76 @@ function mediaKindsOf(manifest: StremioManifest): ForeignMedium[] {
 	return found.length === 0 ? ['live-action'] : found;
 }
 
+/**
+ * The addon's own configuration form, as settings this host can draw.
+ *
+ * A configurable addon declares its fields in `config[]`, and the ecosystem's
+ * SDK routes them back as **one path segment holding URL-encoded JSON**
+ * (`getRouter.js`: `config = JSON.parse(config)`). So the fields are
+ * renderable and the values are applyable, which together mean a viewer sets
+ * their own key inside this app instead of being sent to the addon's website
+ * to generate a URL and paste it back.
+ *
+ * `password` maps to `text`, and that is a real loss rather than a neutral
+ * one: the manifest schema here has no secret type, so a key a viewer types
+ * is drawn in the clear. Worth closing at the schema, not worth papering over
+ * by dropping the field — an addon whose only configuration is its key would
+ * then be unconfigurable.
+ *
+ * `number` also maps to `text`, which costs only the keyboard.
+ *
+ * Anything the schema would reject is dropped rather than repaired, the rule
+ * `settings.ts` already applies: a row that does not mean what the manifest
+ * says is worse than a missing one.
+ */
+function settingsFromConfig(manifest: StremioManifest): SettingDescriptor[] {
+	if (!Array.isArray(manifest.config)) return [];
+
+	const out: SettingDescriptor[] = [];
+	const seen = new Set<string>();
+	for (const entry of manifest.config) {
+		if (typeof entry !== 'object' || entry === null) continue;
+		const row = entry as Record<string, unknown>;
+		const key = typeof row['key'] === 'string' ? row['key'] : '';
+		const declared = typeof row['type'] === 'string' ? row['type'] : '';
+		if (key.length === 0) continue;
+
+		const id = settingIdFor(key);
+		if (id.length === 0 || seen.has(id)) continue;
+
+		const type =
+			declared === 'checkbox'
+				? 'switch'
+				: declared === 'select'
+					? 'select'
+					: declared === 'text' || declared === 'number' || declared === 'password'
+						? 'text'
+						: null;
+		if (type === null) continue;
+
+		const options = Array.isArray(row['options'])
+			? row['options']
+					.filter((one): one is string => typeof one === 'string' && one.length > 0)
+					.map((one) => ({ value: one, label: one }))
+			: [];
+		// A select with nothing to select from is a dead control.
+		if (type === 'select' && options.length === 0) continue;
+
+		seen.add(id);
+		out.push({
+			id,
+			key,
+			type,
+			label: typeof row['title'] === 'string' && row['title'].length > 0 ? row['title'] : key,
+			...(type === 'select' ? { options } : {}),
+			...(row['default'] === undefined
+				? {}
+				: { default: declared === 'checkbox' ? row['default'] === 'checked' : row['default'] })
+		});
+	}
+	return out;
+}
+
 /** Everything before `/manifest.json`, configuration segment included. */
 function baseOf(manifestUrl: string): string {
 	return manifestUrl.replace(/\/manifest\.json(\?.*)?$/i, '').replace(/\/+$/, '');
@@ -202,17 +274,31 @@ function listingOf(manifest: StremioManifest, manifestUrl: string): RepositoryPl
 			foreignVersion: version,
 			mediaKind: mediaKindsOf(manifest)[0],
 			mediaKinds: mediaKindsOf(manifest),
+			// Both declared by the addon rather than inferred. `adult` was
+			// hardcoded false here, which published a claim the manifest was
+			// already making for itself.
+			usesP2p: hints['p2p'] === true,
 			// The whole reason this format is worth having: the host holds an
 			// IMDB id already, so nothing about this source has to be found by
 			// searching its catalogue for a title.
 			idKinds: ['imdb'],
-			isNsfw: false,
+			isNsfw: hints['adult'] === true,
 			detail: {
 				base,
 				types: typeNames(manifest),
 				resources,
 				searchable: searchableCatalogues(manifest),
-				configurationRequired: hints['configurationRequired'] === true
+				configurationRequired: hints['configurationRequired'] === true,
+				// The bundle needs the id-to-key mapping, because the segment it
+				// builds is keyed the way the addon spelled it, not the way this
+				// schema had to normalise it.
+				config: settingsFromConfig(manifest).map((one) => ({
+					id: one.id,
+					key: one.key ?? one.id,
+					type: one.type,
+					label: one.label,
+					...(one.options === undefined ? {} : { options: one.options })
+				}))
 			}
 		}
 	});
@@ -292,6 +378,36 @@ function unwrapInstallLink(pasted: URL): string | null {
 	} catch {
 		return null;
 	}
+}
+
+/**
+ * The settings a listing already derived, read back for the bundle.
+ *
+ * `convert` holds a listing rather than a manifest — conversion is a pure
+ * function of the listing (`ForeignOrigin.detail`'s own rule) — so the config
+ * shape travels there and this rebuilds the descriptors from it rather than
+ * re-fetching a document already read.
+ */
+function settingsOf(listing: RepositoryPlugin): SettingDescriptor[] {
+	const rows = listing.origin?.detail?.['config'];
+	if (!Array.isArray(rows)) return [];
+	return rows.flatMap((entry) => {
+		if (typeof entry !== 'object' || entry === null) return [];
+		const row = entry as Record<string, unknown>;
+		const id = typeof row['id'] === 'string' ? row['id'] : '';
+		const key = typeof row['key'] === 'string' ? row['key'] : '';
+		const type = row['type'];
+		if (id.length === 0 || (type !== 'text' && type !== 'switch' && type !== 'select')) return [];
+		return [
+			{
+				id,
+				key,
+				type,
+				label: typeof row['label'] === 'string' && row['label'].length > 0 ? row['label'] : key,
+				...(Array.isArray(row['options']) ? { options: row['options'] as never } : {})
+			} satisfies SettingDescriptor
+		];
+	});
 }
 
 /**
@@ -448,9 +564,12 @@ export const stremioAdapter: ForeignAdapter = {
 				types: Array.isArray(detail['types']) ? (detail['types'] as string[]) : [],
 				searchable: Array.isArray(detail['searchable'])
 					? (detail['searchable'] as { type: string; id: string }[])
+					: [],
+				config: Array.isArray(detail['config'])
+					? (detail['config'] as { id: string; key: string; type: string }[])
 					: []
 			}),
-			settings: []
+			settings: settingsOf(listing)
 		});
 	}
 };

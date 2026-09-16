@@ -224,6 +224,15 @@ export interface ConversionRecord {
 	 * it by title", which is what every row written before this existed meant.
 	 */
 	readonly idKinds?: readonly ExternalIdKind[];
+	/**
+	 * Whether this source acquires media over a peer-to-peer network, copied
+	 * from `ForeignOrigin.usesP2p` at conversion time.
+	 *
+	 * Read by the host to decide two things it cannot decide any other way
+	 * before a stream is requested: whether to disclose the exposure, and
+	 * whether this build can consume such a source at all.
+	 */
+	readonly usesP2p?: boolean;
 }
 
 /**
@@ -274,6 +283,16 @@ export interface ForeignOrigin {
 	 * see `ExternalIdKind`.
 	 */
 	readonly idKinds?: readonly ExternalIdKind[];
+	/**
+	 * Whether this source acquires media over a peer-to-peer network.
+	 *
+	 * Declared by the source rather than discovered at play time, which is the
+	 * whole value of it. A host that cannot consume P2P can then say so on the
+	 * row, before anybody presses play, instead of installing something that
+	 * fails on its first stream — and a host that can still owes the viewer the
+	 * disclosure, because joining a swarm exposes their address to peers.
+	 */
+	readonly usesP2p?: boolean;
 	readonly isNsfw: boolean;
 	/**
 	 * Whatever else that format's converter needs, carried on the listing.

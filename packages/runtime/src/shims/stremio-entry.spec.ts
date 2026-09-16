@@ -26,7 +26,8 @@ interface Plugin {
 const BASE = 'https://addon.example.invalid/config=abc';
 
 async function load(
-	searchable: { type: string; id: string }[] = [{ type: 'series', id: 'example' }]
+	searchable: { type: string; id: string }[] = [{ type: 'series', id: 'example' }],
+	config: { id: string; key: string; type: string }[] = []
 ): Promise<Plugin> {
 	const directory = await mkdtemp(join(tmpdir(), 'stremio-entry-'));
 	const file = join(directory, 'entry.mjs');
@@ -36,7 +37,8 @@ async function load(
 			pluginId: 'test.stremio',
 			baseUrl: BASE,
 			types: ['movie', 'series'],
-			searchable
+			searchable,
+			config
 		})
 	);
 	const module = (await import(`file://${file}`)) as Record<string, unknown>;
@@ -44,7 +46,11 @@ async function load(
 }
 
 /** A context whose network answers from a table, and records what was asked. */
-function context(routes: Record<string, unknown>, asked: string[] = []) {
+function context(
+	routes: Record<string, unknown>,
+	asked: string[] = [],
+	values: Record<string, unknown> = {}
+) {
 	return {
 		asked,
 		ctx: {
@@ -65,6 +71,11 @@ function context(routes: Record<string, unknown>, asked: string[] = []) {
 						json: async () => JSON.parse(text) as unknown
 					};
 				}
+			},
+			settings: {
+				string: (id: string) => (values[id] === undefined ? '' : String(values[id])),
+				boolean: (id: string) => values[id] === true,
+				list: () => []
 			},
 			log: { debug() {}, warn() {} }
 		}
@@ -243,5 +254,58 @@ describe('searching an addon', () => {
 
 		expect(page.entries).toEqual([]);
 		expect(asked).toEqual([]);
+	});
+});
+
+/**
+ * The addon's own configuration, set inside this app rather than on its
+ * website. The ecosystem's SDK parses one path segment as JSON
+ * (`getRouter.js`), which is what makes the values applyable at all — without
+ * that, rendering the form would be drawing a control that does nothing.
+ */
+describe('a configured addon', () => {
+	const CONFIG = [
+		{ id: 'api_key', key: 'apiKey', type: 'text' },
+		{ id: 'dubbed', key: 'dubbed', type: 'switch' }
+	];
+
+	it('sends what the viewer set, keyed the way the addon spelled it', async () => {
+		const plugin = await load([], CONFIG);
+		const { ctx, asked } = context({}, [], { api_key: 'secret-value', dubbed: true });
+
+		await plugin.listEpisodes('series:tt1', ctx).catch(() => undefined);
+
+		const segment = encodeURIComponent(JSON.stringify({ apiKey: 'secret-value', dubbed: true }));
+		expect(asked[0]).toBe(`${BASE}/${segment}/meta/series/tt1.json`);
+	});
+
+	it('leaves the address untouched when nothing is set', async () => {
+		// The common case, and the one that would break: an addon configured on
+		// its own page already carries its settings in the URL, and appending an
+		// empty segment would change an address that was working.
+		const plugin = await load([], CONFIG);
+		const { ctx, asked } = context({}, [], {});
+
+		await plugin.listEpisodes('series:tt1', ctx).catch(() => undefined);
+
+		expect(asked[0]).toBe(`${BASE}/meta/series/tt1.json`);
+	});
+
+	it('leaves out a switch the viewer left off', async () => {
+		const plugin = await load([], CONFIG);
+		const { ctx, asked } = context({}, [], { dubbed: false, api_key: 'k' });
+
+		await plugin.listEpisodes('series:tt1', ctx).catch(() => undefined);
+
+		expect(asked[0]).toContain(encodeURIComponent(JSON.stringify({ apiKey: 'k' })));
+	});
+
+	it('adds no segment for an addon that declares no configuration', async () => {
+		const plugin = await load([], []);
+		const { ctx, asked } = context({}, [], { anything: 'ignored' });
+
+		await plugin.listEpisodes('series:tt1', ctx).catch(() => undefined);
+
+		expect(asked[0]).toBe(`${BASE}/meta/series/tt1.json`);
 	});
 });

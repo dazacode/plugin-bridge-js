@@ -335,3 +335,87 @@ describe('a collection rather than a single addon', () => {
 		).toThrow(ForeignFormatError);
 	});
 });
+
+/**
+ * Three facts the manifest states about itself that this adapter used to
+ * either hardcode or ignore. Each is declared at install time, which is the
+ * point: a host can disclose and gate on them before anybody presses play.
+ */
+describe('what the manifest declares about itself', () => {
+	it('takes the adult flag from the manifest instead of assuming false', () => {
+		const clean = stremioAdapter.parseIndex(manifest(), URL_).plugins[0];
+		expect(clean.origin?.isNsfw).toBe(false);
+
+		const adult = stremioAdapter.parseIndex(manifest({ behaviorHints: { adult: true } }), URL_)
+			.plugins[0];
+		expect(adult.origin?.isNsfw).toBe(true);
+	});
+
+	it('records that a source acquires over peer-to-peer', () => {
+		// Declared, not discovered at play time — which is what lets a host say
+		// "this needs a native client" on the row rather than after a failure.
+		const p2p = stremioAdapter.parseIndex(manifest({ behaviorHints: { p2p: true } }), URL_)
+			.plugins[0];
+
+		expect(p2p.origin?.usesP2p).toBe(true);
+		expect(stremioAdapter.parseIndex(manifest(), URL_).plugins[0].origin?.usesP2p).toBe(false);
+	});
+});
+
+describe('the addon’s own configuration form', () => {
+	const CONFIG = {
+		behaviorHints: { configurable: true },
+		config: [
+			{ key: 'apiKey', type: 'password', title: 'Debrid key', required: true },
+			{ key: 'dubbed', type: 'checkbox', default: 'checked', title: 'Prefer dubbed' },
+			{ key: 'quality', type: 'select', options: ['1080p', '720p'], title: 'Quality' },
+			{ key: 'limit', type: 'number', title: 'Results' }
+		]
+	};
+
+	function settingsOf(over: Record<string, unknown> = CONFIG) {
+		const [plugin] = stremioAdapter.parseIndex(manifest(over), URL_).plugins;
+		return (plugin.origin?.detail?.['config'] ?? []) as { id: string; key: string; type: string }[];
+	}
+
+	it('maps every field type this schema has somewhere to put', () => {
+		expect(settingsOf().map((one) => [one.key, one.type])).toEqual([
+			// No secret type exists here, so a key is drawn in the clear — a real
+			// loss, and better than dropping the only field that makes the addon
+			// usable.
+			['apiKey', 'text'],
+			['dubbed', 'switch'],
+			['quality', 'select'],
+			// Costs the keyboard, nothing else.
+			['limit', 'text']
+		]);
+	});
+
+	it('keeps the addon’s own spelling beside the normalised id', () => {
+		// The segment sent back is keyed the addon's way; the id is what this
+		// host stores under. Losing either breaks a configured request.
+		const [first] = settingsOf();
+		expect(first.id).toBe('apikey');
+		expect(first.key).toBe('apiKey');
+	});
+
+	it('drops a select with nothing to select from', () => {
+		const rows = settingsOf({
+			behaviorHints: { configurable: true },
+			config: [{ key: 'empty', type: 'select', options: [] }]
+		});
+		expect(rows).toEqual([]);
+	});
+
+	it('drops a field type the schema cannot represent', () => {
+		const rows = settingsOf({
+			behaviorHints: { configurable: true },
+			config: [{ key: 'weird', type: 'colorpicker' }]
+		});
+		expect(rows).toEqual([]);
+	});
+
+	it('declares nothing for an addon with no configuration', () => {
+		expect(settingsOf({})).toEqual([]);
+	});
+});

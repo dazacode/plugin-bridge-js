@@ -12,6 +12,35 @@ to exhaustion and deliberately closed it. `v0.1.x` is for fixes to what has
 already been promised; a minor bump whose case is "the number went up" is not a
 minor bump.
 
+## v0.3.2 — what the manifest was already saying
+
+Three facts a Stremio addon states about itself, which this adapter had been
+hardcoding, ignoring, or discovering far too late.
+
+`behaviorHints.adult` reaches `isNsfw`, which was hardcoded `false` — a claim
+published on the addon's behalf while the addon was making its own.
+
+`behaviorHints.p2p` reaches a new `usesP2p` on `ForeignOrigin` and
+`ConversionRecord`. It is declared at install time, and that is the whole
+value: a host that cannot consume peer-to-peer can say so on the row instead
+of installing something that fails on its first stream, and a host that can
+still owes the viewer the disclosure, because joining a swarm exposes their
+address to peers. Nothing here consumes it yet.
+
+`config[]` reaches `SettingDescriptor[]`, so a configurable addon is
+configured _in the host_ rather than on its own website. This is possible
+because the ecosystem's SDK parses its configuration path segment as JSON
+(`getRouter.js`), so the values are applyable and not merely renderable — the
+bundle rebuilds that segment from what the viewer set, keyed the way the addon
+spelled each field rather than the way this schema had to normalise the id. An
+addon that sets nothing gets an untouched address, which matters because one
+configured on its own page already carries its settings in the URL.
+
+`password` maps to `text`, and that is a real loss rather than a neutral one:
+this manifest schema has no secret type, so a key a viewer types is drawn in
+the clear. Worth closing at the schema. Dropping the field instead would make
+an addon whose only configuration is its key unconfigurable, which is worse.
+
 ## v0.3.1 — a whole addon list in one paste
 
 Three fixes to what v0.3.0 shipped, all of them about the URL a person
