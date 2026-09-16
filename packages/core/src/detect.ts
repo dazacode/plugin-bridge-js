@@ -63,9 +63,18 @@ function normalise(pasted: string): URL {
 
 	const withScheme = /^[\w.-]+\/[\w.-]+$/.test(trimmed) ? `https://github.com/${trimmed}` : trimmed;
 
+	// One ecosystem publishes its install links under its own scheme, formed by
+	// swapping `https` for it and nothing else — so swapping back is lossless
+	// and yields the address the link always named. Rewritten rather than
+	// accepted: what is fetched is still https, which is the rule the check
+	// below exists to keep. Without this, pasting the link that ecosystem's own
+	// documentation tells people to copy fails with "a repository must be
+	// https", which is true of the scheme and useless as advice.
+	const rewritten = withScheme.replace(/^stremio:\/\//i, 'https://');
+
 	let url: URL;
 	try {
-		url = new URL(withScheme);
+		url = new URL(rewritten);
 	} catch {
 		throw new ValidationFailure('That is not a URL.');
 	}
@@ -102,7 +111,14 @@ export function detectionCandidates(
 	};
 
 	// Native first, always. See this file's header.
-	for (const candidate of resolveIndexCandidates(pasted)) add(candidate);
+	//
+	// Given the *normalised* URL rather than the raw paste, so that both halves
+	// of this function agree on what was pasted. They did their own identical
+	// normalisation independently, which was harmless while normalising meant
+	// only the `owner/repo` shorthand — and stopped being harmless the moment
+	// `normalise` learned to rewrite a scheme, because this call then still saw
+	// the original and refused it.
+	for (const candidate of resolveIndexCandidates(url.toString())) add(candidate);
 	for (const adapter of adapters) {
 		for (const candidate of adapter.candidates(url)) add(candidate);
 	}

@@ -12,6 +12,37 @@ to exhaustion and deliberately closed it. `v0.1.x` is for fixes to what has
 already been promised; a minor bump whose case is "the number went up" is not a
 minor bump.
 
+## v0.3.1 — a whole addon list in one paste
+
+Three fixes to what v0.3.0 shipped, all of them about the URL a person
+actually has in their hand rather than the one the protocol documents.
+
+**Collections.** This ecosystem publishes a person's entire addon list as a
+JSON array of `{ manifest, transportUrl, flags }` descriptors — the document a
+client saves and restores — and it behaves exactly like every other format's
+repository index. Reading it means somebody moving across pastes one URL
+instead of one per addon. Recognised strictly, on both a `transportUrl` and a
+valid inline manifest, because a bare array is not a distinctive document and
+another adapted format publishes its whole extension list as one. Stream-less
+entries, which every real list carries, are counted and dropped rather than
+taken as grounds to refuse the list.
+
+**Install links.** The addon directories and the addons' own pages hand out a
+link to the _web client_ with the manifest as a parameter, not the manifest —
+and the parameter sits in the URL _fragment_, so `searchParams` cannot see it
+and a reader who checks only there concludes there is nothing to unwrap. Those
+are now unwrapped, raw or percent-encoded, matched by route shape rather than
+by hostname so a self-hosted client works the same.
+
+**The install scheme.** The same ecosystem's documentation tells people to
+copy a link under its own scheme, formed by swapping `https` for it and
+changing nothing else. Pasting one used to fail with "a repository must be
+https" — true about the scheme, useless as advice. It is rewritten back, so
+what is fetched is still https. Fixing that surfaced a second bug:
+`detectionCandidates` normalised the paste for the adapters and then handed
+the _raw_ string to the native resolver, which refused it before any adapter
+was asked. Both halves now read the same URL.
+
 ## v0.3.0 — a seventh ecosystem, and the first with nothing to translate
 
 Six adapters port programs. `FOREIGN.md` §4.1 states the cost plainly: an

@@ -169,3 +169,169 @@ describe('the URL a viewer pastes', () => {
 		expect(stremioAdapter.candidates(new URL(URL_))).toEqual([URL_]);
 	});
 });
+
+/**
+ * What people actually copy.
+ *
+ * An addon's own page and every directory listing it hand out a link to the
+ * *web client* with the manifest as a parameter, not the manifest. A viewer
+ * pasting what they were given is pasting a link to somebody else's app, and
+ * before this it had `/manifest.json` appended to it and failed.
+ */
+describe('an install link rather than a manifest', () => {
+	const MANIFEST = 'https://addon.example.invalid/lite/manifest.json';
+
+	it('unwraps the manifest out of the fragment', () => {
+		// The `?` is after the `#`, so this parameter is in the fragment and
+		// `searchParams` cannot see it. That is the entire trap.
+		expect(
+			stremioAdapter.candidates(new URL(`https://web.example.invalid/#/addons?addon=${MANIFEST}`))
+		).toEqual([MANIFEST]);
+	});
+
+	it('unwraps it percent-encoded too, because both forms circulate', () => {
+		expect(
+			stremioAdapter.candidates(
+				new URL(`https://web.example.invalid/#/addons?addon=${encodeURIComponent(MANIFEST)}`)
+			)
+		).toEqual([MANIFEST]);
+	});
+
+	it('appends the manifest when the link carries only a directory', () => {
+		expect(
+			stremioAdapter.candidates(
+				new URL('https://web.example.invalid/#/addons?addon=https://addon.example.invalid/lite')
+			)
+		).toEqual([MANIFEST]);
+	});
+
+	it('is matched by shape, so a self-hosted web client works the same', () => {
+		// No hostname is written down here or in the adapter — any host serving
+		// that route means the same thing.
+		expect(
+			stremioAdapter.candidates(
+				new URL(`https://someone-elses-host.example.invalid/#/addons?addon=${MANIFEST}`)
+			)
+		).toEqual([MANIFEST]);
+	});
+
+	it('ignores a fragment that carries no addon at all', () => {
+		expect(
+			stremioAdapter.candidates(new URL('https://addon.example.invalid/lite/#/board'))
+		).toEqual(['https://addon.example.invalid/lite/#/board/manifest.json']);
+	});
+
+	it('offers nothing when the link names an addon it cannot use', () => {
+		// An install link must not become a way around the transport rule, and
+		// a link whose addon is unusable has no candidate worth a request.
+		expect(
+			stremioAdapter.candidates(
+				new URL(
+					'https://web.example.invalid/#/addons?addon=http://addon.example.invalid/manifest.json'
+				)
+			)
+		).toEqual([]);
+	});
+});
+
+/**
+ * A whole addon list in one paste.
+ *
+ * This is the only document in this format that lists more than one source,
+ * and it is what a person moving across already has — the list their client
+ * saved. Without it they bring their addons one at a time.
+ */
+describe('a collection rather than a single addon', () => {
+	function descriptor(id: string, over: Record<string, unknown> = {}) {
+		return {
+			transportUrl: `https://${id}.example.invalid/manifest.json`,
+			flags: { official: false },
+			manifest: {
+				id: `invalid.example.${id}`,
+				version: '1.0.0',
+				name: id,
+				types: ['movie', 'series'],
+				resources: ['stream'],
+				...over
+			}
+		};
+	}
+
+	it('produces one listing per addon in the list', () => {
+		const index = stremioAdapter.parseIndex(
+			JSON.stringify([descriptor('one'), descriptor('two')]),
+			'https://someone.example.invalid/collection.json'
+		);
+
+		expect(index.format).toBe('stremio');
+		expect(index.plugins.map((row) => row.name)).toEqual(['one', 'two']);
+	});
+
+	it('points each listing at its own address, not at the collection', () => {
+		const index = stremioAdapter.parseIndex(
+			JSON.stringify([descriptor('one')]),
+			'https://someone.example.invalid/collection.json'
+		);
+
+		expect(index.plugins[0].origin?.detail?.['base']).toBe('https://one.example.invalid');
+		expect(index.plugins[0].hosts).toContain('one.example.invalid');
+	});
+
+	it('drops the metadata and subtitle providers a real list carries, and counts them', () => {
+		// Refusing the whole document because it contains a subtitle provider
+		// would reject an entirely ordinary collection.
+		const index = stremioAdapter.parseIndex(
+			JSON.stringify([
+				descriptor('streams'),
+				descriptor('subs', { resources: ['subtitles'] }),
+				descriptor('meta', { resources: ['catalog', 'meta'] })
+			]),
+			'https://someone.example.invalid/collection.json'
+		);
+
+		expect(index.plugins.map((row) => row.name)).toEqual(['streams']);
+		expect(index.filteredOut).toBe(2);
+	});
+
+	it('keeps one listing when the same addon is named twice', () => {
+		// Two configurations of one service share an id, and two listings
+		// sharing an id share a keyed-each key.
+		const index = stremioAdapter.parseIndex(
+			JSON.stringify([descriptor('one'), descriptor('one')]),
+			'https://someone.example.invalid/collection.json'
+		);
+
+		expect(index.plugins).toHaveLength(1);
+	});
+
+	/**
+	 * The risk this format introduces. A bare JSON array is not a distinctive
+	 * document — another adapted ecosystem publishes its entire extension list
+	 * as one — so recognising "an array" would claim somebody else's index and
+	 * shadow it for every repository, which is the property
+	 * `adapters.spec.ts` defends across all seven.
+	 */
+	it('refuses an array that is not a collection', () => {
+		expect(() =>
+			stremioAdapter.parseIndex(
+				JSON.stringify([{ name: 'Something', pkg: 'com.example.thing', apk: 'thing.apk' }]),
+				'https://someone.example.invalid/index.json'
+			)
+		).toThrow(ForeignFormatError);
+	});
+
+	it('refuses entries that carry an address but no manifest', () => {
+		expect(() =>
+			stremioAdapter.parseIndex(
+				JSON.stringify([{ transportUrl: 'https://one.example.invalid/manifest.json' }]),
+				'https://someone.example.invalid/collection.json'
+			)
+		).toThrow(ForeignFormatError);
+	});
+
+	it('refuses an empty list rather than showing an empty repository', () => {
+		expect(() =>
+			stremioAdapter.parseIndex('[]', 'https://someone.example.invalid/collection.json')
+		).toThrow(ForeignFormatError);
+	});
+});

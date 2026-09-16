@@ -722,8 +722,24 @@ document:
 - **No upstream code is embedded**, so no bundle carries an upstream licence
   and there is no derived work to attribute. `licenses/` is empty by
   construction rather than by omission.
-- **One manifest is one listing.** There is no repository document naming many
-  extensions; the "repository" a viewer pastes _is_ the addon.
+- **One manifest is one listing**, and a _collection_ is the exception. A
+  manifest describes one addon, so the "repository" a viewer pastes is usually
+  the addon itself. This ecosystem also publishes a person's whole addon list
+  as a JSON array of `{ manifest, transportUrl, flags }` descriptors — the
+  document a client saves and restores — and that behaves like every other
+  format's index: many sources, one URL, each entry carrying its manifest
+  inline beside the address it is served from. It is recognised strictly, on
+  both a `transportUrl` and a valid inline manifest, because a bare JSON array
+  is not a distinctive document and one other adapted format publishes its
+  entire extension list as one. Addons in a collection that serve no streams —
+  the metadata and subtitle providers a real list carries — are counted and
+  dropped rather than refusing the document.
+- **The link people copy is not the manifest.** Directories and addon pages
+  hand out a link to the _web client_ with the manifest as a parameter, and
+  that parameter sits in the URL fragment, where `searchParams` cannot see it.
+  The same ecosystem's documentation also tells people to copy a link under
+  its own scheme. `candidates` unwraps the first; `detect.ts` rewrites the
+  second back to https, so what is fetched is unchanged.
 - **Configuration lives in the URL.** An addon that needs a key hands the
   viewer a URL with their settings in a path segment, so a configured addon
   and a plain one differ only in the string pasted. The adapter treats

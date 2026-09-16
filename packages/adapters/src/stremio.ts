@@ -218,6 +218,125 @@ function listingOf(manifest: StremioManifest, manifestUrl: string): RepositoryPl
 	});
 }
 
+/**
+ * The addons in a collection document, or null when this is not one.
+ *
+ * A collection is the shape this ecosystem uses for *a person's whole addon
+ * list*: a JSON array of `{ manifest, transportUrl, flags }` descriptors, each
+ * carrying the addon's manifest inline beside the address it is served from.
+ * It is what a client saves and restores, and it is the one document here that
+ * behaves like every other format's repository index — many sources, one URL.
+ *
+ * That is why it is worth reading. Without it, a viewer moving across brings
+ * their addons one paste at a time; with it, the list they already have is one
+ * paste, and the existing browse-and-install screen does the rest.
+ *
+ * **Recognised strictly**, because a bare JSON array is not a distinctive
+ * document — one other adapted format publishes its whole extension list as
+ * one. Requiring both a `transportUrl` and an inline manifest carrying `id`,
+ * `version` and `resources` is what keeps this from claiming somebody else's
+ * index, and an array with no such entry is not a collection at all.
+ */
+function collectionEntries(
+	decoded: unknown
+): { manifest: StremioManifest; transportUrl: string }[] | null {
+	if (!Array.isArray(decoded)) return null;
+
+	const found: { manifest: StremioManifest; transportUrl: string }[] = [];
+	for (const entry of decoded) {
+		if (typeof entry !== 'object' || entry === null) continue;
+		const row = entry as Record<string, unknown>;
+		const transportUrl = row['transportUrl'];
+		if (typeof transportUrl !== 'string' || transportUrl.length === 0) continue;
+		if (!isManifest(row['manifest'])) continue;
+		found.push({ manifest: row['manifest'], transportUrl });
+	}
+	return found.length === 0 ? null : found;
+}
+
+/**
+ * The manifest URL carried inside a Stremio Web install link.
+ *
+ * These are what people actually copy. The addon directories and the addons'
+ * own pages hand out a link to the *web client* with the manifest as a
+ * parameter — `…/#/addons?addon=https://…/manifest.json` — rather than the
+ * manifest itself, so a viewer pasting what they were given is pasting a link
+ * to somebody else's app. Appending `/manifest.json` to that produces a URL
+ * that cannot exist, and the viewer is told their addon is not an addon.
+ *
+ * **The parameter is in the fragment, not the query.** `#/addons?addon=…` puts
+ * the `?` after the `#`, so `url.searchParams.get('addon')` returns null and a
+ * reader who checks only there concludes there is nothing to unwrap. This is
+ * the whole bug, and it is invisible until tried.
+ *
+ * Matched by shape rather than by hostname: any host serving that route means
+ * the same thing, including a self-hosted web client, and matching on a
+ * hostname would be both narrower and the kind of thing rule 9 exists to keep
+ * out of this directory. The embedded value is accepted raw or percent-encoded
+ * because both forms circulate — `URLSearchParams` decodes the second and
+ * leaves the first alone.
+ */
+function unwrapInstallLink(pasted: URL): string | null {
+	const hash = pasted.hash;
+	const at = hash.indexOf('?');
+	if (at < 0) return null;
+
+	const addon = new URLSearchParams(hash.slice(at + 1)).get('addon');
+	if (addon === null || addon.length === 0) return null;
+
+	try {
+		const inner = new URL(addon);
+		// Only ever https out of here: `detect.ts` enforces that on what it
+		// fetches, and an install link is not a way around it.
+		return inner.protocol === 'https:' ? inner.toString() : null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * A collection, as a repository of sources.
+ *
+ * Addons that serve no streams are dropped rather than refused: a real
+ * collection routinely carries a metadata provider and a subtitle provider
+ * beside the sources, and refusing the document for their presence would
+ * reject a perfectly ordinary list. They are counted, so the screen can say
+ * how many were left out instead of quietly showing a shorter list — the same
+ * bargain `keepMediums` makes for an unsupported medium.
+ */
+function collectionIndex(
+	entries: readonly { manifest: StremioManifest; transportUrl: string }[]
+): RepositoryIndex {
+	const plugins: RepositoryPlugin[] = [];
+	const seen = new Set<string>();
+	let withoutStreams = 0;
+
+	for (const entry of entries) {
+		if (!resourceNames(entry.manifest).includes('stream')) {
+			withoutStreams += 1;
+			continue;
+		}
+		const listing = listingOf(entry.manifest, entry.transportUrl);
+		// A list may name the same addon twice — two configurations of one
+		// service share an id. Two listings sharing an id share a keyed-each
+		// key, and the render throws for the whole list rather than the pair.
+		if (seen.has(listing.id)) continue;
+		seen.add(listing.id);
+		plugins.push(listing);
+	}
+
+	const kept = keepMediums({
+		name: 'Stremio addons',
+		updatedAt: '',
+		signingKey: null,
+		plugins,
+		format: 'stremio'
+	});
+	// `keepMediums` counts what *it* dropped; the stream-less ones were gone
+	// before it ran and belong in the same total.
+	return { ...kept, filteredOut: (kept.filteredOut ?? 0) + withoutStreams };
+}
+
 export const stremioAdapter: ForeignAdapter = {
 	format: 'stremio',
 
@@ -235,8 +354,21 @@ export const stremioAdapter: ForeignAdapter = {
 	 * sentence a viewer can act on — under a guaranteed 404.
 	 */
 	candidates(pasted: URL): string[] {
-		const raw = pasted.toString();
-		if (looksLikeFile(pasted)) return [raw];
+		// An install link is a link to a client app with the real address
+		// inside it. Unwrapped first, because everything below is about the
+		// addon's own URL and this is not one yet.
+		//
+		// A link that names an addon this cannot use offers *nothing* rather
+		// than falling back to the link itself: appending `/manifest.json` to a
+		// web client's route builds a URL that cannot exist, and spending a
+		// request to discover that adds a fetch without adding an answer.
+		const named = pasted.hash.includes('addon=');
+		const unwrapped = unwrapInstallLink(pasted);
+		if (named && unwrapped === null) return [];
+		const url = unwrapped === null ? pasted : new URL(unwrapped);
+
+		const raw = url.toString();
+		if (looksLikeFile(url)) return [raw];
 		return [`${raw.replace(/\/+$/, '')}/manifest.json`];
 	},
 
@@ -247,6 +379,14 @@ export const stremioAdapter: ForeignAdapter = {
 		} catch {
 			throw new ForeignFormatError('not JSON');
 		}
+		// A whole addon list, which is the only document in this format that
+		// lists more than one source. Read before the single-manifest case
+		// because the two are different JSON shapes and cannot be confused.
+		const collection = collectionEntries(decoded);
+		if (collection !== null) {
+			return collectionIndex(collection);
+		}
+
 		if (!isManifest(decoded)) {
 			throw new ForeignFormatError('not a Stremio addon manifest');
 		}

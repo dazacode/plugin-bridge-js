@@ -137,3 +137,37 @@ describe('the body decides, not the path', () => {
 		expect(found.index.format).toBe('cloudstream');
 	});
 });
+
+/**
+ * The install links an ecosystem's own documentation tells people to copy.
+ *
+ * One publishes them under its own scheme, formed by swapping `https` for it
+ * and changing nothing else. Pasting one used to fail with "a repository must
+ * be https" — true about the scheme, and useless as advice to somebody who
+ * copied the link they were given.
+ */
+describe('a pasted install link under another scheme', () => {
+	it('is read as the https address it always named', () => {
+		const { url } = detectionCandidates('stremio://addon.example.invalid/lite/manifest.json', []);
+
+		expect(url.toString()).toBe('https://addon.example.invalid/lite/manifest.json');
+	});
+
+	it('still fetches over https, which is the rule that mattered', () => {
+		const { candidates } = detectionCandidates(
+			'stremio://addon.example.invalid/lite/manifest.json',
+			[]
+		);
+
+		expect(candidates.every((candidate) => candidate.startsWith('https://'))).toBe(true);
+	});
+
+	it('leaves every other scheme refused', () => {
+		expect(() => detectionCandidates('http://addon.example.invalid/manifest.json', [])).toThrow(
+			/must be https/
+		);
+		expect(() => detectionCandidates('ftp://addon.example.invalid/manifest.json', [])).toThrow(
+			/must be https/
+		);
+	});
+});
