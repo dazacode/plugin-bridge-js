@@ -357,8 +357,8 @@ describe('what the manifest declares about itself', () => {
 		const p2p = stremioAdapter.parseIndex(manifest({ behaviorHints: { p2p: true } }), URL_)
 			.plugins[0];
 
-		expect(p2p.origin?.usesP2p).toBe(true);
-		expect(stremioAdapter.parseIndex(manifest(), URL_).plugins[0].origin?.usesP2p).toBe(false);
+		expect(p2p.origin?.declaredP2p).toBe(true);
+		expect(stremioAdapter.parseIndex(manifest(), URL_).plugins[0].origin?.declaredP2p).toBe(false);
 	});
 });
 

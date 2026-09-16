@@ -169,7 +169,7 @@ export async function checkListing(
 		mediaKind: listing.origin.mediaKind,
 		mediaKinds: listing.origin.mediaKinds,
 		idKinds: listing.origin.idKinds,
-		usesP2p: listing.origin.usesP2p
+		declaredP2p: listing.origin.declaredP2p
 	};
 
 	const result = await verifyConvertedPlugin(

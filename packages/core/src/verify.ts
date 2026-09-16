@@ -45,6 +45,16 @@ export interface VerificationResult {
 	readonly searchHits: number;
 	readonly episodeCount: number;
 	readonly streamCount: number;
+	/**
+	 * How many of what it resolved were peer-to-peer descriptors.
+	 *
+	 * The evidence behind `ConversionRecord.observedP2p`. Counted rather than
+	 * flagged, because the count separates two situations a boolean cannot: a
+	 * source answering with torrents *and* direct links needs no special
+	 * capability to play here, while one answering with torrents alone does.
+	 * This and `streamCount` are read together for that reason.
+	 */
+	readonly torrentCount: number;
 }
 
 export interface VerifyOptions extends SandboxOptions {
@@ -218,7 +228,7 @@ export async function verifyConvertedPlugin(
 		...sandboxOptions
 	} = options;
 
-	const nothing = { searchHits: 0, episodeCount: 0, streamCount: 0 };
+	const nothing = { searchHits: 0, episodeCount: 0, streamCount: 0, torrentCount: 0 };
 	let sandbox: PluginSandbox | null = null;
 	const deadline = Date.now() + budgetMs;
 	const outOfTime = () => Date.now() > deadline;
@@ -343,11 +353,27 @@ export async function verifyConvertedPlugin(
 					PLAYABLE.has(String(stream.container ?? 'hls'))
 			);
 
+			// Counted, not judged. Whether a descriptor can become a stream is the
+			// host's question — this records that the source answered with one,
+			// so a row can say so honestly whatever this build can do about it.
+			const torrents = streams.filter(
+				(stream) => typeof (stream as { torrent?: unknown }).torrent === 'object'
+			);
+
 			const counts = {
 				searchHits: searchHits,
 				episodeCount: episodes.length,
-				streamCount: playable.length
+				streamCount: playable.length,
+				torrentCount: torrents.length
 			};
+
+			// A source that answered with descriptors this build cannot acquire
+			// has still answered, and the gate says so rather than calling it
+			// broken — what stops it playing is a capability, which is not a
+			// property of the source and must not be reported as one.
+			if (playable.length === 0 && torrents.length > 0) {
+				return { ok: true, failedAt: null, detail: null, ...counts };
+			}
 
 			if (playable.length === 0) {
 				return {

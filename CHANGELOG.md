@@ -12,6 +12,35 @@ to exhaustion and deliberately closed it. `v0.1.x` is for fixes to what has
 already been promised; a minor bump whose case is "the number went up" is not a
 minor bump.
 
+## v0.4.0 — a source may answer with something this device cannot use
+
+`resolve()` could only say "here is an address" or "I failed". A source that
+answered with a torrent had to be reported as one of those, and both were
+wrong: it answered, correctly, with media a different device could play.
+
+`TorrentDescriptor` is that third answer. A bundle returns
+`{ infoHash, fileIdx?, sources? }` and stops there — whether it can become a
+stream is the host's question, the same division that keeps a plugin from
+knowing what platform it runs on. Deliberately not a magnet string: a
+URL-shaped value no fetch can open would have made every guard, probe and
+player downstream learn an exception.
+
+`VerificationResult.torrentCount` and `CheckResult.torrentCount` carry what a
+run actually saw, and `ConversionRecord.observedP2p` records it. That is the
+fact `behaviorHints.p2p` cannot supply: the most widely installed torrent
+addon in this ecosystem declares nothing and returns torrents for every
+request, so declaration is advisory and observation is authoritative for the
+one thing it covers. `usesP2p` is accordingly renamed `declaredP2p`, because
+once the two facts are separate the old name claims the wrong one.
+
+The gate no longer fails a source for answering this way. A resolve that
+returns descriptors and no direct link passes, because what stops it playing
+is a capability, which is not a property of the source and must not be
+reported as one (rule 17).
+
+`p2p` on the manifest stays advisory and stays disclosed. Nothing here
+consumes a descriptor; the host does, and that boundary is in the app.
+
 ## v0.3.2 — what the manifest was already saying
 
 Three facts a Stremio addon states about itself, which this adapter had been

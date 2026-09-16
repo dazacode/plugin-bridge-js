@@ -93,6 +93,16 @@ export interface CheckResult {
 	/** What it managed before failing, when it managed anything. */
 	readonly searchHits?: number;
 	readonly episodeCount?: number;
+	/**
+	 * How many peer-to-peer descriptors the run resolved.
+	 *
+	 * Here as well as on `ConversionRecord.observedP2p` because the two cover
+	 * different rows: a listing somebody checked without installing has no
+	 * conversion record to carry the observation, and forgetting what that
+	 * check saw would mean asking the source again to learn something already
+	 * proved.
+	 */
+	readonly torrentCount?: number;
 	readonly streamCount?: number;
 }
 

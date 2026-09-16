@@ -159,6 +159,42 @@ export function declaredMediums(
 export type ExternalIdKind = 'imdb';
 
 /**
+ * A torrent, as the thing a source hands back instead of a URL.
+ *
+ * Deliberately not a URL, and deliberately not a magnet string. A magnet would
+ * be a URL-shaped value that no fetch can open, and every guard, probe and
+ * player downstream treats a URL as fetchable — `__isPlayable`, the reach
+ * probe, the mirror memory and the fall-through walk all would have had to
+ * learn an exception. A distinct shape makes the one place that must
+ * understand it obvious, and leaves the rest of the pipeline reading exactly
+ * as it did.
+ *
+ * Carries what an acquisition engine needs and nothing else: no display
+ * strings, no source name, no file list. Those belong to the `PlaybackSource`
+ * the host builds once the engine has turned this into an address.
+ */
+export interface TorrentDescriptor {
+	/** The infohash, lowercased hex, as the protocol spells it. */
+	readonly infoHash: string;
+	/**
+	 * Which file in the torrent, when the source knows.
+	 *
+	 * Absent is a real answer rather than a default: a single-file torrent has
+	 * nothing to choose, and for a multi-file one an engine picking the largest
+	 * video is more reliable than a source guessing an index it never read.
+	 */
+	readonly fileIdx?: number;
+	/**
+	 * Trackers and DHT nodes the source offered, verbatim.
+	 *
+	 * Passed through untouched because an engine joins a swarm faster knowing
+	 * where to look, and because rewriting them would be this client having an
+	 * opinion about somebody else's network.
+	 */
+	readonly sources?: readonly string[];
+}
+
+/**
  * What a converted plugin was made from.
  *
  * Present only when the bundle did not come from a Yorozo repository. It is
@@ -225,14 +261,32 @@ export interface ConversionRecord {
 	 */
 	readonly idKinds?: readonly ExternalIdKind[];
 	/**
-	 * Whether this source acquires media over a peer-to-peer network, copied
-	 * from `ForeignOrigin.usesP2p` at conversion time.
-	 *
-	 * Read by the host to decide two things it cannot decide any other way
-	 * before a stream is requested: whether to disclose the exposure, and
-	 * whether this build can consume such a source at all.
+	 * What the source's manifest claimed, copied from `ForeignOrigin` at
+	 * conversion time. Advisory — see there.
 	 */
-	readonly usesP2p?: boolean;
+	readonly declaredP2p?: boolean;
+	/**
+	 * Whether this client **watched** the source answer with peer-to-peer
+	 * descriptors.
+	 *
+	 * Authoritative for the one thing it covers, and only that: we ran
+	 * `resolve()` and read what came back. Rule 17 is satisfied by
+	 * construction, because the capability the claim depends on is the one
+	 * that produced the evidence.
+	 *
+	 * Kept beside `declaredP2p` rather than merged into it, because the two
+	 * are different facts and stay distinguishable even when both are true. A
+	 * source that declared nothing and was observed is a source whose author
+	 * was careless; a source that declared and was never run is unproven. One
+	 * boolean could not say either.
+	 *
+	 * **Evidence, never authority.** Observing peer-to-peer does not widen
+	 * what a plugin may do: permissions are granted at install against a
+	 * manifest the viewer was shown, and a fact learned afterwards cannot
+	 * retroactively enlarge that grant. What it does is let a host disclose
+	 * honestly and ask.
+	 */
+	readonly observedP2p?: boolean;
 }
 
 /**
@@ -284,15 +338,16 @@ export interface ForeignOrigin {
 	 */
 	readonly idKinds?: readonly ExternalIdKind[];
 	/**
-	 * Whether this source acquires media over a peer-to-peer network.
+	 * Whether the source's own manifest **claims** peer-to-peer acquisition.
 	 *
-	 * Declared by the source rather than discovered at play time, which is the
-	 * whole value of it. A host that cannot consume P2P can then say so on the
-	 * row, before anybody presses play, instead of installing something that
-	 * fails on its first stream — and a host that can still owes the viewer the
-	 * disclosure, because joining a swarm exposes their address to peers.
+	 * Advisory, and named for it. A manifest is what an author wrote, not what
+	 * their addon does: the most widely installed torrent addon in this
+	 * ecosystem declares nothing here and returns torrents for every request.
+	 * So this buys early disclosure when it is present and proves nothing when
+	 * it is absent, which is why `ConversionRecord.observedP2p` exists beside
+	 * it rather than instead of it.
 	 */
-	readonly usesP2p?: boolean;
+	readonly declaredP2p?: boolean;
 	readonly isNsfw: boolean;
 	/**
 	 * Whatever else that format's converter needs, carried on the listing.

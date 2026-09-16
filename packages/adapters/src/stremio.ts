@@ -277,7 +277,7 @@ function listingOf(manifest: StremioManifest, manifestUrl: string): RepositoryPl
 			// Both declared by the addon rather than inferred. `adult` was
 			// hardcoded false here, which published a claim the manifest was
 			// already making for itself.
-			usesP2p: hints['p2p'] === true,
+			declaredP2p: hints['p2p'] === true,
 			// The whole reason this format is worth having: the host holds an
 			// IMDB id already, so nothing about this source has to be found by
 			// searching its catalogue for a title.

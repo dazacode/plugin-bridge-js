@@ -221,6 +221,33 @@ function __playable(row) {
 }
 
 /**
+ * A stream object that names a torrent, as an acquisition descriptor.
+ *
+ * \`sources\` carries this protocol's trackers and DHT nodes verbatim. The
+ * infohash is lowercased here because that is how it is spelled everywhere it
+ * is compared, and a source that returns it uppercase would otherwise start a
+ * second engine for a torrent already running.
+ */
+function __torrent(row) {
+  if (!row || typeof row !== 'object') return null;
+  if (typeof row.infoHash !== 'string' || row.infoHash.length === 0) return null;
+
+  const label = String(row.name || row.title || '').trim();
+  const idx = Number(row.fileIdx);
+  return {
+    torrent: {
+      infoHash: row.infoHash.toLowerCase(),
+      ...(Number.isFinite(idx) && idx >= 0 ? { fileIdx: idx } : {}),
+      ...(Array.isArray(row.sources)
+        ? { sources: row.sources.filter(function (one) { return typeof one === 'string'; }) }
+        : {})
+    },
+    label: label.length > 0 ? label : 'Torrent',
+    subtitles: __sidecars(row.subtitles)
+  };
+}
+
+/**
  * Sidecar subtitle tracks, which this protocol carries per stream.
  *
  * Unlike the scraped formats, these arrive with a real language tag, so the
@@ -341,16 +368,24 @@ export default {
     const rows = body && Array.isArray(body.streams) ? body.streams : [];
 
     const sources = [];
-    const dropped = { torrent: 0, external: 0, youtube: 0, other: 0 };
+    const dropped = { external: 0, youtube: 0, other: 0 };
     for (const row of rows) {
       const source = __playable(row);
       if (source !== null) {
         sources.push(source);
         continue;
       }
+      // A torrent is **returned, not dropped**. It is a real answer this
+      // client may or may not be able to act on, and which of those is true is
+      // the host's question rather than this bundle's — the same division that
+      // keeps a plugin from knowing what device it runs on.
+      const torrent = __torrent(row);
+      if (torrent !== null) {
+        sources.push(torrent);
+        continue;
+      }
       if (row && typeof row === 'object') {
-        if (typeof row.infoHash === 'string') dropped.torrent += 1;
-        else if (typeof row.externalUrl === 'string') dropped.external += 1;
+        if (typeof row.externalUrl === 'string') dropped.external += 1;
         else if (typeof row.ytId === 'string') dropped.youtube += 1;
         else dropped.other += 1;
       }
@@ -366,15 +401,11 @@ export default {
     // through the check's own \`detail\`.
     if (sources.length === 0 && rows.length > 0) {
       const parts = [];
-      if (dropped.torrent > 0) parts.push(dropped.torrent + ' torrent');
       if (dropped.external > 0) parts.push(dropped.external + ' link to another site');
       if (dropped.youtube > 0) parts.push(dropped.youtube + ' YouTube');
       const said = parts.length > 0 ? parts.join(', ') : rows.length + ' unrecognised';
       throw new Error(
-        'This addon answered with ' + said + ' stream(s) and no direct link. ' +
-          (dropped.torrent > 0
-            ? 'Yorozo has no torrent client; configuring this addon with a debrid account on its own page makes it return playable links instead.'
-            : 'None of them is something this player can open.')
+        'This addon answered with ' + said + ' stream(s) and nothing this player can open.'
       );
     }
     return sources;

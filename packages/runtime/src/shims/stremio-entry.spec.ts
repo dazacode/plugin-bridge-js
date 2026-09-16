@@ -157,19 +157,47 @@ describe('resolving a stream', () => {
 		expect(asked[0]).toBe(`${BASE}/stream/series/tt1%3A1%3A1.json`);
 	});
 
-	it('keeps the direct link and drops what cannot be played', async () => {
-		const plugin = await load();
+	/** The direct link is at index 1: a torrent precedes it in `STREAMS`. */
+	async function resolved(ctx: unknown) {
+		return await plugin!.resolve('series:tt1', { number: 1, sourceEpisodeId: 'tt1:1:1' }, ctx);
+	}
+	let plugin: Plugin | null = null;
+
+	it('keeps the direct link, and the torrent beside it', async () => {
+		// Both are real answers. Which of them this device can act on is the
+		// host's question, and a bundle that decided it here would be deciding
+		// for every device the same bundle runs on.
+		plugin = await load();
 		const { ctx } = context({ '/stream/series/tt1:1:1.json': STREAMS });
 
-		const sources = await plugin.resolve(
-			'series:tt1',
-			{ number: 1, sourceEpisodeId: 'tt1:1:1' },
-			ctx
-		);
+		const sources = await resolved(ctx);
 
-		expect(sources).toHaveLength(1);
-		expect(sources[0].url).toBe('https://cdn.example.invalid/one.m3u8');
-		expect(sources[0].container).toBe('hls');
+		expect(sources).toHaveLength(2);
+		expect(sources[0].torrent).toEqual({ infoHash: 'abc' });
+		expect(sources[1].url).toBe('https://cdn.example.invalid/one.m3u8');
+		expect(sources[1].container).toBe('hls');
+	});
+
+	it('lowercases the infohash, so one torrent is not two engines', async () => {
+		plugin = await load();
+		const { ctx } = context({
+			'/stream/movie/tt2.json': { streams: [{ infoHash: 'ABCDEF', fileIdx: 3, sources: ['tr'] }] }
+		});
+
+		const sources = await plugin.resolve('movie:tt2', null, ctx);
+
+		expect(sources[0].torrent).toEqual({ infoHash: 'abcdef', fileIdx: 3, sources: ['tr'] });
+	});
+
+	it('leaves out a file index the source did not state', async () => {
+		// Absent is a real answer: an engine picking the largest video beats a
+		// source guessing an index it never read.
+		plugin = await load();
+		const { ctx } = context({ '/stream/movie/tt2.json': { streams: [{ infoHash: 'aa' }] } });
+
+		const sources = await plugin.resolve('movie:tt2', null, ctx);
+
+		expect(sources[0].torrent).not.toHaveProperty('fileIdx');
 	});
 
 	it('carries the headers the addon says the stream needs', async () => {
@@ -184,7 +212,7 @@ describe('resolving a stream', () => {
 			ctx
 		);
 
-		expect(sources[0].headers).toEqual({ Referer: 'https://player.example.invalid/' });
+		expect(sources[1].headers).toEqual({ Referer: 'https://player.example.invalid/' });
 	});
 
 	it('keeps the addon’s own subtitle language rather than calling it unknown', async () => {
@@ -197,7 +225,7 @@ describe('resolving a stream', () => {
 			ctx
 		);
 
-		expect(sources[0].subtitles).toEqual([
+		expect(sources[1].subtitles).toEqual([
 			expect.objectContaining({ languageCode: 'eng', format: 'vtt' })
 		]);
 	});
@@ -207,14 +235,34 @@ describe('resolving a stream', () => {
 	 * sixty-seven torrents has answered; reporting that as "returned no stream"
 	 * blames it for working as designed.
 	 */
-	it('says what it got when none of it is playable, rather than returning empty', async () => {
+	it('returns torrents rather than refusing, even when they are all there is', async () => {
+		// This used to throw "no torrent client", which was a bundle answering a
+		// question about the device it happened to be running on.
 		const plugin = await load();
 		const { ctx } = context({
 			'/stream/movie/tt2.json': { streams: [{ infoHash: 'a' }, { infoHash: 'b' }] }
 		});
 
-		await expect(plugin.resolve('movie:tt2', null, ctx)).rejects.toThrow(/2 torrent/);
-		await expect(plugin.resolve('movie:tt2', null, ctx)).rejects.toThrow(/debrid/);
+		const sources = await plugin.resolve('movie:tt2', null, ctx);
+
+		expect(sources.map((one) => (one.torrent as { infoHash: string }).infoHash)).toEqual([
+			'a',
+			'b'
+		]);
+	});
+
+	it('still says what it got when none of it is actionable at all', async () => {
+		// A link to somebody else's player is not a stream on any device, so
+		// there is nothing for a host to decide and the sentence still belongs
+		// here.
+		const plugin = await load();
+		const { ctx } = context({
+			'/stream/movie/tt2.json': {
+				streams: [{ externalUrl: 'https://elsewhere.example.invalid/watch' }]
+			}
+		});
+
+		await expect(plugin.resolve('movie:tt2', null, ctx)).rejects.toThrow(/another site/);
 	});
 
 	it('returns empty for an addon that genuinely has nothing', async () => {
