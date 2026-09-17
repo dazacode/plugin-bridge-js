@@ -94,6 +94,12 @@ export interface StremioEntrypointOptions {
 		readonly key: string;
 		readonly type: string;
 	}[];
+	/** `behaviorHints.configurable` — this addon has a page to set it up on. */
+	readonly configurable?: boolean;
+	/** Whether the address the viewer pasted already carries their settings. */
+	readonly baseConfigured?: boolean;
+	/** That page's address, empty for an addon that declares none. */
+	readonly configureUrl?: string;
 }
 
 export function stremioEntrypoint(options: StremioEntrypointOptions): string {
@@ -103,7 +109,10 @@ export function stremioEntrypoint(options: StremioEntrypointOptions): string {
 		`const __TYPES = ${JSON.stringify(options.types)};`,
 		`const __RESOURCES = ${JSON.stringify(options.resources ?? [])};`,
 		`const __SEARCHABLE = ${JSON.stringify(options.searchable)};`,
-		`const __CONFIG = ${JSON.stringify(options.config)};`
+		`const __CONFIG = ${JSON.stringify(options.config)};`,
+		`const __CONFIGURABLE = ${JSON.stringify(options.configurable === true)};`,
+		`const __BASE_CONFIGURED = ${JSON.stringify(options.baseConfigured === true)};`,
+		`const __CONFIGURE_URL = ${JSON.stringify(options.configureUrl ?? '')};`
 	].join('\n');
 
 	return `${JS_RUNTIME}
@@ -152,9 +161,51 @@ function __configSegment() {
   return '/' + encodeURIComponent(JSON.stringify(chosen));
 }
 
+/**
+ * Whether this addon has a setup step nobody has taken.
+ *
+ * Asked at request time rather than baked in, because two of the three
+ * conditions are decided after conversion: a viewer who fills in the addon's
+ * declared fields has configured it without changing its address, and that has
+ * to count. All three must hold — it says it is configurable, the address
+ * carries no segment, and nothing was entered here — so an addon that is
+ * merely *configurable* and works perfectly well on its defaults is never
+ * accused of being unset.
+ */
+function __unconfigured() {
+  return __CONFIGURABLE === true && __BASE_CONFIGURED !== true && __configSegment() === '';
+}
+
+/**
+ * The refusal an addon gives when it has nothing to answer *with*.
+ *
+ * 401 and 403 are what this ecosystem's addons return for a request carrying
+ * no configuration, and read as a status alone they are indistinguishable from
+ * an anti-bot wall — which is what the host classified them as, telling a
+ * viewer a working addon had "refused an automated request". Measured on a
+ * live one: 403 for every stream request against the bare address, with a
+ * browser's own user agent as readily as with ours, and 200 the moment any
+ * configuration segment is present.
+ *
+ * So the *status is not the evidence* — the addon having a setup step nobody
+ * has taken is. This sentence says that, names the page, and deliberately does
+ * not contain the number: the host reads these strings, and a status in the
+ * text is what made it guess wrong in the first place.
+ */
+function __unconfiguredError() {
+  return new Error(
+    'This addon has not been set up yet. It has to be configured on its own page' +
+      (__CONFIGURE_URL.length > 0 ? ' — ' + __CONFIGURE_URL : '') +
+      ', which hands back a second address with your settings in it. Paste that one here.'
+  );
+}
+
 async function __ask(path) {
   const res = await fetchv2(__BASE_URL + __configSegment() + path, { Accept: 'application/json' });
   if (res.status === 404) return null;
+  if ((res.status === 401 || res.status === 403) && __unconfigured()) {
+    throw __unconfiguredError();
+  }
   if (!res.ok) throw new Error('The addon answered ' + res.status + '.');
   return await res.json();
 }

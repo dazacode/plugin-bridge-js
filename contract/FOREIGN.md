@@ -748,6 +748,25 @@ document:
   declaring `configurationRequired` is refused with the instruction to
   configure it first, because installing the unconfigured URL would produce a
   permanently empty source that looks like this client's fault.
+- **An addon may require configuration without declaring it, and then the
+  status is not the evidence.** Measured on a live addon: `configurable: true`,
+  `configurationRequired: false`, no `config[]` at all — and **403 to every
+  stream request** against its bare address, with a browser's own user agent as
+  readily as with ours, while _any_ configuration segment returns 200. So the
+  refusal above never fires, no form can be drawn, and the bundle is turned
+  away by a status indistinguishable from an anti-bot wall. Read as one, it
+  produced the worst sentence available: the host told the viewer this source
+  _"refused an automated request"_ — a story about being blocked, about an
+  addon that had simply never been set up, with the one gesture that fixes it
+  named nowhere. The adapter therefore records `configurable` and whether the
+  pasted address carries a segment at all; the shim treats **401 or 403 while
+  unconfigured** as the setup step it is, and says so in words carrying no
+  status, because the status is what misled the reader in the first place.
+  Whether the addon is configured is asked at request time rather than baked
+  in, since a viewer who fills in declared fields configures it without
+  changing its address. Being unsure resolves toward silence: an address with
+  any path segment is taken as configured, so an addon hosted under a prefix is
+  never told to go and set itself up.
 
 #### 4.6.1 Addressed by id, which is what the rest of the system gains
 

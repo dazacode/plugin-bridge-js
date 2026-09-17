@@ -12,6 +12,43 @@ to exhaustion and deliberately closed it. `v0.1.x` is for fixes to what has
 already been promised; a minor bump whose case is "the number went up" is not a
 minor bump.
 
+## Unreleased — an addon that was never set up is not an addon blocking us
+
+A Stremio addon may require configuration without declaring it. Measured on a
+live one: `configurable: true`, `configurationRequired: false`, no `config[]`
+at all — and 403 to every stream request against its bare address, with a
+browser's own user agent as readily as with ours, while any configuration
+segment returns 200.
+
+Nothing in this stack could tell that apart from an anti-bot wall, because the
+only evidence it looked at was the status. The host's own vocabulary has a
+verdict for a 403 and it is **"Blocking access — this source answered, but
+refused an automated request"**, so a viewer was given a confident story about
+being refused, about an addon that was one paste from working, with the gesture
+that would fix it named nowhere. Rule 17's failure mode with the blame pointed
+outward instead of inward.
+
+The status is no longer the evidence. `stremio.ts` records `configurable` and
+whether the pasted address carries a configuration segment at all; the
+generated client treats 401 or 403 **while unconfigured** as the setup step it
+is and says so in words containing no status — deliberately, since a number in
+the text is what the reader downstream got wrong. It is asked at request time,
+so a viewer who fills in declared fields has configured the addon without
+changing its address, and an addon that merely _can_ be configured and works on
+its defaults is never accused. An address carrying any path segment counts as
+configured, so an addon hosted under a prefix is never told to set itself up.
+
+The sibling case was wrong in the opposite direction and is fixed with it: an
+adapter refusing an addon that _does_ declare `configurationRequired` produces a
+conversion refusal with no failed step, which is the same shape as a translator
+gap — so the correct refusal was reported as **"Not yet translatable — a gap on
+this side"**, the one verdict this project measures at zero in sixty-nine.
+
+`CONVERTER_VERSION` 46. Both new facts are recorded at conversion time, so an
+installed row keeps the old client until it is converted again, and every stored
+verdict that said "Blocking access" for this becomes unknown rather than
+carrying a pre-fix answer forward.
+
 ## v0.4.0 — a source may answer with something this device cannot use
 
 `resolve()` could only say "here is an address" or "I failed". A source that

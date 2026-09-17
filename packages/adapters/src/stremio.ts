@@ -28,6 +28,20 @@
  * useful until it has been configured, so installing the unconfigured URL
  * would produce a source that is permanently empty and look like our fault.
  *
+ * **An addon may require configuration without declaring it.** Measured on a
+ * live one: `configurable: true`, `configurationRequired: false`, no `config[]`
+ * at all — and every `/stream/…` request against the bare origin answers 403,
+ * with a browser's own user agent as readily as with ours, while *any*
+ * configuration segment answers 200. So the hint is not reliable, the fields
+ * are not declared, and the refusal above never fires. What that produced was
+ * the worst available sentence: the status matched this host's anti-bot
+ * pattern and the viewer was told the addon *"refused an automated request"* —
+ * a story about being blocked, for an addon that had simply never been set up,
+ * with the one gesture that would fix it named nowhere.
+ *
+ * `configurable` and whether the pasted address already carries a segment are
+ * therefore both recorded, and the bundle says *that* when it is turned away.
+ *
  * ## Rule 9
  *
  * No addon URL appears in this file, its tests or its history. The viewer
@@ -240,6 +254,28 @@ function baseOf(manifestUrl: string): string {
 	return manifestUrl.replace(/\/manifest\.json(\?.*)?$/i, '').replace(/\/+$/, '');
 }
 
+/**
+ * Whether the address a viewer pasted already carries the addon's settings.
+ *
+ * This ecosystem configures an addon *by path*: the configure page hands back
+ * a second URL with the viewer's choices encoded as a segment before
+ * `/manifest.json`. So a bare origin is an addon nobody has set up, and an
+ * origin with anything after it is one somebody has — or an addon hosted under
+ * a path prefix, which is why this only ever *withholds* the hint below and
+ * never produces one. Being wrong in that direction costs nothing; being wrong
+ * the other way would tell a working addon to go and configure itself.
+ *
+ * Nothing here reads the segment. It may carry a viewer's own account key, and
+ * the rule for that (this file's header) is that it stays opaque.
+ */
+function carriesConfiguration(base: string): boolean {
+	try {
+		return new URL(base).pathname.replace(/^\/+|\/+$/g, '').length > 0;
+	} catch {
+		return false;
+	}
+}
+
 function listingOf(manifest: StremioManifest, manifestUrl: string): RepositoryPlugin {
 	const name =
 		typeof manifest.name === 'string' && manifest.name.length > 0 ? manifest.name : 'Addon';
@@ -289,6 +325,17 @@ function listingOf(manifest: StremioManifest, manifestUrl: string): RepositoryPl
 				resources,
 				searchable: searchableCatalogues(manifest),
 				configurationRequired: hints['configurationRequired'] === true,
+				// Both halves of "has this been set up yet", kept apart because
+				// they answer different questions and only the pair is useful:
+				// an addon that cannot be configured has nothing to be told to
+				// do, and one whose address already carries a segment has been.
+				configurable: hints['configurable'] === true,
+				baseConfigured: carriesConfiguration(base),
+				// Where the ecosystem's SDK serves the configure page, and where
+				// every addon that rolls its own puts it too. Derived from the
+				// address the viewer supplied rather than known here — rule 9 —
+				// and recorded only for an addon that says it has one.
+				...(hints['configurable'] === true ? { configureUrl: `${base}/configure` } : {}),
 				// The bundle needs the id-to-key mapping, because the segment it
 				// builds is keyed the way the addon spelled it, not the way this
 				// schema had to normalise it.
@@ -568,7 +615,10 @@ export const stremioAdapter: ForeignAdapter = {
 					: [],
 				config: Array.isArray(detail['config'])
 					? (detail['config'] as { id: string; key: string; type: string }[])
-					: []
+					: [],
+				configurable: detail['configurable'] === true,
+				baseConfigured: detail['baseConfigured'] === true,
+				configureUrl: typeof detail['configureUrl'] === 'string' ? detail['configureUrl'] : ''
 			}),
 			settings: settingsOf(listing)
 		});

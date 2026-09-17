@@ -418,3 +418,163 @@ describe('a configured addon', () => {
 		expect(asked[0]).toBe(`${BASE}/meta/series/tt1.json`);
 	});
 });
+
+/**
+ * An addon that answers nothing until it has been set up.
+ *
+ * The case that made this necessary was measured on a live addon and is worth
+ * stating, because every instinct says the opposite: it declares
+ * `configurable: true`, `configurationRequired: false` and **no** `config[]`,
+ * and then answers 403 to every stream request against its bare address — with
+ * a browser's own user agent as readily as with ours — while returning 200 for
+ * *any* configuration segment at all. Read as a status, that is an anti-bot
+ * wall; read as a fact about the addon, it is a setup step nobody has taken.
+ *
+ * So these tests are about which of the two the bundle claims, and the whole
+ * distinction rests on evidence the status does not carry.
+ */
+describe('an addon nobody has set up', () => {
+	/** Answers one status to everything, so the branch is the only variable. */
+	function refusing(status: number, asked: string[] = []) {
+		return {
+			asked,
+			ctx: {
+				http: {
+					send: async (url: string) => {
+						asked.push(url);
+						return { status, url, headers: {}, text: async () => 'Forbidden' };
+					}
+				},
+				settings: { string: () => '', boolean: () => false, list: () => [] },
+				log: { debug() {}, warn() {} }
+			}
+		};
+	}
+
+	async function loadWith(over: Record<string, unknown>) {
+		const directory = await mkdtemp(join(tmpdir(), 'stremio-entry-'));
+		const file = join(directory, 'entry.mjs');
+		await writeFile(
+			file,
+			stremioEntrypoint({
+				pluginId: 'test.stremio',
+				baseUrl: 'https://addon.example.invalid',
+				types: ['movie', 'series'],
+				resources: ['stream'],
+				searchable: [],
+				config: [],
+				...over
+			})
+		);
+		const module = (await import(`file://${file}`)) as Record<string, unknown>;
+		return module['default'] as Plugin;
+	}
+
+	it('names the setup step rather than the status it was refused with', async () => {
+		const plugin = await loadWith({
+			configurable: true,
+			baseConfigured: false,
+			configureUrl: 'https://addon.example.invalid/configure'
+		});
+		const { ctx } = refusing(403);
+
+		await expect(plugin.resolve('movie:tt1', undefined, ctx)).rejects.toThrow(
+			/has not been set up/i
+		);
+	});
+
+	it('points at the page that hands back the address to paste', async () => {
+		const plugin = await loadWith({
+			configurable: true,
+			baseConfigured: false,
+			configureUrl: 'https://addon.example.invalid/configure'
+		});
+		const { ctx } = refusing(403);
+
+		await expect(plugin.resolve('movie:tt1', undefined, ctx)).rejects.toThrow(
+			/addon\.example\.invalid\/configure/
+		);
+	});
+
+	it('says nothing about a status, because a status is what misled this before', async () => {
+		// The host classifies on these words. A `403` left in the sentence is
+		// matched by its anti-bot pattern and the verdict reverts to the wrong
+		// one with the right text underneath it.
+		const plugin = await loadWith({
+			configurable: true,
+			configureUrl: 'https://x.example.invalid/configure'
+		});
+		const { ctx } = refusing(403);
+
+		const error = await plugin.resolve('movie:tt1', undefined, ctx).catch((e: Error) => e);
+		expect(String((error as Error).message)).not.toMatch(/403|forbidden|blocked/i);
+	});
+
+	it('accepts 401 as the same fact, because addons use both', async () => {
+		const plugin = await loadWith({ configurable: true, configureUrl: '' });
+		const { ctx } = refusing(401);
+
+		await expect(plugin.resolve('movie:tt1', undefined, ctx)).rejects.toThrow(
+			/has not been set up/i
+		);
+	});
+
+	it('does not accuse an addon whose address already carries a configuration', async () => {
+		// The pasted URL had a segment, so somebody *has* set this up and the
+		// refusal is about something else. Telling them to configure a configured
+		// addon is the mirror image of the bug this fixes.
+		const plugin = await loadWith({ configurable: true, baseConfigured: true });
+		const { ctx } = refusing(403);
+
+		await expect(plugin.resolve('movie:tt1', undefined, ctx)).rejects.toThrow(/answered 403/);
+	});
+
+	it('does not accuse an addon the viewer configured inside this app', async () => {
+		// Declared fields, filled in here: the address carries no segment and the
+		// addon is configured all the same. Baking "unconfigured" in at
+		// conversion time would have got this one wrong.
+		const directory = await mkdtemp(join(tmpdir(), 'stremio-entry-'));
+		const file = join(directory, 'entry.mjs');
+		await writeFile(
+			file,
+			stremioEntrypoint({
+				pluginId: 'test.stremio',
+				baseUrl: 'https://addon.example.invalid',
+				types: ['movie'],
+				resources: ['stream'],
+				searchable: [],
+				config: [{ id: 'api_key', key: 'apiKey', type: 'text' }],
+				configurable: true,
+				baseConfigured: false,
+				configureUrl: 'https://addon.example.invalid/configure'
+			})
+		);
+		const module = (await import(`file://${file}`)) as Record<string, unknown>;
+		const plugin = module['default'] as Plugin;
+
+		const asked: string[] = [];
+		const ctx = {
+			http: {
+				send: async (url: string) => {
+					asked.push(url);
+					return { status: 403, url, headers: {}, text: async () => '' };
+				}
+			},
+			settings: {
+				string: (id: string) => (id === 'api_key' ? 'filled-in' : ''),
+				boolean: () => false,
+				list: () => []
+			},
+			log: { debug() {}, warn() {} }
+		};
+
+		await expect(plugin.resolve('movie:tt1', undefined, ctx)).rejects.toThrow(/answered 403/);
+	});
+
+	it('leaves an addon that is not configurable at all alone', async () => {
+		const plugin = await loadWith({ configurable: false });
+		const { ctx } = refusing(403);
+
+		await expect(plugin.resolve('movie:tt1', undefined, ctx)).rejects.toThrow(/answered 403/);
+	});
+});

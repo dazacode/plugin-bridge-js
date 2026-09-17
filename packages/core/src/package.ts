@@ -105,8 +105,18 @@ const ENTRYPOINT = 'source';
  *     already-installed rows are re-converted: both facts are recorded at
  *     conversion time, so a fixed converter changes nothing for a bundle that
  *     is already on disk.
+ *
+ * 46: a Stremio addon that has to be set up on its own page says so, instead of
+ *     reporting the 403 it is turned away with — which the host read as an
+ *     anti-bot wall and rendered as "refused an automated request" about an
+ *     addon that was one paste from working. Bumped for both reasons the
+ *     number exists: `configurable` and the shape of the pasted address are
+ *     recorded at conversion time, so an installed row keeps the old shim until
+ *     it is converted again, and every stored verdict that said "Blocking
+ *     access" for this was answering a question this build now answers
+ *     differently.
  */
-export const CONVERTER_VERSION = 45;
+export const CONVERTER_VERSION = 46;
 
 export interface BundleInput {
 	readonly id: string;

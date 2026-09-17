@@ -109,6 +109,42 @@ describe('what it refuses', () => {
 		);
 	});
 
+	it('records that an addon has a setup step, and whether the address shows one', () => {
+		// Measured on a live addon: `configurable: true`,
+		// `configurationRequired: false`, no `config[]` — and 403 to every
+		// stream request until a configuration segment is present. The refusal
+		// below never fires for it, so these two fields are what the bundle has
+		// to go on.
+		const bare = 'https://addon.example.invalid/manifest.json';
+		const [unset] = stremioAdapter.parseIndex(
+			manifest({ behaviorHints: { configurable: true, configurationRequired: false } }),
+			bare
+		).plugins;
+
+		expect(unset.origin?.detail?.['configurable']).toBe(true);
+		expect(unset.origin?.detail?.['baseConfigured']).toBe(false);
+		expect(unset.origin?.detail?.['configureUrl']).toBe('https://addon.example.invalid/configure');
+	});
+
+	it('reads an address with a segment in it as already set up', () => {
+		// `URL_` carries one. Being wrong in this direction is the safe one:
+		// the hint is withheld, and an addon hosted under a path prefix is
+		// never told to go and configure itself.
+		const [configured] = stremioAdapter.parseIndex(
+			manifest({ behaviorHints: { configurable: true } }),
+			URL_
+		).plugins;
+
+		expect(configured.origin?.detail?.['baseConfigured']).toBe(true);
+	});
+
+	it('claims no setup page for an addon that declares none', () => {
+		const [plain] = stremioAdapter.parseIndex(manifest(), URL_).plugins;
+
+		expect(plain.origin?.detail?.['configurable']).toBe(false);
+		expect(plain.origin?.detail?.['configureUrl']).toBeUndefined();
+	});
+
 	it('refuses to install an addon that has not been configured yet', async () => {
 		const [plugin] = stremioAdapter.parseIndex(
 			manifest({ behaviorHints: { configurable: true, configurationRequired: true } }),
