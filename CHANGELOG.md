@@ -12,6 +12,46 @@ to exhaustion and deliberately closed it. `v0.1.x` is for fixes to what has
 already been promised; a minor bump whose case is "the number went up" is not a
 minor bump.
 
+## Unreleased — the reason a format was refused stopped being true
+
+Hayase was `browse-only` on one stated ground: _"extensions in this format
+return torrents rather than streams, and Yorozo has no torrent client."_ The
+premise expired and the refusal did not, which is its own lesson about a
+sentence written once and read as a fact ever after.
+
+Everything it needed was already built for another ecosystem:
+`TorrentDescriptor` on the ABI, a resolve answering with descriptors and no
+direct link counting as a pass, `TorrentAcquisition` as the host's port, a
+companion or desktop host behind it, and per-source consent in front. A row's
+info hash travels exactly that path and no other. Nothing in the adapter or
+the runtime acquires anything, and must not.
+
+Measured over 77 published extensions from 15 repositories rather than against
+the format's documentation, which is why the fixes are classes and not sources:
+the whole module body is evaluated inside the first plugin call (37 of 77
+failed at load because this ecosystem writes its own address as a class field,
+`url = atob("…")`, and `export default new class {…}()` constructs at the
+assignment); that body is async, because two of them await at their top level;
+`navigator.onLine` is answered; `exclusions` and `resolution` always arrive
+with the right type; a hash is read from `hash`, from a magnet's `xt=urn:btih:`
+in hex or base32, and from a `link` that is itself a bare hash. A `.torrent`
+url is refused by name rather than guessed at.
+
+Repository-local helpers are fetched from the same repository at the same ref
+and inlined ahead of the entry module. A specifier resolving outside that
+repository is refused: it is a real URL on the same forge, and following it
+would let one listing run code from a repository nobody added.
+
+Three capabilities, measured separately on the same 67 extensions: the runtime
+shim alone, 8; with repository-local modules, 16; with the AniList id the host
+already holds, 24. Reported as measured — an earlier estimate said about 35 and
+was wrong, because it counted eleven sources wanting AniDB and TVDB ids this
+catalogue has no source of. Those stay refused.
+
+No `CONVERTER_VERSION` bump: the number exists so already-installed rows are
+re-converted when the converter improves, and a format that could never be
+installed has no such rows.
+
 ## Unreleased — the destination is the site's to name, the scheme is not
 
 A family of sources answer an **https** request with a 301 to **http** on

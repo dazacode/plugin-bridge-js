@@ -436,11 +436,24 @@ const PROFILES: Readonly<Record<ForeignFormat, FormatProfile>> = {
 	hayase: {
 		format: 'hayase',
 		label: 'Hayase',
-		tier: 'browse-only',
+		tier: 'convert',
 		keyDocument: 'index',
-		refusal:
-			'Extensions in this format return torrents rather than streams, and Yorozo has no ' +
-			'torrent client. This repository browses, but nothing here can be installed yet.',
+		/*
+		 * Was `browse-only`, on one stated ground: *"extensions in this format
+		 * return torrents rather than streams, and Yorozo has no torrent
+		 * client."* That premise stopped being true, and the refusal outlived
+		 * it — which is its own lesson about a sentence written once and read
+		 * as a fact forever.
+		 *
+		 * What replaced it was already built for another ecosystem:
+		 * `TorrentDescriptor` on the ABI, a resolve answering with descriptors
+		 * and no direct link counting as a pass, `TorrentAcquisition` as the
+		 * host's port, a companion or desktop host behind it, and `P2pConsent`
+		 * per source in front of it. A Hayase row's info hash travels exactly
+		 * that path and no other; nothing in the adapter or the runtime
+		 * acquires anything.
+		 */
+		refusal: null,
 		implicitCookies: false
 	},
 	lnreader: {

@@ -262,13 +262,18 @@ describe('Cloudstream', () => {
 });
 
 describe('the formats that browse for a product reason', () => {
-	it('says Hayase returns torrents, not that it is unreadable', () => {
+	it('no longer refuses Hayase for a torrent client this host now has', () => {
+		// It was refused with "Yorozo has no torrent client", and that premise
+		// stopped being true: `TorrentDescriptor`, `TorrentAcquisition`, a
+		// companion behind it and `P2pConsent` in front. The row converts, and
+		// says it is addressed by an AniList id — which is what lets a source
+		// with no catalogue be bound at all.
 		const { body, url } = bodyOf('hayase');
 		const index = adapterFor('hayase').parseIndex(body, url);
 
 		expect(index.plugins).toHaveLength(1);
-		// Classified as anime, so the row names the real obstacle.
-		expect(listingRefusal(index.plugins[0])).toMatch(/torrents rather than streams/);
+		expect(listingRefusal(index.plugins[0])).toBeNull();
+		expect(index.plugins[0].origin?.idKinds).toEqual(['anilist']);
 	});
 
 	it('filters LNReader novels out and counts them', () => {

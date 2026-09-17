@@ -78,7 +78,7 @@ typo.
 | Format        | Client(s)                  | Artifact                                        | Tier          | Why                                                                         |
 | ------------- | -------------------------- | ----------------------------------------------- | ------------- | --------------------------------------------------------------------------- |
 | `sora`        | Sora                       | `.js` + `module.json`                           | `convert`     | Plain script; maps onto `ABI.md` §1 almost one to one                       |
-| `hayase`      | Hayase, Shiru              | `.js` + index entry                             | `browse-only` | Converts as code, then yields torrents; §4.2                                |
+| `hayase`      | Hayase, Shiru              | `.js` + index entry                             | `convert`     | Plain JS; yields torrents, which the host acquires; §4.2                    |
 | `lnreader`    | LNReader                   | CommonJS `.js`                                  | `browse-only` | Novels only; §4.3                                                           |
 | `mangayomi`   | Mangayomi                  | `.js` or `.dart` source                         | `convert` †   | The JavaScript third converts; the Dart majority needs an interpreter; §4.4 |
 | `aniyomi`     | Aniyomi, Anikku, and forks | APK (R8-minified DEX), built from public Kotlin | `convert` ‡   | Never the artifact — the **source** it was built from; §4.1.1, §4.1.6       |
@@ -594,10 +594,27 @@ wrong here does not cost a viewer their access.
 ### 4.2 Torrent sources
 
 One adapted format's extensions declare `"type": "torrent"` and return magnet
-links. Yorozo's players take an HTTP URL; neither can play a magnet, and there
-is no torrent client in the product. The adapter ships so the format is
-recognised and the catalogue lists; install refuses with that sentence, and
-stops refusing when a torrent client exists.
+links. This was refused on the ground that Yorozo's players take an HTTP URL,
+neither can play a magnet, and there is no torrent client in the product —
+with the note that it "stops refusing when a torrent client exists".
+
+**It exists, so this converts.** A row's info hash becomes a
+`TorrentDescriptor` (`ABI.md` §1); a resolve answering with descriptors and no
+direct link is a pass, not a failure; the host owns acquisition behind its own
+`TorrentAcquisition` port, with pairing and per-source consent in front of it.
+Neither the adapter nor the runtime acquires anything, and must not: they hand
+back an info hash and stop, which is the same division that keeps a plugin
+from knowing what device it runs on.
+
+These sources publish **no catalogue and no episode list** — they answer about
+a title the caller already names, which is the same shape as a stream-only
+addon in §4.6 and is bound the same way: by an id the host holds
+(`ExternalIdKind`), never by searching a catalogue that does not exist.
+
+A repository-local helper module is part of the extension and is fetched with
+it, from the same repository at the same ref. A specifier that resolves
+outside that repository is refused — it is a real URL on the same forge, and
+following it would let one listing run code from a repository nobody added.
 
 ### 4.3 Unsupported mediums
 
