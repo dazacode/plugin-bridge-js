@@ -115,8 +115,16 @@ const ENTRYPOINT = 'source';
  *     it is converted again, and every stored verdict that said "Blocking
  *     access" for this was answering a question this build now answers
  *     differently.
+ *
+ * 47: `Application` is a name, so the two spellings this ecosystem uses to
+ *     reach its own settings store both resolve to it —
+ *     `Injekt.get<Application>().getSharedPreferences(…)` and
+ *     `val context: Application by injectLazy()`. Bumped because it changes
+ *     what an extension converts to: members that were refused are now
+ *     emitted, and a row installed before this keeps the smaller bundle
+ *     until it is converted again.
  */
-export const CONVERTER_VERSION = 46;
+export const CONVERTER_VERSION = 47;
 
 export interface BundleInput {
 	readonly id: string;

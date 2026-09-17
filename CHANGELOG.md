@@ -12,6 +12,43 @@ to exhaustion and deliberately closed it. `v0.1.x` is for fixes to what has
 already been promised; a minor bump whose case is "the number went up" is not a
 minor bump.
 
+## Unreleased — asking for the settings store is not asking for the container
+
+`Injekt` is a dependency-injection container and reaching into a host app's
+object graph is out of scope, so every mention of it was refused. But the
+ecosystem does not use it as a container. Measured across four repositories,
+every single occurrence is one request: **give me my preferences.** It is
+written `Injekt.get<Application>().getSharedPreferences("source_$id",
+MODE_PRIVATE)` in 21 places and `private val context: Application by
+injectLazy()` in 10 more — the second in shared templates, which is how ten
+lines of source blocked thirty-one extension directories.
+
+The store was never the missing part. The runtime has owned it all along; what
+was missing was the name. `Application` is now a bundle-scope name whose one
+supported member is `getSharedPreferences`, and the two spellings converge on
+it.
+
+This is not indulgence toward old code. ext-lib 16 **removed**
+`getSourcePreferences()` and documents the `Injekt.get<Application>()` form in
+its place, so the extensions writing it are the ones that have migrated, and
+their share only grows.
+
+The exemption is the whole idiom and not the type. An `Application` reached for
+`filesDir`, or a container reached for the host's http client, still refuses by
+name — a shim that has never heard of the member would fail inside the sandbox
+instead, which is the trade this project does not make. That distinction can
+only be drawn at the call: `namedObstacle` is checked leaf-first, and a leaf
+sees the token `Injekt` and nothing around it. So the exemption sits beside the
+crypto question in `scanInto`, which is there for the same reason.
+
+Measured: on three third-party repositories added without this project in mind,
+1 of 37 directories converted and now 8 do. On the 254-directory corpus the
+catalogue is unchanged at 69 — this clears a blocker that was never the only
+one there — but 36 refusals are gone and `by injectLazy<Application>()` no
+longer blocks anything.
+
+`CONVERTER_VERSION` 47, because what an extension converts to has changed.
+
 ## Unreleased — an addon that was never set up is not an addon blocking us
 
 A Stremio addon may require configuration without declaring it. Measured on a

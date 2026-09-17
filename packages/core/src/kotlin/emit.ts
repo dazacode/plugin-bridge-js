@@ -300,6 +300,15 @@ const RECEIVER_BUILDERS: ReadonlySet<string> = new Set([
 const QUALIFIED_GLOBAL = /^(?:java|javax|kotlin|android)\.[\w.]*?\.?(\w+)$/;
 
 /**
+ * `Injekt.get<T>()`, whitespace already squeezed out of the text.
+ *
+ * Only the no-argument form, because that is the whole of what this ecosystem
+ * writes — a keyed `Injekt.get(qualifier)` asks a different question and is
+ * left to the refusal.
+ */
+const INJEKT_GET = /^Injekt\.get<(\w+)>\(\)$/;
+
+/**
  * The calls that make a member `async` whether or not it said `suspend`.
  *
  * `.execute()` blocks in Kotlin and cannot here; the crypto four are
@@ -4191,6 +4200,18 @@ class Emitter {
 	/* ── calls ───────────────────────────────────────────────────────────── */
 
 	private call(node: KNode): string {
+		// `Injekt.get<Application>()` — the container reached for the one object
+		// the runtime already owns. `subset.ts` lets exactly this idiom past the
+		// Injekt refusal; here it resolves to the same bundle-scope name that
+		// `private val context: Application by injectLazy()` yields, so the two
+		// spellings of "my settings store" converge on one object.
+		//
+		// Guarded by `GLOBAL_NAMES` rather than by the type's spelling: a `T`
+		// the runtime does not define falls through to the refusal below, which
+		// is what should happen to a container reached for anything else.
+		const injected = INJEKT_GET.exec(node.text.replace(/\s+/g, ''));
+		if (injected !== null && GLOBAL_NAMES.has(injected[1])) return injected[1];
+
 		// `x.ifEmpty { return@map null }` before anything else looks at the call:
 		// its lambda is a jump out of the *enclosing* lambda, which only reads
 		// correctly with the callback taken away.

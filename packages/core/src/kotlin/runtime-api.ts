@@ -526,6 +526,19 @@ export const RUNTIME_GLOBALS = [
 	   it the conversion refuses for naming its own return type. */
 	'Hoster',
 
+	/* `Application`, which is how this ecosystem spells "my settings store".
+
+	   It is never used as a context: measured across four repositories, every
+	   occurrence is `Injekt.get<Application>().getSharedPreferences("source_$id",
+	   MODE_PRIVATE)` or the `by injectLazy()` form of the same thing. The
+	   dependency-injection container stays out of reach — `Injekt.get<T>()` for
+	   any other `T` is still refused — but the one object it is asked for here
+	   is one the runtime already owns.
+
+	   `getSourcePreferences()` was removed in ext-lib 16 and this is the
+	   spelling that replaced it, so the count rises as repositories migrate. */
+	'Application',
+
 	/* Returned rather than constructed by the host, but a scraper builds them
 	   by hand on every list page: `AnimesPage(list, hasNextPage)` is what
 	   `popularAnimeParse` returns, and `AnimeFilterList` is what a filter

@@ -428,6 +428,10 @@ const defaults: Globals = {
 		TriState: { STATE_IGNORE: 0, STATE_INCLUDE: 1, STATE_EXCLUDE: 2 }
 	},
 	Json: {},
+	// As the runtime defines it: the one member this ecosystem asks of an
+	// `Application` is the settings store, and it is the same store
+	// `__k.prefs()` hands back.
+	Application: { getSharedPreferences: () => helpers.prefs?.([] as never) },
 	// Constructed for one purpose: something to `synchronized` on.
 	Any: () => ({})
 };
@@ -1692,6 +1696,50 @@ describe('the delegates this ecosystem uses instead of construction', () => {
 	it('refuses an injection of something the host does not own', () => {
 		expect(refusalNames(inClass('    private val loader by injectLazy<Loader>()'))).toContain(
 			'`by injectLazy<Loader>()`'
+		);
+	});
+
+	it('reads the store through the container, which is what ext-lib 16 documents', () => {
+		// `getSourcePreferences()` was removed in ext-lib 16 and this is the
+		// spelling that replaced it, so the share of the ecosystem writing it
+		// only grows. Refusing it cost every extension that had migrated.
+		const demo = instantiate(
+			inClass(
+				'    override val id = 7L',
+				'    private val preferences = Injekt.get<Application>().getSharedPreferences("source_$id", 0x0000)',
+				'    fun quality() = preferences.getString("q", "1080p")!!'
+			)
+		);
+
+		expect(demo.quality()).toBe('1080p');
+	});
+
+	it('reads the store through the older delegate spelling of the same thing', () => {
+		// `private val context: Application by injectLazy()` and the
+		// `Injekt.get<Application>()` above are one idiom written two ways, a
+		// generation apart. Both resolve to the store; neither resolves to a
+		// context.
+		const demo = instantiate(
+			inClass(
+				'    private val context: Application by injectLazy()',
+				'    fun quality() = context.getSharedPreferences("source_1", 0).getString("q", "720p")!!'
+			)
+		);
+
+		expect(demo.quality()).toBe('720p');
+	});
+
+	it('still refuses the container when it is reached for anything else', () => {
+		// The exemption is the preferences idiom, not the type. An `Application`
+		// reached for a real context, or a container reached for the host's
+		// http client, would resolve to a shim that has never heard of it and
+		// fail inside the sandbox — the silent-bug shape `subset.ts` refuses to
+		// trade a named refusal for.
+		expect(refusalNames(inClass('    val client = Injekt.get<NetworkHelper>().client'))).toContain(
+			'Injekt.get'
+		);
+		expect(refusalNames(inClass('    val dir = Injekt.get<Application>().filesDir'))).toContain(
+			'Injekt.get'
 		);
 	});
 });

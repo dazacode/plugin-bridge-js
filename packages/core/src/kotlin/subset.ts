@@ -481,6 +481,17 @@ export function cryptoObstacle(text: string, asTransformation = false): string |
 	return null;
 }
 
+/**
+ * `Injekt.get<Application>().getSharedPreferences(…)`, whitespace squeezed out.
+ *
+ * The one use of the dependency-injection container this build answers rather
+ * than refuses; see the call-level exemption in `scanInto` for why it is
+ * matched on the call and not on a leaf. The preference name and mode are not
+ * inspected — whatever an extension passes, it is asking for its own store,
+ * and the runtime has exactly one.
+ */
+const APPLICATION_PREFERENCES = /\bInjekt\.get<Application>\(\)\.getSharedPreferences\(/;
+
 /** The obstacle this node's own text names, if any. Checked leaf-first. */
 export function namedObstacle(text: string): string | null {
 	// Asked first, because it is the specific question: `cryptoObstacle` names
@@ -1183,6 +1194,14 @@ export const HOST_METHODS: ReadonlySet<string> = new Set([
 	'parseLong',
 	'time',
 
+	// SharedPreferences, read. `Application.getSharedPreferences("source_$id",
+	// MODE_PRIVATE)` is how ext-lib 16 tells an extension to reach its own
+	// store, having removed `getSourcePreferences()`. The receiver resolves to
+	// the runtime's `Application` and this is the only method asked of it, so
+	// without the gate the whole idiom converts up to its last step and then
+	// refuses on the call that was the point of it.
+	'getSharedPreferences',
+
 	// SharedPreferences, written. The store and its editor are both in
 	// `KOTLIN_PREFS` already; only this gate stood between an extension and
 	// `preferences.edit().putString(key, value).apply()`, which is how every
@@ -1439,6 +1458,7 @@ export const GLOBAL_NAMES: ReadonlySet<string> = new Set([
 	'AnimeFilter',
 	'Json',
 	'Hoster',
+	'Application',
 	'AnimesPage',
 	'AnimeFilterList',
 	'RegexOption',
@@ -1987,6 +2007,29 @@ function scanInto(node: KNode, memberName: string, found: Untranslatable[]): voi
 				return;
 			}
 		}
+	}
+
+	// The other question a leaf cannot answer, and the mirror of the one above.
+	//
+	// `Injekt` on its own is the dependency-injection container, which is out
+	// of reach and stays refused. But `Injekt.get<Application>()
+	// .getSharedPreferences("source_$id", MODE_PRIVATE)` is this ecosystem's
+	// spelling of "my settings store" — ext-lib 16 removed
+	// `getSourcePreferences()` and documents this in its place — and the store
+	// is one the runtime already owns. A leaf sees only `Injekt`, so the two
+	// can only be told apart here, at the call.
+	//
+	// The exemption is the whole idiom rather than `<Application>` alone,
+	// deliberately. An `Application` reached for anything else — `filesDir`,
+	// `packageManager`, a real context — would resolve to a shim that has never
+	// heard of it and fail inside the sandbox, which is the silent-bug shape
+	// this file's header refuses to trade for. Asking for the store is
+	// answered; asking for the process is still a named refusal.
+	if (
+		node.type === 'call_expression' &&
+		APPLICATION_PREFERENCES.test(node.text.replace(/\s+/g, ''))
+	) {
+		return;
 	}
 
 	// Named obstacles are matched on the smallest node whose text contains

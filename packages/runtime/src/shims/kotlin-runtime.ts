@@ -7734,6 +7734,32 @@ function getSharedPreferences() { return __prefStore; }
 function preferencesKey(id) { return 'source_' + __str(id); }
 
 /**
+ * 'Application', which this ecosystem reaches for exactly one thing.
+ *
+ * Android's Application is a whole process context. Nothing here pretends to
+ * be one: across every corpus measured, an extension asks for it to call
+ * 'getSharedPreferences("source_$id", MODE_PRIVATE)' and nothing else. That is
+ * the store above, so the object answers that call and declares the two
+ * members a caller reaches on the way to it.
+ *
+ * It matters more than it looks. 'getSourcePreferences()' was removed in
+ * ext-lib 16, and 'Injekt.get<Application>().getSharedPreferences(…)' is what
+ * the ecosystem now documents in its place — so this is the current spelling,
+ * not a legacy one, and the share of extensions using it only grows.
+ *
+ * The preference *name* is ignored on purpose. A converted bundle has one
+ * store, keyed by the host's own plugin id; 'source_$id' is this ecosystem's
+ * way of writing "mine", and honouring it as a namespace would hand each
+ * source a second, empty store that its own defaults never reached.
+ */
+var Application = {
+  getSharedPreferences: function () { return __prefStore; },
+  getApplicationContext: function () { return Application; },
+  getPackageName: function () { return 'app'; },
+  packageName: 'app'
+};
+
+/**
  * The androidx preference types, as declarations rather than as widgets.
  *
  * An extension builds these in 'setupPreferenceScreen' and the host never
