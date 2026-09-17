@@ -1,25 +1,9 @@
-# What Dependabot watches here, and why each entry is the one it is.
+# What Dependabot watches here, and why the obvious entry is missing.
 #
 # https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
 
 version: 2
 updates:
-  # `bun`, not `npm`. This repository's lockfile is `bun.lock` and its
-  # `packageManager` is bun 1.4.2; the npm ecosystem would read `package.json`
-  # and then either ignore the lockfile or write one of a different kind, which
-  # is how a dependency bump turns into a build that installs something nobody
-  # resolved. Bun's own ecosystem needs the text lockfile bun 1.1.39 introduced,
-  # which is what is committed here.
-  #
-  # One entry at the root covers the workspace: `workspaces: ['packages/*']` is
-  # resolved from here, and a directory per package would produce six pull
-  # requests for one shared dependency.
-  - package-ecosystem: 'bun'
-    directory: '/'
-    schedule:
-      interval: 'weekly'
-    open-pull-requests-limit: 5
-
   # The workflows are dependencies too, and the one this repository has runs
   # with permission to read the whole of it. A pinned action that is never
   # updated is the part of the supply chain nobody looks at.
@@ -27,3 +11,22 @@ updates:
     directory: '/'
     schedule:
       interval: 'weekly'
+# **There is deliberately no entry for this repository's own packages.**
+#
+# The lockfile is `bun.lock` at `lockfileVersion: 2`, written by bun 1.4.2, and
+# the bun Dependabot runs reads up to version 1:
+#
+#     Dependabot::DependencyFileNotSupported
+#     Unsupported bun.lock 'lockfileVersion' 2 in /bun.lock.
+#     The bun version Dependabot runs supports up to 1.
+#
+# So `package-ecosystem: 'bun'` fails on every run rather than opening pull
+# requests, which is a red check that says nothing and trains people to ignore
+# red checks.
+#
+# `npm` is not the workaround. It would read `package.json`, ignore `bun.lock`
+# or write a lockfile of a different kind, and a dependency bump would then
+# install something nobody resolved — a worse outcome than no automation.
+#
+# Add the bun entry when Dependabot reads lockfile version 2, and not before.
+# Until then dependency updates here are somebody's decision rather than a bot's.
