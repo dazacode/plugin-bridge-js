@@ -318,11 +318,19 @@ export const relay = async (
 		if (response.status >= 300 && response.status < 400 && location !== null) {
 			hops += 1;
 			if (hops > MAX_REDIRECTS) return json({ error: 'too many redirects' }, { status: 502 });
+			const from = target;
+			let next: URL;
 			try {
-				target = new URL(location, target);
+				next = new URL(location, target);
 			} catch {
 				return json({ error: 'bad redirect' }, { status: 502 });
 			}
+			// The site's advice about *scheme* is the one part not taken. See
+			// `keepingHttps`. Everything else about this hop — the private-address
+			// guard, the https floor, the hop budget, the uncredentialled
+			// header — is decided by the top of this loop, on whatever URL comes
+			// back from here, exactly as before.
+			target = keepingHttps(from, next);
 			continue;
 		}
 		break;
@@ -467,6 +475,46 @@ async function readCapped(response: Response, limit: number): Promise<string> {
 		at += chunk.length;
 	}
 	return new TextDecoder().decode(joined.subarray(0, limit));
+}
+
+/**
+ * The same redirect target, over https, when the only thing being changed is
+ * the scheme — and otherwise the target untouched.
+ *
+ * A family of sites (misconfigured canonical redirects, usually adding a
+ * trailing slash) answer an **https** request with a 301 to **http** on their
+ * own host. Measured: `https://…/buscar/a` → `http://…/buscar/a/`, and
+ * `https://…/` → `http://…/index`. Both answer 200 over https when asked
+ * directly, so the redirect is not a real move to cleartext — it is a
+ * `Location` built by string-joining a stored base that predates the site's
+ * own certificate.
+ *
+ * Refusing it is correct and was costing working sources. Following it is not
+ * an option: this relay does not put a plugin's traffic on the wire in the
+ * clear, ever. So the site's advice about *where* to go is taken, and its
+ * advice about *how* is not.
+ *
+ * Narrow on purpose, and each condition is load-bearing:
+ *
+ * - The request being redirected must itself be https. An http hop cannot
+ *   reach here — the loop refuses one before it is sent — but the check says
+ *   so rather than relying on that.
+ * - The target must be http. Anything else is returned untouched.
+ * - The host must match **exactly**, `host` and not `hostname`, so a redirect
+ *   to a different port is a different host and is left to be refused. A
+ *   cross-host downgrade is somebody else's server and is never rewritten.
+ *
+ * What this deliberately is not: following downgrades, relaxing mixed schemes,
+ * rewriting across hosts, or trying https speculatively anywhere else. The
+ * returned URL is re-checked by the loop like any other hop and spends a hop
+ * from the same budget, so a site that redirects in a circle still stops.
+ */
+function keepingHttps(from: URL, to: URL): URL {
+	if (from.protocol !== 'https:' || to.protocol !== 'http:') return to;
+	if (to.host !== from.host) return to;
+	const upgraded = new URL(to.toString());
+	upgraded.protocol = 'https:';
+	return upgraded;
 }
 
 /**

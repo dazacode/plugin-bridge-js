@@ -12,6 +12,42 @@ to exhaustion and deliberately closed it. `v0.1.x` is for fixes to what has
 already been promised; a minor bump whose case is "the number went up" is not a
 minor bump.
 
+## Unreleased — the destination is the site's to name, the scheme is not
+
+A family of sources answer an **https** request with a 301 to **http** on
+their own host — misconfigured canonical redirects, usually doing nothing but
+adding a trailing slash. Measured: `https://…/buscar/a` →
+`http://…/buscar/a/`, and `https://…/` → `http://…/index`. Both answer 200
+over https when asked directly, so the redirect is not a real move to
+cleartext; it is a `Location` built by string-joining a stored base that
+predates the site's own certificate.
+
+The relay refused, correctly, and the sources were lost with it. Following
+the hop is not an option: a plugin's traffic does not go on the wire in the
+clear, ever. So the site's advice about _where_ to go is taken and its advice
+about _how_ is not — the target is retried over https, and nothing cleartext
+is ever sent.
+
+Narrow on purpose. The request being redirected must be https, the target
+must be http, and the host must match exactly — `host` and not `hostname`, so
+a redirect that also changes port is a different host and stays refused. A
+cross-host downgrade is somebody else's server and is never rewritten. The
+upgraded URL is re-checked by the same loop as any other hop and spends a hop
+from the same budget, so a site that redirects in a circle still stops.
+
+What it is not: following downgrades, relaxing mixed schemes, rewriting
+across hosts, or trying https speculatively anywhere else.
+
+Measured on one catalogue: a source went from `search` with 0 results to
+`resolve` with 80 results and 6 episodes. It now fails at video extraction,
+against a third-party host, which is a different question.
+
+`docs/compatibility.md` gains the measurement discipline this was found by:
+probe the exact request path the tool exercises, not the site's front page —
+an estimate built from two homepages predicted two recoveries and one was
+real. With it, the two ways the instrument lies: a bare `fetch` follows the
+downgrade the relay refuses, and Node's trust store is not a browser's.
+
 ## Unreleased — asking for the settings store is not asking for the container
 
 `Injekt` is a dependency-injection container and reaching into a host app's

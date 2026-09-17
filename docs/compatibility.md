@@ -52,6 +52,38 @@ The useful ratio is **`portable` over live-and-reachable**, not over the whole
 catalogue: a repository is full of sources that are dead, moved, or behind an
 anti-bot challenge, and none of those measure this software.
 
+A repository can also publish more than it still contains. An index is a
+snapshot of what was _built_; the source it was built from moves on, and index
+entries carry no commit or ref to pin against. One measured repository listed
+ten extensions and held source for three, the other seven having been deleted
+from its default branch two years after the index was written. Those are dead
+listings — `catalogue` says so in as many words — and counting them as
+translation failures makes the denominator meaningless.
+
+### Probe the path the tool exercises, not the site's front page
+
+The rule that has cost the most time to relearn. When triaging why a listing
+failed, fetch **the exact request the extension makes**, not the site's
+homepage. An estimate built from the front page was wrong twice in one pass:
+two sources both redirected `https://…/` to `http://`, so both looked like the
+same fault, but only one of them made that request on the path being measured
+— the other's search builds a different URL and was failing for unrelated
+selector drift. The prediction said two recoveries; one was real.
+
+Two traps in the instrument itself, both of which report a result that is about
+the harness rather than the software:
+
+- **A bare `fetch` is not the host.** Node's follows a redirect that downgrades
+  to cleartext; the relay refuses one. A harness built on `fetch(url, {
+redirect: 'follow' })` will happily report a search returning eighty results
+  that the real host declines to make at all. Drive under the host's own policy
+  before believing a green result.
+- **Node's trust store is not a browser's.** A site chaining to a newer
+  certificate authority can fail in the CLI with
+  `UNABLE_TO_GET_ISSUER_CERT_LOCALLY` while every browser loads it, because the
+  browser host uses the browser's roots. That failure belongs to the measuring
+  instrument and must not be counted against the catalogue.
+
 ## Two ecosystems have been measured this way
 
 The columns above were designed against a Kotlin ecosystem and then used

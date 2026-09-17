@@ -524,3 +524,124 @@ describe('the budget a relayed call is held to', () => {
 		expect(response.status).toBe(502);
 	});
 });
+
+/**
+ * A redirect that downgrades to cleartext on the site's own host.
+ *
+ * Measured on two live sources: a misconfigured canonical redirect answers an
+ * https request with a 301 to `http://` on the same host, and both targets
+ * serve 200 over https when asked directly. The relay refused, correctly, and
+ * the sources were lost to a `Location` header built from a stale base.
+ *
+ * What is pinned here is the exact width of the recovery: the scheme is the
+ * only thing overridden, the host must match, and nothing cleartext is ever
+ * put on the wire. Every test records every URL the relay actually requested,
+ * because "no http request was sent" is the property that matters and it is
+ * not visible in the answer.
+ */
+describe('a redirect to http on the same host', () => {
+	/** Records every URL the relay asks for, so cleartext can be ruled out. */
+	function recording(served: (request: Request, asked: string[]) => Response) {
+		const asked: string[] = [];
+		const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
+			asked.push(String(input));
+			return served(new Request(String(input), init as RequestInit), asked);
+		}) as typeof fetch;
+		return { asked, fetcher };
+	}
+
+	async function relayed(url: string, served: (request: Request, asked: string[]) => Response) {
+		const { asked, fetcher } = recording(served);
+		const response = await relay(
+			new Request('https://local.invalid/api/plugin-fetch', {
+				method: 'POST',
+				body: JSON.stringify({ url })
+			}),
+			fetcher,
+			repair
+		);
+		return {
+			asked,
+			status: response.status,
+			payload: (await response.json()) as Record<string, unknown>
+		};
+	}
+
+	it('asks for the redirect target over https instead, and never over http', async () => {
+		const { asked, status, payload } = await relayed(
+			'https://example.invalid/buscar/a',
+			(request) =>
+				request.url === 'https://example.invalid/buscar/a'
+					? new Response(null, {
+							status: 301,
+							headers: { location: 'http://example.invalid/buscar/a/' }
+						})
+					: new Response('page', { status: 200 })
+		);
+
+		expect(status).toBe(200);
+		expect(payload).toMatchObject({ status: 200, body: 'page' });
+		// The path the site asked for, over the scheme it did not.
+		expect(asked).toEqual([
+			'https://example.invalid/buscar/a',
+			'https://example.invalid/buscar/a/'
+		]);
+		expect(asked.every((one) => one.startsWith('https:'))).toBe(true);
+	});
+
+	it('still refuses a downgrade that also changes host', async () => {
+		// Somebody else's server. Taking a cross-host redirect and deciding it
+		// ought to be https is this route inventing an address, which is the
+		// thing it is not allowed to do.
+		const { asked, status, payload } = await relayed(
+			'https://example.invalid/x',
+			() => new Response(null, { status: 301, headers: { location: 'http://other.invalid/x' } })
+		);
+
+		expect(status).toBe(403);
+		expect(payload).toMatchObject({ error: 'a plugin may only make https requests' });
+		expect(asked).toEqual(['https://example.invalid/x']);
+	});
+
+	it('still refuses a downgrade that changes port, since that is a different host', async () => {
+		const { asked, status, payload } = await relayed(
+			'https://example.invalid/x',
+			() =>
+				new Response(null, { status: 301, headers: { location: 'http://example.invalid:8080/x' } })
+		);
+
+		expect(status).toBe(403);
+		expect(payload).toMatchObject({ error: 'a plugin may only make https requests' });
+		expect(asked).toEqual(['https://example.invalid/x']);
+	});
+
+	it('still refuses a redirect that is not a url at all', async () => {
+		const { status, payload } = await relayed(
+			'https://example.invalid/x',
+			() => new Response(null, { status: 301, headers: { location: 'http://[' } })
+		);
+
+		expect(status).toBe(502);
+		expect(payload).toMatchObject({ error: 'bad redirect' });
+	});
+
+	it('spends a hop from the same budget, so a downgrading loop still stops', async () => {
+		// The recovery must not become a way round the ceiling: a site that
+		// answers every https request with a downgrade to the next path would
+		// otherwise walk for ever.
+		let seen = 0;
+		const { asked, status, payload } = await relayed('https://example.invalid/0', () => {
+			seen += 1;
+			return new Response(null, {
+				status: 301,
+				headers: { location: `http://example.invalid/${seen}` }
+			});
+		});
+
+		expect(status).toBe(502);
+		expect(payload).toMatchObject({ error: 'too many redirects' });
+		// MAX_REDIRECTS is 4, so the first request plus four followed hops.
+		expect(asked).toHaveLength(5);
+		expect(asked.every((one) => one.startsWith('https:'))).toBe(true);
+	});
+});
