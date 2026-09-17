@@ -84,6 +84,29 @@ redirect: 'follow' })` will happily report a search returning eighty results
   browser host uses the browser's roots. That failure belongs to the measuring
   instrument and must not be counted against the catalogue.
 
+### For an id-addressed source, this tool measures its own probe
+
+`catalogue` scores a source with no catalogue by handing it fixed probe ids
+rather than searching it, because searching something that publishes no
+catalogue returns nothing however healthy it is. That is right, and it has a
+consequence worth stating plainly: **`portable` for such a source is a claim
+about those two ids, not about the source.**
+
+A torrent source keyed on an AniList id answers for the shows whose ids the
+probe happens to carry and finds nothing for the rest. In the product it is
+handed the id of the show the viewer actually opened, which is a different
+question with a different answer. Measured on one ecosystem: every listing
+converted, and the fraction that returned torrents to the probe was far lower
+than the fraction that returned them when asked about titles the sources
+actually index.
+
+So read the two columns apart. **`converted` is about this software** — the
+translation, the runtime, the declaration — and is the number that moves when
+the bridge improves. **`works` is about this software _and_ one fixed
+question**, and for an id-addressed format it is a floor rather than an
+estimate. Widening the probe list until the number rises is measuring the
+probe; the honest fix is to say which of the two a figure is.
+
 ### Five reasons a listing fails, and which of them the tool knows
 
 The six columns above score an _outcome_. Planning needs the _cause_, and these
