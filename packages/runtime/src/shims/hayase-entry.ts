@@ -381,14 +381,23 @@ export default {
   },
 
   /**
-   * Nothing. These sources do not publish an episode list and never claimed
-   * to; the host's own catalogue has one, and answering with a guessed run
-   * would be this bundle inventing metadata it is forbidden to own.
+   * One episode, which is the truthful answer and not a guess at the run.
+   *
+   * These sources publish no episode list: they answer about whatever episode
+   * number they are handed. So the honest thing to say is not "none" — that
+   * reads downstream as a source with nothing in it, and the verifier scores
+   * it as having failed — but "ask me", and the smallest way to say that is a
+   * single episode. The host's own catalogue supplies the real run and drives
+   * 'resolve' with its numbers; nothing here invents a count, a title or a
+   * season, which would be this bundle owning metadata it is forbidden to own.
+   *
+   * The same shape the stream-only addons in the other torrent ecosystem
+   * already answer with, for the same reason.
    */
   // eslint-disable-next-line @typescript-eslint/require-await
   async listEpisodes(sourceMediaId, ctx) {
     __enter(ctx);
-    return [];
+    return [{ number: 1, sourceEpisodeId: String(sourceMediaId || '') }];
   },
 
   async resolve(sourceMediaId, episode, ctx) {

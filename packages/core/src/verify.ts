@@ -31,6 +31,7 @@ import {
 	type RunnablePlugin,
 	type SandboxOptions
 } from '@plugin-bridge/host/sandbox-host';
+import type { ExternalIdKind } from './formats';
 
 /** Which part of the path failed, so a message can name it. */
 export type VerificationStep = 'load' | 'search' | 'episodes' | 'resolve' | 'reach';
@@ -201,7 +202,32 @@ const DEFAULT_PROBE = 'a';
  * media, which none of these is. One film and one series, because the two
  * take different paths through a source and an addon may serve only one.
  */
-const DEFAULT_PROBE_IDS: readonly string[] = ['movie:tt0133093', 'series:tt0944947'];
+/**
+ * What to ask an id-addressed source, in the spelling of the id it declared.
+ *
+ * One list per namespace, because the shape belongs to the kind: handing an
+ * AniList-addressed source `movie:tt0133093` asks it about a *title* spelled
+ * like an IMDB reference, which no catalogue has — and the source then fails
+ * the gate for answering a question it was never asked. That is rule 17's
+ * exact prohibition one level further in, and it is how this check first
+ * scored a whole working format at zero.
+ *
+ * Real, long-running shows on purpose: a probe id naming something obscure
+ * would make the gate depend on that show being indexed, which is the same
+ * mistake `probe` avoids by being a particle rather than a title.
+ */
+const PROBE_IDS: Readonly<Record<ExternalIdKind, readonly string[]>> = {
+	imdb: ['movie:tt0133093', 'series:tt0944947'],
+	anilist: ['anilist:21|One Piece', 'anilist:16498|Attack on Titan']
+};
+
+const DEFAULT_PROBE_IDS: readonly string[] = PROBE_IDS.imdb;
+
+/** The probes this source's own declared namespaces call for. */
+function probesFor(kinds: readonly ExternalIdKind[]): readonly string[] {
+	const out = kinds.flatMap((kind) => PROBE_IDS[kind] ?? []);
+	return out.length > 0 ? out : DEFAULT_PROBE_IDS;
+}
 const DEFAULT_BUDGET_MS = 60_000;
 
 /** Containers the players actually open. Anything else is not a pass. */
@@ -254,11 +280,15 @@ export async function verifyConvertedPlugin(
 		// searching it here would verify a path nothing uses — and for a source
 		// with no catalogue at all, would fail it for answering a question it
 		// never claimed to answer. The check runs what an install would.
-		const idAddressed = (plugin.converted?.idKinds ?? []).length > 0;
+		const declaredKinds = plugin.converted?.idKinds ?? [];
+		const idAddressed = declaredKinds.length > 0;
 
 		let entries: CatalogEntry[];
 		if (idAddressed) {
-			entries = probeIds.map((id) => ({ sourceMediaId: id }));
+			// The caller's own list when it gave one, otherwise the probes this
+			// source's declared namespaces call for.
+			const asked = options.probeIds ?? probesFor(declaredKinds);
+			entries = asked.map((id) => ({ sourceMediaId: id }));
 		} else {
 			try {
 				const page = (await sandbox.searchCatalog(probe, 1)) as {

@@ -81,6 +81,48 @@ function decodeUrl(value: unknown): string | null {
  * URL appears once however many modules import it — which is also what stops a
  * cycle.
  */
+/**
+ * The hosts a source names, including the ones it wrote in base64.
+ *
+ * This ecosystem habitually stores its own address encoded —
+ * `url = atob("aHR0cHM6Ly8…")` — and a scanner reading the source as text sees
+ * a meaningless string. The consequence is not cosmetic: `hosts` is the
+ * allowlist the sandbox enforces, so an address nobody could see is an address
+ * the plugin is refused at request time, reported as *"tried to reach X, which
+ * it did not declare"*. Measured on a live repository, that is exactly what
+ * happened.
+ *
+ * So every base64-looking literal is decoded and scanned too. Decoding is
+ * discovery, not trust: whatever is found still has to be shown to a viewer as
+ * a declared host, and a plugin still cannot reach anything outside the list.
+ * A literal that is not base64, or decodes to nothing url-shaped, contributes
+ * nothing and costs one failed parse.
+ */
+function hostsInEncodedSource(source: string): string[] {
+	const found = new Set<string>();
+	for (const match of source.matchAll(/['"`]([A-Za-z0-9+/]{16,}={0,2})['"`]/g)) {
+		let decoded: string;
+		try {
+			decoded = Buffer.from(match[1], 'base64').toString('utf8');
+		} catch {
+			continue;
+		}
+		// Read as a URL rather than handed back to the source scanner: that one
+		// looks for addresses written inside string literals, and what comes
+		// out of a decode is a bare address with no literal around it.
+		for (const address of decoded.matchAll(/https?:\/\/[^\s"'`<>]+/g)) {
+			try {
+				const host = new URL(address[0]).hostname.toLowerCase();
+				if (host.includes('.')) found.add(host);
+			} catch {
+				// Not an address after all; a decode that happens to contain
+				// "://" is not evidence of one.
+			}
+		}
+	}
+	return [...found];
+}
+
 const MAX_MODULES = 12;
 const MAX_DEPTH = 3;
 
@@ -241,7 +283,11 @@ export const hayaseAdapter: ForeignAdapter = {
 			...new Set([
 				...listing.hosts,
 				...hostsInSource(script),
-				...modules.flatMap((one) => hostsInSource(one.source))
+				...hostsInEncodedSource(script),
+				...modules.flatMap((one) => [
+					...hostsInSource(one.source),
+					...hostsInEncodedSource(one.source)
+				])
 			])
 		].sort();
 
