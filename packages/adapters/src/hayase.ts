@@ -8,10 +8,12 @@
  * url; neither shaka nor libmpv can play a magnet, and there is no torrent
  * client in the product.
  *
- * The adapter ships anyway so that pasting one of these repositories gives a
- * catalogue and a sentence, rather than "no plugin repository was found there"
- * — which would be indistinguishable from a typo. When a torrent client exists,
- * only `formats.ts` and `convert` below change.
+ * **That stopped being true, and this format converts now.** `ABI.md` §1 has
+ * `TorrentDescriptor`; a resolve answering with descriptors and no direct link
+ * is a pass; and the host owns acquisition behind `TorrentAcquisition`, with
+ * its own pairing and consent. So a row's info hash is handed back and the
+ * host decides what it can do with it — the same division the Stremio adapter
+ * already relies on. Nothing here acquires anything.
  *
  * The index's `url` field is base64 of the source's own address. It is decoded
  * only to derive the host list a consent screen would show; nothing here stores
@@ -22,18 +24,22 @@ import {
 	convertedPluginId,
 	foreignListing,
 	hostsFromUrls,
+	hostsInSource,
 	keepMediums,
-	refuseConversion,
 	ForeignFormatError,
-	type ForeignAdapter
+	type ConversionServices,
+	type ForeignAdapter,
+	type TextFetcher
 } from '@plugin-bridge/core/adapter';
+import { packageBundle } from '@plugin-bridge/core/package';
+import type { RepositoryIndex, RepositoryPlugin } from '@plugin-bridge/core/repository-index';
+import { hayaseEntrypoint } from '@plugin-bridge/runtime/shims/hayase-entry';
 import {
 	DEFAULT_REFS,
 	looksLikeFile,
 	parseRepositoryUrl,
 	rawCandidates
 } from '@plugin-bridge/core/git-hosts';
-import type { RepositoryIndex } from '@plugin-bridge/core/repository-index';
 
 /** Base64 that never throws: an undecodable field simply grants no host. */
 function decodeUrl(value: unknown): string | null {
@@ -44,6 +50,99 @@ function decodeUrl(value: unknown): string | null {
 	} catch {
 		return null;
 	}
+}
+
+/**
+ * The modules an extension imports from its own repository, fetched.
+ *
+ * Eight of the measured extensions split a helper out — `./utils.js`,
+ * `./lib/shared.js` — and without it the entry module converts, loads, and
+ * throws `parseFeed is not defined` at the first search. Resolving them is
+ * therefore part of reading the extension, not an extra.
+ *
+ * ## What is refused, and why each rule is here
+ *
+ * - **Only relative specifiers.** A bare one (`node:fs`, a package name) is a
+ *   dependency this runtime does not have, and inventing a fetch for it would
+ *   turn a named refusal into a mystery at call time.
+ * - **Only under the same repository, at the same ref.** Resolution is against
+ *   the artifact's own URL, and the result must still begin with the
+ *   `<owner>/<repo>/<ref>/` the artifact came from. `../../../other/repo/x.js`
+ *   resolves to a real URL on the same forge, and fetching it would let one
+ *   listing pull code from a repository nobody added — provenance laundering,
+ *   not a module system.
+ * - **Bounded.** Depth and count are capped, because how many requests one
+ *   conversion costs must not be a property of somebody else's repository.
+ *
+ * `abstract.js` is skipped rather than fetched: the runtime defines that base
+ * class itself, so fetching it would be a request whose answer is discarded.
+ *
+ * Deepest first, so a helper is declared before whatever reads it, and each
+ * URL appears once however many modules import it — which is also what stops a
+ * cycle.
+ */
+const MAX_MODULES = 12;
+const MAX_DEPTH = 3;
+
+/** `https://host/owner/repo/ref/` — everything a sibling must stay inside. */
+function repositoryRoot(artifactUrl: string): string | null {
+	let url: URL;
+	try {
+		url = new URL(artifactUrl);
+	} catch {
+		return null;
+	}
+	const segments = url.pathname.split('/').filter((one) => one.length > 0);
+	if (segments.length < 4) return null;
+	return `${url.origin}/${segments.slice(0, 3).join('/')}/`;
+}
+
+async function repositoryModules(
+	script: string,
+	artifactUrl: string,
+	getText: TextFetcher
+): Promise<{ specifier: string; source: string }[]> {
+	const found = repositoryRoot(artifactUrl);
+	if (found === null) return [];
+	// Bound outside the closure: narrowing does not reach into one, and the
+	// prefix check is the whole provenance guarantee.
+	const root: string = found;
+
+	const seen = new Set<string>([artifactUrl]);
+	const collected: { specifier: string; source: string }[] = [];
+
+	async function walk(source: string, base: string, depth: number): Promise<void> {
+		if (depth > MAX_DEPTH) return;
+		for (const match of source.matchAll(/^[ \t]*import\s[\s\S]*?\sfrom\s*['"](\.[^'"]*)['"]/gm)) {
+			if (collected.length >= MAX_MODULES) return;
+			const specifier = match[1];
+			if (/abstract\.js$/.test(specifier)) continue;
+
+			let resolved: string;
+			try {
+				resolved = new URL(specifier, base).toString();
+			} catch {
+				continue;
+			}
+			if (!resolved.startsWith(root) || seen.has(resolved)) continue;
+			seen.add(resolved);
+
+			let body: string;
+			try {
+				body = await getText(resolved);
+			} catch {
+				// Left out rather than fatal: the entry module then refuses by
+				// the missing symbol's own name, which says more than "a file
+				// this build expected was not there".
+				continue;
+			}
+			await walk(body, resolved, depth + 1);
+			collected.push({ specifier, source: body });
+		}
+	}
+
+	await walk(script, artifactUrl, 0);
+	return collected;
 }
 
 export const hayaseAdapter: ForeignAdapter = {
@@ -119,10 +218,40 @@ export const hayaseAdapter: ForeignAdapter = {
 		});
 	},
 
-	// `async`, so the refusal is a rejection rather than a synchronous throw
-	// from something typed to return a promise. A caller reaching for `.catch`
-	// must not be the one who discovers the difference.
-	async convert(): Promise<Uint8Array> {
-		refuseConversion('hayase');
+	async convert(listing: RepositoryPlugin, services: ConversionServices): Promise<Uint8Array> {
+		const origin = listing.origin;
+		if (origin === undefined || origin.format !== 'hayase') {
+			throw new ForeignFormatError('That listing did not come from a Hayase repository.');
+		}
+		const script = new TextDecoder().decode(await services.fetchArtifact(origin.artifactUrl));
+		const modules = await repositoryModules(script, origin.artifactUrl, services.getText);
+
+		// The index names the source's own address; the code names everywhere
+		// else it goes — an indexer's API, a mirror, whatever a helper module
+		// reaches for. Declaring only the first produces a plugin refused the
+		// moment it searches, which reads as a broken source rather than as our
+		// under-declaration.
+		const hosts = [
+			...new Set([
+				...listing.hosts,
+				...hostsInSource(script),
+				...modules.flatMap((one) => hostsInSource(one.source))
+			])
+		].sort();
+
+		return packageBundle({
+			id: listing.id,
+			name: listing.name,
+			description:
+				listing.description.length > 0
+					? `Converted Hayase source. ${listing.description}`
+					: 'Converted Hayase source.',
+			version: listing.version,
+			author: listing.author,
+			hosts,
+			origin,
+			entrypointSource: hayaseEntrypoint({ pluginId: listing.id, script, modules }),
+			settings: []
+		});
 	}
 };
