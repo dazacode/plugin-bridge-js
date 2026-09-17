@@ -84,6 +84,59 @@ redirect: 'follow' })` will happily report a search returning eighty results
   browser host uses the browser's roots. That failure belongs to the measuring
   instrument and must not be counted against the catalogue.
 
+### Five reasons a listing fails, and which of them the tool knows
+
+The six columns above score an _outcome_. Planning needs the _cause_, and these
+are the five worth separating — the first two are the only ones that are about
+this software at all:
+
+| Cause                         | Where it lands    | Decided by                                                                 |
+| ----------------------------- | ----------------- | -------------------------------------------------------------------------- |
+| **translator-widenable**      | `widen`           | the tool — nothing it refused on is in `NATIVE_CAPABILITIES`               |
+| **native host capability**    | `native`          | the tool — `NATIVE_CAPABILITIES` in `scoreboard.ts`                        |
+| **dead or stale upstream**    | `broken`, no step | the tool, in words: the source could not be found in the repository        |
+| **site defence**              | `unproven`        | **hand-triage** — a 403 or a null selector on a challenge page looks alike |
+| **source-specific behaviour** | `unproven`        | **hand-triage**                                                            |
+
+The bottom two share a column, and that is the honest state of it: from here a
+site that refuses automated requests and a source whose markup moved both look
+like "converted, and something downstream did not answer". Telling them apart
+means fetching what the extension fetched. Do not report a hand-triage split as
+though the tool produced it.
+
+The distinction that matters most is **translator-widenable versus native**,
+because only the first is work. A native refusal is a boundary: the plugin
+needs something the shell cannot provide, and in a browser tab some of those
+are permanent at any price. The same plugin may be perfectly portable on a
+host with different capabilities, which is a property of the host and not of
+the translation.
+
+### A version number is not a category
+
+Worked example, and the reason this section exists. Every extension built
+against one ecosystem's newest extension-library generation failed — **0 of 12**
+— against roughly 28% for the previous generation. Read as a version problem it
+looked like the highest-value workstream available.
+
+It was not a version problem. Measured:
+
+- **Not one of the twelve was blocked on the new API.** The generation's
+  headline change — a two-step hoster/video pipeline — is already shimmed. Only
+  three scattered obstacles were new-API-shaped, across four listings.
+- **Eight of the twelve were `native`**, six of them because the extension
+  stands up a **local HTTP server** to proxy its own HLS (see
+  `adr/0006-local-http-server.md`, which refuses that permanently and supplies
+  the behaviour declaratively instead). Five reach it through one shared theme.
+- Of the four that were widenable, a greedy pass over their combined obstacles
+  completed **one** after two fixes, and nothing more after twelve.
+
+Newer extensions fail more because they are more ambitious, not because their
+API is unsupported. **Sorting a catalogue by library version sorts it by
+ambition.** Before treating any group as a class-level gap, run a greedy pass
+over the group's combined obstacles and check what successive fixes actually
+complete — a shared _blocker_ is not a shared _fix_, and a cluster that shares a
+template can still be eight independent tails.
+
 ## Two ecosystems have been measured this way
 
 The columns above were designed against a Kotlin ecosystem and then used
