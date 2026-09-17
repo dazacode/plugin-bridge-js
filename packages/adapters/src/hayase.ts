@@ -204,6 +204,12 @@ export const hayaseAdapter: ForeignAdapter = {
 					// Classified as anime so the row explains the *real* obstacle —
 					// no torrent client — rather than the wrong one.
 					mediaKind: 'anime',
+					// These sources have no catalogue to search — they answer
+					// about a title the caller already names. Several of them
+					// additionally *require* an AniList id and refuse without
+					// one, which the host holds for an AniList-keyed show. See
+					// `ExternalIdKind`: the id is handed over, never derived.
+					idKinds: ['anilist'],
 					isNsfw: row['nsfw'] === true
 				}
 			});

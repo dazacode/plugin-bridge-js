@@ -155,8 +155,20 @@ export function declaredMediums(
  * that id from its metadata provider, so there is nothing to search, nothing
  * to score and nothing to get wrong. A source declaring one of these is
  * saying "hand me this id and I will answer", and the host binds it directly.
+ *
+ * **A namespace, not a number.** `anilist` is AniList's id and nothing else:
+ * it is never filled from MAL, AniDB or TMDB because those count different
+ * things, and a number from the wrong namespace does not fail — it answers,
+ * for the wrong show. A host that does not hold the id a source asked for
+ * declares nothing and the source is searched by title instead, which is the
+ * ordinary path.
+ *
+ * Only kinds a host actually carries belong here. AniDB and TVDB are
+ * deliberately absent: sources ask for them, this catalogue has no source of
+ * them, and adding a mapping service to raise a compatibility count is the
+ * trade this project does not make.
  */
-export type ExternalIdKind = 'imdb';
+export type ExternalIdKind = 'imdb' | 'anilist';
 
 /**
  * A torrent, as the thing a source hands back instead of a URL.
