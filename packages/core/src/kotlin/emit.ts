@@ -3259,7 +3259,7 @@ class Emitter {
 	 */
 	private hoistedEmptyGuard(
 		node: KNode,
-		guarded: { value: KNode; jump: KNode; test: string }
+		guarded: { value: KNode; jump: KNode; detached?: KNode; test: string }
 	): string {
 		const frame = this.guards;
 		if (frame === null || !frame.hoistable.has(node)) {
@@ -3272,12 +3272,15 @@ class Emitter {
 		const holder = this.temporary();
 		frame.lines.push(
 			`const ${holder} = ${value};`,
-			`if (${this.helper(guarded.test)}(${holder})) ${block([this.stmt(guarded.jump, this.jumpValues.get(guarded.jump))])}`
+			`if (${this.helper(guarded.test)}(${holder})) ${block([this.stmt(guarded.jump, guarded.detached ?? this.jumpValues.get(guarded.jump))])}`
 		);
 		return holder;
 	}
 
-	private hoistedGuard(node: KNode, guarded: { value: KNode; jump: KNode }): string {
+	private hoistedGuard(
+		node: KNode,
+		guarded: { value: KNode; jump: KNode; detached?: KNode }
+	): string {
 		const frame = this.guards;
 		if (frame === null || !frame.hoistable.has(node)) {
 			this.refuse(node, 'a `?: return` used as a value');
@@ -3293,7 +3296,7 @@ class Emitter {
 			// deliver over several lines — `?: return if (a) b else c` — and an
 			// unbraced `if` would take only the first of them and run the rest
 			// unconditionally.
-			`if (${holder} == null) ${block([this.stmt(guarded.jump, this.jumpValues.get(guarded.jump))])}`
+			`if (${holder} == null) ${block([this.stmt(guarded.jump, guarded.detached ?? this.jumpValues.get(guarded.jump))])}`
 		);
 		return holder;
 	}
@@ -4217,6 +4220,11 @@ class Emitter {
 		// correctly with the callback taken away.
 		const empty = emptyGuard(node);
 		if (empty !== null) return this.hoistedEmptyGuard(node, empty);
+
+		// `x.let { it ?: return emptyList() }` for the same reason: the jump is
+		// out of the *member*, and only reads correctly with the callback gone.
+		const letGuarded = letGuard(node);
+		if (letGuarded !== null) return this.hoistedGuard(node, letGuarded);
 
 		const { callee, args, lambda, labelled, typeArgument } = this.flatten(node);
 		if (callee.type === 'navigation_expression') {
@@ -6669,7 +6677,9 @@ const INERT_KINDS: ReadonlySet<string> = new Set([
  * ends in a value rather than a jump is the ordinary `ifEmpty` the helper
  * already handles.
  */
-function emptyGuard(node: KNode): { value: KNode; jump: KNode; test: string } | null {
+function emptyGuard(
+	node: KNode
+): { value: KNode; jump: KNode; detached?: KNode; test: string } | null {
 	if (node.type !== 'call_expression') return null;
 	const callee = kids(node)[0];
 	if (callee === undefined || callee.type !== 'navigation_expression') return null;
@@ -6688,15 +6698,108 @@ function emptyGuard(node: KNode): { value: KNode; jump: KNode; test: string } | 
 
 	const body = kids(lambda).find((child) => child.type === 'statements') ?? lambda;
 	const statements = kids(body).filter((child) => child.type !== 'lambda_parameters');
-	if (statements.length !== 1 || statements[0].type !== 'jump_expression') return null;
+	const jump = statements[0];
+	if (jump === undefined || jump.type !== 'jump_expression') return null;
+
+	// The same split `rejoinJumps` repairs at statement level: the grammar cuts
+	// `return emptyList()` into a valueless jump and a sibling call, so a body
+	// that *is* one jump arrives here as two statements. Requiring exactly one
+	// therefore rejected `ifEmpty { return emptyList() }` while accepting
+	// `ifEmpty { return listOf(x) }` — the block was emitted as a callback and
+	// the whole member refused, for a difference the author never wrote. The
+	// pairing rule is `rejoinJumps`': the jump carries nothing of its own and
+	// its value is the sibling beginning on the same line.
+	const detached =
+		statements.length === 2 &&
+		kids(jump).every((part) => part.type === 'label') &&
+		/^(?:return|throw)\b/.test(jump.text.trim()) &&
+		statements[1].line === jump.line
+			? statements[1]
+			: undefined;
+	if (statements.length !== 1 && detached === undefined) return null;
 
 	const value = kids(callee)[0];
 	if (value === undefined) return null;
 	return {
 		value,
-		jump: statements[0],
+		jump,
+		detached,
 		test: member === 'ifEmpty' ? 'isEmpty' : 'isBlank'
 	};
+}
+
+/**
+ * `x.let { it ?: return emptyList() }` — a null guard wearing a scope function.
+ *
+ * `let` binds its receiver to `it` and yields whatever the block yields, so a
+ * block whose whole body is `it ?: <jump>` yields `x` when `x` is non-null and
+ * jumps when it is not. That is `x ?: <jump>` exactly, and reading it as one
+ * puts the jump where it was written instead of inside a JavaScript callback it
+ * cannot leave.
+ *
+ * This is worth recognising rather than leaving to the inlining path because
+ * the idiom appears mid-chain — `body.string().takeIf { … }.let { it ?: return
+ * emptyList() }.substringAfter(…)` is one shared extractor, copied across a
+ * whole repository — and inlining a block whose value the rest of the chain
+ * consumes would mean hoisting the chain, while reading it as a guard needs
+ * only what `hoistedGuard` already does.
+ *
+ * Narrow in the three ways that make it exact:
+ *
+ * - **`.let`, never `?.let`.** `x?.let { … }` skips the block when `x` is null,
+ *   so the jump is precisely what it does *not* do — reading it as a guard
+ *   would return where Kotlin yields null.
+ * - **The implicit `it`.** A block that names its parameter may shadow, and a
+ *   guard on something other than the receiver is not this shape.
+ * - **The whole body, and only the guard.** A block that also computes
+ *   something has a value this cannot stand in for.
+ */
+function letGuard(node: KNode): { value: KNode; jump: KNode; detached?: KNode } | null {
+	if (node.type !== 'call_expression') return null;
+	const callee = kids(node)[0];
+	if (callee === undefined || callee.type !== 'navigation_expression') return null;
+
+	const suffix = kids(callee)[kids(callee).length - 1];
+	if (suffix === undefined || suffix.type !== 'navigation_suffix') return null;
+	// `?.let` is a different function: it never runs the block for a null
+	// receiver, so the jump inside is unreachable exactly when the guard would
+	// have fired.
+	if (suffix.allChildren[0]?.type === '?.') return null;
+	if (kids(suffix).find((child) => child.type === 'simple_identifier')?.text !== 'let') return null;
+
+	const trailing = kids(node).find((child) => child.type === 'call_suffix');
+	if (trailing === undefined) return null;
+	const lambda = [...walk(trailing)].find((child) => child.type === 'lambda_literal');
+	if (lambda === undefined) return null;
+	// A named parameter is not the implicit `it` this reads, and a block that
+	// renames its subject may be guarding something else entirely.
+	if (kids(lambda).some((child) => child.type === 'lambda_parameters')) return null;
+
+	const body = kids(lambda).find((child) => child.type === 'statements') ?? lambda;
+	const statements = kids(body);
+	const elvis = statements[0];
+	if (elvis === undefined || elvis.type !== 'elvis_expression') return null;
+
+	const subject = kids(elvis)[0];
+	const jump = kids(elvis)[1];
+	if (subject === undefined || subject.type !== 'simple_identifier' || subject.text !== 'it') {
+		return null;
+	}
+	if (jump === undefined || jump.type !== 'jump_expression') return null;
+
+	// The grammar's `return emptyList()` split, the same one `rejoinJumps` and
+	// `emptyGuard` repair: the jump carries nothing and its value is the
+	// sibling that begins on its line.
+	const bare =
+		kids(jump).every((part) => part.type === 'label') &&
+		/^(?:return|throw)\b/.test(jump.text.trim());
+	const detached =
+		statements.length === 2 && bare && statements[1].line === jump.line ? statements[1] : undefined;
+	if (statements.length !== 1 && detached === undefined) return null;
+
+	const value = kids(callee)[0];
+	if (value === undefined) return null;
+	return { value, jump, detached };
 }
 
 function hoistableGuards(root: KNode): ReadonlySet<KNode> {
@@ -6711,6 +6814,16 @@ function hoistableGuards(root: KNode): ReadonlySet<KNode> {
 			if (!blocked && !effects) out.add(node);
 			const after = visit(empty.value, blocked, effects);
 			visit(empty.jump, true, after);
+			return after;
+		}
+
+		// `x.let { it ?: return … }` is `x ?: return …`, and moves under the
+		// same two conditions for the same reasons.
+		const guarded = letGuard(node);
+		if (guarded !== null) {
+			if (!blocked && !effects) out.add(node);
+			const after = visit(guarded.value, blocked, effects);
+			visit(guarded.jump, true, after);
 			return after;
 		}
 

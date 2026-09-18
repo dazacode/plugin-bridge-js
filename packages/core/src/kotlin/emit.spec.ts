@@ -2902,6 +2902,92 @@ describe('a name declared somewhere the emitter had not looked', () => {
 		);
 	});
 
+	it('gives `ifEmpty { return emptyList() }` its value back', () => {
+		// The same grammar split `rejoinJumps` repairs at statement level: a
+		// `return` with an empty argument list arrives as a valueless jump and a
+		// sibling call, so a block that *is* one jump reaches the guard reader as
+		// two statements. Requiring exactly one refused this while converting
+		// `ifEmpty { return listOf(x) }` — the same code, one argument apart.
+		const demo = instantiate(
+			inClass(
+				'    fun parts(row: String): List<String> {',
+				'        val text = row.ifEmpty { return emptyList() }',
+				'        return text.split(",")',
+				'    }'
+			)
+		);
+
+		expect(demo.parts('a,b')).toEqual(['a', 'b']);
+		// And the jump keeps the value it was written with, rather than
+		// returning `undefined` where a list was meant.
+		expect(demo.parts('')).toEqual([]);
+	});
+
+	it('reads `x.let { it ?: return … }` as the guard it is', () => {
+		// One shared extractor writes this mid-chain and a whole repository
+		// inherits it: the block is `let`, so its value feeds the rest of the
+		// chain, and inlining it would mean hoisting the chain. As a guard it is
+		// `x ?: return …`, which hoists on its own and leaves the chain alone.
+		const demo = instantiate(
+			inClass(
+				'    fun parts(row: String): List<String> {',
+				'        return row.takeIf { it.isNotEmpty() }',
+				'            .let { it ?: return emptyList() }',
+				'            .trim()',
+				'            .split(",")',
+				'    }'
+			)
+		);
+
+		expect(demo.parts(' a,b ')).toEqual(['a', 'b']);
+		expect(demo.parts('')).toEqual([]);
+	});
+
+	it('does not read `?.let { it ?: return … }` as a guard', () => {
+		// `x?.let { … }` never runs the block for a null receiver, so the jump is
+		// unreachable in exactly the case a guard would fire. Read as one, a null
+		// `row` would return "guard" where Kotlin yields null — a different
+		// value, silently. The inlining path already gets this right; what this
+		// checks is that the guard reader keeps its hands off it.
+		const demo = instantiate(
+			inClass(
+				'    fun pick(row: String?): String {',
+				'        val got = row?.let { it ?: return "guard" }',
+				'        return "[" + (got ?: "null") + "]"',
+				'    }'
+			)
+		);
+
+		expect(demo.pick('a')).toBe('[a]');
+		expect(demo.pick(null)).toBe('[null]');
+	});
+
+	it('does not hoist a `let` guard past something that has already run', () => {
+		// Hoisting moves the guard's subject ahead of everything written before
+		// it. `first()` is written first and must stay first, so this guard
+		// cannot move and is refused rather than reordered.
+		const source = kt(
+			'class Demo : Source() {',
+			'    fun go(row: String): String = join(first(), row.let { it ?: return "" })',
+			'    fun first(): String = "1"',
+			'    fun join(a: String, b: String): String = a + b',
+			'}'
+		);
+
+		expect(translate(source).refusals.flatMap((one) => one.obstacles.map((o) => o.kind))).toContain(
+			'a `?: return` used as a value'
+		);
+	});
+
+	it('still calls `let` as a function when its block is not a guard', () => {
+		// Only a block whose whole body is `it ?: <jump>` is this shape. One that
+		// computes something is the ordinary `let`, and reading it as a guard
+		// would throw its result away.
+		const demo = instantiate(inClass('    fun tag(row: String): String = row.let { it + "!" }'));
+
+		expect(demo.tag('a')).toBe('a!');
+	});
+
 	it('still calls `ifEmpty` as a function when its block produces a value', () => {
 		// Only a block whose whole body is the jump becomes a guard. One that
 		// yields a value is the ordinary `ifEmpty`, and turning that into a

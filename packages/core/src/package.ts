@@ -123,8 +123,19 @@ const ENTRYPOINT = 'source';
  *     what an extension converts to: members that were refused are now
  *     emitted, and a row installed before this keeps the smaller bundle
  *     until it is converted again.
+ *
+ * 48: two spellings of a null guard stop refusing the member they guard.
+ *     `x.ifEmpty { return emptyList() }` was refused where
+ *     `x.ifEmpty { return listOf(y) }` converted, because the grammar splits a
+ *     `return` with an empty argument list into two nodes and the guard reader
+ *     required one — the same split `rejoinJumps` already repairs. And
+ *     `x.let { it ?: return … }` is now read as the `x ?: return …` it is,
+ *     which is what lets it appear mid-chain, where one shared extractor puts
+ *     it across a whole repository. Bumped because members that were refused
+ *     are now emitted, so a row installed before this keeps the smaller bundle
+ *     until it is converted again.
  */
-export const CONVERTER_VERSION = 47;
+export const CONVERTER_VERSION = 48;
 
 export interface BundleInput {
 	readonly id: string;
