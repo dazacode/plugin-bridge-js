@@ -114,6 +114,8 @@ import {
 	BUILDER_LAMBDA_METHODS,
 	TOLERATED_JSON_FLAGS,
 	VARARG_OPTIONS,
+	VIDEO_V16_ONLY,
+	VIDEO_V16_PARAMETERS,
 	scanObstacles,
 	thrownHelper,
 	type Refusal,
@@ -4973,6 +4975,12 @@ class Emitter {
 		const named_ = named
 			.map((arg) => this.argumentName(arg))
 			.filter((one): one is string => one !== null);
+
+		// `Video` is two constructors under one name, and this is the only place
+		// that can tell them apart — see `VIDEO_V16_PARAMETERS`.
+		if (name === 'Video' && named_.some((one) => VIDEO_V16_ONLY.has(one))) {
+			return this.videoV16Arguments(args, named_);
+		}
 		const qualified = owner === null ? undefined : this.qualifiedSignatures.get(`${owner}.${name}`);
 		// The qualified signature only when it actually accounts for what was
 		// written. An argument the Kotlin passes by name is a parameter of the
@@ -5018,6 +5026,47 @@ class Emitter {
 		let last = slots.length - 1;
 		while (last >= 0 && slots[last] === null) last -= 1;
 		return slots.slice(0, last + 1).map((slot) => slot ?? 'undefined');
+	}
+
+	/**
+	 * A `Video(…)` written against the ext-lib 16 primary constructor.
+	 *
+	 * Emitted as a **single options object** — `Video({ videoUrl: …,
+	 * videoTitle: … })` — rather than slotted into positions, because the two
+	 * constructors share four parameter names at different indices and a
+	 * position is exactly what cannot be shared. The runtime reads one plain
+	 * object argument as this constructor and everything else as the ext-lib 14
+	 * one, so the two never have to be told apart by arity.
+	 *
+	 * Mixing is refused rather than resolved. A positional argument alongside a
+	 * v16 name, or `url`/`quality` alongside one, would mean the call is not
+	 * cleanly either constructor, and the wrong choice publishes a page url as
+	 * a stream — silently, since both produce a `Video` that converts and
+	 * loads. Neither shape occurs anywhere in the measured catalogue, so this
+	 * refuses nothing that exists today and will refuse loudly if that changes.
+	 */
+	private videoV16Arguments(args: KNode[], named_: readonly string[]): string[] {
+		const positional = args.filter((arg) => !arg.allChildren.some((child) => child.type === '='));
+		if (positional.length > 0) {
+			this.refuse(positional[0], '`Video(…)` mixing positional and ext-lib 16 named arguments');
+		}
+		const legacy = named_.find((one) => one === 'url' || one === 'quality');
+		if (legacy !== undefined) {
+			this.refuse(args[0], `\`Video(…)\` naming both \`${legacy}\` and an ext-lib 16 parameter`);
+		}
+		const fields: string[] = [];
+		for (const arg of args) {
+			const key = kids(arg)[0]?.text ?? '';
+			if (!VIDEO_V16_PARAMETERS.includes(key)) {
+				this.refuse(arg, `the argument name \`${key}\` on \`Video\``);
+			}
+			const values = this.argumentExpressions(arg);
+			if (values.length !== 1 || values[0]?.startsWith('...')) {
+				this.refuse(arg, 'a spread mixed with named arguments');
+			}
+			fields.push(`${key}: ${values[0]}`);
+		}
+		return [`{ ${fields.join(', ')} }`];
 	}
 
 	/**

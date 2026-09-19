@@ -604,6 +604,66 @@ The work that remains is not translator work. It is the three capability
 decisions in `adr/0005`, the sources themselves, and cleanup that will not move
 installability.
 
+## 7b. Reopened on new evidence, closed again at +2 (2026-09-19)
+
+The ecosystem migrated: **182 of 254** extensions now subclass
+`keiyoushi.utils.AnimeHttpLegacySource` or `ParsedAnimeHttpLegacySource`, a
+shim in the extension repository's own `core/`, and only 8 still import the
+upstream `AnimeHttpSource`. ext-lib 16 replaced `getVideoList(episode)` with
+`getHosterList(episode)` → `getVideoList(hoster)` and made `Video` a data class
+whose primary constructor leads with `videoUrl`. The hoster half was already
+translated and the legacy bases do not trip the converter; the `Video` half was
+not.
+
+**One thing shipped: the ext-lib 16 `Video` constructor.** The two constructors
+share `videoUrl`, `headers`, `subtitleTracks` and `audioTracks` at _different
+indices_, so they cannot be one `KNOWN_SIGNATURES` entry. What makes the choice
+decidable is that their discriminating names are disjoint, measured over ~300
+`Video(…)` calls in 777 files: 18 calls in 10 extensions name an ext-lib 16
+parameter, **none** mixes in a positional argument and **none** also spells
+`url`/`quality`. So a v16-only name selects the v16 representation, ambiguity
+is refused rather than guessed, and the ext-lib 14 shape — 137 three-positional
+and 73 four-positional calls — is untouched.
+
+| composed corpus, 254 extensions | converting |
+| ------------------------------- | ---------- |
+| baseline                        | 68         |
+| \+ ext-lib 16 `Video`           | **70**     |
+
+**+2, zero regressions.** Kept for the semantics, not the number.
+
+**Everything else measured here was a harness artifact**, and the retraction
+matters more than the fix. Projections of 39/254, 53/254, 69/254 and a
+39 → 110 ceiling were all produced by scans that withheld part of the
+classpath; see _Measure the program, not the directory_ in `compatibility.md`.
+With production's file set composed, the extractor/playlist family that those
+numbers pointed at leaves the histogram: `PlaylistUtils(…)` and
+`.extractFromHls(…)` disappear and `.videosFromUrl(…)` falls from 67 to 11.
+
+**`PlaylistUtils.fixSubtitles` is settled, on two independent grounds.** It was
+proposed as an optional subtitle side-path whose refusal might be made
+non-blocking. It is not optional: it is never called inside `PlaylistUtils`,
+its eight callers are other extractor modules and extensions, and in all three
+spellings it sits on the straight-line path into the video call — an argument
+expression, a preceding `val`, or the return expression of `videosFromUrl`
+itself. `reach()` marks it reachable and is correct to; it prunes
+`cleanSubtitleData` and `toWebVtt` beneath it, so the analysis discriminates
+rather than blanket-keeps. Exempting it would yield `fixSubtitles is not a
+function`, or subtitles pointing at un-normalised SubRip served as `.vtt`.
+And stubbing it to a pass-through in a corpus copy — pricing the native
+implementation without writing one — moves the corpus **70 → 70**. Worth
+nothing either way.
+
+The remaining 184 refusals are the wall §7 already described: **128 need at
+least one native capability**, and the list is led by the JVM class object
+(79), a parser gap (74), an embedded JavaScript engine (64),
+`.addInterceptor()` (58), the WebView cookie store (47) and WebView (47).
+§7's rule applies to every one of them — frequency is not value, and none has
+been shown to unblock a listing _alone_.
+
+**Aniyomi is stopped again.** Reopening it was justified by evidence that
+turned out to be the instrument; the frozen verdict survived.
+
 ## 8. Licensing
 
 miwayomi is Apache-2.0. Its `source-api/` and `core-common/` are adapted from

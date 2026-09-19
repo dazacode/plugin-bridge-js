@@ -8152,10 +8152,69 @@ LruCache.prototype.remove = function (key) {
 LruCache.prototype.evictAll = function () { this.entries.clear(); };
 LruCache.prototype.size = function () { return this.entries.size; };
 
-/** Constructible with or without 'new', because the emitter writes both. */
+/**
+ * Constructible with or without 'new', because the emitter writes both.
+ *
+ * Two constructors live here under one name. The positional arguments are the
+ * ext-lib 14 secondary — 'Video(url, quality, videoUrl, ...)' — which is what
+ * the overwhelming majority of the catalogue writes and what upstream still
+ * keeps as a deprecated secondary. A **single plain object** carrying any
+ * ext-lib 16 field is the primary constructor instead, whose first parameter
+ * is 'videoUrl' where the secondary's third is.
+ *
+ * The emitter decides which, and only ever passes the object form for a call
+ * that named an ext-lib 16 parameter, so the shapes never have to be told
+ * apart by arity here. The check is still made on the object's own fields
+ * rather than on 'arguments.length', because a runtime that infers a
+ * constructor from a count is one refactor away from inferring the wrong one.
+ *
+ * 'url' is the *page* url upstream ('videoPageUrl'), which the ext-lib 16
+ * constructor has no parameter for, so it stays empty there — and 'quality' is
+ * upstream a deprecated getter returning 'videoTitle', so both spellings are
+ * populated from whichever one the caller supplied. That is what lets
+ * 'aniyomi-entry' keep reading 'videoUrl || url' and 'videoTitle || quality'
+ * without knowing which constructor ran.
+ */
+function __isVideoV16(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  for (var i = 0; i < __VIDEO_V16_FIELDS.length; i += 1) {
+    if (__has(value, __VIDEO_V16_FIELDS[i])) return true;
+  }
+  return false;
+}
+
+var __VIDEO_V16_FIELDS = [
+  'videoTitle', 'resolution', 'bitrate', 'preferred', 'timestamps',
+  'mpvArgs', 'ffmpegStreamArgs', 'ffmpegVideoArgs', 'internalData',
+  'initialized', 'memo'
+];
+
 function Video(url, quality, videoUrl, headers, subtitleTracks, audioTracks) {
+  // Decided once, before the 'new' forward below: forwarding six named
+  // parameters turns a one-argument call into a six-argument one, so an
+  // 'arguments.length' test inside the constructed call would see the wrong
+  // shape and silently take the ext-lib 14 path.
+  var v = arguments.length === 1 && __isVideoV16(url) ? url : null;
   if (!(this instanceof Video)) {
-    return new Video(url, quality, videoUrl, headers, subtitleTracks, audioTracks);
+    return v !== null
+      ? new Video(v)
+      : new Video(url, quality, videoUrl, headers, subtitleTracks, audioTracks);
+  }
+  if (v !== null) {
+    this.url = '';
+    this.videoUrl = v.videoUrl === null || v.videoUrl === undefined ? null : String(v.videoUrl);
+    this.videoTitle = __str(v.videoTitle);
+    this.quality = __str(v.videoTitle);
+    this.resolution = v.resolution === undefined ? null : v.resolution;
+    this.bitrate = v.bitrate === undefined ? null : v.bitrate;
+    this.headers = v.headers === undefined ? null : v.headers;
+    this.preferred = v.preferred === true;
+    this.subtitleTracks = __arr(v.subtitleTracks);
+    this.audioTracks = __arr(v.audioTracks);
+    this.timestamps = __arr(v.timestamps);
+    this.internalData = __str(v.internalData);
+    this.initialized = v.initialized === true;
+    return;
   }
   this.url = __str(url);
   this.quality = __str(quality);

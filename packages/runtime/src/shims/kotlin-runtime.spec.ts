@@ -2305,6 +2305,66 @@ describe('the model types an extension builds its results with', () => {
 		expect(renamed.videoList).toHaveLength(1);
 	});
 
+	it('builds a Video from either constructor, and keeps both spellings filled', () => {
+		const { Video } = runtime.globals;
+
+		// ext-lib 14 secondary — three positional arguments, which is what 137
+		// calls in the current catalogue write.
+		const legacy = Video('https://example.invalid/page', '720p', 'https://example.invalid/a.mp4');
+		expect(legacy.url).toBe('https://example.invalid/page');
+		expect(legacy.videoUrl).toBe('https://example.invalid/a.mp4');
+		expect(legacy.quality).toBe('720p');
+		// Upstream `quality` is a deprecated getter over `videoTitle`, so both
+		// read the same however the caller spelled it.
+		expect(legacy.videoTitle).toBe('720p');
+
+		// ext-lib 16 primary — one options object, which is what the emitter
+		// writes for a call that named an ext-lib 16 parameter. `videoUrl` is
+		// this constructor's FIRST parameter where it is the secondary's third,
+		// which is the whole reason the two cannot share a positional list.
+		const current = Video({
+			videoUrl: 'https://example.invalid/b.m3u8',
+			videoTitle: '1080p',
+			resolution: 1080,
+			preferred: true,
+			internalData: 'k'
+		});
+		expect(current.videoUrl).toBe('https://example.invalid/b.m3u8');
+		expect(current.videoTitle).toBe('1080p');
+		expect(current.quality).toBe('1080p');
+		expect(current.resolution).toBe(1080);
+		expect(current.preferred).toBe(true);
+		expect(current.internalData).toBe('k');
+		// No page url exists in this constructor, and inventing one would put a
+		// manifest address where `aniyomi-entry` looks for a page.
+		expect(current.url).toBe('');
+
+		// What playback actually reads, for both — `videoUrl || url` and
+		// `videoTitle || quality` in `aniyomi-entry`. Neither may come back
+		// empty, which is the failure this whole split exists to prevent.
+		for (const made of [legacy, current]) {
+			expect(String(made.videoUrl || made.url || '')).not.toBe('');
+			expect(String(made.videoTitle || made.quality || '')).not.toBe('');
+		}
+	});
+
+	it('reads a first argument that is not an ext-lib 16 object as a page url', () => {
+		const { Video } = runtime.globals;
+
+		// A string first argument is the secondary constructor however few
+		// arguments follow: the object form is the only thing that selects the
+		// primary, so arity never has to decide.
+		const two = Video('https://example.invalid/a.mp4', 'HD');
+		expect(two.url).toBe('https://example.invalid/a.mp4');
+		expect(two.quality).toBe('HD');
+
+		// An object carrying none of the ext-lib 16 fields is not a v16 call
+		// either — `videoUrl` alone is shared by both constructors and settles
+		// nothing.
+		const shared = Video({ videoUrl: 'https://example.invalid/a.mp4' });
+		expect(shared.videoTitle).toBe('');
+	});
+
 	it('wraps a video list as the single sentinel hoster', () => {
 		// `List<Video>.toHosterList()` — the one line a source with no hoster
 		// concept writes to answer `getHosterList`.

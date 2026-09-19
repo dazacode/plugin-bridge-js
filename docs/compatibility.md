@@ -60,6 +60,43 @@ from its default branch two years after the index was written. Those are dead
 listings — `catalogue` says so in as many words — and counting them as
 translation failures makes the denominator meaningless.
 
+### Measure the program, not the directory
+
+A conversion result is valid only when the measurement composes the **same
+effective classpath production composes** — the extension, every
+`implementation(project(':lib:<name>'))` module it declares, the
+`lib-multisrc/<theme>/` template when it names one, **and the `:lib:`
+dependencies those modules themselves declare**. `source-repo.ts` closes
+exactly that set, transitive dependencies included to depth 1, and it does so
+because "fetching only the extension yields a subclass with no superclass,
+calling functions that are not there".
+
+`plugin-bridge inspect <dir>` deliberately does not: it reads the `.kt` under
+one directory and nothing else, which is the right tool for a person editing a
+translation and the wrong one for a catalogue-wide number. Scoring a corpus
+with it measures a missing classpath.
+
+This has produced a believable and wrong histogram twice, at two different
+depths, in one afternoon. Over a 254-extension corpus:
+
+| what the harness composed                         | converting |
+| ------------------------------------------------- | ---------- |
+| the extension directory alone                     | 39 / 254   |
+| \+ its own declared `:lib:` modules and theme     | 53 / 254   |
+| \+ the `:lib:` those modules declare (production) | 70 / 254   |
+
+Each of the first two rows came with a plausible top blocker that was really
+the absent callee: `.videosFromUrl(…)` led the first at 67 extensions and is
+11 in the last. A whole workstream was proposed on the strength of the first
+number, and the lever it pointed at did not exist. **No extension in that
+catalogue declares `:lib:playlistutils` directly** — the ones that need it
+reach it through an extractor module that does, which is precisely the layer a
+depth-0 harness drops.
+
+So: before a conversion percentage is reported, state which of those three
+file sets produced it. A histogram from an incomplete environment is not a
+weaker version of the real one; it points somewhere else entirely.
+
 ### Probe the path the tool exercises, not the site's front page
 
 The rule that has cost the most time to relearn. When triaging why a listing

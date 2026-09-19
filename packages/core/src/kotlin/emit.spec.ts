@@ -3610,6 +3610,99 @@ describe('refusing by name', () => {
 		expect(emission.js).toContain('(await __super.getHosterList(episode))');
 	});
 
+	it('builds an ext-lib 16 `Video` from its own parameter names', () => {
+		// `videoTitle` is the ext-lib 16 primary constructor's second parameter
+		// and appears nowhere in the ext-lib 14 secondary, so naming it settles
+		// which of the two is being called. Before this, the name was simply
+		// absent from `KNOWN_SIGNATURES['Video']` and the call was refused —
+		// measured at 18 calls across 10 extensions in the current catalogue.
+		const emission = translate(
+			inClass(
+				'    override suspend fun getVideoList(episode: SEpisode): List<Video> {',
+				'        return listOf(Video(videoUrl = "https://example.invalid/a.m3u8", videoTitle = "1080p"))',
+				'    }'
+			)
+		);
+
+		expect(emission.refusals).toEqual([]);
+		expect(emission.js).toContain(
+			"Video({ videoUrl: 'https://example.invalid/a.m3u8', videoTitle: '1080p' })"
+		);
+	});
+
+	it('carries the ext-lib 16 fields that have no ext-lib 14 counterpart', () => {
+		const emission = translate(
+			inClass(
+				'    override suspend fun getVideoList(episode: SEpisode): List<Video> {',
+				'        return listOf(Video(videoUrl = "https://example.invalid/a.m3u8", videoTitle = "x", resolution = 1080, preferred = true, internalData = "k"))',
+				'    }'
+			)
+		);
+
+		expect(emission.refusals).toEqual([]);
+		expect(emission.js).toContain('resolution: 1080');
+		expect(emission.js).toContain('preferred: true');
+		expect(emission.js).toContain("internalData: 'k'");
+	});
+
+	it('leaves the ext-lib 14 `Video` positional, which is most of the catalogue', () => {
+		// 137 calls in the current catalogue pass three positional arguments and
+		// 73 pass four. None of that may move.
+		const emission = translate(
+			inClass(
+				'    override suspend fun getVideoList(episode: SEpisode): List<Video> {',
+				'        return listOf(Video(page, "default", page))',
+				'    }'
+			)
+		);
+
+		expect(emission.refusals).toEqual([]);
+		expect(emission.js).toContain("Video(this.page, 'default', this.page)");
+		expect(emission.js).not.toContain('videoTitle:');
+	});
+
+	it('still slots an ext-lib 14 named argument positionally', () => {
+		const emission = translate(
+			inClass(
+				'    override suspend fun getVideoList(episode: SEpisode): List<Video> {',
+				'        return listOf(Video(url = "https://example.invalid/p", quality = "720p", videoUrl = "https://example.invalid/a.mp4"))',
+				'    }'
+			)
+		);
+
+		expect(emission.refusals).toEqual([]);
+		expect(emission.js).toContain(
+			"Video('https://example.invalid/p', '720p', 'https://example.invalid/a.mp4')"
+		);
+	});
+
+	it('refuses a `Video` that is not cleanly either constructor', () => {
+		// The two share `videoUrl`, `headers`, `subtitleTracks` and
+		// `audioTracks` at different indices. A call that mixes a positional
+		// argument with an ext-lib 16 name, or names `quality` beside one, has
+		// no reading this can be sure of — and the wrong reading publishes a
+		// page url as the stream, which converts and loads and plays nothing.
+		expect(
+			refusalNames(
+				inClass(
+					'    override suspend fun getVideoList(episode: SEpisode): List<Video> {',
+					'        return listOf(Video("https://example.invalid/p", videoTitle = "1080p"))',
+					'    }'
+				)
+			).join(' ')
+		).toContain('mixing positional and ext-lib 16 named arguments');
+
+		expect(
+			refusalNames(
+				inClass(
+					'    override suspend fun getVideoList(episode: SEpisode): List<Video> {',
+					'        return listOf(Video(quality = "1080p", videoTitle = "1080p"))',
+					'    }'
+				)
+			).join(' ')
+		).toContain('ext-lib 16 parameter');
+	});
+
 	it('refuses a `super.` to something the base class does not offer', () => {
 		expect(refusalNames(inClass('    override fun setup() = super.setup()'))).toContain(
 			'`super.setup()`'

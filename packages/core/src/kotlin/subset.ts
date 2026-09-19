@@ -1686,6 +1686,18 @@ export const SUPER_SUSPEND_MEMBERS: ReadonlySet<string> = new Set([
 export const KNOWN_SIGNATURES: ReadonlyMap<string, readonly string[]> = new Map([
 	['GET', ['url', 'headers', 'cache']],
 	['POST', ['url', 'headers', 'body', 'cache']],
+	// **The ext-lib 14 secondary constructor**, which is still what the
+	// overwhelming majority of the catalogue writes: 137 calls pass three
+	// positional arguments and 73 pass four, and every named call that spells
+	// `url` or `quality` means this one. It survives upstream as a deprecated
+	// secondary, delegating to the primary with `videoTitle = quality` — so
+	// keeping it as the positional shape is not legacy support, it is the
+	// common case.
+	//
+	// The **ext-lib 16 primary** constructor is a different parameter list
+	// that happens to share three names at different indices, and it cannot be
+	// merged into this one entry. `VIDEO_V16_PARAMETERS` below is that list,
+	// reached only when a call names something that can only be its.
 	['Video', ['url', 'quality', 'videoUrl', 'headers', 'subtitleTracks', 'audioTracks']],
 	['Track', ['url', 'lang']],
 
@@ -1753,6 +1765,76 @@ export const KNOWN_SIGNATURES: ReadonlyMap<string, readonly string[]> = new Map(
 	// where the declaration cannot be found the named argument is refused —
 	// which is the answer this table was added to avoid and the only correct
 	// one available.
+]);
+
+/**
+ * `Video`'s **ext-lib 16 primary constructor**, which is a second parameter
+ * list under the same name.
+ *
+ * Upstream `Video.kt` is a data class whose primary constructor is
+ *
+ *     Video(videoUrl = "", videoTitle = "", resolution: Int? = null,
+ *           bitrate: Int? = null, headers = null, preferred = false,
+ *           subtitleTracks = [], audioTracks = [], timestamps = [],
+ *           mpvArgs = [], ffmpegStreamArgs = [], ffmpegVideoArgs = [],
+ *           internalData = "", initialized = false, memo = {})
+ *
+ * with the ext-lib 14 shape kept as a *deprecated secondary* that delegates to
+ * it (`videoTitle = quality`, and `url` stored as the separate page url). Both
+ * are live, and `KNOWN_SIGNATURES` can hold only one list per name.
+ *
+ * They cannot be merged, because `videoUrl`, `headers`, `subtitleTracks` and
+ * `audioTracks` appear in **both at different indices** — `videoUrl` is index
+ * 2 in the secondary and index 0 here. Slotting a named `videoUrl` against the
+ * wrong list is how a converted extension ends up publishing its page url as
+ * the stream.
+ *
+ * What makes the choice decidable is that the discriminating names are
+ * disjoint: `url`/`quality` belong only to the secondary, and
+ * `VIDEO_V16_ONLY` below only to the primary. Measured over the current
+ * catalogue (777 Kotlin files, ~300 `Video(…)` calls): 18 calls in 10
+ * extensions name something v16-only, **none** of them mixes in a positional
+ * argument and **none** also spells `url` or `quality`. So a call is read as
+ * v16 exactly when it names one of those, and anything ambiguous is refused
+ * rather than guessed — the rule `rateLimitCall` already follows.
+ */
+export const VIDEO_V16_PARAMETERS: readonly string[] = [
+	'videoUrl',
+	'videoTitle',
+	'resolution',
+	'bitrate',
+	'headers',
+	'preferred',
+	'subtitleTracks',
+	'audioTracks',
+	'timestamps',
+	'mpvArgs',
+	'ffmpegStreamArgs',
+	'ffmpegVideoArgs',
+	'internalData',
+	'initialized',
+	'memo'
+];
+
+/**
+ * The parameter names that can only mean the ext-lib 16 primary constructor.
+ *
+ * `VIDEO_V16_PARAMETERS` minus the four it shares with the ext-lib 14
+ * secondary (`videoUrl`, `headers`, `subtitleTracks`, `audioTracks`), which
+ * say nothing about which one is being called.
+ */
+export const VIDEO_V16_ONLY: ReadonlySet<string> = new Set([
+	'videoTitle',
+	'resolution',
+	'bitrate',
+	'preferred',
+	'timestamps',
+	'mpvArgs',
+	'ffmpegStreamArgs',
+	'ffmpegVideoArgs',
+	'internalData',
+	'initialized',
+	'memo'
 ]);
 
 /**
