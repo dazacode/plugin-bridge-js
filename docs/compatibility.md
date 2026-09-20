@@ -322,3 +322,60 @@ here rather than there, because they apply to any future measurement:
   day each produced a number that looked like a finding — one reported every
   known-good source as broken, the other counted three stringified objects as
   streams.
+
+## Configuration must be proven by effect, not by presence
+
+There are three claims about a setting and only the third is the one anybody
+cares about:
+
+| claim        | what it proves                                               |
+| ------------ | ------------------------------------------------------------ |
+| **presence** | the manifest declares it, so the host drew a control         |
+| **delivery** | `ctx.settings` answers with the viewer's value               |
+| **effect**   | the foreign plugin _read_ that value and behaved differently |
+
+The first two can be green while the third is dead, and the ordinary funnel
+cannot tell them apart: a source that ignores every setting still converts,
+loads, resolves and plays, using whatever its own defaults are. The result is a
+completely green run over a feature that does nothing.
+
+Measured, in the sixth ecosystem's adapter: settings were assembled into a
+module-scope variable, and every one of the twenty-five places a scraper reads
+them is `global[...]`, `window[...]` or `globalThis[...]` — never a bare name.
+The reach for them was `ctx.settings.all()`, which the contract does not have.
+Nothing failed. Every scraper would have run on its defaults, and a debrid
+credential typed into a settings screen would never have arrived, which the
+viewer would read as the provider being broken.
+
+So this is rule 17 one level in: **do not claim a capability from a check that
+never exercised the capability's observable effect.** A preference that changes
+resolution, authentication, playback, provider selection or security earns a
+differential test — the same source, the same title, the setting off and on,
+asserting the _shape of the answer changes_. One in that ecosystem is exactly
+this shape: with no debrid configured it returns info hashes, and with one
+configured the same call returns direct addresses. A cosmetic preference does
+not earn one yet.
+
+## A new ecosystem teaches some layer. It need not teach the contract.
+
+"It needed a lot of fixes" and "the contract was not ready" are different
+statements, and conflating them makes every adapter look like evidence against
+the ABI. The sixth ecosystem adapted here is the worked example — it cost real
+engineering at three layers and none at the fourth:
+
+| layer              | what it had to learn                                                                                  |
+| ------------------ | ----------------------------------------------------------------------------------------------------- |
+| extraction         | string-array obfuscation                                                                              |
+| runtime            | an absent crypto library, a polyfill colliding with the runtime's own `atob`, a missing DOM event API |
+| adapter            | the module shape, and delivering settings the scrapers could actually read                            |
+| ABI vocabulary     | one id namespace                                                                                      |
+| **structural ABI** | **nothing**                                                                                           |
+
+Season, settings and torrents were the three plausible places for the contract
+to crack. All three turned out to be concepts it had already been taught by
+other ecosystems — the season channel added for one, the manifest settings
+block filled by two others, the descriptor built for a third.
+
+A runtime incompatibility is not an ABI incompatibility. Keeping them in
+separate columns is what makes "it fit through the same door" a measurement
+rather than a claim.
