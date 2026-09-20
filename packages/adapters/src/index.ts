@@ -23,6 +23,7 @@ import { cloudstreamAdapter } from './cloudstream';
 import { hayaseAdapter } from './hayase';
 import { lnreaderAdapter } from './lnreader';
 import { mangayomiAdapter } from './mangayomi';
+import { nuvioAdapter } from './nuvio';
 import { soraAdapter } from './sora';
 import { stremioAdapter } from './stremio';
 
@@ -40,6 +41,11 @@ import { stremioAdapter } from './stremio';
  * other format's index immediately and cannot be fooled by one — which also
  * means nothing is gained by asking it early, and a viewer pasting one of the
  * six list formats should not pay a request to find that out.
+ *
+ * `nuvio` sits beside it for the same reason and ahead of it for a narrower
+ * one: its document is also a single object, but it is identified by a
+ * `scrapers` array whose entries each name their own file, which no other
+ * format publishes. That makes its parse the cheaper of the two negatives.
  */
 export const FOREIGN_ADAPTERS: readonly ForeignAdapter[] = [
 	soraAdapter,
@@ -48,6 +54,7 @@ export const FOREIGN_ADAPTERS: readonly ForeignAdapter[] = [
 	cloudstreamAdapter,
 	hayaseAdapter,
 	mangayomiAdapter,
+	nuvioAdapter,
 	stremioAdapter
 ];
 
@@ -65,6 +72,7 @@ export {
 	hayaseAdapter,
 	lnreaderAdapter,
 	mangayomiAdapter,
+	nuvioAdapter,
 	soraAdapter,
 	stremioAdapter
 };

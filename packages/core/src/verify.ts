@@ -218,7 +218,20 @@ const DEFAULT_PROBE = 'a';
  */
 const PROBE_IDS: Readonly<Record<ExternalIdKind, readonly string[]>> = {
 	imdb: ['movie:tt0133093', 'series:tt0944947'],
-	anilist: ['anilist:21|One Piece', 'anilist:16498|Attack on Titan']
+	anilist: ['anilist:21|One Piece', 'anilist:16498|Attack on Titan'],
+	/*
+	 * `movie` and `tv` are TMDB's own two endpoints, and the number means a
+	 * different work under each. Spelled the way `referenceFor` spells it, so
+	 * that the probe asks what a real binding would ask.
+	 *
+	 * Three rather than two, and the third is animated on purpose. This
+	 * namespace is the first whose sources split by *medium* rather than by
+	 * form: an anime-only scraper holds neither a live-action film nor a
+	 * live-action series, and asking it only about those two fails it at
+	 * `resolve` for not carrying titles it never claimed — rule 17's exact
+	 * prohibition, and measured here before this line existed.
+	 */
+	tmdb: ['movie:603', 'tv:1399', 'tv:37854']
 };
 
 const DEFAULT_PROBE_IDS: readonly string[] = PROBE_IDS.imdb;

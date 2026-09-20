@@ -34,7 +34,15 @@ Run a command with --help for its own options.
 `;
 
 /** The ecosystems an explicit scope may name; detection is tried first. */
-const FORMATS = new Set(['aniyomi', 'mangayomi', 'cloudstream', 'sora', 'hayase', 'lnreader']);
+const FORMATS = new Set([
+	'aniyomi',
+	'mangayomi',
+	'cloudstream',
+	'sora',
+	'hayase',
+	'lnreader',
+	'nuvio'
+]);
 
 async function main(argv: string[]): Promise<number> {
 	const args = [...argv];

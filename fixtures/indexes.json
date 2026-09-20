@@ -267,5 +267,42 @@
 				"configurationRequired": false
 			}
 		}
+	},
+	"nuvio": {
+		"indexUrl": "https://example.invalid/nuvio/nuvio.json",
+		"body": {
+			"name": "Example Scrapers",
+			"version": "1.0.0",
+			"scrapers": [
+				{
+					"id": "example-direct",
+					"name": "Example Direct",
+					"description": "Example direct links",
+					"version": "1.0.1",
+					"author": "Example",
+					"supportedTypes": [
+						"movie",
+						"tv"
+					],
+					"filename": "providers/example-direct.js",
+					"enabled": true,
+					"hasSettings": true,
+					"formats": [
+						"mp4",
+						"m3u8"
+					],
+					"contentLanguage": [
+						"en"
+					]
+				},
+				{
+					"id": "example-withdrawn",
+					"name": "Example Withdrawn",
+					"version": "0.9.0",
+					"filename": "providers/example-withdrawn.js",
+					"enabled": false
+				}
+			]
+		}
 	}
 }

@@ -48,7 +48,8 @@ export const REPOSITORY_FORMATS = [
 	'mangayomi',
 	'aniyomi',
 	'cloudstream',
-	'stremio'
+	'stremio',
+	'nuvio'
 ] as const;
 export type RepositoryFormat = (typeof REPOSITORY_FORMATS)[number];
 
@@ -67,7 +68,8 @@ export const FOREIGN_FORMATS = [
 	'mangayomi',
 	'aniyomi',
 	'cloudstream',
-	'stremio'
+	'stremio',
+	'nuvio'
 ] as const satisfies readonly ForeignFormat[];
 
 /**
@@ -157,18 +159,28 @@ export function declaredMediums(
  * saying "hand me this id and I will answer", and the host binds it directly.
  *
  * **A namespace, not a number.** `anilist` is AniList's id and nothing else:
- * it is never filled from MAL, AniDB or TMDB because those count different
- * things, and a number from the wrong namespace does not fail — it answers,
- * for the wrong show. A host that does not hold the id a source asked for
- * declares nothing and the source is searched by title instead, which is the
- * ordinary path.
+ * it is never filled from MAL or AniDB because those count different things,
+ * and a number from the wrong namespace does not fail — it answers, for the
+ * wrong show. The same holds in the other direction now that `tmdb` is a
+ * member: a host holding a TMDB id declares `tmdb`, and never spends it as an
+ * `anilist` one. A host that does not hold the id a source asked for declares
+ * nothing and the source is searched by title instead, which is the ordinary
+ * path.
+ *
+ * `tmdb` carries its endpoint, because TMDB's own numeric ids collide across
+ * `/movie` and `/tv` and a bare number does not say which it came from.
+ * `referenceFor` spells it, and getting it wrong returns a real but unrelated
+ * show — the one failure in this file that answers instead of erroring.
  *
  * Only kinds a host actually carries belong here. AniDB and TVDB are
  * deliberately absent: sources ask for them, this catalogue has no source of
  * them, and adding a mapping service to raise a compatibility count is the
- * trade this project does not make.
+ * trade this project does not make. `tmdb` is admitted on exactly that test
+ * and no other — it is a service this catalogue already keys shows by, and
+ * for the anime it does not, the id arrives in a mapping payload already
+ * fetched for something else.
  */
-export type ExternalIdKind = 'imdb' | 'anilist';
+export type ExternalIdKind = 'imdb' | 'anilist' | 'tmdb';
 
 /**
  * A torrent, as the thing a source hands back instead of a URL.
@@ -454,6 +466,26 @@ const PROFILES: Readonly<Record<ForeignFormat, FormatProfile>> = {
 		 * acquires anything.
 		 */
 		refusal: null,
+		implicitCookies: false
+	},
+	nuvio: {
+		format: 'nuvio',
+		label: 'Nuvio',
+		tier: 'convert',
+		/*
+		 * Its index is a `scrapers` array rather than the bare list four other
+		 * formats publish, and it is the only one that names each entry's file
+		 * separately from the entry itself — so the key document is the index
+		 * and the artifact is resolved from it, not guessed from the id.
+		 */
+		keyDocument: 'index',
+		refusal: null,
+		/*
+		 * These run in a React Native scope, which has no document and no
+		 * cookie jar of its own. A source here that needs a session carries it
+		 * in a header it sets itself, so granting ambient cookies would hand
+		 * every one of them state it was never written to expect.
+		 */
 		implicitCookies: false
 	},
 	lnreader: {

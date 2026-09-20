@@ -22,7 +22,8 @@ import {
 	decodeJsUnicodeEscapes,
 	findManifestUrls,
 	parsePlayerSources,
-	unpackDeanEdwards
+	unpackDeanEdwards,
+	unpackStringArray
 } from '@plugin-bridge/core/extract/patterns';
 
 // Assigned onto `globalThis` rather than exported, because the output is
@@ -30,6 +31,7 @@ import {
 (globalThis as unknown as Record<string, unknown>)['__yorozoRuntime'] = {
 	parseHtml,
 	unpackDeanEdwards,
+	unpackStringArray,
 	decodeJsUnicodeEscapes,
 	parsePlayerSources,
 	findManifestUrls,
