@@ -197,6 +197,22 @@ over the group's combined obstacles and check what successive fixes actually
 complete — a shared _blocker_ is not a shared _fix_, and a cluster that shares a
 template can still be eight independent tails.
 
+## Three numbers, not one
+
+A compatibility percentage answers one question and gets read as three. Keep
+them apart, and report all three or none:
+
+|                   | asks                                                          |
+| ----------------- | ------------------------------------------------------------- |
+| **compatibility** | can this be executed correctly at all?                        |
+| **playability**   | did it hand back media that actually answers?                 |
+| **relevance**     | is that media what this client's viewers are trying to watch? |
+
+The third is the one that gets skipped, and it is the one that decides whether
+an adapter is worth writing. An ecosystem measured at 12% playable was 0%
+relevant, and the gap between those two numbers was the whole decision — see
+the Miru row below.
+
 ## Two ecosystems have been measured this way
 
 The columns above were designed against a Kotlin ecosystem and then used
@@ -207,6 +223,29 @@ describe _translation_ or describe one translator.
 | ----------------- | ---------------- | ---------------------- |
 | convert and load  | 60 of 254        | 57 of 57 anime modules |
 | verified playable | 6                | 16                     |
+
+### A third, measured as a no (2026-09-19)
+
+A second JavaScript ecosystem — one file per extension, a host-supplied base
+class, and a loader this harness reproduced verbatim — measured **12 verified
+playable of 101 video extensions**. It is not worth an adapter, and the reason
+is in the third column rather than the first two:
+
+|                                         |          |
+| --------------------------------------- | -------- |
+| population                              | 101      |
+| verified playable                       | 12 (12%) |
+| — adult-content sources                 | 5        |
+| — Chinese bulk-resource sites           | 6        |
+| — one Punjabi film source               | 1        |
+| **relevant to this client's catalogue** | **0**    |
+
+Not one is an anime source and not one is English-language, against a client
+whose catalogue is anime and live-action addressed by AniList and TMDB ids.
+The remaining 89 are ordinary upstream rot — 30 threw on site drift, 10 have
+dead DNS, 8 searched and found nothing — and **none is a demonstrated gap in
+this software**. Cheap to adapt and worth nothing, which is a result rather
+than a disappointment.
 
 `compatibility-sora.md` has the second pass in full. Two things from it belong
 here rather than there, because they apply to any future measurement:
