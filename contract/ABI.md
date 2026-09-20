@@ -26,7 +26,7 @@ _what episodes?_, _how do I play one?_ — and the third answer may include a
 A bundle is one ES2020 module with a default export.
 
 ```ts
-import { defineSource } from '@kuro/plugin-sdk';
+import { defineSource } from '@yorozo/plugin-sdk';
 
 export default defineSource({
   id: 'com.example.plugins.example',   // must equal manifest.id
@@ -106,7 +106,7 @@ interface SourceContext {
 	readonly http: HttpClient; // permission: "network"
 	readonly settings: SettingsView; // values for manifest.settings
 	readonly storage: KeyValueStore; // permission: "storage", ≤64 KiB
-	readonly log: Logger;
+	readonly log: Logger; // debug and warn, one string each — see below
 	readonly signal: AbortSignal;
 	readonly text: TextCodecs; // TextEncoder/TextDecoder shims
 	readonly bytes: ByteCodecs; // base64/hex, engine-independent
@@ -114,6 +114,22 @@ interface SourceContext {
 	readonly locale: string; // BCP-47, may lack a region
 }
 ```
+
+```ts
+interface Logger {
+	debug(message: string): void;
+	warn(message: string): void;
+}
+```
+
+Two levels and no more. There is no `info` and no `error`, which are the two an
+author reaches for first — written down here because this file said `Logger`
+and nothing else for long enough that the SDK was built against the guess.
+
+`console.log`, `console.warn` and the rest also work and arrive in the same
+place: the sandbox replaces the console rather than leaving one attached, and
+caps how much a plugin may emit per load, so a plugin logging in a loop cannot
+flood the log it shares with everything else.
 
 There is no ambient `fetch`, no `XMLHttpRequest`, no `globalThis.crypto`, no
 timers beyond `setTimeout`, no DOM and no filesystem. The sandbox removes them;
@@ -546,8 +562,8 @@ capability decision rather than an engine one (`AGENTS.md` rule 13). Lookbehind
 was the one whose only justification was the engine table, which is why it is
 the only one repealed here.
 
-`kuro plugin test --engines` runs a plugin's own suite on the engine class
-above, so this list is enforced rather than remembered.
+`plugin-bridge test <dir>` runs a plugin in that engine class, so this list is
+enforced rather than remembered.
 
 ---
 

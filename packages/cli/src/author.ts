@@ -144,6 +144,11 @@ const STARTER_MANIFEST = (id: string, name: string) =>
 			description: 'A Yorozo source plugin.',
 			version: '0.1.0',
 			author: { name: 'you' },
+			// Written out rather than defaulted, so that it is visible and
+			// changed. A bundle with no stated licence packages as
+			// `NOASSERTION`, which tells a reader nothing about what they may
+			// do with it.
+			license: 'MIT',
 			network: {
 				hosts: ['example.test']
 			},

@@ -201,6 +201,12 @@ export interface HttpRequest {
 	readonly method?: string;
 	readonly headers?: Readonly<Record<string, string>>;
 	readonly body?: string;
+	/**
+	 * `false` returns a 3xx as the answer instead of taking it, so you can read
+	 * its `Location` out of `response.headers`. Redirects are followed by
+	 * default, and every hop is re-checked against your declared hosts.
+	 */
+	readonly follow?: boolean;
 }
 
 /**
@@ -210,15 +216,39 @@ export interface HttpRequest {
  * a redirect that is *not* followed all happen whether or not your own code
  * remembered to. See `ABI.md` §2.1; most plugins never set one.
  */
+export interface RateLimitRule {
+	/** 1–1000. */
+	readonly permits: number;
+	/** 1–600000. */
+	readonly periodMs: number;
+}
+
+/**
+ * Rules the host applies to your requests, rather than code you write.
+ *
+ * Declared once and enforced outside your plugin, so a retry or a wait happens
+ * whether or not your own code remembered to — and a limiter inside the isolate
+ * would be one the isolate could decline to run. Most plugins never set one.
+ *
+ * Ordering needs no ceremony: a policy declared before a request is in force
+ * for it whether or not you awaited this.
+ */
 export interface RequestPolicy {
-	readonly userAgent?: string;
-	readonly headers?: Readonly<Record<string, string>>;
-	/** `false` reads a redirect instead of taking it, exposing its `Location`. */
-	readonly follow?: boolean;
-	readonly rateLimit?: {
-		readonly requests: number;
-		readonly perMs: number;
+	readonly retry?: {
+		/** Total attempts including the first, 1–5. */
+		readonly attempts: number;
+		/** Statuses worth asking again, 100–599. */
+		readonly onStatus: readonly number[];
+		/** Wait before the second attempt, 0–60000. */
+		readonly backoffMs: number;
+		/** Each further wait times this, 1–10. Default 1. */
+		readonly multiplier?: number;
 	};
+	/** Every request this plugin makes. */
+	readonly rateLimit?: RateLimitRule;
+	/** And, in addition, per host. */
+	readonly rateLimitByHost?: Readonly<Record<string, RateLimitRule>>;
+	readonly headersByHost?: Readonly<Record<string, Readonly<Record<string, string>>>>;
 }
 
 /**
