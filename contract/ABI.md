@@ -32,8 +32,8 @@ export default defineSource({
   id: 'com.example.plugins.example',   // must equal manifest.id
 
   async searchCatalog(query, page, ctx): Promise<CatalogPage> { … },
-  async listEpisodes(ref, ctx): Promise<SourceEpisode[]> { … },
-  async resolve(ref, episodeNumber, ctx): Promise<PlaybackSource[]> { … },
+  async listEpisodes(sourceMediaId, ctx): Promise<SourceEpisode[]> { … },
+  async resolve(sourceMediaId, episode, ctx): Promise<PlaybackSource[]> { … },
 
   // optional
   async browse(shelf, page, ctx): Promise<CatalogPage> { … },
@@ -44,6 +44,45 @@ The three required methods map one-to-one onto interfaces the clients already
 have — `SourceRepository.searchCatalog`, `SourceRepository.listEpisodes`,
 `PlaybackRepository.resolve`. A plugin is an _implementation_ of contracts that
 predate it, which is why installing one adds no screens and no branches.
+
+`sourceMediaId` is the source's own id for the title, as the source minted it —
+never one of this client's. It arrives from the binding the matching layer made,
+and rule 1 is why it travels in this direction only.
+
+### `resolve`'s second argument is an episode, not a number
+
+```ts
+interface ResolveTarget {
+	readonly number: number; // always present
+	readonly sourceEpisodeId?: string; // only if the source enumerated
+	readonly season?: number; // only if it did not
+}
+```
+
+The two optional fields are very nearly mutually exclusive, and that is the
+part worth reading twice.
+
+`number` is what the viewer asked for, always.
+
+`sourceEpisodeId` is present when the source published its own episode list and
+one of its rows matched — it is that row's id, and it is the best thing to key
+on, because the source minted it.
+
+`season` is present when the source published **no** list. Some sources have
+none to give: a stream-only addon was never asked what it holds, and reading its
+empty answer as "this source lacks episode 577" blames it for a question nobody
+put. So the host asks anyway, and supplies the season from its own catalogue,
+because a protocol addressed as `<id>:<season>:<episode>` cannot be spoken
+without one. Episode numbers are unique across a show here, so that season is a
+lookup and not a guess.
+
+When the source did enumerate, `season` is withheld deliberately: the source
+already said where the episode lives, and this client's numbering has no
+standing to correct it.
+
+A plugin that keys on `sourceEpisodeId` when it has one and falls back to
+`season` with `number` when it does not is a plugin that works for both kinds of
+source. Neither field may be assumed present.
 
 ### What is deliberately absent
 
