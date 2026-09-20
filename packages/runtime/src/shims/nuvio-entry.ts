@@ -62,6 +62,20 @@ export interface NuvioEntrypointOptions {
 	readonly pluginId: string;
 	/** The scraper's source, already unpacked if it was obfuscated. */
 	readonly script: string;
+	/**
+	 * The settings the manifest declares, with the scraper's own key for each.
+	 *
+	 * Carried because `ctx.settings` is read *by manifest id* and one value at
+	 * a time — there is no way to ask it for everything it holds — while these
+	 * scrapers read one object under their own arbitrary keys. The mapping is
+	 * known at conversion, so it travels into the bundle rather than being
+	 * re-derived at runtime from a normalisation that could drift.
+	 */
+	readonly settings?: readonly {
+		readonly id: string;
+		readonly key: string;
+		readonly type: string;
+	}[];
 }
 
 /**
@@ -71,7 +85,10 @@ export interface NuvioEntrypointOptions {
  * wrapper below *provides* `module` and reads what was put on it.
  */
 export function nuvioEntrypoint(options: NuvioEntrypointOptions): string {
-	const constants = `const __PLUGIN_ID = ${JSON.stringify(options.pluginId)};`;
+	const constants = [
+		`const __PLUGIN_ID = ${JSON.stringify(options.pluginId)};`,
+		`const __SETTINGS = ${JSON.stringify(options.settings ?? [])};`
+	].join('\n');
 
 	return `${DOM_RUNTIME_SOURCE}
 ${JS_RUNTIME}
@@ -80,15 +97,24 @@ ${constants}
 /* --- the runtime these were written for ---------------------------------- */
 
 /**
- * React Native aliases 'window' to the global object and defines a 'navigator'
- * that names itself. Neither is a browser's: there is no document behind them,
- * and a scraper reaching for one gets the same undefined it would get at home.
+ * React Native aliases 'window' and 'global' to the global object and defines a
+ * 'navigator' that names itself. Neither is a browser's: there is no document
+ * behind them, and a scraper reaching for one gets the same undefined it would
+ * get at home.
+ *
+ * Assigned *onto* the global object rather than declared as module variables,
+ * because that is where these scrapers look. Counted across the corpus, the
+ * settings object alone is read 12 times as 'global[...]', 8 as 'window[...]'
+ * and 5 as 'globalThis[...]', and never once as a bare name — so a module-scope
+ * declaration is invisible to every one of them, and a scraper then runs with
+ * its defaults while the viewer's choices sit unread.
  */
-var window = typeof globalThis === 'object' ? globalThis : this;
-var navigator = { product: 'ReactNative', userAgent: 'Yorozo' };
+globalThis.window = globalThis;
+globalThis.global = globalThis;
+globalThis.navigator = { product: 'ReactNative', userAgent: 'Yorozo' };
 
 /** Where this ecosystem's scrapers read their configured values from. */
-var SCRAPER_SETTINGS = {};
+globalThis.SCRAPER_SETTINGS = {};
 
 /* --- cheerio, over this bundle's own parser ------------------------------ */
 
@@ -236,7 +262,20 @@ require = function (name) {
 var module = { exports: {} };
 var exports = module.exports;
 
+/*
+ * The scraper runs inside a function, not at this bundle's top level.
+ *
+ * These are CommonJS modules and several carry their own polyfills — one
+ * declares 'atob', which this runtime also declares, and two top-level 'var's
+ * of the same name in one module is a *parse* error: the bundle fails to load
+ * and says 'Identifier "atob" has already been declared', which names neither
+ * the scraper nor the collision. Giving it the wrapper CommonJS would have
+ * given it puts its declarations in their own scope, where a polyfill shadows
+ * the runtime's for that scraper only and nothing else notices.
+ */
+(function (module, exports, require) {
 ${options.script}
+})(module, exports, require);
 
 /** Whichever way this scraper published itself. */
 function __entry(name) {
@@ -329,9 +368,19 @@ export default {
 
   async resolve(sourceMediaId, episode, ctx) {
     __enter(ctx);
-    SCRAPER_SETTINGS = (ctx && ctx.settings && typeof ctx.settings.all === 'function')
-      ? ctx.settings.all()
-      : SCRAPER_SETTINGS;
+    /*
+     * Built here rather than handed over: 'ctx.settings' answers one id at a
+     * time and by the manifest's id, while these read a single object under
+     * their own keys. Both halves of that mapping were decided at conversion.
+     */
+    const chosen = {};
+    for (const setting of __SETTINGS) {
+      if (ctx === undefined || ctx === null || ctx.settings === undefined) break;
+      chosen[setting.key] = setting.type === 'switch'
+        ? ctx.settings.boolean(setting.id)
+        : ctx.settings.string(setting.id);
+    }
+    globalThis.SCRAPER_SETTINGS = chosen;
 
     const getStreams = __entry('getStreams');
     if (getStreams === null) {

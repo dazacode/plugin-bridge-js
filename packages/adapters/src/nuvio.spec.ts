@@ -154,6 +154,62 @@ describe('what a converted Nuvio bundle declares', () => {
 		expect(settings.map((one) => one.key)).toEqual(['right']);
 	});
 
+	it('gives the scraper its own scope, so its polyfills do not collide', async () => {
+		/*
+		 * Measured: one scraper carries its own `atob`, which this runtime also
+		 * declares. Two top-level `var`s of one name in a module is a *parse*
+		 * error, so the bundle failed to load with "Identifier 'atob' has
+		 * already been declared" — naming neither the scraper nor the
+		 * collision. Inside a function its polyfill shadows the runtime's for
+		 * that scraper and nothing else notices.
+		 */
+		const source = `
+			const API = 'https://api.example.invalid/v1';
+			var atob = function (value) { return value; };
+			async function getStreams() { return []; }
+			module.exports = { getStreams };
+		`;
+		const bundle = await nuvioAdapter.convert(listing(), services(source));
+		const entries = await readZip(bundle);
+		const payload = new TextDecoder().decode(
+			entries.find((entry) => entry.name === 'payload/source.js')!.bytes
+		);
+		// The runtime's own declaration is still there, and the scraper's is
+		// inside a wrapper rather than beside it.
+		expect(payload).toContain('function atob(');
+		expect(payload).toContain('(function (module, exports, require) {');
+		const wrapper = payload.indexOf('(function (module, exports, require) {');
+		expect(payload.indexOf('var atob = function (value)')).toBeGreaterThan(wrapper);
+	});
+
+	it('hands each value to the scraper under the key the scraper wrote', async () => {
+		/*
+		 * `ctx.settings` answers one id at a time, by the manifest's id, and
+		 * these scrapers read one object under their own arbitrary keys —
+		 * counted across the corpus as `global[...]` 12 times, `window[...]`
+		 * 8 and `globalThis[...]` 5, never as a bare name. Both halves of that
+		 * mapping are decided here, so both travel into the bundle.
+		 */
+		const source = `
+			const API = 'https://api.example.invalid/v1';
+			async function getStreams() { return []; }
+			async function onSettings() {
+				return [{ type: 'select', key: 'sortBy', label: 'Sort',
+					options: [{ label: 'Q', value: 'quality' }], default: 'quality' }];
+			}
+			module.exports = { getStreams, onSettings };
+		`;
+		const bundle = await nuvioAdapter.convert(listing(), services(source));
+		const entries = await readZip(bundle);
+		const payload = new TextDecoder().decode(
+			entries.find((entry) => entry.name === 'payload/source.js')!.bytes
+		);
+		expect(payload).toContain('"id":"sortby"');
+		expect(payload).toContain('"key":"sortBy"');
+		// Onto the global object, which is the only place they look.
+		expect(payload).toContain('globalThis.SCRAPER_SETTINGS = chosen;');
+	});
+
 	it('declares nothing rather than guessing when the schema does not parse', async () => {
 		const source = `
 			async function getStreams() { return []; }

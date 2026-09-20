@@ -291,6 +291,8 @@ export const nuvioAdapter: ForeignAdapter = {
 		 */
 		const hosts = [...new Set(hostsInSource(script))].sort();
 
+		const settings = declaredSettings(script);
+
 		return packageBundle({
 			id: listing.id,
 			name: listing.name,
@@ -302,8 +304,15 @@ export const nuvioAdapter: ForeignAdapter = {
 			author: listing.author,
 			hosts,
 			origin,
-			entrypointSource: nuvioEntrypoint({ pluginId: listing.id, script }),
-			settings: declaredSettings(script)
+			entrypointSource: nuvioEntrypoint({
+				pluginId: listing.id,
+				script,
+				// The same list the manifest carries, so the bundle reads each
+				// value by the id the host stored it under and hands it to the
+				// scraper under the key the scraper wrote.
+				settings: settings.map((one) => ({ id: one.id, key: one.key ?? one.id, type: one.type }))
+			}),
+			settings
 		});
 	}
 };
