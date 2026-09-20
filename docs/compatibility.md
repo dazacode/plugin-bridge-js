@@ -265,25 +265,52 @@ describe _translation_ or describe one translator.
 ### A third, measured as a no (2026-09-19)
 
 A second JavaScript ecosystem — one file per extension, a host-supplied base
-class, and a loader this harness reproduced verbatim — measured **12 verified
-playable of 101 video extensions**. It is not worth an adapter, and the reason
-is in the third column rather than the first two:
+class, and a loader this harness reproduced verbatim — measured **16 verified
+playable of 101 video extensions**. It is still not worth an adapter, and the
+reason is in the third column rather than the first two:
 
 |                                         |          |
 | --------------------------------------- | -------- |
 | population                              | 101      |
-| verified playable                       | 12 (12%) |
-| — adult-content sources                 | 5        |
-| — Chinese bulk-resource sites           | 6        |
+| verified playable                       | 16 (16%) |
+| — adult-content sources                 | 6        |
+| — Chinese bulk-resource sites           | 7        |
+| — English vintage-cartoon archives      | 2        |
 | — one Punjabi film source               | 1        |
-| **relevant to this client's catalogue** | **0**    |
+| **relevant to this client's catalogue** | **~2**   |
 
-Not one is an anime source and not one is English-language, against a client
-whose catalogue is anime and live-action addressed by AniList and TMDB ids.
-The remaining 89 are ordinary upstream rot — 30 threw on site drift, 10 have
-dead DNS, 8 searched and found nothing — and **none is a demonstrated gap in
-this software**. Cheap to adapt and worth nothing, which is a result rather
-than a disappointment.
+None is an anime source, and the two English ones are archives of vintage
+cartoons rather than the anime and live-action this client addresses by
+AniList and TMDB ids. The remaining 85 are ordinary upstream rot — 31 threw on
+site drift, 12 have dead DNS, 8 searched and found nothing — and **none is a
+demonstrated gap in this software**. Cheap to adapt and worth close to
+nothing, which is a result rather than a disappointment.
+
+> **Superseded.** An earlier run of this ecosystem reported **12 of 101** with
+> the claims _"not one is English-language"_ and _"relevant: 0"_. Both are
+> withdrawn. That harness supplied two of the three scripts the host injects
+> ahead of every extension, and the third (`md5`) was missing; the corrected
+> run has no harness signature in any row. The conclusion survives the
+> correction and the sentences did not — the honest statement is that the
+> demonstrated overlap with this client's catalogue is very small, not that it
+> is empty.
+
+### One source, two ecosystems
+
+`topcartoons` came back **playable through this ecosystem and through a
+second, unrelated one** on the same day — the first observed cross-ecosystem
+overlap, and a caution about every count on this page:
+
+> **Ecosystem yield is not unique-provider yield.** Five ecosystems exposing
+> the same ten sites are not fifty sources. Per-ecosystem playability is still
+> the right number for deciding whether to write an adapter, because that is a
+> question about one adapter's return. It is the wrong number for describing
+> how much a viewer gains, and the two get conflated the moment they are added
+> together.
+
+One observation is not a deduplication problem, and nothing here builds one.
+It is recorded so that a future report which does add ecosystems together
+knows to establish provider identity first.
 
 `compatibility-sora.md` has the second pass in full. Two things from it belong
 here rather than there, because they apply to any future measurement:
