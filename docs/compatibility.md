@@ -97,6 +97,44 @@ So: before a conversion percentage is reported, state which of those three
 file sets produced it. A histogram from an incomplete environment is not a
 weaker version of the real one; it points somewhere else entirely.
 
+### The same rule pointing the other way
+
+Withholding is the half that is easy to look for. A harness that **supplies
+what the runtime does not** manufactures successes exactly as readily, and it
+is harder to notice because the result looks like good news.
+
+Three shapes of it, all measured on live ecosystems:
+
+- **A permissive module resolver.** One ecosystem's scrapers run inside React
+  Native, whose own guide says to avoid Node modules. A harness that answered
+  `require('assert')`, `require('zlib')` and `require('net')` through Node's
+  real resolver let bundled polyfill paths execute that the shipping sandbox
+  refuses. `require` there must serve the modules the contract names and throw
+  on the rest — and the throw is its own verdict class, not a failure of the
+  extension.
+- **Globals the host does not define.** The mirror of the same mistake: that
+  harness also withheld `window`, which React Native aliases to `global`, and
+  scored a source as a translator gap for saying so. Model the host's declared
+  surface — both what it has and what it lacks — rather than defining
+  everything a file mentions or nothing it does.
+- **A bootstrap that shadows its own fix.** A context can be given a faithful
+  implementation and then have a `var` in its own preamble overwrite it. Two
+  providers read as broken through three consecutive runs for that reason, and
+  the second was found only because the first was fixed. When a global is
+  supplied, assert it is the supplied one.
+
+The general form, which covers both halves:
+
+> **The harness must model the runtime's boundary, not approximate its
+> conveniences.** Every global, module and API it offers or refuses is part of
+> the measurement, and a difference in either direction is a finding about the
+> harness rather than about the software.
+
+The cheapest way to hold it: before reporting, scan the result rows for the
+harness's own signatures — `is not defined`, `is not a function`,
+`Cannot find module`, a blank URL — and treat any of them as a measurement
+that has not finished.
+
 ### Probe the path the tool exercises, not the site's front page
 
 The rule that has cost the most time to relearn. When triaging why a listing
