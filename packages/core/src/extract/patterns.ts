@@ -510,6 +510,405 @@ export function unpackDeanEdwards(source: string): string | null {
 }
 
 /* -------------------------------------------------------------------------
+ * 1b. The string-array obfuscator
+ * ---------------------------------------------------------------------- */
+
+/**
+ * Ceiling on how many shifts a rotation is tried before it is abandoned.
+ *
+ * The real count is bounded by the dictionary's length, and a dictionary long
+ * enough to exceed this is one whose checksum is never going to agree anyway.
+ */
+const MAX_ROTATIONS = 4096;
+
+/** Shortest array taken for a dictionary rather than an ordinary literal. */
+const MIN_DICTIONARY = 8;
+
+/** Ceiling on how many call sites are rewritten in one input. */
+const MAX_SUBSTITUTIONS = 100_000;
+
+/**
+ * A radix-64 alphabet written out in full, as this obfuscator's decoder does.
+ *
+ * Matched by *shape* rather than compared against a constant, because the
+ * alphabet is a property of the build: the common one puts lowercase first,
+ * which is not the standard order, and decoding with the wrong table does not
+ * fail — it returns a different string of the same length. That is the whole
+ * reason this is read from the source instead of assumed.
+ */
+const RADIX_64_ALPHABET = /['"]([A-Za-z0-9+/=]{65})['"]/;
+
+/**
+ * The text of the balanced `{...}` starting at or after `from`.
+ *
+ * String literals are skipped rather than scanned, because a brace inside one
+ * is text and counting it closes the block early — which then reads as a
+ * function whose body is a prefix of itself.
+ */
+function balancedBraces(text: string, from: number): { body: string; end: number } | null {
+	const open = text.indexOf('{', from);
+	if (open < 0) return null;
+
+	let depth = 0;
+	for (let i = open; i < text.length; i++) {
+		const c = text.charAt(i);
+		if (c === '{') depth++;
+		else if (c === '}') {
+			depth--;
+			if (depth === 0) return { body: text.slice(open + 1, i), end: i };
+		} else if (c === '"' || c === "'" || c === '`') {
+			i++;
+			while (i < text.length && text.charAt(i) !== c) {
+				if (text.charAt(i) === '\\') i++;
+				i++;
+			}
+		}
+	}
+	return null;
+}
+
+/** A hex or decimal integer, as this obfuscator writes them. */
+function readInteger(text: string): number | null {
+	const value = /^(?:0[xX][0-9a-fA-F]+|\d+)$/.test(text) ? Number(text) : Number.NaN;
+	return Number.isFinite(value) ? value : null;
+}
+
+/**
+ * The dictionary: a zero-argument function whose whole body is one array of
+ * strings, which it then caches by reassigning its own name.
+ *
+ * Found by shape rather than by name, because every identifier in this output
+ * is a fresh hash. The array is read as *data* — the quotes, the `\x` escapes
+ * and the ordering are all there is to it.
+ */
+function readDictionary(source: string): { name: string; items: string[] } | null {
+	const declaration = /function\s+(_0x[0-9a-fA-F]+)\s*\(\s*\)\s*\{/g;
+	for (let found = declaration.exec(source); found !== null; found = declaration.exec(source)) {
+		const body = balancedBraces(source, found.index + found[0].length - 1);
+		if (body === null) continue;
+
+		const literal = /=\s*\[([\s\S]*?)\]\s*;/.exec(body.body);
+		if (literal === null) continue;
+
+		const items: string[] = [];
+		const entry = /'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)"/g;
+		for (let one = entry.exec(literal[1]); one !== null; one = entry.exec(literal[1])) {
+			items.push(decodeJsUnicodeEscapes(one[1] === undefined ? (one[2] ?? '') : one[1]));
+			if (items.length > MAX_NODES) return null;
+		}
+		if (items.length >= MIN_DICTIONARY) return { name: found[1], items };
+	}
+	return null;
+}
+
+/**
+ * The decoder: the function that reads the dictionary by index.
+ *
+ * `offset` is the constant subtracted from every index, so that the numbers at
+ * the call sites do not start at zero. `alphabet` is the radix-64 table the
+ * entries are encoded with, taken from the decoder's own body, or `null` when
+ * this build stored them as plain text.
+ */
+function readDecoder(
+	source: string,
+	dictionary: string
+): { name: string; offset: number; alphabet: string | null } | null {
+	const declaration = /function\s+(_0x[0-9a-fA-F]+)\s*\(([^)]*)\)\s*\{/g;
+	for (let found = declaration.exec(source); found !== null; found = declaration.exec(source)) {
+		if (found[1] === dictionary || found[2].trim().length === 0) continue;
+
+		const body = balancedBraces(source, found.index + found[0].length - 1);
+		if (body === null || !body.body.includes(dictionary + '(')) continue;
+
+		const shift = /=\s*\w+\s*-\s*(0[xX][0-9a-fA-F]+|\d+)/.exec(body.body);
+		const offset = shift === null ? 0 : (readInteger(shift[1]) ?? 0);
+		const table = RADIX_64_ALPHABET.exec(body.body);
+		return { name: found[1], offset, alphabet: table === null ? null : table[1] };
+	}
+	return null;
+}
+
+/**
+ * Every name that holds the decoder, following assignment chains.
+ *
+ * A `const` keyword is deliberately *not* required. A minifier writes the
+ * second and later declarators of one statement without one — `const a={…},
+ * b=decode;` — and the decoder alias is very often among those. Requiring the
+ * keyword loses every call made through such an alias, which does not fail:
+ * it silently leaves those strings encoded, and whatever reads the result
+ * afterwards sees a source that simply does not mention them.
+ */
+function decoderNames(source: string, decoder: string): Set<string> {
+	const direct = new Map<string, string>();
+	const assignment = /(_0x[0-9a-fA-F]+)\s*=\s*(_0x[0-9a-fA-F]+)\s*[;,)]/g;
+	for (let one = assignment.exec(source); one !== null; one = assignment.exec(source)) {
+		direct.set(one[1], one[2]);
+	}
+
+	const names = new Set<string>([decoder]);
+	for (let grew = true; grew;) {
+		grew = false;
+		direct.forEach((to, from) => {
+			if (names.has(to) && !names.has(from)) {
+				names.add(from);
+				grew = true;
+			}
+		});
+	}
+	return names;
+}
+
+/**
+ * `{ _0xaa: 0x91, … }` tables, flattened to `owner.key → index`.
+ *
+ * The obfuscator hoists most of its indices into one of these per function and
+ * writes the call sites as `decode(table.key)`. A reader that only understands
+ * a literal argument therefore misses the majority of them — and, worse, misses
+ * them inside the rotation checksum, where the consequence is not a few stray
+ * strings but a rotation that never converges at all.
+ */
+function numericTables(source: string): Map<string, number> {
+	const tables = new Map<string, number>();
+	const table = /(_0x[0-9a-fA-F]+)\s*=\s*\{([^{}]*)\}/g;
+	for (let one = table.exec(source); one !== null; one = table.exec(source)) {
+		const field = /(_0x[0-9a-fA-F]+)\s*:\s*(0[xX][0-9a-fA-F]+|\d+)/g;
+		for (let f = field.exec(one[2]); f !== null; f = field.exec(one[2])) {
+			const at = readInteger(f[2]);
+			if (at !== null) tables.set(one[1] + '.' + f[1], at);
+		}
+	}
+	return tables;
+}
+
+/**
+ * Radix-64 over a table read from the source, decoded as UTF-8.
+ *
+ * `base64Decode` is deliberately not reused: it is correct for the standard
+ * alphabet and this one is not standard, and the difference shows up as a
+ * decode that succeeds and answers wrongly rather than one that reports a
+ * problem. Padding ends the data; a character outside the table is skipped,
+ * which is what the decoder being imitated does.
+ */
+function decodeRadix64(value: string, alphabet: string): string {
+	const bytes: number[] = [];
+	let accumulator = 0;
+	let bits = 0;
+
+	for (let i = 0; i < value.length; i++) {
+		const digit = alphabet.indexOf(value.charAt(i));
+		if (digit < 0) continue;
+		if (digit === 64) break;
+		accumulator = (accumulator << 6) | digit;
+		bits += 6;
+		if (bits >= 8) {
+			bits -= 8;
+			bytes.push((accumulator >> bits) & 0xff);
+		}
+	}
+
+	return utf8Decode(bytes);
+}
+
+/**
+ * The rotation checksum, evaluated as arithmetic over data.
+ *
+ * Total and non-recursive in its inputs: `+ - * / ( )` and `parseInt(d(i))`,
+ * nothing else. Anything it does not recognise ends the parse and returns
+ * `null`, which abandons the rotation rather than guessing at it.
+ *
+ * This exists because the dictionary cannot be read until it has been rotated,
+ * and the rotation is defined by a checksum over the dictionary's own entries.
+ * The obfuscator resolves that circularity by *running* a loop. Running it is
+ * exactly what this file does not do, so the expression is parsed instead and
+ * the loop is driven from outside.
+ */
+function evaluateChecksum(
+	expression: string,
+	read: (index: number) => number,
+	tables: Map<string, number>
+): number | null {
+	let at = 0;
+	const skip = (): void => {
+		while (at < expression.length && /\s/.test(expression.charAt(at))) at++;
+	};
+
+	const primary = (): number | null => {
+		skip();
+		if (expression.charAt(at) === '-') {
+			at++;
+			const value = primary();
+			return value === null ? null : -value;
+		}
+		if (expression.charAt(at) === '+') {
+			at++;
+			return primary();
+		}
+		if (expression.charAt(at) === '(') {
+			at++;
+			const value = sum();
+			skip();
+			if (expression.charAt(at) !== ')') return null;
+			at++;
+			return value;
+		}
+
+		const rest = expression.slice(at);
+		const literal = /^parseInt\(\s*[A-Za-z_$][\w$]*\(\s*(0[xX][0-9a-fA-F]+|\d+)\s*\)\s*\)/.exec(
+			rest
+		);
+		if (literal !== null) {
+			at += literal[0].length;
+			const index = readInteger(literal[1]);
+			return index === null ? null : read(index);
+		}
+		const indirect =
+			/^parseInt\(\s*[A-Za-z_$][\w$]*\(\s*(_0x[0-9a-fA-F]+)\.(_0x[0-9a-fA-F]+)\s*\)\s*\)/.exec(
+				rest
+			);
+		if (indirect !== null) {
+			const index = tables.get(indirect[1] + '.' + indirect[2]);
+			if (index === undefined) return null;
+			at += indirect[0].length;
+			return read(index);
+		}
+		const number = /^(?:0[xX][0-9a-fA-F]+|\d+(?:\.\d+)?)/.exec(rest);
+		if (number !== null) {
+			at += number[0].length;
+			return Number(number[0]);
+		}
+		return null;
+	};
+
+	const product = (): number | null => {
+		let left = primary();
+		if (left === null) return null;
+		for (;;) {
+			skip();
+			const operator = expression.charAt(at);
+			if (operator !== '*' && operator !== '/') return left;
+			at++;
+			const right = primary();
+			if (right === null) return null;
+			left = operator === '*' ? left * right : left / right;
+		}
+	};
+
+	const sum = (): number | null => {
+		let left = product();
+		if (left === null) return null;
+		for (;;) {
+			skip();
+			const operator = expression.charAt(at);
+			if (operator !== '+' && operator !== '-') return left;
+			at++;
+			const right = product();
+			if (right === null) return null;
+			left = operator === '+' ? left + right : left - right;
+		}
+	};
+
+	return sum();
+}
+
+/**
+ * Rewrite a string-array-obfuscated source so its strings are readable.
+ *
+ * The scheme: every string literal is moved into one array, each call site
+ * becomes `decode(index)`, and the array is shifted at load until a checksum
+ * over a few of its own entries equals a constant. It is the default output of
+ * a widely used obfuscator, so this is a property of the *tool*, not of anyone
+ * who ran it, and it is worth defeating once here rather than per ecosystem.
+ *
+ * Nothing is executed. The dictionary and the index offset are read as data,
+ * the radix-64 layer is `base64Decode`, and the rotation is driven from outside
+ * by parsing its checksum. Returns `null` when the input is not in this form,
+ * when the rotation does not converge within its bound, or when it is too large
+ * to look at.
+ *
+ * ## Why a caller should care
+ *
+ * Because *everything* a static reader wants is inside that array: the hosts a
+ * source reaches, the settings it declares, the endpoints it calls. A reader
+ * that runs before this one does not see a smaller set of them — it very
+ * often sees none, and reports a source that names nothing as a source that
+ * needs nothing.
+ */
+export function unpackStringArray(source: string): string | null {
+	if (typeof source !== 'string' || source.length === 0 || source.length > MAX_INPUT) return null;
+
+	const dictionary = readDictionary(source);
+	if (dictionary === null) return null;
+
+	const decoder = readDecoder(source, dictionary.name);
+	if (decoder === null) return null;
+
+	const items = dictionary.items.slice();
+	let cache = new Map<number, string>();
+	const decode = (index: number): string => {
+		const at = index - decoder.offset;
+		if (at < 0 || at >= items.length) return '';
+		const hit = cache.get(at);
+		if (hit !== undefined) return hit;
+		const value =
+			decoder.alphabet === null ? items[at] : decodeRadix64(items[at], decoder.alphabet);
+		cache.set(at, value);
+		return value;
+	};
+
+	const tables = numericTables(source);
+
+	// The rotation, when there is one. `}(dictionary, target))` is the call
+	// that closes the self-checking loop, and the `const … = -parseInt(…` just
+	// above it is the checksum whose value that target is.
+	const closing = new RegExp(
+		'\\}\\s*\\(\\s*' + dictionary.name + '\\s*,\\s*(0[xX][0-9a-fA-F]+|\\d+)\\s*\\)\\s*\\)'
+	);
+	const rotation = closing.exec(source);
+	if (rotation !== null) {
+		const target = readInteger(rotation[1]);
+		const checksum =
+			/(?:const|let|var)\s+_0x[0-9a-fA-F]+\s*=\s*(-?\s*parseInt[\s\S]*?);\s*if\s*\(/.exec(source);
+		if (target !== null && checksum !== null) {
+			let shifted = 0;
+			for (; shifted < MAX_ROTATIONS; shifted++) {
+				cache = new Map<number, string>();
+				const value = evaluateChecksum(checksum[1], (i) => parseInt(decode(i), 10), tables);
+				if (value === target) break;
+				const first = items.shift();
+				if (first === undefined) return null;
+				items.push(first);
+			}
+			if (shifted >= MAX_ROTATIONS) return null;
+			cache = new Map<number, string>();
+		}
+	}
+
+	const names = decoderNames(source, decoder.name);
+	const group: string[] = [];
+	names.forEach((one) => group.push(one));
+	const alternation = group.join('|');
+
+	let substitutions = 0;
+	const replaceCall = (whole: string, index: number | undefined): string => {
+		if (index === undefined || substitutions >= MAX_SUBSTITUTIONS) return whole;
+		const value = decode(index);
+		if (value === '') return whole;
+		substitutions++;
+		return JSON.stringify(value);
+	};
+
+	let out = source.replace(
+		new RegExp('(?:' + alternation + ')\\((0[xX][0-9a-fA-F]+|\\d+)\\)', 'g'),
+		(whole, digits: string) => replaceCall(whole, readInteger(digits) ?? undefined)
+	);
+	out = out.replace(
+		new RegExp('(?:' + alternation + ')\\((_0x[0-9a-fA-F]+)\\.(_0x[0-9a-fA-F]+)\\)', 'g'),
+		(whole, owner: string, key: string) => replaceCall(whole, tables.get(owner + '.' + key))
+	);
+	return out;
+}
+
+/* -------------------------------------------------------------------------
  * 2. Numeric character escapes
  * ---------------------------------------------------------------------- */
 

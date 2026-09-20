@@ -26,7 +26,8 @@ import {
 	findManifestUrls,
 	parseJsObjectLiteral,
 	parsePlayerSources,
-	unpackDeanEdwards
+	unpackDeanEdwards,
+	unpackStringArray
 } from './patterns';
 
 /* -------------------------------------------------------------------------
@@ -229,6 +230,181 @@ describe('unpackDeanEdwards', () => {
 	it('survives non-string input', () => {
 		expect(unpackDeanEdwards(null as unknown as string)).toBeNull();
 		expect(unpackDeanEdwards(42 as unknown as string)).toBeNull();
+	});
+});
+
+/* -------------------------------------------------------------------------
+ * unpackStringArray
+ *
+ * The fixtures are built the way the obfuscator builds its output, so that a
+ * test failure means the unpacker stopped understanding the scheme rather than
+ * that a hand-written sample drifted.
+ * ---------------------------------------------------------------------- */
+
+/** The alphabet the common build uses: lowercase first, which is not standard. */
+const LOWER_FIRST = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/=';
+
+/** Radix-64 over an arbitrary table — the inverse of what the unpacker does. */
+function encodeWith(value: string, alphabet: string): string {
+	const bytes: number[] = [];
+	for (let i = 0; i < value.length; i++) {
+		const code = value.charCodeAt(i);
+		if (code < 0x80) bytes.push(code);
+		else if (code < 0x800) bytes.push(0xc0 | (code >> 6), 0x80 | (code & 0x3f));
+		else bytes.push(0xe0 | (code >> 12), 0x80 | ((code >> 6) & 0x3f), 0x80 | (code & 0x3f));
+	}
+	let out = '';
+	for (let i = 0; i < bytes.length; i += 3) {
+		const a = bytes[i];
+		const b = i + 1 < bytes.length ? bytes[i + 1] : -1;
+		const c = i + 2 < bytes.length ? bytes[i + 2] : -1;
+		out += alphabet.charAt(a >> 2);
+		out += alphabet.charAt(((a & 3) << 4) | (b < 0 ? 0 : b >> 4));
+		out += b < 0 ? '=' : alphabet.charAt(((b & 15) << 2) | (c < 0 ? 0 : c >> 6));
+		out += c < 0 ? '=' : alphabet.charAt(c & 63);
+	}
+	return out;
+}
+
+interface ObfuscatorOptions {
+	/** How many times the dictionary is pre-rotated, which the loop must undo. */
+	readonly rotations?: number;
+	/** Write the checksum's indices through a table, as most builds do. */
+	readonly indirectChecksum?: boolean;
+	/** Declare the decoder alias with no keyword, as a minifier does. */
+	readonly aliasWithoutKeyword?: boolean;
+	/** Store entries as plain text instead of encoding them. */
+	readonly plainText?: boolean;
+	/** The radix-64 table to encode with. */
+	readonly alphabet?: string;
+}
+
+/**
+ * A source in the string-array scheme, carrying `strings` at `offset`.
+ *
+ * Every identifier is `_0x` followed by hex, because that is what the tool
+ * emits and what the unpacker matches on. A fixture with readable names is
+ * correctly ignored, which makes it a test of nothing.
+ *
+ * The two entries the checksum reads are numeric, so the target is their sum
+ * and holds for exactly one rotation of the dictionary.
+ */
+function obfuscated(strings: readonly string[], options: ObfuscatorOptions = {}): string {
+	const alphabet = options.alphabet ?? LOWER_FIRST;
+	const offset = 0x64;
+	// Padded past the minimum a dictionary must reach to be taken for one, so
+	// that a fixture carrying a single address is still shaped like real output.
+	const filler: string[] = [];
+	while (2 + strings.length + filler.length < 10) filler.push('pad' + String(filler.length));
+	const entries = ['111', '222', ...strings, ...filler];
+	const stored = entries.map((one) =>
+		options.plainText === true ? one : encodeWith(one, alphabet)
+	);
+
+	// Pre-rotate backwards, so that shifting forwards restores the order.
+	for (let i = 0; i < (options.rotations ?? 0); i++) stored.unshift(stored.pop() as string);
+
+	const literal = stored.map((one) => "'" + one + "'").join(',');
+	const decoder = options.plainText === true ? '' : "const _0xa1c3='" + alphabet + "';";
+	const first = options.indirectChecksum === true ? '_0x9c0d._0xe1f2' : '0x64';
+	const second = options.indirectChecksum === true ? '_0x9c0d._0xa3b4' : '0x65';
+	const table =
+		options.indirectChecksum === true ? 'const _0x9c0d={_0xe1f2:0x64,_0xa3b4:0x65};' : '';
+	const alias =
+		options.aliasWithoutKeyword === true
+			? 'const _0xf5a6={_0xc7d8:0x1},_0xb2d4=_0xe3f4;'
+			: 'const _0xb2d4=_0xe3f4;';
+
+	return (
+		'function _0x1a2b(){const _0x3c4d=[' +
+		literal +
+		'];_0x1a2b=function(){return _0x3c4d;};return _0x1a2b();}' +
+		'(function(_0x5e6f,_0x7a8b){' +
+		table +
+		'const _0xc5d6=_0xe3f4;const _0xe7f8=_0x5e6f();while(!![]){try{' +
+		'const _0xa9b0=parseInt(_0xc5d6(' +
+		first +
+		'))/0x1+parseInt(_0xc5d6(' +
+		second +
+		'))/0x1;' +
+		'if(_0xa9b0===_0x7a8b)break;else _0xe7f8["push"](_0xe7f8["shift"]());' +
+		'}catch(_0xc1d2){_0xe7f8["push"](_0xe7f8["shift"]());}}}(_0x1a2b,0x14d));' +
+		'function _0xe3f4(_0xa5b6,_0xc7d8){_0xa5b6=_0xa5b6-' +
+		String(offset) +
+		';const _0xe9f0=_0x1a2b();' +
+		decoder +
+		'return _0xe9f0[_0xa5b6];}' +
+		alias +
+		'const value=_0xb2d4(0x66);'
+	);
+}
+
+describe('unpackStringArray', () => {
+	it('declines anything that is not in this form', () => {
+		expect(unpackStringArray('const a = 1;')).toBeNull();
+		expect(unpackStringArray('')).toBeNull();
+	});
+
+	it('reads the dictionary and rewrites the call sites', () => {
+		const out = unpackStringArray(obfuscated(['https://example.test/api']));
+		expect(out).not.toBeNull();
+		expect(out).toContain('https://example.test/api');
+	});
+
+	it('undoes the rotation the dictionary was stored under', () => {
+		for (const rotations of [0, 1, 3, 7]) {
+			const out = unpackStringArray(obfuscated(['https://rotated.test/x'], { rotations }));
+			expect(out, `rotated ${rotations}`).toContain('https://rotated.test/x');
+		}
+	});
+
+	/*
+	 * Each of the three below was a real defect, and each one *succeeded*: the
+	 * unpacker returned a source that looked unpacked and silently withheld
+	 * addresses. A caller deriving a request allowlist from that output
+	 * produces a plugin refused at its first request, which reads as a broken
+	 * source rather than as an under-declaration here.
+	 */
+
+	it('resolves indirect indices inside the rotation checksum', () => {
+		// Measured: without this the checksum never evaluates, the rotation
+		// never converges, and 30 of 60 real sources unpacked to nothing.
+		const out = unpackStringArray(
+			obfuscated(['https://indirect.test/v1'], { rotations: 2, indirectChecksum: true })
+		);
+		expect(out).not.toBeNull();
+		expect(out).toContain('https://indirect.test/v1');
+	});
+
+	it('follows a decoder alias declared without a keyword', () => {
+		// `const a={…},read=decode;` — the second declarator carries no `const`,
+		// and requiring one loses every call made through `read`.
+		const out = unpackStringArray(
+			obfuscated(['https://aliased.test/v2'], { aliasWithoutKeyword: true })
+		);
+		expect(out).not.toBeNull();
+		expect(out).toContain('https://aliased.test/v2');
+	});
+
+	it('decodes with the alphabet the source declares, not the standard one', () => {
+		// The dangerous one. Decoding with the wrong table does not throw and
+		// does not return nothing: it returns a different string of the same
+		// length. Both alphabets below are valid; only the source says which.
+		const standard = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=';
+		for (const alphabet of [LOWER_FIRST, standard]) {
+			const out = unpackStringArray(obfuscated(['https://alphabet.test/z'], { alphabet }));
+			expect(out, alphabet.slice(0, 6)).toContain('https://alphabet.test/z');
+		}
+	});
+
+	it('reads a build that stored its entries as plain text', () => {
+		const out = unpackStringArray(obfuscated(['https://plain.test/p'], { plainText: true }));
+		expect(out).toContain('https://plain.test/p');
+	});
+
+	it('gives up rather than spinning when the checksum cannot be satisfied', () => {
+		const broken = obfuscated(['https://never.test']).replace('0x14d', '0x7fffffff');
+		expect(unpackStringArray(broken)).toBeNull();
 	});
 });
 
