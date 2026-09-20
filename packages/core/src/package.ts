@@ -145,15 +145,7 @@ export interface BundleInput {
 	readonly version: string;
 	readonly author: string;
 	readonly hosts: readonly string[];
-	/**
-	 * Where this was translated from, for a bundle that was translated.
-	 *
-	 * Absent for a plugin written against the ABI in the first place. That is
-	 * not a special case bolted on: a native plugin has no foreign id, no
-	 * upstream version and no artifact url, and inventing one would put a
-	 * provenance claim in `signature.json` that nothing backs.
-	 */
-	readonly origin?: ForeignOrigin;
+	readonly origin: ForeignOrigin;
 	readonly entrypointSource: string;
 	/**
 	 * What the source declares it can be configured with.
@@ -294,9 +286,7 @@ export function convertedManifest(input: BundleInput): Record<string, unknown> {
 		// filler.
 		description: (input.description.length > 0
 			? input.description
-			: input.origin === undefined
-				? 'A Yorozo source plugin.'
-				: `Converted from a ${input.origin.format} extension.`
+			: `Converted from a ${input.origin.format} extension.`
 		).slice(0, 280),
 		version: toSemver(input.version),
 		author: {
@@ -394,28 +384,21 @@ export async function packageBundle(input: BundleInput): Promise<Uint8Array> {
 			`${JSON.stringify(
 				{
 					signed: false,
-					// Omitted entirely for a plugin nobody converted. A
-					// `convertedBy` block naming no format is a provenance claim
-					// with nothing behind it, which is worse than its absence.
-					...(input.origin === undefined
-						? {}
-						: {
-								convertedBy: {
-									converter: 'yorozo-foreign',
-									converterVersion: CONVERTER_VERSION,
-									format: input.origin.format,
-									foreignId: input.origin.foreignId,
-									foreignVersion: input.origin.foreignVersion,
-									artifactUrl: input.origin.artifactUrl,
-									// Stated beside the conversion rather than only in the
-									// manifest, because this file is what a reviewer reads
-									// to answer "where did this come from and whose is it".
-									...(httpUrl(input.repository) === null
-										? {}
-										: { sourceRepository: httpUrl(input.repository) }),
-									...(spdx(input.license) === null ? {} : { upstreamLicense: spdx(input.license) })
-								}
-							})
+					convertedBy: {
+						converter: 'yorozo-foreign',
+						converterVersion: CONVERTER_VERSION,
+						format: input.origin.format,
+						foreignId: input.origin.foreignId,
+						foreignVersion: input.origin.foreignVersion,
+						artifactUrl: input.origin.artifactUrl,
+						// Stated beside the conversion rather than only in the
+						// manifest, because this file is what a reviewer reads
+						// to answer "where did this come from and whose is it".
+						...(httpUrl(input.repository) === null
+							? {}
+							: { sourceRepository: httpUrl(input.repository) }),
+						...(spdx(input.license) === null ? {} : { upstreamLicense: spdx(input.license) })
+					}
 				},
 				null,
 				2

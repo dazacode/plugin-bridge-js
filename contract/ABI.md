@@ -26,7 +26,7 @@ _what episodes?_, _how do I play one?_ — and the third answer may include a
 A bundle is one ES2020 module with a default export.
 
 ```ts
-import { defineSource } from '@yorozo/plugin-sdk';
+import { defineSource } from '@kuro/plugin-sdk';
 
 export default defineSource({
   id: 'com.example.plugins.example',   // must equal manifest.id
@@ -117,8 +117,8 @@ interface SourceContext {
 
 ```ts
 interface Logger {
-	debug(message: string): void;
-	warn(message: string): void;
+	debug(message: string, data?: Readonly<Record<string, unknown>>): void;
+	warn(message: string, data?: Readonly<Record<string, unknown>>): void;
 }
 ```
 
@@ -562,8 +562,8 @@ capability decision rather than an engine one (`AGENTS.md` rule 13). Lookbehind
 was the one whose only justification was the engine table, which is why it is
 the only one repealed here.
 
-`plugin-bridge test <dir>` runs a plugin in that engine class, so this list is
-enforced rather than remembered.
+`kuro test <plugin>` runs a plugin's own suite against its recorded traffic,
+so this list is enforced rather than remembered.
 
 ---
 

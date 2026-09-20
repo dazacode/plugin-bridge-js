@@ -23,12 +23,6 @@ const COMMANDS = `plugin-bridge — adapt a foreign plugin into a portable JavaS
   inspect <dir|url>            what it declares, and what this build refuses
   catalogue <index-url>        every listing in a repository, scored
   validate <bundle.zip>        read a bundle back and check its digests
-
-Writing a plugin of your own:
-
-  init <dir>                   scaffold one you can run in about a minute
-  test <dir>                   build it, run it, and show what it answered
-  pack <dir>                   write the .yorozoplugin
   generate                     rebuild the generated runtime sources
   boundary                     assert the runtime/host boundary holds
 
@@ -73,12 +67,6 @@ async function main(argv: string[]): Promise<number> {
 		case 'boundary': {
 			const { runBoundary } = await import('./boundary');
 			return await runBoundary(args);
-		}
-		case 'init':
-		case 'test':
-		case 'pack': {
-			const { runAuthor } = await import('./author');
-			return await runAuthor(command, args);
 		}
 		case 'convert':
 		case 'check':

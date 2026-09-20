@@ -16,29 +16,16 @@ other five adapters convert an artifact and are correspondingly thin.
 
 It is a **translator**, not an emulator. Nothing here pretends to be Android.
 
-## Two ways in
+## Writing a plugin, rather than translating one
 
-**Writing a plugin?** → **[docs/plugins](docs/plugins/README.md)**
+This repository is the **compatibility** half: it adapts plugins written for
+other ecosystems into the Common Plugin ABI, and it is the reference
+implementation of that ABI.
 
-You do not need any of the above. A plugin is one module answering three
-questions, and the adapters are evidence that the contract is worth targeting
-rather than something you have to learn:
-
-```sh
-plugin-bridge init my-plugin     # scaffold
-plugin-bridge test my-plugin     # build it, run it, see what it answered
-plugin-bridge pack my-plugin     # write the .yorozoplugin
-```
-
-**Translating an ecosystem?** → [docs/adding-an-adapter.md](docs/adding-an-adapter.md)
-
-That is the rest of this README.
-
-```
-foreign extension ──► adapter ──► front-end ──► emit ──► JS bundle
-                                                          │
-                                            sealed sandbox ┴─► host port ─► any surface
-```
+If you want to _write_ a plugin, you want the platform repository instead —
+[dazacode/kuro-plugins](https://github.com/dazacode/kuro-plugins) — which has
+the SDK (`@kuro/plugin-sdk`), the `kuro` CLI, worked plugins and offline tests.
+Nothing in here is a prerequisite for that.
 
 ## What it is for
 
