@@ -1,0 +1,9 @@
+{
+	"name": "@yorozo/plugin-sdk",
+	"version": "0.4.0",
+	"description": "Types and helpers for writing a Yorozo source plugin against the Common Plugin ABI.",
+	"license": "Apache-2.0",
+	"type": "module",
+	"main": "src/index.ts",
+	"types": "src/index.ts"
+}
