@@ -9,7 +9,9 @@ runtime, and that says what a **host** owes it.
 Rule 9 applies. No source is named here, and none may be added.
 
 Versioned by `yorozoPluginApi` in the manifest. This document describes **API
-level 1**.
+level 2**. Level 1 is every section below except §8, and a level-1 plugin is
+unchanged and still loads — §8 only _adds_ two optional methods and the values
+they return.
 
 ---
 
@@ -18,6 +20,10 @@ level 1**.
 A plugin answers three questions in JavaScript — _what shows do you have?_,
 _what episodes?_, _how do I play one?_ — and the third answer may include a
 **declarative byte pipeline** that the host, never the plugin, executes.
+
+At level 2 a plugin that serves **manga** answers a different second and third:
+_what chapters?_ and _what images make up one?_ (§8). The first question is the
+same question, and it is the same method.
 
 ---
 
@@ -37,6 +43,10 @@ export default defineSource({
 
   // optional
   async browse(shelf, page, ctx): Promise<CatalogPage> { … },
+
+  // level 2, and only for a plugin that serves manga (§8)
+  async listChapters(sourceMediaId, ctx): Promise<SourceChapter[]> { … },
+  async readChapter(sourceMediaId, chapter, ctx): Promise<ChapterPages> { … },
 });
 ```
 
@@ -96,6 +106,9 @@ source. Neither field may be assumed present.
   is never persisted.
 - **No lifecycle hooks.** No `onInstall`, no background work. A plugin is a pure
   function of its inputs plus `ctx`.
+- **No second spelling of an episode.** A chapter is not an episode with a
+  different word on it, and §8 adds its own methods rather than overloading
+  `listEpisodes`. What that buys, and what it costs, is argued there.
 
 ---
 
@@ -580,3 +593,134 @@ Checked in this order at load, each with a distinct user-readable reason:
 A plugin declaring an unknown permission is **refused**, not degraded. Silently
 dropping a capability a plugin believes it has is how a plugin ends up making a
 request it thinks is authorised.
+
+---
+
+## 8. Chapters and pages — API level 2
+
+The fourth question, for plugins that serve manga. **Added at the end rather
+than in the middle**: the section numbers above are cited across two
+repositories, and inserting one here would silently repoint every citation at a
+different rule — the same reason `AGENTS.md` retired rules 11 and 12 in place.
+
+### 8.1 Two methods, not a reused one
+
+```ts
+async listChapters(sourceMediaId, ctx): Promise<SourceChapter[]>;
+async readChapter(sourceMediaId, chapter: ChapterTarget, ctx): Promise<ChapterPages>;
+```
+
+`searchCatalog` and `browse` are **unchanged and shared**. Finding a title is the
+same question whatever the title is, it returns a `SourceCatalogEntry` that
+carries no canonical id, and the matching layer binds it exactly as it always
+did (rule 1). Only the two questions _below_ a title differ.
+
+**Why `listEpisodes` is not reused.** It is the tempting answer — a chapter list
+is an ordered list of numbered things, which is what it returns — and it is
+wrong in three places that a reader would then have to undo:
+
+- **Chapter numbers are fractional.** `10.5` is a real chapter, published as
+  such, and it is not "episode 10, part 2".
+- **A chapter has a scanlator, and often several.** Two groups translate the
+  same chapter and both are listed. There is no episode analogue; the nearest
+  thing, a release group, is not modelled and is not addressable.
+- **A volume is not a season.** It is a print artifact that a web chapter list
+  may omit entirely, and half of these sources do.
+
+A source that serves both mediums answers both pairs of questions. Nothing
+prevents one plugin doing so, and nothing requires it.
+
+### 8.2 What they return
+
+```ts
+interface SourceChapter {
+	readonly sourceChapterId: string; // the source's own id, as it minted it
+	readonly number: number; // fractional; 10.5 is a chapter
+	readonly title?: string;
+	readonly volume?: number;
+	readonly scanlator?: string;
+	readonly publishedAt?: string; // ISO 8601, UTC
+}
+
+interface ChapterTarget {
+	readonly number: number; // always present
+	readonly sourceChapterId?: string; // only if the source enumerated
+	readonly scanlator?: string; // only if the viewer picked one
+}
+
+interface ChapterPages {
+	readonly pages: readonly PageImage[];
+	readonly direction?: 'ltr' | 'rtl' | 'vertical';
+}
+
+interface PageImage {
+	readonly index: number; // 0-based, and the order is this field, not the array
+	readonly url: string;
+	readonly headers?: Record<string, string>; // §8.3
+	readonly pipeline?: ImagePipeline; // §8.4 — declared, not yet implemented
+}
+```
+
+`ChapterTarget` is `ResolveTarget`'s shape and is so for `ResolveTarget`'s
+reason: a source that enumerated said where the chapter lives and this client's
+numbering has no standing to correct it, and a source that did not still has to
+be addressable. Neither optional field may be assumed present.
+
+**`index` is the order, not the array position.** A source that yields its pages
+out of order, or that omits one, is common enough that trusting arrival order
+would reorder somebody's book. A host sorts on `index` and says so when the
+sequence has a hole.
+
+**`direction` is a hint the source knows and the viewer overrides.** A
+right-to-left book opened left-to-right is not subtly wrong, it is backwards, and
+the source is the only party that knows which it is. It is optional because most
+sources do not say; absent means the host's own default for that title, never a
+guess made here.
+
+### 8.3 `headers` on a page is the load-bearing field
+
+An image that returns 403 without a `Referer`, on a host whose chapter page
+loaded perfectly, is **the most common failure in this ecosystem** — it is why
+the upstream base class has a separate per-image request hook rather than
+reusing the page request.
+
+So `headers` is on `PageImage` from the first commit, not added after a
+catalogue measurement comes back mysteriously low. This is `StreamPipeline`
+§4.1's lesson — per-request headers must survive to the byte fetch, not just to
+the document that named it — applied to the medium where it bites hardest.
+
+Rule 4 is unaffected and worth restating here, because a page list looks more
+persistable than a stream URL and is not: **`readChapter` runs at read time and
+its output is never stored.** A downloaded chapter stores bytes, not URLs.
+
+### 8.4 `ImagePipeline` is declared and refused
+
+```ts
+type ImagePipeline = never; // no operation exists at level 2
+```
+
+A minority of sources deliver a chapter as an archive, or as tiles that must be
+reassembled, or as text rendered to an image. Each is the same shape as
+`StreamPipeline`: a declarative operation the **host** performs on bytes the
+plugin never touches.
+
+The field is in the type so that adding an operation later is not an ABI break.
+**No operation exists yet, and a conversion that needs one is refused by name
+and counted** — because designing a descrambling vocabulary against sources
+nobody has converted is precisely how the local-HTTP-server cluster got its
+first and wrong answer (`docs/adr/0006-local-http-server.md` §5). The refusal
+count is what will say whether the vocabulary is worth designing.
+
+### 8.5 Compatibility
+
+§7's checks are unchanged. A **level-1 host** meeting a plugin that declares
+`yorozoPluginApi: 2` refuses it at check 1, with the reason it already gives —
+which is the correct outcome, because that host has no reader to show a page in.
+
+A **level-2 host** meeting a level-1 plugin is unchanged: the two methods are
+optional, a plugin that serves video declares neither, and nothing asks it to.
+
+A plugin that declares `listChapters` but not `readChapter`, or the reverse, is
+**refused at load**. Half of a medium is a plugin that lists a book nobody can
+open, and rule 9's sibling principle applies: a conservative refusal beats
+silent wrong behaviour.

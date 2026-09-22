@@ -30,7 +30,8 @@ describe('which mediums this build has somewhere to show', () => {
 		// medium falls all the way through to `null` — installable.
 		expect(refusalFor('sora', 'anime')).toBeNull();
 		expect(refusalFor('sora', 'live-action')).toBeNull();
-		expect(refusalFor('sora', 'manga')).toMatch(/manga source/);
+		// `manga` joined the supported set under ADR-0013.
+		expect(refusalFor('sora', 'manga')).toBeNull();
 		expect(refusalFor('sora', 'novel')).toMatch(/novel source/);
 	});
 
@@ -45,8 +46,16 @@ describe('which mediums this build has somewhere to show', () => {
 		expect(liveAction).not.toMatch(/nowhere to show/);
 	});
 
-	it('still refuses manga and novel listings for the medium, not the format', () => {
-		expect(refusalFor('cloudstream', 'manga')).toMatch(/manga source/);
+	it('still refuses a novel listing for the medium, not the format', () => {
+		// The medium check runs first and is the more specific answer, so this
+		// listing is told it is the wrong medium rather than the wrong format.
 		expect(refusalFor('cloudstream', 'novel')).toMatch(/novel source/);
+	});
+
+	it('refuses a manga listing for its format now that the medium is supported', () => {
+		// The same listing before ADR-0013 was refused for its medium. It is
+		// still refused — this format's artifact has no converter — and the
+		// *reason* moving is the whole point of checking the medium first.
+		expect(refusalFor('cloudstream', 'manga')).toMatch(/compiled Java/);
 	});
 });

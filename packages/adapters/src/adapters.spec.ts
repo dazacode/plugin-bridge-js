@@ -97,23 +97,23 @@ describe('each adapter recognises only its own format', () => {
 describe('Sora', () => {
 	const { body, url } = bodyOf('sora');
 
-	it('keeps the anime module and filters the manga one', () => {
+	it('keeps both modules now that manga is a medium this build shows', () => {
 		const index = adapterFor('sora').parseIndex(body, url);
 
 		expect(index.format).toBe('sora');
-		expect(index.plugins).toHaveLength(1);
-		expect(index.filteredOut).toBe(1);
-		expect(index.plugins[0].name).toBe('Example Anime');
+		expect(index.plugins).toHaveLength(2);
+		expect(index.filteredOut).toBe(0);
+		expect(index.plugins.map((listing) => listing.name)).toContain('Example Anime');
 	});
 
 	it('resolves a relative scriptUrl against the index it came from', () => {
-		// The second module's script is `./comics/script.js`. It is filtered out
-		// of the result, so this asserts through the manga-inclusive path: what
-		// matters is that a relative url never survives as a relative url.
+		// What matters is that a relative url never survives as a relative url.
+		// Both modules are kept now, so both are checked.
 		const index = adapterFor('sora').parseIndex(body, url);
-		expect(index.plugins[0].origin?.artifactUrl).toBe(
-			'https://example.invalid/modules/example/script.js'
-		);
+		expect(index.plugins.map((listing) => listing.origin?.artifactUrl)).toEqual([
+			'https://example.invalid/modules/example/script.js',
+			'https://example.invalid/modules/comics/script.js'
+		]);
 	});
 
 	it('carries everything conversion needs on the listing itself', () => {
@@ -148,12 +148,15 @@ describe('Sora', () => {
 describe('Aniyomi', () => {
 	const { body, url } = bodyOf('aniyomi');
 
-	it('classifies by package, keeping the anime extension only', async () => {
+	it('classifies by package, and keeps both mediums it can show', async () => {
+		// The classification is what is under test and it is unchanged. Before
+		// ADR-0013 the manga row was dropped here; it is now kept, so this
+		// asserts the *classification* rather than the survivor count.
 		const index = await loadForeignIndex(adapterFor('aniyomi'), body, url, siblings('aniyomi'));
 
-		expect(index.plugins).toHaveLength(1);
-		expect(index.filteredOut).toBe(1);
-		expect(index.plugins[0].name).toBe('Example Anime');
+		expect(index.plugins).toHaveLength(2);
+		expect(index.filteredOut).toBe(0);
+		expect(index.plugins.map((listing) => listing.origin?.mediaKind)).toEqual(['anime', 'manga']);
 	});
 
 	it('resolves the artifact into the apk directory beside the index', () => {
@@ -181,7 +184,7 @@ describe('Aniyomi', () => {
 		});
 
 		// Metadata only. A repository that does not publish it is usable.
-		expect(index.plugins).toHaveLength(1);
+		expect(index.plugins).toHaveLength(2);
 		expect(index.signingKey).toBeNull();
 	});
 
@@ -290,7 +293,10 @@ describe('the formats that browse for a product reason', () => {
 		const index = adapterFor('mangayomi').parseIndex(body, url);
 
 		expect(before).toHaveLength(2);
-		expect(index.plugins).toHaveLength(1);
+		// Both are kept now. `itemType` still decides which medium each is, and
+		// that — not the survivor count — is what this test is about.
+		expect(index.plugins).toHaveLength(2);
+		expect(index.plugins.map((listing) => listing.origin?.mediaKind)).toEqual(['anime', 'manga']);
 		expect(index.plugins[0].name).toBe('Example Anime');
 		expect(index.plugins[0].origin?.detail?.['sourceCodeLanguage']).toBe('js');
 	});

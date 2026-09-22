@@ -89,8 +89,8 @@ export type ForeignTier = 'convert' | 'browse-only';
  * categories name the same thing; calling those `manga` to fit an
  * anime/manga/novel taxonomy would put a wrong sentence in front of a viewer.
  * Which mediums this build actually has somewhere to show is
- * `SUPPORTED_MEDIUMS`, not "equals `'anime'`" — `manga` and `novel` remain
- * unsupported and are refused the same way they always were.
+ * `SUPPORTED_MEDIUMS`, not "equals `'anime'`" — and since `ADR-0013` that set
+ * includes `manga`. `novel` remains unsupported and is refused as it was.
  *
  * ## Why this is written out rather than derived from `MediaKind`
  *
@@ -111,7 +111,7 @@ export type ForeignTier = 'convert' | 'browse-only';
  * come off *foreign* index rows, so what a listing may claim is decided by
  * what those ecosystems publish, not by what this client's own model grew,
  * and `SUPPORTED_MEDIUMS` is the one place that has to be told when the
- * domain's supported set changes.
+ * domain's supported set changes. `ADR-0013` is the one time it has been.
  */
 export type ForeignMedium = 'anime' | 'live-action' | 'manga' | 'novel';
 
@@ -123,8 +123,25 @@ export type ForeignMedium = 'anime' | 'live-action' | 'manga' | 'novel';
  * even survive into a browsable list?) both read, so the two cannot disagree
  * — a listing kept by one and refused by the other would be a row that shows
  * up only to explain that it should not have.
+ *
+ * `manga` joined under `ADR-0013`, and covers comics, webtoons, manhwa and
+ * manhua alike: they differ in origin and in reading direction, which is a
+ * property of a title, and in nothing an adapter can see.
+ *
+ * **A medium here is a capability claim, not a taste one.** This set answers
+ * "is there anywhere in this build to show this?" and nothing else. What a
+ * listing *contains* is carried on `origin` and decided by the host —
+ * `FOREIGN.md` §4.3.
+ *
+ * **And a medium is not a reader.** Adding one makes a listing installable and
+ * convertible; the host still has to have somewhere to put the result, which
+ * for this one is `ABI.md` §8.
  */
-export const SUPPORTED_MEDIUMS: ReadonlySet<ForeignMedium> = new Set(['anime', 'live-action']);
+export const SUPPORTED_MEDIUMS: ReadonlySet<ForeignMedium> = new Set([
+	'anime',
+	'live-action',
+	'manga'
+]);
 
 /**
  * Every medium something classified claims, from either shape of the record.

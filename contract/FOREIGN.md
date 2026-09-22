@@ -616,28 +616,46 @@ it, from the same repository at the same ref. A specifier that resolves
 outside that repository is refused — it is a real URL on the same forge, and
 following it would let one listing run code from a repository nobody added.
 
-### 4.3 Unsupported mediums
+### 4.3 Mediums, supported and not
 
-`AGENTS.md` scopes the product to `anime` and `live-action` (movies and drama
-series): no manga, no light novels. This is a per-_listing_ judgement and not
-a per-repository one — one ecosystem's own published catalogue is manga-only
-while third-party catalogues in the same format serve something this build
-does show, so a format may not be written off on the strength of the
-catalogue its authors happen to publish. Listings **none** of whose declared
-mediums (`origin.mediaKinds`, falling back to `origin.mediaKind`) are in
-`SUPPORTED_MEDIUMS` (`formats.ts`) are **filtered out of the browse list** by
-`keepMediums` and cannot be installed; one supported medium among several
-keeps the listing. A repository whose every
-listing was filtered says so explicitly — "this repository lists no
-supported sources" — rather than rendering an empty list, which reads as a
-broken fetch.
+`AGENTS.md` scopes the product to `anime`, `live-action` (movies and drama
+series) and, since `ADR-0013`, **`manga`** — which covers comics, webtoons,
+manhwa and manhua alike, because they differ in origin and reading direction
+rather than in anything an adapter can see. `novel` remains out.
 
-`live-action` is not the same claim as "anime". A listing correctly
-classified as `live-action` still answers to its _format's_ own tier: a
-Cloudstream listing, for instance, is now filtered in rather than dropped,
-and still refuses to install, because that format's artifact is compiled JVM
-bytecode with no converter yet (§4.1) — a fact about the format, unrelated to
-what the listing serves.
+This is a per-_listing_ judgement and not a per-repository one, and that has
+always mattered more than it sounds: one ecosystem's own published catalogue is
+manga-only, so a format may not be written off on the strength of the catalogue
+its authors happen to publish. Under ADR-0013 that same ecosystem stops being an
+argument for the rule and becomes its first beneficiary — its 363 published
+listings were filtered out in their entirety by the clause above this one, and
+114 of them are in a language that needs no translation at all.
+
+Listings **none** of whose declared mediums (`origin.mediaKinds`, falling back
+to `origin.mediaKind`) are in `SUPPORTED_MEDIUMS` (`formats.ts`) are **filtered
+out of the browse list** by `keepMediums` and cannot be installed; one supported
+medium among several keeps the listing. A repository whose every listing was
+filtered says so explicitly — "this repository lists no supported sources" —
+rather than rendering an empty list, which reads as a broken fetch.
+
+`live-action` is not the same claim as "anime", and `manga` is not the same
+claim as either. A listing correctly classified still answers to its _format's_
+own tier: a listing in a format whose artifact is compiled bytecode with no
+converter is now filtered in rather than dropped, and still refuses to
+install — a fact about the format, unrelated to what the listing serves.
+
+**A supported medium is a capability claim, not a taste one.** `keepMediums`
+answers "is there anywhere in this build to show this?" and nothing else. What a
+listing contains is carried, not judged: an adapter that can read its index's
+content rating puts it on `origin` so the browse list can filter without a
+second network request, and the **host** decides what to show by default.
+ADR-0013 §5 is that decision for the medium this section just added.
+
+**A medium is not a reader.** Adding `manga` to `SUPPORTED_MEDIUMS` makes a
+listing installable and convertible; it does not make a page appear. `ABI.md`
+§8 is the other half, and an adapter that converts a manga source against a
+host with no `readChapter` consumer fails §7's fifth check — a declared
+capability with no consumer — which is the failure being asked for.
 
 ### 4.4 A format that is half convertible
 

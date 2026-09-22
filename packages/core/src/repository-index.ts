@@ -73,11 +73,16 @@ export interface RepositoryIndex {
 	 */
 	readonly format: RepositoryFormat;
 	/**
-	 * Listings dropped because they are not anime sources.
+	 * Listings dropped because this build has nowhere to show what they serve.
 	 *
-	 * Counted rather than discarded silently: a repository that lists three
-	 * hundred manga sources and no anime must be able to say so, because an
-	 * empty list reads as a failed fetch.
+	 * Counted rather than discarded silently: a repository none of whose
+	 * listings survive must be able to say so, because an empty list reads as a
+	 * failed fetch.
+	 *
+	 * The example this comment used to give — three hundred manga sources and
+	 * no anime — was a real repository, and under `ADR-0013` it is now three
+	 * hundred listings that are kept. The count survives because `novel` and
+	 * any medium a foreign index may yet claim still land here.
 	 */
 	readonly filteredOut?: number;
 }

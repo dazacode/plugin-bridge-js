@@ -260,9 +260,21 @@ describe('which listings this format offers', () => {
 		await expect(convert(listingOf(0))).rejects.toThrow(/written in Dart/);
 	});
 
-	it('filters a manga listing out of the catalogue entirely', () => {
+	it('keeps a manga listing, which is what this catalogue is made of', () => {
+		// Every listing this format's own catalogue publishes is manga, and
+		// before ADR-0013 the whole of it was filtered out here. A JavaScript
+		// one now survives and installs; the Dart majority still refuses, for
+		// its language rather than for what it serves.
 		const index = mangayomiAdapter.parseIndex(indexBody(1, 0), INDEX_URL);
-		expect(index.plugins).toHaveLength(0);
+		expect(index.plugins).toHaveLength(1);
+		expect(index.filteredOut).toBe(0);
+		expect(listingRefusal(index.plugins[0])).toBeNull();
+	});
+
+	it('still refuses a Dart manga listing for its language, not its medium', () => {
+		const index = mangayomiAdapter.parseIndex(indexBody(0, 0), INDEX_URL);
+		expect(index.plugins).toHaveLength(1);
+		expect(listingRefusal(index.plugins[0])).toMatch(/Dart/);
 	});
 });
 

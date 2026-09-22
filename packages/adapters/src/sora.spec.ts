@@ -81,14 +81,18 @@ describe('classifying a module Sora describes only in free text', () => {
 		expect(plugins[0].origin?.mediaKind).toBe('live-action');
 	});
 
-	it('still keeps a manga catalogue out of the browse list', () => {
+	it('now keeps a manga catalogue, classified from the same free text', () => {
+		// The classification is unchanged; what changed under ADR-0013 is that
+		// `manga` is a medium this build can show. This module is kept for the
+		// same reason it used to be dropped — the word it filed itself under.
 		const body = JSON.stringify([{ ...manifest('Comics', 'x/x.js'), type: 'mangas' }]);
 		const { plugins, filteredOut } = soraAdapter.parseIndex(
 			body,
 			'https://example.invalid/modules.json'
 		);
-		expect(plugins).toHaveLength(0);
-		expect(filteredOut).toBe(1);
+		expect(plugins).toHaveLength(1);
+		expect(filteredOut).toBe(0);
+		expect(plugins[0].origin?.mediaKind).toBe('manga');
 	});
 
 	it('still keeps a novel catalogue out of the browse list', () => {
