@@ -29,6 +29,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import {
 	requiredRuntimeNames,
+	HOST_BACKED_HELPERS,
 	RUNTIME_GLOBALS,
 	RUNTIME_HELPERS
 } from '@plugin-bridge/core/kotlin/runtime-api';
@@ -4132,5 +4133,92 @@ describe('the two java.text services Intl asks for', () => {
 			'Portuguese (Brazil)'
 		);
 		expect(g.Locale.forLanguageTag('zz').getDisplayName(g.Locale.ROOT)).toBe('zz');
+	});
+});
+
+/* ── the helpers that need a plugin call in flight ────────────────────────── */
+
+/** Loaded fresh and never entered, so `__ctx` is still null in it. */
+const hostless = await load();
+
+describe('what cannot run before a plugin call has entered', () => {
+	/**
+	 * The list `emit.ts` defers a class property on, checked against the runtime
+	 * that decides it.
+	 *
+	 * A helper that stops reaching `__host()` and stays on the list costs a
+	 * needless deferral; one that starts reaching it and is left off is a bundle
+	 * that dies at load, in a constructor, telling its reader about a network
+	 * call it never made. Both are a name in the wrong list rather than anything
+	 * a reader of either file could see, so the two are checked against each
+	 * other here.
+	 */
+	// A runtime of its own, because `__enter` sets module state: by the time this
+	// file gets here the shared `runtime` has had a context entered by an
+	// earlier test, and every helper below would answer "no host needed".
+	const clean = hostless.k;
+
+	const ARGUMENTS: readonly unknown[][] = [
+		[],
+		['a'],
+		['a', 'b'],
+		// A character no URI may carry literally, because `__k.uri` reaches the
+		// host's encoder only for the bytes it has to percent-escape — a probe
+		// made entirely of safe text would decide it needs no host.
+		['a', 'é'],
+		['a', 'é', 'é', 'é', 'é'],
+		['a', 'UTF-8'],
+		[new Uint8Array([1, 2])],
+		[new Uint8Array([1, 2]), 'UTF-8'],
+		[{}],
+		[{}, 'a'],
+		[1],
+		[1, 2],
+		[[1, 2]]
+	];
+
+	/** True when SOME call of this helper fails for want of a host. */
+	function needsHost(name: string): boolean {
+		const fn = clean[name];
+		if (typeof fn !== 'function') return false;
+		for (const args of ARGUMENTS) {
+			try {
+				const answer = fn(...args);
+				// Several helpers are `async`, and one handed nonsense rejects.
+				// Swallowed here: what is being asked is whether it THREW for want
+				// of a host, and a rejection over a bad argument is neither that
+				// nor a failure of this suite.
+				if (answer !== null && typeof answer === 'object' && 'catch' in answer) {
+					(answer as Promise<unknown>).catch(() => undefined);
+				}
+			} catch (error) {
+				if (String((error as Error).message).includes('before any plugin call')) return true;
+			}
+		}
+		return false;
+	}
+
+	it('names every helper the emitter must defer a property on', () => {
+		const missing = [...HOST_BACKED_HELPERS].filter((name) => !needsHost(name));
+		expect(missing).toEqual([]);
+	});
+
+	it('names no helper that runs perfectly well without one', () => {
+		// The other direction, which is the one that would let a bundle die:
+		// a helper that reaches the host and is absent from the list.
+		const unlisted = RUNTIME_HELPERS.filter(
+			(name) => !HOST_BACKED_HELPERS.has(name) && needsHost(name)
+		);
+		expect(unlisted).toEqual([]);
+	});
+
+	it('says which capability was reached for, not only the network', () => {
+		// `__host` guards `text`, `bytes` and `crypto` as well as `http`, and the
+		// message named only the last — so an extension whose class property
+		// encoded a constant to UTF-8 was told at load that it had called out to
+		// the network, and whoever read that went looking for a request that
+		// does not exist.
+		expect(() => clean.toByteArray('Salted__', 'UTF-8')).toThrow(/text/);
+		expect(() => clean.toByteArray('Salted__', 'UTF-8')).toThrow(/before any plugin call/);
 	});
 });

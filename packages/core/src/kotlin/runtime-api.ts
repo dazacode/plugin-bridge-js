@@ -552,6 +552,36 @@ export const RUNTIME_HELPERS = [
 export type RuntimeHelper = (typeof RUNTIME_HELPERS)[number];
 
 /**
+ * The helpers that cannot run before a plugin call has entered.
+ *
+ * Each reaches `__host()` — the host's `text`, `bytes` or `http` — and `__host`
+ * throws when no call is in flight. That matters at exactly one place: a class
+ * *property*, which runs inside the constructor, and the driver constructs the
+ * extension at module load with no context entered. `emit.ts` defers such a
+ * property to a memoised getter for the same reason it already defers one that
+ * reads a base member, and this is the list it asks.
+ *
+ * `val salted = "Salted__".toByteArray(Charsets.UTF_8)` is the measured shape —
+ * a constant that happens to need an encoder — and it was 7 of the bundles that
+ * converted cleanly and then died on import.
+ *
+ * Kept honest by `kotlin-runtime.spec.ts`, which calls each one with no context
+ * and asserts it throws: a helper that stops needing the host, or a new one that
+ * starts, is a name in the wrong list rather than a bundle that dies at load.
+ */
+export const HOST_BACKED_HELPERS: ReadonlySet<RuntimeHelper> = new Set([
+	'contentEquals',
+	'decodeHexToString',
+	'decodeToString',
+	'encodeToString',
+	'stringOf',
+	'toByteArray',
+	'toJsonBody',
+	'toRequestBody',
+	'uri'
+]);
+
+/**
  * Names the runtime defines at bundle scope, spelled as the Kotlin spells them.
  *
  * These are constructed by the converted code directly, so renaming them would

@@ -1470,6 +1470,16 @@ export const FREE_FUNCTIONS: ReadonlyMap<string, string> = new Map([
 	['arrayListOf', 'mutableListOf'],
 	['listOfNotNull', 'listOfNotNull'],
 	['emptyList', 'emptyList'],
+
+	// `protected val preferences = getPreferences()` — the plain-call spelling
+	// of the delegate `emit.ts` already resolves. Without it the bare call fell
+	// through to `this.getPreferences()`, which is the right default for a
+	// member the base supplies and wrong here: the driver supplies no such
+	// member, so the bundle died at load with `this.getPreferences is not a
+	// function`. Four of the measured bundles, and `Keyoapp` and `Kemono` are
+	// both written this way.
+	['getPreferences', 'prefs'],
+
 	// `delay(300.milliseconds)` between retries. It suspends, so it is awaited.
 	['delay', 'delay'],
 	// Generic packed-script decoding. The runtime deliberately accepts only the

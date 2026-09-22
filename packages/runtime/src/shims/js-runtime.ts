@@ -47,9 +47,26 @@ var __ctx = null;
 
 function __enter(ctx) { __ctx = ctx; return ctx; }
 
+/**
+ * The host, or the sentence that says why there is not one yet.
+ *
+ * This guards every capability the host lends — 'http', but also 'text',
+ * 'bytes' and 'crypto' — and the message used to name only the first. So a
+ * converted extension whose class property encoded a constant to UTF-8 died at
+ * load being told it had called out to the network, which it had not: the
+ * reader goes looking for a request that does not exist, in a file that never
+ * makes one.
+ *
+ * The emitter now defers such a property to first use — see HOST_BACKED_HELPERS
+ * — so this should be rarer than it was. What still reaches it deserves a
+ * sentence that is true.
+ */
 function __host() {
   if (__ctx === null) {
-    throw new Error('This converted module called out to the network outside a plugin call.');
+    throw new Error(
+      'This converted module used a capability the host lends (network, text, bytes or crypto) ' +
+        'before any plugin call had started.'
+    );
   }
   return __ctx;
 }

@@ -125,6 +125,7 @@ import {
 	type Refusal,
 	type Untranslatable
 } from './subset';
+import { HOST_BACKED_HELPERS, type RuntimeHelper } from './runtime-api';
 
 /**
  * One member, and every name its source text mentions.
@@ -2548,23 +2549,45 @@ class Emitter {
 		// the extension. A memoised getter defers the read to the first use and
 		// still evaluates once, which is what the Kotlin `val` promised; it is
 		// the same shape `by lazy` already gets, for the same reason.
+		//
+		// The second reason is the same argument about the same moment.
+		// `val salted = "Salted__".toByteArray(Charsets.UTF_8)` is a constant
+		// that happens to need the host's encoder, and no context has been
+		// entered while a constructor is running — so it threw at load, in 7 of
+		// the measured bundles, with a message about the network.
+		//
+		// Which helpers those are is not guessed from the text: the set of
+		// helpers this initialiser reached is the difference `propertyValue`
+		// makes to `used`, and `HOST_BACKED_HELPERS` is the list the runtime's
+		// own spec keeps honest.
 		const initialiser = kids(node).find((child) => !PROPERTY_PARTS.has(child.type));
 		const mutable = kids(node).some(
 			(child) => child.type === 'binding_pattern_kind' && child.text === 'var'
 		);
-		if (!mutable && initialiser !== undefined && this.readsBaseMember(initialiser)) {
-			const deferred = this.member(name, node, () => {
-				const value = this.propertyValue(node, name);
-				return this.overridable(
-					name,
-					`get ${name}() ${block([`return ${this.helper('lazy')}(this, ${JSON.stringify(name)}, () => ${value});`])}`
-				);
-			});
-			return deferred === null ? null : { kind: 'member', text: deferred };
-		}
+		const readsBase = !mutable && initialiser !== undefined && this.readsBaseMember(initialiser);
 
-		const text = this.member(name, node, () => `this.${name} = ${this.propertyValue(node, name)};`);
-		return text === null ? null : { kind: 'assign', text };
+		let deferred = readsBase;
+		const text = this.member(name, node, () => {
+			const before = new Set(this.used);
+			const value = this.propertyValue(node, name);
+			if (!mutable && !deferred) {
+				for (const helper of this.used) {
+					if (before.has(helper)) continue;
+					if (!HOST_BACKED_HELPERS.has(helper as RuntimeHelper)) continue;
+					deferred = true;
+					break;
+				}
+			}
+			return deferred
+				? this.overridable(
+						name,
+						`get ${name}() ${block([
+							`return ${this.helper('lazy')}(this, ${JSON.stringify(name)}, () => ${value});`
+						])}`
+					)
+				: `this.${name} = ${value};`;
+		});
+		return text === null ? null : { kind: deferred ? 'member' : 'assign', text };
 	}
 
 	/**
@@ -7853,6 +7876,25 @@ const JS_IDENTIFIER = /^[A-Za-z_$][\w$]*$/;
  * was written in. A cycle — which Kotlin would not have compiled — is left
  * alone rather than resolved arbitrarily.
  */
+/**
+ * As much of a module-scope binding as runs when the module is loaded.
+ *
+ * Everything from the first `function` or `=>` onward is a body that runs when
+ * something calls it, which for ordering purposes is never. Keeping it would
+ * invent cycles out of the ordinary shape where an object's method reads a
+ * constant declared above the object — `TextInterceptorHelper.createUrl` reads
+ * `HOST`, and `HOST` is `TextInterceptorHelper.HOST` — which Kotlin allows
+ * because an `object` initialises on first access, and which has one correct
+ * order in JavaScript that a false cycle would refuse to find.
+ *
+ * String literals go first, so a quoted `"HOST"` is not read as the name.
+ */
+function eagerPart(piece: string): string {
+	const withoutStrings = piece.replace(/'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"/g, "''");
+	const body = /\bfunction\b|=>/.exec(withoutStrings);
+	return body === null ? withoutStrings : withoutStrings.slice(0, body.index);
+}
+
 function orderClasses(pieces: readonly string[]): string[] {
 	if (pieces.length < 2) return [...pieces];
 
@@ -7863,12 +7905,33 @@ function orderClasses(pieces: readonly string[]): string[] {
 		}
 		return names;
 	});
-	const needs = pieces.map((piece) => {
-		const bases = new Set<string>();
+	const needs = pieces.map((piece, index) => {
+		const wanted = new Set<string>();
 		for (const match of piece.matchAll(/^class\s+[\w$]+\s+extends\s+([\w$]+)/gm)) {
-			bases.add(match[1]);
+			wanted.add(match[1]);
 		}
-		return bases;
+
+		// A `class` or `function` is hoisted and its body is not run, so only its
+		// base has to exist yet. A module-scope `const` is neither: its
+		// initialiser runs at load, in the order these pieces are emitted, and a
+		// name it reaches for is in its temporal dead zone until then.
+		//
+		// `private val popular = FilterList(SortFilter("popular"))` at file scope
+		// beside `class SortFilter` is ordinary Kotlin — a file-scope `val` and a
+		// class in one file, with no order between them — and it came out as
+		// `Cannot access 'SortFilter' before initialization`, at load, with
+		// nothing refused. Every identifier is added rather than only the
+		// constructed ones: a name inside a lambda in there does not need to
+		// exist yet, so `eagerPart` cuts the piece off at the first function it
+		// contains — asking for slightly more order than strictly needed is
+		// harmless, but asking for a name that is only read *later* invents a
+		// cycle, and a cycle falls back to source order and fixes nothing.
+		if (/^(?:const|let)\s/m.test(piece)) {
+			for (const match of eagerPart(piece).matchAll(/\b([A-Za-z_$][\w$]*)\b/g)) {
+				if (!declares[index].has(match[1])) wanted.add(match[1]);
+			}
+		}
+		return wanted;
 	});
 
 	const remaining = pieces.map((_, index) => index);

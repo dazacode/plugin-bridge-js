@@ -70,6 +70,9 @@ const nullish = (value: Any): boolean => value === null || value === undefined;
 /** The classpath, as far as a fixture needs one. */
 const stubLoader = { getResourceAsStream: () => null };
 
+/** Every value `toByteArray` was handed, in order. See the helper. */
+const encodedTexts: string[] = [];
+
 /**
  * Just enough of `__k` to run the fixtures, with Kotlin's semantics where they
  * differ from JavaScript's — which is the only reason these helpers exist.
@@ -383,6 +386,14 @@ const helpers: Record<string, (...args: never[]) => unknown> = {
 	},
 	decode: (_json: Any, _shape: string, body: string) => JSON.parse(body) as Any,
 	pref: (_store: Any, _key: string, fallback: Any) => fallback,
+
+	// One of the helpers that cannot run before a plugin call has entered: the
+	// real one reaches `__host().text.encode`. It counts its calls so a test can
+	// ask WHEN it ran, which is the whole question about a deferred property.
+	toByteArray: (value: Any) => {
+		encodedTexts.push(String(value));
+		return [String(value).length];
+	},
 	// The real one reads the manifest's settings and writes to a per-run
 	// overlay; here it only has to be a store, so that a delegate resolving to
 	// one is distinguishable from the `null` it used to resolve to.
@@ -465,6 +476,7 @@ const defaults: Globals = {
 	Headers: { Builder: () => ({ build: () => ({}) }) },
 	FormBody: { Builder: () => ({ build: () => ({}) }) },
 	Jsoup: { parse: (html: string) => html },
+	Charsets: { UTF_8: 'UTF-8' },
 	SAnime: { create: () => ({}), ONGOING: 1, COMPLETED: 2, UNKNOWN: 0 },
 	SEpisode: { create: () => ({}) },
 	Video: (url: string, quality: string, videoUrl: string) => ({
@@ -4363,5 +4375,104 @@ describe('a getter a subclass overrides with a plain value', () => {
 
 		expect(demo.base()).toBe('manga');
 		expect(demo.overridden()).toBe('comics-new');
+	});
+});
+
+describe('a property whose value the host has to compute', () => {
+	it('waits until something reads it, rather than running in the constructor', () => {
+		// `private val salted = "Salted__".toByteArray(Charsets.UTF_8)` is a
+		// constant that happens to need an encoder, and the encoder is the
+		// host's. No plugin call has entered while a constructor runs, so this
+		// threw at load in 7 of 300 measured bundles — and the message it threw
+		// said the module had called out to the network, which it had not.
+		encodedTexts.length = 0;
+		const demo = instantiate(
+			inClass('    private val salted = "Salted__".toByteArray(Charsets.UTF_8)')
+		);
+
+		expect(encodedTexts).toEqual([]);
+		expect(demo.salted).toEqual([8]);
+		expect(encodedTexts).toEqual(['Salted__']);
+	});
+
+	it('still evaluates once, which is what the Kotlin `val` promised', () => {
+		encodedTexts.length = 0;
+		const demo = instantiate(
+			inClass('    private val salted = "Salted__".toByteArray(Charsets.UTF_8)')
+		);
+
+		expect(demo.salted).toEqual([8]);
+		expect(demo.salted).toEqual([8]);
+		expect(encodedTexts).toEqual(['Salted__']);
+	});
+
+	it('leaves a `var` alone, because deferring one would move a side effect', () => {
+		// The deferral is only sound for a value nothing reassigns.
+		encodedTexts.length = 0;
+		instantiate(inClass('    private var salted = "Salted__".toByteArray(Charsets.UTF_8)'));
+
+		expect(encodedTexts).toEqual(['Salted__']);
+	});
+});
+
+describe('the settings store written as a plain call', () => {
+	it('resolves to the store, as the `by` delegate spelling already did', () => {
+		// `protected val preferences = getPreferences()` is what `Keyoapp` and
+		// `Kemono` write. It fell through to `this.getPreferences()` — the right
+		// default for a member the base supplies, and wrong here, because the
+		// driver supplies no such member. Four of the measured bundles died at
+		// load on it.
+		const demo = instantiate(
+			inClass(
+				'    private val preferences = getPreferences()',
+				'    fun domain(): String = preferences.getString("domain", "fallback")!!'
+			)
+		);
+
+		expect(demo.domain()).toBe('fallback');
+	});
+});
+
+describe('the order module-scope declarations are emitted in', () => {
+	it('puts a class before the constant that constructs it', () => {
+		// A file-scope `val` and a class in one file have no order between them
+		// in Kotlin. In JavaScript the `const` runs at load and the class is in
+		// its temporal dead zone until its own line, so the wrong order is
+		// `Cannot access 'Sort' before initialization` — at load, with nothing
+		// refused.
+		const found = evaluate(
+			kt(
+				'private val popular = Sort("views")',
+				'class Sort(val key: String)',
+				'class Demo : Source() {',
+				'    fun pick(): String = popular.key',
+				'}'
+			),
+			'new Demo().pick()'
+		);
+
+		expect(found).toBe('views');
+	});
+
+	it('does not invent a cycle out of a method that reads a constant above it', () => {
+		// `object Helper { fun url() = HOST }` beside `val HOST = Helper.NAME`
+		// is ordinary, and reading the method body as a load-time dependency
+		// makes the two need each other. There is one correct order and a false
+		// cycle would refuse to find it.
+		const found = evaluate(
+			kt(
+				'private val host = Helper.NAME',
+				'object Helper {',
+				'    const val NAME = "example.invalid"',
+				'    fun url(): String = "https://" + host',
+				'}',
+				'class Demo : Source() {',
+				'    fun link(): String = Helper.url()',
+				'}'
+			),
+			'new Demo().link()'
+		);
+
+		expect(found).toBe('https://example.invalid');
 	});
 });
