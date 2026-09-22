@@ -32,6 +32,7 @@ import {
 import {
 	ForeignIndexError,
 	loadForeignIndex,
+	type ArtifactFetcher,
 	type ForeignAdapter,
 	type TextFetcher
 } from './adapter';
@@ -160,7 +161,8 @@ function claimsOurs(body: string): boolean {
 export async function detectRepository(
 	pasted: string,
 	getText: TextFetcher,
-	adapters: readonly ForeignAdapter[]
+	adapters: readonly ForeignAdapter[],
+	getBytes?: ArtifactFetcher
 ): Promise<DetectedRepository> {
 	const { candidates } = detectionCandidates(pasted, adapters);
 	const attempted: string[] = [];
@@ -168,9 +170,20 @@ export async function detectRepository(
 	for (const candidate of candidates) {
 		attempted.push(candidate);
 
+		// One fetch, whichever way it is read. When a byte fetcher is available
+		// the text is decoded from the *same* bytes rather than requested again:
+		// an index is bytes, and "text" is an interpretation of them. Decoding
+		// is deliberately non-fatal — a binary index becomes a string no parser
+		// accepts, which is exactly the outcome the text adapters should have.
 		let body: string;
+		let raw: Uint8Array | undefined;
 		try {
-			body = await getText(candidate);
+			if (getBytes === undefined) {
+				body = await getText(candidate);
+			} else {
+				raw = await getBytes(candidate);
+				body = new TextDecoder().decode(raw);
+			}
 		} catch {
 			continue;
 		}
@@ -200,7 +213,7 @@ export async function detectRepository(
 			try {
 				return {
 					indexUrl: candidate,
-					index: await loadForeignIndex(adapter, body, candidate, getText)
+					index: await loadForeignIndex(adapter, body, candidate, getText, raw)
 				};
 			} catch (error) {
 				// Same rule as the native parser above: an adapter that recognised

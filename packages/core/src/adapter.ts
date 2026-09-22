@@ -171,6 +171,27 @@ export interface ForeignAdapter {
 	parseIndex(body: string, indexUrl: string): RepositoryIndex;
 
 	/**
+	 * The same, for a format whose index is **not text**.
+	 *
+	 * One ecosystem publishes its index as a gzipped protobuf, and the rest of
+	 * this pipeline is built on strings. Decoding those bytes as UTF-8 and
+	 * handing the result to `parseIndex` does not produce a parse failure — it
+	 * produces a string full of replacement characters, which every adapter
+	 * then declines for the wrong reason.
+	 *
+	 * Optional, and additive: an adapter without it is reached exactly as
+	 * before. An adapter **with** it gets the raw bytes first and its
+	 * `parseIndex` second, so a format that publishes both spellings can refuse
+	 * the wrong one in its own words rather than by silence — which matters
+	 * here, because the ecosystem in question still serves a JSON index that
+	 * parses cleanly and contains two placeholder rows.
+	 *
+	 * Only reached when the caller supplied a byte fetcher. A host that has
+	 * only `getText` is not broken, it simply cannot see this format.
+	 */
+	parseIndexBytes?(bytes: Uint8Array, indexUrl: string): RepositoryIndex;
+
+	/**
 	 * The same, for a format whose index is genuinely split across two
 	 * documents — a metadata file beside the listings, or a manifest that only
 	 * points at where the listings are.
@@ -243,13 +264,30 @@ export function pretranslatedDescriptor(value: unknown): PretranslatedDescriptor
 	return { archiveUrl, sha256: sha256.toLowerCase(), pluginId, pluginVersion };
 }
 
-/** Reads an index through whichever of the two methods the adapter provides. */
+/**
+ * Reads an index through whichever of the methods the adapter provides.
+ *
+ * `bytes` is tried first when both it and `parseIndexBytes` are present, and a
+ * refusal there falls through to the text path **on the same adapter** rather
+ * than to the next one. A format may publish its index in two spellings, and
+ * the adapter is the only thing that knows both.
+ */
 export function loadForeignIndex(
 	adapter: ForeignAdapter,
 	body: string,
 	indexUrl: string,
-	getText: TextFetcher
+	getText: TextFetcher,
+	bytes?: Uint8Array
 ): Promise<RepositoryIndex> {
+	if (bytes !== undefined && adapter.parseIndexBytes !== undefined) {
+		try {
+			return Promise.resolve(adapter.parseIndexBytes(bytes, indexUrl));
+		} catch (error) {
+			// A hard error about *this* format is the answer; only "not mine"
+			// is worth asking the same adapter's other door about.
+			if (!(error instanceof ForeignFormatError)) return Promise.reject(error);
+		}
+	}
 	if (adapter.loadIndex !== undefined) return adapter.loadIndex(body, indexUrl, getText);
 	return Promise.resolve(adapter.parseIndex(body, indexUrl));
 }

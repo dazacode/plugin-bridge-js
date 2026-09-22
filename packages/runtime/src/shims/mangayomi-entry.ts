@@ -82,6 +82,14 @@ export interface MangayomiEntrypointOptions {
 	 * falls through to the source's own declared default.
 	 */
 	readonly settingIds?: Readonly<Record<string, string>>;
+	/**
+	 * Which pair of terminal methods this bundle declares.
+	 *
+	 * Taken from the listing's own medium rather than sniffed from the script,
+	 * because a source that serves books still defines methods whose names look
+	 * like the video ones, and guessing from that would be guessing.
+	 */
+	readonly serves?: 'video' | 'manga';
 }
 
 /**
@@ -403,6 +411,224 @@ export function extractorNames(script: string): string[] {
 	return [...found].sort();
 }
 
+/**
+ * The two method pairs, of which a bundle declares exactly one.
+ *
+ * A source in this format serves video or it serves a book, and its listing
+ * says which. Emitting both pairs would have every converted bundle claim it
+ * can do something half of them cannot, and `ABI.md` §7's fifth check —
+ * every declared capability has a consumer — is the one that would catch it,
+ * at load, on the viewer's device. Deciding here instead means a manga bundle
+ * simply has no `resolve` to call.
+ */
+const VIDEO_TERMINAL_METHODS = `  async listEpisodes(sourceMediaId, ctx) {
+    __enter(ctx);
+    const provider = __provider();
+    const detail = __decode(await __need(provider, 'getDetail')(__foreign(sourceMediaId)));
+    if (!detail || typeof detail !== 'object') return [];
+
+    const rows = Array.isArray(detail.episodes)
+      ? detail.episodes
+      : (Array.isArray(detail.chapters) ? detail.chapters : []);
+
+    // Removed from every episode name before a number is read out of it, so
+    // that a show whose own title carries digits is not renumbered by them.
+    const showTitle = typeof detail.name === 'string'
+      ? detail.name
+      : (typeof detail.title === 'string' ? detail.title : '');
+
+    // Collected in the source's own order first, because numbering is a
+    // decision about the list rather than about each row: what a row gets when
+    // its name says nothing depends on what its neighbours' names said.
+    const urls = [];
+    const names = [];
+    for (let index = 0; index < rows.length; index += 1) {
+      const row = rows[index];
+      if (!row || typeof row !== 'object') continue;
+      const url = __absolute(String(row.url || ''), __BASE_URL);
+      if (url.length === 0) continue;
+      urls.push(url);
+      names.push(typeof row.name === 'string' ? row.name : '');
+    }
+
+    const numbers = __numberEpisodes(showTitle, names);
+
+    const episodes = [];
+    for (let index = 0; index < urls.length; index += 1) {
+      episodes.push({
+        number: numbers[index],
+        sourceEpisodeId: urls[index],
+        title: names[index].length > 0 ? names[index] : undefined
+      });
+    }
+    episodes.sort(function (a, b) { return a.number - b.number; });
+    return episodes;
+  },
+
+  async resolve(sourceMediaId, episode, ctx) {
+    __enter(ctx);
+    const provider = __provider();
+    const target = episode && episode.sourceEpisodeId ? episode.sourceEpisodeId : sourceMediaId;
+    const rows = __array(await __need(provider, 'getVideoList')(__foreign(target)));
+
+    const sources = [];
+    for (const row of rows) {
+      if (!row || typeof row !== 'object') continue;
+      const url = __absolute(String(row.url || row.originalUrl || ''), __BASE_URL);
+      if (!__isPlayable(url)) continue;
+      const quality = String(row.quality || '').trim();
+      sources.push({
+        url: url,
+        // Read from the url rather than declared per stream: this format says
+        // nothing about the container, and a wrong guess is a player error.
+        container: /\\.m3u8(\\?|$)/i.test(url) ? 'hls' : (/\\.mpd(\\?|$)/i.test(url) ? 'dash' : 'mp4'),
+        label: quality.length > 0 ? quality : 'Source',
+        quality: quality.length > 0 ? quality : undefined,
+        heightPx: __height(quality),
+        headers: row.headers && typeof row.headers === 'object' ? row.headers : undefined,
+        subtitles: __tracks(row.subtitles)
+      });
+    }
+    return sources;
+  }`;
+
+const MANGA_TERMINAL_METHODS = `  async listChapters(sourceMediaId, ctx) {
+    __enter(ctx);
+    const provider = __provider();
+    const detail = __decode(await __need(provider, 'getDetail')(__foreign(sourceMediaId)));
+    if (!detail || typeof detail !== 'object') return [];
+
+    // \`chapters\` is this format's own name for them, and \`episodes\` is what the
+    // same field is called by a source written for the video half. Both are
+    // read, because one file serves whichever its author had in mind.
+    const rows = Array.isArray(detail.chapters)
+      ? detail.chapters
+      : (Array.isArray(detail.episodes) ? detail.episodes : []);
+
+    // Removed before a number is read, so a book whose own title carries digits
+    // is not renumbered by them.
+    const bookTitle = typeof detail.name === 'string'
+      ? detail.name
+      : (typeof detail.title === 'string' ? detail.title : '');
+
+    const urls = [];
+    const names = [];
+    const volumes = [];
+    const scanlators = [];
+    const dates = [];
+    for (const row of rows) {
+      if (!row || typeof row !== 'object') continue;
+      const url = __absolute(String(row.url || ''), __BASE_URL);
+      if (url.length === 0) continue;
+      const split = __splitVolume(typeof row.name === 'string' ? row.name : '');
+      urls.push(url);
+      names.push(split.rest);
+      volumes.push(split.volume);
+      scanlators.push(typeof row.scanlator === 'string' && row.scanlator.length > 0 ? row.scanlator : undefined);
+      dates.push(__publishedAt(row.dateUpload));
+    }
+
+    const numbers = __numberEpisodes(bookTitle, names);
+
+    const chapters = [];
+    for (let index = 0; index < urls.length; index += 1) {
+      chapters.push({
+        sourceChapterId: urls[index],
+        number: numbers[index],
+        title: names[index].length > 0 ? names[index] : undefined,
+        volume: volumes[index],
+        scanlator: scanlators[index],
+        publishedAt: dates[index]
+      });
+    }
+    chapters.sort(function (a, b) { return a.number - b.number; });
+    return chapters;
+  },
+
+  async readChapter(sourceMediaId, chapter, ctx) {
+    __enter(ctx);
+    const provider = __provider();
+    // The source minted the id and it is the whole address here, so it is
+    // preferred whenever it is present; the title's own id is what a source
+    // that enumerated nothing gets asked with.
+    const target = chapter && chapter.sourceChapterId ? chapter.sourceChapterId : sourceMediaId;
+    return { pages: __pages(await __need(provider, 'getPageList')(__foreign(target))) };
+  }`;
+
+const MANGA_TERMINAL_HELPERS = `
+/* --- chapters ---------------------------------------------------------------
+ *
+ * \`__numberEpisodes\` is reused here, and that is not a shortcut. It is a port
+ * of an episode recogniser that was itself forked from this ecosystem's own
+ * *chapter* recogniser, so using it for chapters returns it to what it was
+ * written for — including the fractional answers a book needs, where \`10.5\` is
+ * a real chapter and not a tidier's rounding error.
+ *
+ * One thing the episode fork dropped, because no episode has one: a volume.
+ * \`Vol. 2 Ch. 15.2\` reads as **2** through the episode path, because the first
+ * number it meets is the volume's. Stripping the volume first is what makes it
+ * read as 15.2, and the number stripped is worth keeping rather than
+ * discarding — \`ABI.md\` §8.2 has a field for it.
+ */
+function __splitVolume(name) {
+  const match = /^\\s*(?:vol(?:ume)?\\.?|v)\\s*(\\d+(?:\\.\\d+)?)\\s*(?:[-–—:,.]|\\s)\\s*/i.exec(name);
+  if (match === null) return { volume: undefined, rest: name };
+  const volume = Number(match[1]);
+  return {
+    volume: Number.isFinite(volume) ? volume : undefined,
+    rest: name.slice(match[0].length)
+  };
+}
+
+/**
+ * A publication date, as ISO 8601, or undefined.
+ *
+ * This format hands the value back as **epoch milliseconds in a string**, which
+ * is why it is parsed rather than passed through: \`new Date('1700000000000')\`
+ * is an invalid date, and a chapter list sorted on one is a list in no order at
+ * all. A value that is not a number this can use is dropped, because a wrong
+ * date is worse than an absent one — a reader sorts on it.
+ */
+function __publishedAt(value) {
+  if (value === null || value === undefined) return undefined;
+  const millis = typeof value === 'number' ? value : Number(String(value).trim());
+  if (!Number.isFinite(millis) || millis <= 0) return undefined;
+  const when = new Date(millis);
+  return Number.isNaN(when.getTime()) ? undefined : when.toISOString();
+}
+
+/**
+ * One page list, from the three shapes sources in this format actually return.
+ *
+ * Measured across a sample of this catalogue: bare url strings, \`{url}\`
+ * objects, and \`{url, headers}\` objects — and no declared contract saying which
+ * a source will use. The third is the one that matters: those headers carry a
+ * \`Referer\`, and without it the image host answers 403 on a page whose chapter
+ * loaded perfectly. \`ABI.md\` §8.3 is why the field exists to put it in.
+ *
+ * \`index\` is assigned from the surviving order rather than from the source's
+ * array position, so a row dropped for having no url does not leave a hole a
+ * reader would render as a missing page.
+ */
+function __pages(rows) {
+  const pages = [];
+  for (const row of __array(rows)) {
+    let url = '';
+    let headers;
+    if (typeof row === 'string') {
+      url = row;
+    } else if (row && typeof row === 'object') {
+      url = String(row.url || row.imageUrl || '');
+      if (row.headers && typeof row.headers === 'object') headers = row.headers;
+    }
+    url = __absolute(url, __BASE_URL);
+    if (url.length === 0) continue;
+    pages.push({ index: pages.length, url: url, headers: headers });
+  }
+  return pages;
+}
+`;
+
 export function mangayomiEntrypoint(options: MangayomiEntrypointOptions): string {
 	const constants = [
 		`const __PLUGIN_ID = ${JSON.stringify(options.pluginId)};`,
@@ -413,6 +639,10 @@ export function mangayomiEntrypoint(options: MangayomiEntrypointOptions): string
 
 	// `let`, at module scope, so a source that reassigns one of these is
 	// assigning to a declared binding rather than throwing in strict mode.
+	const manga = options.serves === 'manga';
+	const terminalMethods = manga ? MANGA_TERMINAL_METHODS : VIDEO_TERMINAL_METHODS;
+	const terminalHelpers = manga ? MANGA_TERMINAL_HELPERS : '';
+
 	const stubs = extractorNames(options.script)
 		.map((name) => `let ${name} = __noExtractor(${JSON.stringify(name)});`)
 		.join('\n');
@@ -665,6 +895,7 @@ function __tracks(value) {
   return out.length > 0 ? out : undefined;
 }
 
+${terminalHelpers}
 export default {
   id: __PLUGIN_ID,
 
@@ -684,76 +915,7 @@ export default {
     return __page(await __need(provider, method)(__wanted(page)));
   },
 
-  async listEpisodes(sourceMediaId, ctx) {
-    __enter(ctx);
-    const provider = __provider();
-    const detail = __decode(await __need(provider, 'getDetail')(__foreign(sourceMediaId)));
-    if (!detail || typeof detail !== 'object') return [];
-
-    const rows = Array.isArray(detail.episodes)
-      ? detail.episodes
-      : (Array.isArray(detail.chapters) ? detail.chapters : []);
-
-    // Removed from every episode name before a number is read out of it, so
-    // that a show whose own title carries digits is not renumbered by them.
-    const showTitle = typeof detail.name === 'string'
-      ? detail.name
-      : (typeof detail.title === 'string' ? detail.title : '');
-
-    // Collected in the source's own order first, because numbering is a
-    // decision about the list rather than about each row: what a row gets when
-    // its name says nothing depends on what its neighbours' names said.
-    const urls = [];
-    const names = [];
-    for (let index = 0; index < rows.length; index += 1) {
-      const row = rows[index];
-      if (!row || typeof row !== 'object') continue;
-      const url = __absolute(String(row.url || ''), __BASE_URL);
-      if (url.length === 0) continue;
-      urls.push(url);
-      names.push(typeof row.name === 'string' ? row.name : '');
-    }
-
-    const numbers = __numberEpisodes(showTitle, names);
-
-    const episodes = [];
-    for (let index = 0; index < urls.length; index += 1) {
-      episodes.push({
-        number: numbers[index],
-        sourceEpisodeId: urls[index],
-        title: names[index].length > 0 ? names[index] : undefined
-      });
-    }
-    episodes.sort(function (a, b) { return a.number - b.number; });
-    return episodes;
-  },
-
-  async resolve(sourceMediaId, episode, ctx) {
-    __enter(ctx);
-    const provider = __provider();
-    const target = episode && episode.sourceEpisodeId ? episode.sourceEpisodeId : sourceMediaId;
-    const rows = __array(await __need(provider, 'getVideoList')(__foreign(target)));
-
-    const sources = [];
-    for (const row of rows) {
-      if (!row || typeof row !== 'object') continue;
-      const url = __absolute(String(row.url || row.originalUrl || ''), __BASE_URL);
-      if (!__isPlayable(url)) continue;
-      const quality = String(row.quality || '').trim();
-      sources.push({
-        url: url,
-        // Read from the url rather than declared per stream: this format says
-        // nothing about the container, and a wrong guess is a player error.
-        container: /\\.m3u8(\\?|$)/i.test(url) ? 'hls' : (/\\.mpd(\\?|$)/i.test(url) ? 'dash' : 'mp4'),
-        label: quality.length > 0 ? quality : 'Source',
-        quality: quality.length > 0 ? quality : undefined,
-        heightPx: __height(quality),
-        headers: row.headers && typeof row.headers === 'object' ? row.headers : undefined,
-        subtitles: __tracks(row.subtitles)
-      });
-    }
-    return sources;
-  }
+${terminalMethods}
 };
 `;
 }

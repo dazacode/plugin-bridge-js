@@ -11,6 +11,8 @@
 import { FOREIGN_ADAPTERS } from '@plugin-bridge/adapters';
 import { describe, expect, it } from 'vitest';
 
+import { ForeignFormatError, type ForeignAdapter } from './adapter';
+
 import fixtures from '../../../fixtures/indexes.json';
 import { detectRepository, detectionCandidates } from './detect';
 
@@ -169,5 +171,85 @@ describe('a pasted install link under another scheme', () => {
 		expect(() => detectionCandidates('ftp://addon.example.invalid/manifest.json', [])).toThrow(
 			/must be https/
 		);
+	});
+});
+
+describe('an index that is not text', () => {
+	/** An adapter that only reads bytes, standing in for the real one. */
+	function binaryAdapter(seen: { bytes?: Uint8Array; text?: string }): ForeignAdapter {
+		return {
+			format: 'mangayomi',
+			candidates: () => [],
+			parseIndexBytes(bytes, indexUrl) {
+				seen.bytes = bytes;
+				if (bytes[0] !== 0x1f) throw new ForeignFormatError('not this format');
+				return {
+					name: 'From bytes',
+					updatedAt: '',
+					signingKey: null,
+					plugins: [],
+					format: 'mangayomi',
+					indexUrl
+				} as never;
+			},
+			parseIndex(body) {
+				seen.text = body;
+				throw new ForeignFormatError('not this format either');
+			},
+			convert: () => Promise.reject(new Error('not used'))
+		};
+	}
+
+	it('hands the adapter raw bytes when a byte fetcher was supplied', async () => {
+		const seen: { bytes?: Uint8Array; text?: string } = {};
+		const raw = new Uint8Array([0x1f, 0x8b, 0x08, 0x00]);
+
+		const found = await detectRepository(
+			'https://example.invalid/index.pb',
+			() => Promise.reject(new Error('text should not be fetched separately')),
+			[binaryAdapter(seen)],
+			() => Promise.resolve(raw)
+		);
+
+		expect(found.index.name).toBe('From bytes');
+		expect(seen.bytes).toEqual(raw);
+		// One fetch: the text an adapter would see is decoded from these bytes
+		// rather than requested again.
+		expect(seen.text).toBeUndefined();
+	});
+
+	it('falls through to the same adapter’s text door when the bytes are not its format', async () => {
+		// A format may publish two spellings of its index, and only the adapter
+		// knows both. Falling through to the *next* adapter would lose the
+		// refusal the right one wanted to give.
+		const seen: { bytes?: Uint8Array; text?: string } = {};
+		const raw = new TextEncoder().encode('[{"not":"gzip"}]');
+
+		await expect(
+			detectRepository(
+				'https://example.invalid/index.json',
+				() => Promise.resolve('unused'),
+				[binaryAdapter(seen)],
+				() => Promise.resolve(raw)
+			)
+		).rejects.toThrow();
+
+		expect(seen.bytes).toEqual(raw);
+		expect(seen.text).toBe('[{"not":"gzip"}]');
+	});
+
+	it('leaves a text-only host exactly as it was', async () => {
+		// The byte fetcher is optional. A host without one cannot see a binary
+		// index, which is a gap rather than a break.
+		const seen: { bytes?: Uint8Array; text?: string } = {};
+
+		await expect(
+			detectRepository('https://example.invalid/index.json', () => Promise.resolve('[]'), [
+				binaryAdapter(seen)
+			])
+		).rejects.toThrow();
+
+		expect(seen.bytes).toBeUndefined();
+		expect(seen.text).toBe('[]');
 	});
 });

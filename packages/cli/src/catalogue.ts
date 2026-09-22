@@ -260,7 +260,11 @@ async function run(): Promise<void> {
 	// Detection rather than a single parser: an index may be any of the six
 	// ecosystems, and each names its listings differently. `detectRepository`
 	// tries the spellings a pasted URL could mean and returns ours.
-	const detected = await detectRepository(options.indexUrl, text, FOREIGN_ADAPTERS);
+	// The byte fetcher goes in too, because one ecosystem's index is a gzipped
+	// protobuf. Without it that catalogue is not merely unscored, it is
+	// undetectable — and it would report as "nothing found there", which is a
+	// sentence about the repository rather than about this tool.
+	const detected = await detectRepository(options.indexUrl, text, FOREIGN_ADAPTERS, bytes);
 	const index = detected.index;
 	const listings = index.plugins.slice(0, options.limit);
 	const capabilities = {

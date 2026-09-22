@@ -684,3 +684,182 @@ class DefaultExtension extends MProvider {
 		expect(episodes[2].sourceEpisodeId).toBe('https://watch.example.invalid/o/x');
 	});
 });
+
+/* ── the manga half ───────────────────────────────────────────────────────── */
+
+/**
+ * A source for books, in the idiom the measured catalogue actually uses.
+ *
+ * Every published listing in this format's own catalogue is manga, and before
+ * `ADR-0013` the whole of it was filtered out before it could be converted.
+ * This is what one of them looks like driven end to end.
+ *
+ * The page list deliberately returns **all three shapes** a sample of that
+ * catalogue returns — a bare string, a `{url}` object, and a `{url, headers}`
+ * object — because there is no declared contract saying which a source will
+ * use, and a converter that handled only the shape it saw first would produce
+ * a reader full of missing pages for the others.
+ */
+const BOOK_SOURCE = `
+const mangayomiSources = [{
+  "name": "Example", "id": 2, "lang": "en",
+  "baseUrl": "https://watch.example.invalid",
+  "itemType": 0, "version": "0.1.0", "isManga": true, "isNsfw": false
+}];
+
+class DefaultExtension extends MProvider {
+  async getDetail(url) {
+    return {
+      name: "A Book 7",
+      description: "A synopsis.",
+      chapters: [
+        { name: "Vol. 2 Ch. 15.2", url: "/b/15-2", dateUpload: "1700000000000", scanlator: "A Group" },
+        { name: "Chapter 10.5", url: "/b/10-5", dateUpload: "1699000000000" },
+        { name: "Chapter 7", url: "/b/7", dateUpload: "not a date" }
+      ]
+    };
+  }
+
+  async getPageList(url) {
+    return [
+      "/img/1.jpg",
+      { url: "/img/2.jpg" },
+      { url: "https://cdn.example.invalid/3.jpg", headers: { Referer: "https://watch.example.invalid/" } },
+      { url: "" }
+    ];
+  }
+}
+`;
+
+describe('a source that serves books', () => {
+	interface BookModule {
+		listChapters(
+			sourceMediaId: string,
+			ctx: unknown
+		): Promise<
+			{
+				sourceChapterId: string;
+				number: number;
+				title?: string;
+				volume?: number;
+				scanlator?: string;
+				publishedAt?: string;
+			}[]
+		>;
+		readChapter(
+			sourceMediaId: string,
+			chapter: unknown,
+			ctx: unknown
+		): Promise<{ pages: { index: number; url: string; headers?: Record<string, string> }[] }>;
+		resolve?: unknown;
+		listEpisodes?: unknown;
+	}
+
+	async function loadBook(): Promise<BookModule> {
+		const listing = listingOf(1, 0);
+		const bytes = await mangayomiAdapter.convert(listing, servicesFor(BOOK_SOURCE));
+		const bundle = await openPluginArchive(bytes);
+		const url = `data:text/javascript;base64,${Buffer.from(bundle.entrypointSource).toString('base64')}`;
+		return (await import(/* @vite-ignore */ url)).default as BookModule;
+	}
+
+	it('declares the chapter pair and not the playback pair', async () => {
+		// ABI.md §7's fifth check is "every declared capability has a consumer".
+		// A bundle that declared both would be claiming one it cannot serve.
+		const module = await loadBook();
+		expect(typeof module.listChapters).toBe('function');
+		expect(typeof module.readChapter).toBe('function');
+		expect(module.resolve).toBeUndefined();
+		expect(module.listEpisodes).toBeUndefined();
+	});
+
+	it('reads a chapter number past the volume that precedes it', async () => {
+		const module = await loadBook();
+		const chapters = await module.listChapters('/book/one', context().ctx);
+
+		// `Vol. 2 Ch. 15.2` reads as 2 through the episode path, because the
+		// first number it meets is the volume's. Stripped, it is 15.2 — and the
+		// volume is kept rather than thrown away.
+		const byNumber = Object.fromEntries(chapters.map((row) => [row.number, row]));
+		expect(
+			Object.keys(byNumber)
+				.map(Number)
+				.sort((a, b) => a - b)
+		).toEqual([7, 10.5, 15.2]);
+		expect(byNumber[15.2].volume).toBe(2);
+		expect(byNumber[15.2].title).toBe('Ch. 15.2');
+		expect(byNumber[10.5].volume).toBeUndefined();
+	});
+
+	it('keeps a fraction, because 10.5 is a real chapter', async () => {
+		const module = await loadBook();
+		const chapters = await module.listChapters('/book/one', context().ctx);
+		expect(chapters.map((row) => row.number)).toEqual([7, 10.5, 15.2]);
+	});
+
+	it('is not renumbered by the digits in the book’s own title', async () => {
+		// The title is "A Book 7", and nothing here is chapter 7 by accident.
+		const module = await loadBook();
+		const chapters = await module.listChapters('/book/one', context().ctx);
+		expect(chapters.filter((row) => row.number === 7)).toHaveLength(1);
+	});
+
+	it('carries a scanlator when the source names one, and nothing when it does not', async () => {
+		const module = await loadBook();
+		const chapters = await module.listChapters('/book/one', context().ctx);
+		expect(chapters[2].scanlator).toBe('A Group');
+		expect(chapters[0].scanlator).toBeUndefined();
+	});
+
+	it('parses the epoch-milliseconds string, and drops a date it cannot use', async () => {
+		// The value arrives as milliseconds *in a string*, so passing it through
+		// would make `new Date(...)` invalid and a list sorted on it unordered.
+		const module = await loadBook();
+		const chapters = await module.listChapters('/book/one', context().ctx);
+		expect(chapters[1].publishedAt).toBe(new Date(1699000000000).toISOString());
+		expect(chapters[2].publishedAt).toBe(new Date(1700000000000).toISOString());
+		expect(chapters[0].publishedAt).toBeUndefined();
+	});
+
+	it('normalises all three page shapes, and carries the headers of the third', async () => {
+		const module = await loadBook();
+		const { pages } = await module.readChapter(
+			'/book/one',
+			{ number: 1, sourceChapterId: '/b/7' },
+			context().ctx
+		);
+
+		expect(pages.map((page) => page.url)).toEqual([
+			'https://watch.example.invalid/img/1.jpg',
+			'https://watch.example.invalid/img/2.jpg',
+			'https://cdn.example.invalid/3.jpg'
+		]);
+		// ABI.md §8.3: without this the image host answers 403 on a page whose
+		// chapter loaded perfectly.
+		expect(pages[2].headers).toEqual({ Referer: 'https://watch.example.invalid/' });
+		expect(pages[0].headers).toBeUndefined();
+	});
+
+	it('resolves a relative page against the listing\u2019s base url, not the script\u2019s', async () => {
+		// Worth pinning because the two can differ and this is not obviously the
+		// right one: `__BASE_URL` is read from the listing row at module scope,
+		// before the source's own `mangayomiSources` has been seen, while
+		// `this.source.baseUrl` — what the source concatenates for itself —
+		// prefers the script's copy. A source that disagrees with its own index
+		// row therefore builds its absolute urls from one and has its relative
+		// ones resolved against the other. No converted source in the measured
+		// catalogue does disagree, which is why this is pinned rather than
+		// changed: changing it moves every video bundle too.
+		const module = await loadBook();
+		const { pages } = await module.readChapter('/book/one', undefined, context().ctx);
+		expect(pages[0].url.startsWith('https://watch.example.invalid/')).toBe(true);
+	});
+
+	it('numbers pages by surviving order, leaving no hole where a row was dropped', async () => {
+		// The fourth row has no url. Numbering from the source's array position
+		// would leave index 3 absent and a reader would draw a missing page.
+		const module = await loadBook();
+		const { pages } = await module.readChapter('/book/one', undefined, context().ctx);
+		expect(pages.map((page) => page.index)).toEqual([0, 1, 2]);
+	});
+});

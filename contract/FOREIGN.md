@@ -145,6 +145,25 @@ not its format, because detection (§3) works by trying adapters in order and
 taking the first that succeeds. An adapter that politely returns nothing makes
 every later adapter unreachable.
 
+**An index is not always text.** One ecosystem publishes its as a gzipped
+protobuf, and decoding those bytes as UTF-8 does not fail — it produces a string
+of replacement characters that every adapter then declines for the wrong reason,
+so the catalogue reports as "nothing found there", a sentence about the
+repository rather than about this tool. An adapter may therefore declare
+`parseIndexBytes`, which is handed the raw bytes, and detection fetches **once**
+and decodes the text from those same bytes.
+
+Two properties of that path are load-bearing. It is **optional**: a host with
+only a text fetcher reaches every other adapter exactly as before and simply
+cannot see that one format, which is a gap and not a break. And a refusal from
+`parseIndexBytes` falls back to the **same adapter's** `parseIndex`, never
+straight to the next adapter — because a format may publish two spellings of its
+index, and the adapter is the only thing that knows both. That matters
+concretely here: the ecosystem in question still serves a JSON index that parses
+cleanly and holds two placeholder rows telling an old client to update. An
+adapter that could not answer on that door would leave the trap for the next
+reader, who would measure a catalogue of two and report success.
+
 ### 2.1 `origin`, the provenance a converted listing carries
 
 ```ts

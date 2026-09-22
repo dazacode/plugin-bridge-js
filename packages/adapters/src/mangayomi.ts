@@ -198,6 +198,12 @@ export const mangayomiAdapter: ForeignAdapter = {
 			entrypointSource: mangayomiEntrypoint({
 				pluginId: listing.id,
 				script,
+				// Which pair of terminal methods the bundle declares, taken from
+				// what the *listing* said it serves rather than from the script.
+				// A source for books defines `getPageList` where one for video
+				// defines `getVideoList`, and the rest of the file looks alike —
+				// so the index row is the only thing here that actually knows.
+				serves: origin.mediaKind === 'manga' ? 'manga' : 'video',
 				settingIds: settingKeyMap(settings),
 				source:
 					record !== null && typeof record === 'object' ? (record as Record<string, unknown>) : {}
