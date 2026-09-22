@@ -49,10 +49,24 @@ export const GITHUB_API = 'https://api.github.com';
 /**
  * How much of a tree document is worth reading.
  *
- * A recursive tree of a large catalogue is megabytes of JSON. This is well
- * above what any of them need and far below what would be worth holding.
+ * A recursive tree of a large catalogue is megabytes of JSON. The sentence here
+ * used to say this was "well above what any of them need", and it was 4.6% away
+ * from being false: measured 2026-09-22, the recursive tree of the manga
+ * catalogue's source repository is **8,001,623 bytes** over 31,520 entries,
+ * against a cap of 8,388,608. That repository gains extensions weekly.
+ *
+ * Worth being exact about what going over costs, because it is not a truncated
+ * listing. The whole tree fails, and one tree serves every listing in the
+ * repository — so every one of them would have failed together, and before the
+ * fix in `fetchKotlinDirectory` they would all have failed *silently*, each
+ * reporting that its source could not be found in a repository it is sitting
+ * in. That is the shape of failure this file's `TreeError` comment already
+ * describes, reached by a second route.
+ *
+ * 32 MiB is four times the measured size. It is a bound on a JSON document read
+ * once per repository per session, not on anything held per listing.
  */
-export const MAX_TREE_BYTES = 8 * 1024 * 1024;
+export const MAX_TREE_BYTES = 32 * 1024 * 1024;
 
 /** Raw file URL → the repository, ref and path it addresses. */
 export interface RawLocation {

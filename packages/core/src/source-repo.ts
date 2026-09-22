@@ -83,6 +83,7 @@
  */
 
 import { DEFAULT_REFS, parseRepositoryUrl, rawCandidates, type GitRepository } from './git-hosts';
+import { TreeError } from './git-trees';
 import type { TextFetcher } from './adapter';
 
 /** Where one extension's sources sit, in the parts the layout convention fixes. */
@@ -591,11 +592,20 @@ async function fetchKotlinDirectory(
 
 	let names: readonly string[];
 	if (listing === null) {
-		try {
-			names = await listFiles(base);
-		} catch {
-			return files;
-		}
+		// **Not caught.** This used to answer an empty map for any failure at
+		// all, and an empty map reaches the adapter as `kotlinFiles.size === 0`
+		// — which it reports as "the source could not be found in the repository
+		// it is built from". That sentence is about somebody else's repository
+		// and it was wrong every time it was produced this way: the forge
+		// rate-limiting this address, a tree document past the size cap, the
+		// network being down. `TreeError` has carried a `rateLimited` flag for
+		// exactly this since the video half hit it, and it never reached a
+		// viewer here because of these three lines.
+		//
+		// A directory that genuinely is not there does not throw — the lister
+		// filters a tree it read by prefix and answers `[]` — so everything that
+		// reaches here is a failure worth a sentence of its own.
+		names = await listFiles(base);
 	} else {
 		names = listing;
 	}
@@ -694,9 +704,18 @@ async function readSharedDirectory(
 		let listing: readonly string[];
 		try {
 			listing = await listFiles(base);
-		} catch {
-			// A directory that is not there is the ordinary case for a `themePkg`
-			// naming one this convention does not put where it is looked for.
+		} catch (error) {
+			// A `themePkg` naming a directory this convention does not put where
+			// it is looked for is the ordinary case, and an absent shared module
+			// is not a reason to lose the extension.
+			//
+			// A `TreeError` is not that. It says the forge refused, or the tree
+			// document could not be read — facts about the *host*, not about
+			// this directory — and swallowing one here loses the template
+			// silently, which surfaces as the extension refusing for members the
+			// template declares. That is a sentence about the extension that is
+			// really about the network.
+			if (error instanceof TreeError) throw error;
 			return EMPTY_MODULE;
 		}
 
@@ -867,6 +886,14 @@ export async function fetchExtensionSource(
 
 	let names: readonly string[] = [];
 
+	// A failure aimed at the *host* rather than at one ref, kept while the other
+	// refs are tried and thrown if none of them answers. `aniyomi.ts` does the
+	// same thing at its own probe, and for the same reason: a branch that does
+	// not exist is the ordinary case for one of two candidates, and only both
+	// failing means anything — but the forge refusing this address is not that,
+	// and reporting it as "no ref worked" is a sentence about the repository.
+	let refused: TreeError | null = null;
+
 	if (directoryUrl === null) {
 		// No build file. The extension may still be there — the layout only
 		// promises one for extensions the build system generates — so the refs
@@ -875,7 +902,8 @@ export async function fetchExtensionSource(
 			let listed: readonly string[];
 			try {
 				listed = await listFiles(candidate.url);
-			} catch {
+			} catch (error) {
+				if (error instanceof TreeError) refused = error;
 				continue;
 			}
 			if (listed.length === 0) continue;
@@ -884,12 +912,23 @@ export async function fetchExtensionSource(
 			names = listed;
 			break;
 		}
+		if (directoryUrl === null && refused !== null) throw refused;
 	} else {
-		try {
-			names = await listFiles(directoryUrl);
-		} catch {
-			names = [];
-		}
+		// **Not caught.** This answered `[]`, and an empty listing reaches the
+		// adapter as `kotlinFiles.size === 0`, which it reports as "the source
+		// could not be found in the repository it is built from" — a sentence
+		// about somebody else's repository that was wrong every time this
+		// produced it. One tree document serves every listing in a repository,
+		// so when reading it fails they all fail together, and a viewer is told
+		// the whole catalogue is missing from a repository it is sitting in.
+		//
+		// A directory that genuinely is not there does not throw: the lister
+		// filters a tree it read by prefix and answers none. Everything that
+		// reaches here is a failure that deserves its own sentence — the forge
+		// rate-limiting this address (60 requests an hour, unauthenticated,
+		// counted per address, and in a browser that address is the viewer's),
+		// a tree document past the size cap, the network being down.
+		names = await listFiles(directoryUrl);
 	}
 
 	if (directoryUrl === null) return EMPTY_SOURCE;

@@ -14,6 +14,8 @@
 
 import { describe, expect, it } from 'vitest';
 
+import { TreeError } from './git-trees';
+
 import {
 	MAX_KOTLIN_FILES,
 	MAX_LIB_FILES,
@@ -837,5 +839,44 @@ describe('fetching the template and the modules an extension shares', () => {
 		});
 
 		expect((await fetchExtensionSource(location, listFiles, getText)).resolvedRef).toBe('main');
+	});
+});
+
+describe('a listing that failed, rather than a directory that is empty', () => {
+	const location: SourceLocation = { repositoryUrl: REPO, lang: 'en', directory: 'somename' };
+
+	it('lets the failure out instead of answering "nothing there"', async () => {
+		// The bug this exists for, reported from the app: every listing in one
+		// catalogue read "The source for X could not be found in the repository
+		// it is built from", over sources sitting in that repository. One tree
+		// document serves every listing in a repository, so when reading it
+		// fails they all fail together — and this function turned that into an
+		// empty file map, which the adapter reports as the sentence above.
+		//
+		// The forge rate-limiting this address is the commonest way in: 60
+		// requests an hour, unauthenticated, counted per address, and in a
+		// browser that address is the viewer's.
+		const getText = async (): Promise<string> => {
+			throw new Error('unreachable in this test');
+		};
+		const listFiles = async (): Promise<readonly string[]> => {
+			throw new TreeError('the code host is rate-limiting this address', { rateLimited: true });
+		};
+
+		await expect(fetchExtensionSource(location, listFiles, getText)).rejects.toThrow(
+			/rate-limiting/
+		);
+	});
+
+	it('still reads a directory that really is empty as empty', async () => {
+		// The other half, and why this is not simply "throw on anything": a
+		// directory that is not there does not throw. The lister filters a tree
+		// it read successfully by prefix and answers none, which is a fact about
+		// the repository and is allowed to be reported as one.
+		const { getText, listFiles } = fakeRepository({});
+
+		const source = await fetchExtensionSource(location, listFiles, getText);
+
+		expect(source.kotlinFiles.size).toBe(0);
 	});
 });
