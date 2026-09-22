@@ -62,6 +62,16 @@ export interface MihonEntrypointOptions {
 	readonly lang?: string;
 	/** Foreign preference key to manifest setting id. */
 	readonly settingIds?: Readonly<Record<string, string>>;
+	/**
+	 * The non-Kotlin files fetched beside the source, keyed as the classpath
+	 * names them — `assets/i18n/messages_en.properties` and its siblings.
+	 *
+	 * Embedded rather than fetched at run time because the plugin has no way to
+	 * reach the source repository, and because the conversion already listed
+	 * the directory they sit in. Absent for a conversion whose repository had
+	 * none, which the runtime reads as an empty classpath.
+	 */
+	readonly resources?: Readonly<Record<string, string>>;
 }
 
 const MIHON_DRIVER = String.raw`
@@ -478,11 +488,22 @@ export function mihonEntrypoint(options: MihonEntrypointOptions): string {
 	// section reads this map while it is being evaluated.
 	const settingIds = `var __SETTING_ID_MAP = ${JSON.stringify(options.settingIds ?? {})};`;
 
+	// Beside it, and declared here rather than in the runtime because its
+	// contents are a property of this conversion rather than of the runtime.
+	//
+	// The position is NOT load-bearing the way the line above is, and the test
+	// that was written to pin it does not: `var` hoists, and the only read is
+	// inside `__k.classLoader()`, which nothing calls before the extension is
+	// constructed — well after both. It is here because that is where a reader
+	// looking for "what did this conversion carry" will look.
+	const resources = `var __RESOURCES = ${JSON.stringify(options.resources ?? {})};`;
+
 	return `${JS_RUNTIME}
 ${STREAM_GUARDS}
 ${DOM_RUNTIME_SOURCE}
 const __rt = globalThis.__yorozoRuntime;
 ${settingIds}
+${resources}
 ${kotlinRuntime()}
 ${constants}
 

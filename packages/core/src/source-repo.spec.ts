@@ -375,6 +375,51 @@ describe('fetching one located extension', () => {
 		expect(asked).not.toContain(`${dir}res/icon.png`);
 	});
 
+	it('reads the i18n messages beside the Kotlin, and no other asset', async () => {
+		// `keiyoushi.lib.i18n.Intl` reads `assets/i18n/messages_<lang>.properties`
+		// through the classloader, and without them the largest template in the
+		// catalogue draws every filter label as `[order_by_filter_title]`. One
+		// pattern and not "every asset": an extension's `assets/` may hold
+		// anything its author put there, and an unbounded read of somebody
+		// else's directory is the multiplication this module exists to close.
+		const messages = 'author_filter_title=Author\n';
+		const { getText, listFiles, asked } = fakeRepository({
+			[`${dir}build.gradle`]: gradle,
+			[`${dir}src/A.kt`]: kotlin,
+			[`${dir}assets/i18n/messages_en.properties`]: messages,
+			[`${dir}assets/fonts/reader.ttf`]: 'not a message file',
+			[`${dir}assets/i18n/messages_en.properties.bak`]: 'not a message file either'
+		});
+
+		const source = await fetchExtensionSource(location, listFiles, getText);
+
+		expect([...source.resources]).toEqual([['assets/i18n/messages_en.properties', messages]]);
+		expect(asked).not.toContain(`${dir}assets/fonts/reader.ttf`);
+		expect(asked).not.toContain(`${dir}assets/i18n/messages_en.properties.bak`);
+	});
+
+	it('lets the extension’s own copy of a path win over the template’s', async () => {
+		// The order the Android build merges assets in: an extension that ships
+		// its own `messages_en.properties` beside a template's is overriding it,
+		// not adding a second one.
+		const theme = `${RAW}/main/lib-multisrc/sometheme/`;
+		const { getText, listFiles } = fakeRepository({
+			[`${dir}build.gradle`]: gradle,
+			[`${dir}src/A.kt`]: kotlin,
+			[`${dir}assets/i18n/messages_en.properties`]: 'title=Extension\n',
+			[`${theme}src/Theme.kt`]: 'package x\n',
+			[`${theme}assets/i18n/messages_en.properties`]: 'title=Template\n',
+			[`${theme}assets/i18n/messages_es.properties`]: 'title=Plantilla\n'
+		});
+
+		const source = await fetchExtensionSource(location, listFiles, getText);
+
+		expect(source.resources.get('assets/i18n/messages_en.properties')).toBe('title=Extension\n');
+		// The template's other languages are still there: the extension
+		// overrode one path, not the directory.
+		expect(source.resources.get('assets/i18n/messages_es.properties')).toBe('title=Plantilla\n');
+	});
+
 	it('asks for nothing that is not https', async () => {
 		const { getText, listFiles, asked } = fakeRepository({
 			[`${dir}build.gradle`]: gradle,
@@ -437,6 +482,7 @@ describe('fetching one located extension', () => {
 			themePackage: null,
 			themeFiles: new Map(),
 			libModules: new Map(),
+			resources: new Map(),
 			resolvedRef: null
 		});
 	});

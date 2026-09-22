@@ -540,7 +540,13 @@ export const RUNTIME_HELPERS = [
 	'jsonGetInt',
 	'jsonGetLong',
 	'jsonGetDouble',
-	'jsonGetBoolean'
+	'jsonGetBoolean',
+
+	/* The classpath. `__k.classLoader()` answers a loader over the files the
+	   conversion fetched from the extension's own repository — see
+	   `CLASS_LOADER` in `subset.ts` for the two spellings that reach it, and
+	   `__RESOURCES` in the entry point for where the files come from. */
+	'classLoader'
 ] as const;
 
 export type RuntimeHelper = (typeof RUNTIME_HELPERS)[number];
@@ -775,7 +781,19 @@ export const RUNTIME_GLOBALS = [
 	'Instant',
 	'OffsetDateTime',
 	'ZonedDateTime',
-	'LocalDateTime'
+	'LocalDateTime',
+
+	/* `keiyoushi.lib.i18n.Intl`, which is one small Kotlin file in the shared
+	   `lib/` directory and the largest single blocker the manga half had: 95 of
+	   300 measured listings refused on something inside it. It reads its
+	   strings out of a `.properties` file with `PropertyResourceBundle`, wraps
+	   the byte stream in an `InputStreamReader`, and sorts with a `Collator`.
+	   Each is a capitalised receiver the emitter passes through, so an absent
+	   name is a death at load with nothing refused — which is why they are
+	   declared here rather than left to translate and fail. */
+	'PropertyResourceBundle',
+	'InputStreamReader',
+	'Collator'
 ] as const;
 
 /** Everything the runtime source must define, for the spec that checks it. */

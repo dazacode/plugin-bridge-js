@@ -28,7 +28,10 @@ import { namesCookieJar, packageBundle } from '@plugin-bridge/core/package';
 const PLUGIN_ID = 'app.yorozo.converted.mihon.example';
 const BASE_URL = 'https://read.example.invalid';
 
-async function convert(translated: string): Promise<Uint8Array> {
+async function convert(
+	translated: string,
+	resources: Record<string, string> = {}
+): Promise<Uint8Array> {
 	return await packageBundle({
 		id: PLUGIN_ID,
 		name: 'Example',
@@ -49,7 +52,8 @@ async function convert(translated: string): Promise<Uint8Array> {
 			translatedSource: translated,
 			className: 'Extension',
 			baseUrl: BASE_URL,
-			lang: 'en'
+			lang: 'en',
+			resources
 		}),
 		usesCookies: formatProfile('mihon').implicitCookies || namesCookieJar(translated),
 		license: 'Apache-2.0',
@@ -68,8 +72,8 @@ interface Loaded {
 	searchCatalog(query: string, page: number, ctx: unknown): Promise<Page>;
 }
 
-async function load(translated: string): Promise<Loaded> {
-	const bundle = await openPluginArchive(await convert(translated));
+async function load(translated: string, resources: Record<string, string> = {}): Promise<Loaded> {
+	const bundle = await openPluginArchive(await convert(translated, resources));
 	// A file rather than a `data:` URL: this bundle carries a whole runtime and
 	// is far past the length a data URL can be imported at.
 	const { writeFileSync, mkdtempSync } = await import('node:fs');
@@ -224,5 +228,79 @@ class Extension {
 		]);
 		const shared = [...SUPER_MEMBERS_IMAGE].filter((name) => video.has(name));
 		expect(shared.sort()).toEqual(['headersBuilder', 'latestUpdatesParse', 'latestUpdatesRequest']);
+	});
+});
+
+/**
+ * The classpath, end to end, because the two halves are in different packages.
+ *
+ * `source-repo.ts` fetches `assets/i18n/*.properties`, the adapter hands them
+ * to `mihonEntrypoint`, the entry point declares `__RESOURCES`, and the
+ * runtime's `__k.classLoader()` reads it. Each half has a unit test and none of
+ * them crosses a package boundary, so what this asserts is the join: an option
+ * that stops being passed anywhere along that chain fails here and nowhere
+ * else, which was checked by removing it.
+ *
+ * Both fixtures read the classpath in a class PROPERTY rather than in a method,
+ * because that is where the template that matters reads it — `MadaraBase`
+ * builds its filter options from `intl[…]` at construction, so anything that
+ * throws there costs the whole extension rather than one label.
+ */
+describe('the files a converted extension reads beside its own source', () => {
+	it('reads a message file the conversion fetched, at construction time', async () => {
+		const module = await load(
+			`
+class Extension {
+  constructor() {
+    this.baseUrl = '${BASE_URL}';
+    // A class property, which is where the template that matters reads it.
+    this.label = __k.jsonGetString(
+      new PropertyResourceBundle(
+        new InputStreamReader(
+          __k.classLoader().getResourceAsStream('assets/i18n/messages_en.properties'),
+          'UTF-8'
+        )
+      ),
+      'author_filter_title'
+    );
+  }
+  async getPopularManga(page) {
+    return { mangas: [{ url: '/a', title: this.label }], hasNextPage: false };
+  }
+}
+`,
+			{ 'assets/i18n/messages_en.properties': 'author_filter_title=Author\n' }
+		);
+
+		const page = await module.browse('popular', 1, context());
+		expect(page.entries[0].title).toBe('Author');
+	});
+
+	it('still loads when the repository had no message files at all', async () => {
+		// Most of this catalogue has none, and the video half declares no
+		// `__RESOURCES` whatsoever. An empty bundle degrades to upstream's own
+		// `[key]`; a throw here would be a dead extension for a missing
+		// translation, at construction, taking every entry point with it.
+		const module = await load(`
+class Extension {
+  constructor() {
+    this.baseUrl = '${BASE_URL}';
+    this.bundle = new PropertyResourceBundle(
+      new InputStreamReader(
+        __k.classLoader().getResourceAsStream('assets/i18n/messages_en.properties'),
+        'UTF-8'
+      )
+    );
+  }
+  async getPopularManga(page) {
+    const key = 'author_filter_title';
+    const label = __k.containsKey(this.bundle, key) ? __k.jsonGetString(this.bundle, key) : '[' + key + ']';
+    return { mangas: [{ url: '/a', title: label }], hasNextPage: false };
+  }
+}
+`);
+
+		const page = await module.browse('popular', 1, context());
+		expect(page.entries[0].title).toBe('[author_filter_title]');
 	});
 });

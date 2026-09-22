@@ -219,7 +219,15 @@ describe('what the emitter is promised', () => {
 		// this pins the runtime shut so that "just add a shim" cannot quietly
 		// become the fix. Today the cost is one bundle that throws
 		// `undefined is not an object` at load with nothing naming the cause.
-		const source = kotlinRuntime();
+		//
+		// Asked of the CODE rather than of the whole text: a comment may name
+		// the Kotlin it is about, and `__k.classLoader` has to — the chain it
+		// answers is spelled `javaClass.classLoader` in half the catalogue, and
+		// a test that forbids saying so forbids explaining the exemption beside
+		// the thing it exempts.
+		const source = kotlinRuntime()
+			.replace(/\/\*[\s\S]*?\*\//g, '')
+			.replace(/(^|[^:])\/\/.*$/gm, '$1');
 		expect(source).not.toContain('javaClass');
 		expect(k.javaClass).toBeUndefined();
 	});
@@ -3974,5 +3982,155 @@ describe('names that are a companion rather than a constructor', () => {
 		// honest rather than a stub.
 		expect(runtime.globals.TimeZone.getTimeZone('UTC').getID()).toBe('UTC');
 		expect(runtime.globals.TimeZone.getDefault().getID()).toBe('UTC');
+	});
+});
+
+/* ── the classpath, and the i18n files it exists to reach ─────────────────── */
+
+/**
+ * The runtime with a classpath in it.
+ *
+ * `__RESOURCES` is declared by the entry point ahead of the runtime, so a test
+ * that wants one has to build the module the same way the entry point does.
+ * The plain `load()` above deliberately declares none, which is what pins the
+ * other half of the contract: a bundle with no resources reads as empty rather
+ * than throwing on an undeclared name.
+ */
+async function loadWithResources(resources: Record<string, string>): Promise<Loaded['globals']> {
+	loads += 1;
+	const source = [
+		JS_RUNTIME,
+		`var __RESOURCES = ${JSON.stringify(resources)};`,
+		kotlinRuntime(),
+		'export const k = __k;',
+		'export const globals = { PropertyResourceBundle, InputStreamReader, Collator, Locale };',
+		`/* load ${loads} */`
+	].join('\n');
+	const url = `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`;
+	const module = (await import(/* @vite-ignore */ url)) as {
+		k: any;
+		globals: Record<string, any>;
+	};
+	return { ...module.globals, k: module.k };
+}
+
+const MESSAGES = [
+	'# a comment, and the blank line under it',
+	'',
+	'! the other comment marker',
+	'author_filter_title=Author',
+	'colon_form:Colon',
+	'space_form Space',
+	'empty=',
+	'wrapped=one \\',
+	'    two',
+	'escaped_separator=a\\=b',
+	'unicode=caf\\u00e9',
+	'newline=first\\nsecond'
+].join('\n');
+
+describe('the classpath a converted extension reads its strings from', () => {
+	it('answers a file the conversion fetched, and null for one it did not', async () => {
+		// Null rather than a throw is what the JVM does for a resource that is
+		// not on the classpath, and the difference matters one layer up: the
+		// bundle is what degrades, not the runtime.
+		const g = await loadWithResources({ 'assets/i18n/messages_en.properties': MESSAGES });
+
+		expect(g.k.classLoader().getResourceAsStream('assets/i18n/messages_en.properties')).not.toBe(
+			null
+		);
+		expect(g.k.classLoader().getResourceAsStream('assets/i18n/messages_zz.properties')).toBe(null);
+		// A leading slash is the other spelling of the same path.
+		expect(g.k.classLoader().getResourceAsStream('/assets/i18n/messages_en.properties')).not.toBe(
+			null
+		);
+	});
+
+	it('reads a .properties file the way java.util.Properties reads one', async () => {
+		// Each of these appears in the message files of a real catalogue, and a
+		// split on `=` gets three of them wrong.
+		const g = await loadWithResources({ 'assets/i18n/messages_en.properties': MESSAGES });
+		const stream = g.k.classLoader().getResourceAsStream('assets/i18n/messages_en.properties');
+		const bundle = g.PropertyResourceBundle(new g.InputStreamReader(stream, 'UTF-8'));
+
+		expect(bundle.getString('author_filter_title')).toBe('Author');
+		expect(bundle.getString('colon_form')).toBe('Colon');
+		expect(bundle.getString('space_form')).toBe('Space');
+		expect(bundle.getString('empty')).toBe('');
+		expect(bundle.getString('wrapped')).toBe('one two');
+		expect(bundle.getString('escaped_separator')).toBe('a=b');
+		expect(bundle.getString('unicode')).toBe('café');
+		expect(bundle.getString('newline')).toBe('first\nsecond');
+		expect(bundle.containsKey('author_filter_title')).toBe(true);
+		expect(bundle.containsKey('# a comment, and the blank line under it')).toBe(false);
+	});
+
+	it('is a Map, because that is what the emitter’s two readers already take', async () => {
+		// `bundle.containsKey(k)` becomes `__k.containsKey` and
+		// `bundle.getString(k)` becomes `__k.jsonGetString`. Both read a Map
+		// already; entries as own properties would work until a message file
+		// carried a key spelled like one of the methods.
+		const g = await loadWithResources({ 'assets/i18n/messages_en.properties': MESSAGES });
+		const bundle = g.PropertyResourceBundle(
+			new g.InputStreamReader(
+				g.k.classLoader().getResourceAsStream('assets/i18n/messages_en.properties'),
+				'UTF-8'
+			)
+		);
+
+		expect(g.k.containsKey(bundle, 'author_filter_title')).toBe(true);
+		expect(g.k.jsonGetString(bundle, 'author_filter_title')).toBe('Author');
+	});
+
+	it('answers an EMPTY bundle for a file that is not there, rather than throwing', async () => {
+		// The load-bearing one. `MadaraBase` builds its filter options from
+		// `intl[…]` in a class *property*, so this runs while the extension is
+		// being constructed — a throw there costs the whole bundle rather than
+		// one label. Upstream's own `Intl.get` answers `[key]` for a key it
+		// cannot find, so an empty bundle is the fallback its author wrote.
+		const g = await loadWithResources({});
+		const bundle = g.PropertyResourceBundle(
+			new g.InputStreamReader(
+				g.k.classLoader().getResourceAsStream('assets/i18n/messages_en.properties'),
+				'UTF-8'
+			)
+		);
+
+		expect(bundle.containsKey('author_filter_title')).toBe(false);
+		expect(bundle.size).toBe(0);
+	});
+
+	it('reads an empty classpath when the bundle declares none', () => {
+		// The video half declares no `__RESOURCES` at all, and an undeclared
+		// name is a ReferenceError rather than `undefined` — which is why the
+		// runtime asks `typeof`. This is the runtime loaded WITHOUT one.
+		expect(k.classLoader().getResourceAsStream('assets/i18n/messages_en.properties')).toBe(null);
+	});
+});
+
+describe('the two java.text services Intl asks for', () => {
+	it('orders strings, which is all a Collator is used for here', async () => {
+		const g = await loadWithResources({});
+		const collator = g.Collator.getInstance(g.Locale.forLanguageTag('es'));
+
+		expect(['pear', 'apple', 'fig'].sort((a, b) => collator.compare(a, b))).toEqual([
+			'apple',
+			'fig',
+			'pear'
+		]);
+		expect(collator.equals('fig', 'fig')).toBe(true);
+	});
+
+	it('names a language it knows and answers the tag for one it does not', async () => {
+		// ABI.md §6 forbids the `Intl` global and says display names are the
+		// host's job, so the name is English whatever locale is asked. A tag
+		// with no entry answers itself, which is visible rather than invented.
+		const g = await loadWithResources({});
+
+		expect(g.Locale.forLanguageTag('ja').getDisplayName(g.Locale.ROOT)).toBe('Japanese');
+		expect(g.Locale.forLanguageTag('pt-BR').getDisplayName(g.Locale.ROOT)).toBe(
+			'Portuguese (Brazil)'
+		);
+		expect(g.Locale.forLanguageTag('zz').getDisplayName(g.Locale.ROOT)).toBe('zz');
 	});
 });

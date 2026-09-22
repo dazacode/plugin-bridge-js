@@ -114,6 +114,7 @@ import {
 	SUPER_SUSPEND_MEMBERS,
 	BASE_CONSTANTS,
 	ARGUMENT_LAMBDA_METHODS,
+	CLASS_LOADER,
 	BUILDER_LAMBDA_METHODS,
 	TOLERATED_JSON_FLAGS,
 	VARARG_OPTIONS,
@@ -1693,6 +1694,28 @@ class Emitter {
 		const constructorParams = this.primaryConstructorParams(node);
 		for (const param of constructorParams) this.classMembers.add(param.name);
 
+		/**
+		 * The parameters that are *only* parameters, which a property
+		 * initialiser reads as itself rather than off `this`.
+		 *
+		 * `class Intl(language: String, private val baseLanguage: String)` gives
+		 * the class one field and two names. Both went into `classMembers`
+		 * above, so both resolved to `this.x` — and for the half that is not a
+		 * property there is no such field. `Intl`'s own
+		 * `chosenLanguage = when (language) { in availableLanguages -> … }`
+		 * therefore compared `undefined` against `undefined` and answered the
+		 * base language every time: an extension in Spanish drew its filters in
+		 * English, with nothing refused and nothing thrown.
+		 *
+		 * Only the non-property half is declared, and only around an
+		 * initialiser. A `val` that is both parameter and property must keep
+		 * resolving to the field, because a getter written below it reads the
+		 * field and the parameter is long gone by then — and Kotlin forbids a
+		 * getter or a method from naming the other half at all, which is what
+		 * makes this scope exactly as wide as the language allows.
+		 */
+		const initialiserOnly = constructorParams.filter((param) => !param.isProperty);
+
 		this.emittedTypes.add(name);
 		const nested = this.scopeNestedTypes(members, name);
 
@@ -1715,7 +1738,14 @@ class Emitter {
 						next !== undefined && (next.type === 'getter' || next.type === 'setter')
 							? next
 							: undefined;
-					const emitted = this.classProperty(child, detached);
+					this.pushScope();
+					let emitted;
+					try {
+						for (const param of initialiserOnly) this.declare(param.name);
+						emitted = this.classProperty(child, detached);
+					} finally {
+						this.popScope();
+					}
 					if (emitted === null) break;
 					if (emitted.kind === 'assign') ctorLines.push(emitted.text);
 					else memberLines.push(emitted.text);
@@ -2492,7 +2522,10 @@ class Emitter {
 		if (delegate !== undefined) {
 			const text = this.member(name, node, () => {
 				const initialiser = this.delegateValue(delegate, node, name);
-				return `get ${name}() ${block([`return ${this.helper('lazy')}(this, ${JSON.stringify(name)}, ${initialiser});`])}`;
+				return this.overridable(
+					name,
+					`get ${name}() ${block([`return ${this.helper('lazy')}(this, ${JSON.stringify(name)}, ${initialiser});`])}`
+				);
 			});
 			return text === null ? null : { kind: 'member', text };
 		}
@@ -2503,7 +2536,7 @@ class Emitter {
 				if (body === undefined) this.refuse(getter, 'a getter with no body');
 				const emitted = this.functionScope('function', null, [], () => this.functionBody(body));
 				if (emitted.isAsync) this.refuse(getter, 'a suspending getter');
-				return `get ${name}() ${emitted.text}`;
+				return this.overridable(name, `get ${name}() ${emitted.text}`);
 			});
 			return text === null ? null : { kind: 'member', text };
 		}
@@ -2522,13 +2555,47 @@ class Emitter {
 		if (!mutable && initialiser !== undefined && this.readsBaseMember(initialiser)) {
 			const deferred = this.member(name, node, () => {
 				const value = this.propertyValue(node, name);
-				return `get ${name}() ${block([`return ${this.helper('lazy')}(this, ${JSON.stringify(name)}, () => ${value});`])}`;
+				return this.overridable(
+					name,
+					`get ${name}() ${block([`return ${this.helper('lazy')}(this, ${JSON.stringify(name)}, () => ${value});`])}`
+				);
 			});
 			return deferred === null ? null : { kind: 'member', text: deferred };
 		}
 
 		const text = this.member(name, node, () => `this.${name} = ${this.propertyValue(node, name)};`);
 		return text === null ? null : { kind: 'assign', text };
+	}
+
+	/**
+	 * A getter a subclass is allowed to overwrite with a plain value.
+	 *
+	 * `protected open val mangaSubString get() = "manga"` on a template, and
+	 * `override val mangaSubString = "comics-new"` on the extension built from
+	 * it, is ordinary Kotlin: the override has a backing field where the base
+	 * had a computed value. Emitted as written, the second is
+	 * `this.mangaSubString = "comics-new"` against a prototype accessor with no
+	 * setter — which in an ES module is strict mode, so it **throws**:
+	 * "Attempted to assign to readonly property", inside the constructor, at
+	 * load, taking the whole bundle.
+	 *
+	 * It is not a rare shape. Measured over 300 listings of a real catalogue it
+	 * was 30 of the 47 bundles that converted cleanly and then died on import —
+	 * which is why it is fixed here, where every getter this emitter writes
+	 * passes, rather than at the assignment: the base and the subclass are
+	 * routinely in different files, and the one that has to know is the one
+	 * being assigned to.
+	 *
+	 * `defineProperty` rather than a backing field, because the own property it
+	 * creates is what every later read finds — the same thing Kotlin's backing
+	 * field does to the inherited getter. A `val` is never assigned in valid
+	 * Kotlin except by an override, so nothing else can reach this.
+	 */
+	private overridable(name: string, getter: string): string {
+		return `${getter}\nset ${name}(__v) ${block([
+			`Object.defineProperty(this, ${JSON.stringify(name)}, ` +
+				`{ value: __v, writable: true, enumerable: true, configurable: true });`
+		])}`;
 	}
 
 	/**
@@ -5976,6 +6043,19 @@ class Emitter {
 		// segment.
 		const qualified = QUALIFIED_GLOBAL.exec(node.text.replace(/\s+/g, ''));
 		if (qualified !== null && GLOBAL_NAMES.has(qualified[1])) return qualified[1];
+
+		// The one thing this ecosystem asks the JVM class object for, and the
+		// only reflection in the catalogue that has an answer here.
+		//
+		// `Intl(classLoader = this::class.java.classLoader!!)` is how a source
+		// reaches the `.properties` files its own repository keeps beside its
+		// Kotlin, and `CLASS_LOADER` is both spellings of it — the `::class`
+		// form, which arrives as a navigation suffix holding a keyword and no
+		// name, and the `javaClass` form, which is a named obstacle everywhere
+		// else and stays one. Matched on the whole chain rather than on either
+		// half, so `javaClass.simpleName` is untouched: a class *name* is what
+		// `subset.ts` refuses reflection for, and this is a class *path*.
+		if (CLASS_LOADER.test(node.text.replace(/\s+/g, ''))) return `${this.helper('classLoader')}()`;
 
 		const receiver = kids(node)[0];
 		if (receiver.type === 'super_expression') {

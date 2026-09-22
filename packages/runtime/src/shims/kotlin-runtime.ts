@@ -1097,6 +1097,231 @@ Locale.forLanguageTag = function (tag) {
 };
 
 /**
+ * The language names this ecosystem serves, and why the list stops there.
+ *
+ * 'Locale.getDisplayName' is a language's name in another language, and
+ * 'ABI.md' section 6 both forbids the 'Intl' global and says display names are
+ * the host's job. So this answers an ENGLISH name whatever locale is asked,
+ * and a tag it has never heard of answers itself rather than a guess.
+ *
+ * The 27 tags are exactly the ones a real manga index publishes across ~1,400
+ * listings, plus the two pseudo-tags 'all' and 'other' that an index uses for
+ * a multi-language source. Extending it to the whole of ISO 639 would put
+ * about eight kilobytes into every bundle to answer a question two listings
+ * ask, and the host draws the language chips a viewer actually sees.
+ */
+var __LANGUAGE_NAMES = {
+  af: 'Afrikaans', ar: 'Arabic', bg: 'Bulgarian', ca: 'Catalan', cs: 'Czech',
+  de: 'German', el: 'Greek', en: 'English', es: 'Spanish', fa: 'Persian',
+  fi: 'Finnish', fr: 'French', he: 'Hebrew', hi: 'Hindi', hu: 'Hungarian',
+  id: 'Indonesian', it: 'Italian', ja: 'Japanese', ko: 'Korean', ms: 'Malay',
+  nl: 'Dutch', no: 'Norwegian', pl: 'Polish', pt: 'Portuguese', ro: 'Romanian',
+  ru: 'Russian', sq: 'Albanian', sr: 'Serbian', sv: 'Swedish', th: 'Thai',
+  tr: 'Turkish', uk: 'Ukrainian', vi: 'Vietnamese', zh: 'Chinese'
+};
+
+var __REGION_NAMES = {
+  BR: 'Brazil', CN: 'China', HANS: 'Simplified', HANT: 'Traditional',
+  HK: 'Hong Kong', MX: 'Mexico', PT: 'Portugal', TW: 'Taiwan', US: 'United States'
+};
+
+/**
+ * The display name, in English, of whatever tag this locale was built from.
+ *
+ * The argument is the locale to answer IN, and it is accepted and ignored for
+ * the reason above. Kept as a parameter rather than dropped because every call
+ * in this ecosystem passes one, and a shim that took none would be an arity
+ * mismatch rather than a documented limitation.
+ */
+Locale.prototype.getDisplayName = function (inLocale) {
+  var base = __str(this.language).toLowerCase();
+  var name = Object.prototype.hasOwnProperty.call(__LANGUAGE_NAMES, base)
+    ? __LANGUAGE_NAMES[base]
+    : '';
+  if (name.length === 0) return this.toString();
+  var region = __str(this.country).toUpperCase();
+  if (region.length === 0) return name;
+  var place = Object.prototype.hasOwnProperty.call(__REGION_NAMES, region)
+    ? __REGION_NAMES[region]
+    : region;
+  return name + ' (' + place + ')';
+};
+
+/**
+ * java.text.Collator, which sorts by a locale's rules.
+ *
+ * Every use of it here is 'sortedWith(intl.collator)' over filter labels, so
+ * what it has to answer is a comparator. 'localeCompare' is the JavaScript
+ * spelling of the same question and is in the language core rather than in
+ * 'Intl' — without 'Intl' its collation is implementation-defined, which for
+ * ordering a list of genre names is a difference nobody can see. The locale is
+ * not passed on to it for exactly that reason: an engine with no 'Intl' throws
+ * on a locale argument it cannot honour, and a sort that throws costs the
+ * whole filter list.
+ */
+function Collator(locale) {
+  if (!(this instanceof Collator)) return new Collator(locale);
+  this.locale = locale;
+}
+
+Collator.getInstance = function (locale) { return new Collator(locale); };
+Collator.prototype.compare = function (left, right) {
+  return __str(left).localeCompare(__str(right));
+};
+Collator.prototype.equals = function (left, right) {
+  return this.compare(left, right) === 0;
+};
+
+/**
+ * The files an extension's own repository keeps beside its Kotlin.
+ *
+ * This is NOT a JVM classpath and does not pretend to be one. It answers the
+ * paths the conversion actually fetched — 'assets/i18n/messages_en.properties'
+ * and its siblings — and null for everything else, which is what the JVM
+ * answers for a resource that is not on the classpath either.
+ *
+ * '__RESOURCES' is declared by the entry point ahead of this runtime, the way
+ * '__SETTING_ID_MAP' is. A bundle that declares none (the video half, or a
+ * conversion whose repository had no assets) reads as empty rather than
+ * throwing, so the 'typeof' guard is load-bearing.
+ */
+function __resources() {
+  return typeof __RESOURCES === 'undefined' || __RESOURCES === null ? {} : __RESOURCES;
+}
+
+function __ClassLoader() {}
+
+__ClassLoader.prototype.getResourceAsStream = function (name) {
+  var path = __str(name).replace(/^\\/+/, '');
+  var files = __resources();
+  if (!Object.prototype.hasOwnProperty.call(files, path)) return null;
+  return { __text: __str(files[path]), __path: path };
+};
+
+__ClassLoader.prototype.getResource = function (name) {
+  return this.getResourceAsStream(name);
+};
+
+var __theClassLoader = new __ClassLoader();
+
+/**
+ * InputStreamReader, which here is the identity on what the loader answered.
+ *
+ * The only stream this runtime can produce is one it already holds as text, so
+ * decoding is done. The charset is accepted and ignored: the fetcher read the
+ * file as UTF-8, and the one call site in this ecosystem passes "UTF-8".
+ *
+ * A null stream is carried rather than thrown on, because Java's NPE here would
+ * land inside a class PROPERTY — 'MadaraBase' builds its filter options from
+ * 'intl[…]' at construction — and a throw there takes the whole extension, not
+ * one label. See PropertyResourceBundle for what an absent file answers
+ * instead.
+ */
+function InputStreamReader(stream, charset) {
+  if (!(this instanceof InputStreamReader)) return new InputStreamReader(stream, charset);
+  this.__text = stream === null || stream === undefined ? null : __str(stream.__text);
+  this.__path = stream === null || stream === undefined ? '' : __str(stream.__path);
+}
+
+InputStreamReader.prototype.readText = function () {
+  return this.__text === null ? '' : this.__text;
+};
+InputStreamReader.prototype.close = function () {};
+
+/**
+ * java.util.PropertyResourceBundle, over a '.properties' file.
+ *
+ * It answers a MAP rather than an object with the entries on it, because the
+ * emitter turns 'bundle.containsKey(k)' into '__k.containsKey' and
+ * 'bundle.getString(k)' into '__k.jsonGetString', and both of those already
+ * read a Map. Entries as own properties would work too until a messages file
+ * carried a key spelled like one of the methods.
+ *
+ * A bundle over a file that is not in this conversion is EMPTY rather than a
+ * throw. Upstream's own 'Intl.get' answers '[key]' for a key it cannot find,
+ * so an empty bundle degrades to a label a reader can see and report — where
+ * the throw would be a dead extension, at construction, for a missing
+ * translation.
+ */
+function PropertyResourceBundle(reader) {
+  var text = reader === null || reader === undefined ? '' : __str(reader.readText());
+  var map = __parseProperties(text);
+  map.getString = function (key) { return __str(map.get(key)); };
+  map.containsKey = function (key) { return map.has(key); };
+  map.getKeys = function () { return Array.from(map.keys()); };
+  map.keySet = map.getKeys;
+  return map;
+}
+
+/**
+ * java.util.Properties' text format, as far as these files use it.
+ *
+ * Comments, the three separators Java allows, a trailing backslash that
+ * continues onto the next line, and the escapes that appear in a translated
+ * string: '\\\\n', '\\\\t', '\\\\uXXXX', and an escaped separator. Written out rather
+ * than approximated with a split on '=' because a value in these files
+ * routinely contains one — 'order_by_filter_az=A-Z' is fine either way,
+ * 'search_hint=title=…' is not.
+ */
+function __parseProperties(text) {
+  var out = new Map();
+  var lines = __str(text).replace(/\\r\\n?/g, '\\n').split('\\n');
+  var pending = '';
+  for (var i = 0; i < lines.length; i += 1) {
+    var line = pending + lines[i].replace(/^[ \\t\\f]+/, '');
+    pending = '';
+    if (line.length === 0) continue;
+    if (line.charAt(0) === '#' || line.charAt(0) === '!') continue;
+    // A line ending in an ODD number of backslashes continues; an even number
+    // is an escaped backslash that happens to sit at the end.
+    var slashes = /\\\\*$/.exec(line)[0].length;
+    if (slashes % 2 === 1) {
+      pending = line.slice(0, -1);
+      continue;
+    }
+    var key = '';
+    var cut = -1;
+    for (var c = 0; c < line.length; c += 1) {
+      var ch = line.charAt(c);
+      if (ch === '\\\\') { c += 1; continue; }
+      if (ch === '=' || ch === ':' || ch === ' ' || ch === '\\t' || ch === '\\f') { cut = c; break; }
+    }
+    if (cut === -1) {
+      out.set(__unescapeProperty(line), '');
+      continue;
+    }
+    key = __unescapeProperty(line.slice(0, cut));
+    var rest = line.slice(cut).replace(/^[ \\t\\f]*[=:]?[ \\t\\f]*/, '');
+    out.set(key, __unescapeProperty(rest));
+  }
+  return out;
+}
+
+function __unescapeProperty(text) {
+  var out = '';
+  for (var i = 0; i < text.length; i += 1) {
+    var ch = text.charAt(i);
+    if (ch !== '\\\\') { out += ch; continue; }
+    i += 1;
+    var next = text.charAt(i);
+    if (next === 'n') out += '\\n';
+    else if (next === 't') out += '\\t';
+    else if (next === 'r') out += '\\r';
+    else if (next === 'f') out += '\\f';
+    else if (next === 'u') {
+      var hex = text.slice(i + 1, i + 5);
+      if (/^[0-9a-fA-F]{4}$/.test(hex)) {
+        out += String.fromCharCode(parseInt(hex, 16));
+        i += 4;
+      } else {
+        out += 'u';
+      }
+    } else out += next;
+  }
+  return out;
+}
+
+/**
  * SimpleDateFormat, for the one thing extensions use it for.
  *
  * 'episodeFromElement' reads an upload date on nearly every list page, always
@@ -4738,6 +4963,16 @@ var __k = {
   /** Char.isLowerCase()/isUpperCase(), which java.lang.Character already answers. */
   isLowerCase: function (value) { return Character.isLowerCase(value); },
   isUpperCase: function (value) { return Character.isUpperCase(value); },
+
+  /**
+   * The classpath, which is what this build has of one: see __ClassLoader.
+   *
+   * A helper rather than a bundle-scope name because the Kotlin that reaches it
+   * is not a construction — 'this::class.java.classLoader' and
+   * 'javaClass.classLoader' are reflection the emitter recognises as a whole
+   * chain and rewrites, and nothing spells the loader itself.
+   */
+  classLoader: function () { return __theClassLoader; },
 
   /** Map.containsKey(k), over a Map, a plain object, or a shim that has its own. */
   containsKey: function (value, key) {

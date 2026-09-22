@@ -107,6 +107,16 @@ export interface ExtensionSource {
 	/** Module name → that module's Kotlin, keyed relative to `lib/<name>/`. */
 	readonly libModules: ReadonlyMap<string, ReadonlyMap<string, string>>;
 	/**
+	 * The non-Kotlin files an extension is built *with*, keyed as the classpath
+	 * names them: `assets/i18n/messages_en.properties` and its siblings.
+	 *
+	 * Merged across the template and the extension the way the Android build
+	 * merges them — the extension's own copy of a path wins over the library's —
+	 * because that is what the artifact a viewer would otherwise install
+	 * contains.
+	 */
+	readonly resources: ReadonlyMap<string, string>;
+	/**
 	 * The branch that answered, or null when none did.
 	 *
 	 * Surfaced rather than kept implicit because it is what every template and
@@ -120,6 +130,8 @@ export interface ExtensionSource {
 export interface SharedSources {
 	readonly themeFiles: ReadonlyMap<string, string>;
 	readonly libModules: ReadonlyMap<string, ReadonlyMap<string, string>>;
+	/** The shared directories' own `assets/`, merged; see `ExtensionSource`. */
+	readonly resources: ReadonlyMap<string, string>;
 }
 
 /** Lists every file under one directory URL. See `fetchExtensionSource`. */
@@ -150,6 +162,25 @@ const BUILD_FILES = ['build.gradle', 'build.gradle.kts'] as const;
  * it was meant to, and fetching all of it would be this module's fault.
  */
 export const MAX_KOTLIN_FILES = 64;
+
+/**
+ * How many message files one directory may cost.
+ *
+ * A template carries one per language it has been translated into; the largest
+ * in the measured catalogue carries four. Twelve is room for a repository that
+ * translates further, and a bound on one that puts something unexpected under
+ * `assets/i18n/`.
+ */
+export const MAX_RESOURCE_FILES = 12;
+
+/**
+ * The resource paths worth a request. See `fetchResourceDirectory`.
+ *
+ * Anchored at the start so it is `assets/i18n/` *of this directory*, not any
+ * path that happens to contain those segments, and the filename is matched
+ * whole so a `.properties.bak` beside it is not fetched.
+ */
+const RESOURCE_PATHS = /^assets\/i18n\/[\w.-]+\.properties$/;
 
 /**
  * The per-group caps, and the shared budget that stops them multiplying.
@@ -196,6 +227,8 @@ export function newSourceBudget(): SourceBudget {
 export interface SharedModule {
 	/** Path relative to the directory → file contents. */
 	readonly files: ReadonlyMap<string, string>;
+	/** The same directory's `assets/`, keyed relative to it. */
+	readonly resources: ReadonlyMap<string, string>;
 	/** `project(':lib:…')` names in its own build file; empty when it has none. */
 	readonly dependencies: readonly string[];
 }
@@ -462,6 +495,7 @@ const EMPTY_SOURCE: ExtensionSource = {
 	themePackage: null,
 	themeFiles: new Map(),
 	libModules: new Map(),
+	resources: new Map(),
 	resolvedRef: null
 };
 
@@ -641,6 +675,60 @@ async function fetchKotlinDirectory(
 }
 
 /**
+ * The files a directory holds that are not Kotlin and are still part of it.
+ *
+ * One pattern, `assets/i18n/*.properties`, and it is deliberately not "every
+ * asset". An extension's `assets/` may hold anything its author put there, and
+ * an unbounded read of somebody else's directory is the multiplication the
+ * header of this file exists to close. What earns its place is the one group
+ * the translator can actually use: `keiyoushi.lib.i18n.Intl` reads
+ * `assets/i18n/messages_<lang>.properties` through the classloader, and without
+ * them the largest template in the catalogue draws every filter label as
+ * `[order_by_filter_title]`.
+ *
+ * They are read at the same time as the Kotlin, out of the same listing, on the
+ * same budget — so a directory with no `assets/i18n` costs nothing at all, and
+ * one with four languages costs four responses of about two kilobytes.
+ */
+async function fetchResourceDirectory(
+	base: string,
+	listing: readonly string[],
+	getText: TextFetcher,
+	budget: SourceBudget
+): Promise<Map<string, string>> {
+	const files = new Map<string, string>();
+	if (budget.files <= 0 || budget.bytes <= 0) return files;
+
+	const wanted: { path: string; url: string }[] = [];
+	const seen = new Set<string>();
+	for (const name of listing) {
+		const path = relativeUnder(base, name);
+		if (path === null || seen.has(path) || !RESOURCE_PATHS.test(path)) continue;
+		seen.add(path);
+		wanted.push({ path, url: `${base}${path}` });
+	}
+	wanted.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+
+	for (const entry of wanted) {
+		if (files.size >= MAX_RESOURCE_FILES || budget.files <= 0 || budget.bytes <= 0) break;
+		budget.files -= 1;
+		let body: string;
+		try {
+			body = await getText(entry.url);
+		} catch {
+			// As for the Kotlin beside it: one unreadable file is not a reason to
+			// abandon the rest. A message file that did not arrive reads as an
+			// absent translation, which is a label in brackets rather than a
+			// failure — see `PropertyResourceBundle` in the runtime.
+			continue;
+		}
+		files.set(entry.path, body);
+		budget.bytes -= body.length;
+	}
+	return files;
+}
+
+/**
  * The build file of an already-listed directory, without probing for it.
  *
  * Reading a module's dependencies is only worth doing when the module's own
@@ -673,7 +761,7 @@ async function readListedBuildFile(
 	return null;
 }
 
-const EMPTY_MODULE: SharedModule = { files: new Map(), dependencies: [] };
+const EMPTY_MODULE: SharedModule = { files: new Map(), resources: new Map(), dependencies: [] };
 
 /**
  * One shared directory — a template or a module — read once and remembered.
@@ -720,9 +808,11 @@ async function readSharedDirectory(
 		}
 
 		const files = await fetchKotlinDirectory(base, listing, listFiles, getText, limit, budget);
+		const resources = await fetchResourceDirectory(base, listing, getText, budget);
 		const declared = await readListedBuildFile(base, listing, getText, budget);
 		return {
 			files,
+			resources,
 			dependencies: declared === null ? [] : libDependencies(declared)
 		};
 	})();
@@ -769,6 +859,7 @@ export async function fetchSharedSources(
 ): Promise<SharedSources> {
 	const themeFiles = new Map<string, string>();
 	const libModules = new Map<string, ReadonlyMap<string, string>>();
+	const resources = new Map<string, string>();
 
 	const pending: { name: string; depth: number }[] = [];
 	const queued = new Set<string>();
@@ -795,6 +886,7 @@ export async function fetchSharedSources(
 				cache
 			);
 			for (const [path, body] of template.files) themeFiles.set(path, body);
+			for (const [path, body] of template.resources) resources.set(path, body);
 			enqueue(template.dependencies, 0);
 		}
 	}
@@ -817,10 +909,16 @@ export async function fetchSharedSources(
 			cache
 		);
 		if (module.files.size > 0) libModules.set(entry.name, module.files);
+		// A module's own assets do not overwrite the template's: the template is
+		// read first and is the more specific of the two, exactly as it is for
+		// the Kotlin.
+		for (const [path, body] of module.resources) {
+			if (!resources.has(path)) resources.set(path, body);
+		}
 		if (entry.depth === 0) enqueue(module.dependencies, 1);
 	}
 
-	return { themeFiles, libModules };
+	return { themeFiles, libModules, resources };
 }
 
 /**
@@ -945,6 +1043,7 @@ export async function fetchExtensionSource(
 		MAX_KOTLIN_FILES,
 		budget
 	);
+	const ownResources = await fetchResourceDirectory(directoryUrl, names, getText, budget);
 
 	const declared = buildGradle === null ? {} : readBuildGradle(buildGradle);
 	// Two spellings of one field. The video ecosystem writes `themePkg` in a
@@ -965,7 +1064,11 @@ export async function fetchExtensionSource(
 		? directoryUrl.slice(0, directoryUrl.length - suffix.length)
 		: null;
 
-	let shared: SharedSources = { themeFiles: new Map(), libModules: new Map() };
+	let shared: SharedSources = {
+		themeFiles: new Map(),
+		libModules: new Map(),
+		resources: new Map()
+	};
 	if (rootUrl !== null && (themePackage !== null || libNames.length > 0)) {
 		shared = await fetchSharedSources(
 			rootUrl,
@@ -978,12 +1081,20 @@ export async function fetchExtensionSource(
 		);
 	}
 
+	// The extension's own copy of a path wins, which is the order the Android
+	// build merges assets in: an extension that ships its own
+	// `messages_en.properties` beside a template's is overriding it, not adding
+	// a second one.
+	const resources = new Map(shared.resources);
+	for (const [path, body] of ownResources) resources.set(path, body);
+
 	return {
 		buildGradle,
 		kotlinFiles,
 		themePackage,
 		themeFiles: shared.themeFiles,
 		libModules: shared.libModules,
+		resources,
 		resolvedRef
 	};
 }

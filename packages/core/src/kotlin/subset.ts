@@ -546,6 +546,30 @@ export function cryptoObstacle(text: string, asTransformation = false): string |
  */
 const APPLICATION_PREFERENCES = /\bInjekt\.get<Application>\(\)\.getSharedPreferences\(/;
 
+/**
+ * The classpath, in the two spellings this ecosystem writes it in.
+ *
+ * `this::class.java.classLoader` and `javaClass.classLoader` are one idiom, and
+ * the split is not stylistic: the first is what `MadaraBase` writes and the
+ * second is what `MangaThemesia` writes, which between them is most of the
+ * catalogue. Measured over 300 listings of a real repository, 62 blocked
+ * listings named the first and 18 the second — one idiom in two spellings,
+ * which is the shape the `Application` primitive above turned out to have too.
+ *
+ * It is here rather than in `emit.ts` because both files have to agree about
+ * it. The emitter turns the chain into `__k.classLoader()`; the scanner has to
+ * stop refusing `javaClass` for the length of that chain and no further, which
+ * is the same call-level exemption `APPLICATION_PREFERENCES` gets and for the
+ * same reason — a leaf sees `javaClass` alone and cannot tell a class *path*,
+ * which the runtime can answer, from a class *name*, which it cannot.
+ * `javaClass.simpleName` stays refused.
+ *
+ * The trailing `!!` is a sibling in the tree rather than part of this node, so
+ * it is not in the pattern; `nn()` wraps the result as it does anywhere else.
+ */
+export const CLASS_LOADER =
+	/^(?:(?:[A-Za-z_][\w.]*|this)::class\.java|(?:this\.)?javaClass)\.classLoader$/;
+
 /** The obstacle this node's own text names, if any. Checked leaf-first. */
 export function namedObstacle(text: string): string | null {
 	// Asked first, because it is the specific question: `cryptoObstacle` names
@@ -1087,6 +1111,23 @@ export const HOST_PROPERTY_METHODS: ReadonlySet<string> = new Set([
  * is a deliberate cost rather than an oversight.
  */
 export const HOST_METHODS: ReadonlySet<string> = new Set([
+	// The classpath, and the one question this ecosystem asks a `Locale`.
+	//
+	// `getResourceAsStream(name)` is the read at the bottom of `Intl`, and
+	// `__k.classLoader()` is what it is called on — a loader over the files the
+	// conversion fetched beside the Kotlin, not the whole of a JVM classpath. A
+	// name that was never fetched answers null, which is what the JVM answers
+	// too, so the `Intl` above it falls back to its base language exactly as it
+	// would on a device.
+	//
+	// `getDisplayName` is a language's name in another language. ABI.md §6 says
+	// the host owns those and the bundle has no `Intl` global, so the runtime's
+	// answer is the tag itself unless it is one of the languages this ecosystem
+	// actually serves — see the table for why that is a short list rather than
+	// all of ISO 639.
+	'getResourceAsStream',
+	'getDisplayName',
+
 	// The Rx-era doors on a Call, and the operators on what they answer.
 	// Emitted unchanged because `__observable` defines them — see it for
 	// why an Observable here is a promise with a `map`.
@@ -1715,7 +1756,19 @@ export const GLOBAL_NAMES: ReadonlySet<string> = new Set([
 	'Instant',
 	'OffsetDateTime',
 	'ZonedDateTime',
-	'LocalDateTime'
+	'LocalDateTime',
+
+	/* `keiyoushi.lib.i18n.Intl`, which is one small Kotlin file in the shared
+	   `lib/` directory and the largest single blocker the manga half had: 95 of
+	   300 measured listings refused on something inside it. It reads its
+	   strings out of a `.properties` file with `PropertyResourceBundle`, wraps
+	   the byte stream in an `InputStreamReader`, and sorts with a `Collator`.
+	   Each is a capitalised receiver the emitter passes through, so an absent
+	   name is a death at load with nothing refused — which is why they are
+	   declared here rather than left to translate and fail. */
+	'PropertyResourceBundle',
+	'InputStreamReader',
+	'Collator'
 ]);
 
 /**
@@ -2516,6 +2569,14 @@ function scanInto(node: KNode, memberName: string, found: Untranslatable[]): voi
 		node.type === 'call_expression' &&
 		APPLICATION_PREFERENCES.test(node.text.replace(/\s+/g, ''))
 	) {
+		return;
+	}
+
+	// The third of the same shape, and the emitter's other half: see
+	// `CLASS_LOADER`. Returning rather than descending is what keeps the
+	// `javaClass` leaf below from being refused, and keeps the exemption exactly
+	// as long as the chain the emitter recognises.
+	if (node.type === 'navigation_expression' && CLASS_LOADER.test(node.text.replace(/\s+/g, ''))) {
 		return;
 	}
 

@@ -568,7 +568,12 @@ export const mihonAdapter: ForeignAdapter = {
 			translatedSource: conversion.js,
 			className: conversion.className,
 			baseUrl,
-			lang
+			lang,
+			// The `.properties` files this extension's own repository keeps
+			// beside its Kotlin, which `Intl` reads through the classloader. An
+			// extension with none passes an empty map and the classpath is
+			// empty, which is what it was before they were fetched at all.
+			resources: Object.fromEntries(source.resources)
 		});
 
 		// Over the emitted module rather than the Kotlin: the emitter has

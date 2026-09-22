@@ -67,6 +67,9 @@ type Any = unknown;
 
 const nullish = (value: Any): boolean => value === null || value === undefined;
 
+/** The classpath, as far as a fixture needs one. */
+const stubLoader = { getResourceAsStream: () => null };
+
 /**
  * Just enough of `__k` to run the fixtures, with Kotlin's semantics where they
  * differ from JavaScript's — which is the only reason these helpers exist.
@@ -91,6 +94,11 @@ const helpers: Record<string, (...args: never[]) => unknown> = {
 		if (name === 'List') return Array.isArray(value);
 		return value !== null && typeof value === 'object';
 	},
+	// One loader, whichever spelling asked for it — which is what the test
+	// about the two spellings is asserting. The real one reads the files the
+	// conversion fetched; here it need only be the same object twice.
+	classLoader: () => stubLoader,
+
 	cast: (value: Any) => value,
 	castOrNull: (value: Any, name: string) =>
 		(helpers.isType as never as (a: Any, b: string) => boolean)(value, name) ? value : null,
@@ -4256,5 +4264,104 @@ describe('an unbound reference to a property', () => {
 		);
 
 		expect(found).toHaveLength(2);
+	});
+});
+
+describe('a primary constructor parameter that is not a property', () => {
+	it('reads the parameter itself, not a field the class never got', () => {
+		// `class Intl(language: String, private val baseLanguage: String)` gives
+		// the class one field and two names, and this used to emit `this.language`
+		// for both. The half with no field read `undefined`, so `Intl`'s own
+		// language selection compared nothing against nothing and answered the
+		// base language every time — an extension in Spanish drawing its filters
+		// in English, with nothing refused and nothing thrown.
+		const demo = instantiate(
+			kt(
+				'class Chooser(wanted: String, available: Set<String>, private val fallback: String) {',
+				'    val chosen: String = if (wanted in available) wanted else fallback',
+				'}',
+				'class Demo : Source() {',
+				'    fun pick(): String = Chooser("es", setOf("en", "es"), "en").chosen',
+				'    fun miss(): String = Chooser("de", setOf("en", "es"), "en").chosen',
+				'}'
+			)
+		);
+
+		expect(demo.pick()).toBe('es');
+		expect(demo.miss()).toBe('en');
+	});
+
+	it('still reads a parameter that IS a property off the instance', () => {
+		// The other half, and the reason the scope is only as wide as an
+		// initialiser: a `val` parameter outlives the constructor, and a getter
+		// written below it reads the field rather than the argument.
+		const demo = instantiate(
+			kt(
+				'class Holder(val lang: String, suffix: String) {',
+				'    val tag = lang + suffix',
+				'    val shown get() = lang',
+				'}',
+				'class Demo : Source() {',
+				'    fun tag(): String = Holder("es", "!").tag',
+				'    fun shown(): String = Holder("es", "!").shown',
+				'}'
+			)
+		);
+
+		expect(demo.tag()).toBe('es!');
+		expect(demo.shown()).toBe('es');
+	});
+});
+
+describe('the class loader', () => {
+	it('answers the runtime’s classpath for both spellings of it', () => {
+		// One idiom, two spellings, and the split is the whole catalogue:
+		// `MadaraBase` writes the first and `MangaThemesia` the second.
+		const demo = instantiate(
+			inClass(
+				'    val a = this::class.java.classLoader!!',
+				'    val b = javaClass.classLoader!!',
+				'    fun same(): Boolean = a == b'
+			),
+			{},
+			{}
+		);
+
+		expect(demo.same()).toBe(true);
+	});
+
+	it('still refuses the JVM class object asked for anything else', () => {
+		// A class *path* has an answer here and a class *name* does not. The
+		// exemption is the length of the one chain and no further.
+		expect(refusalNames(inClass('    val tag = javaClass.simpleName'))).toContain(
+			'the JVM class object'
+		);
+	});
+});
+
+describe('a getter a subclass overrides with a plain value', () => {
+	it('lets the assignment win, where a bare accessor threw at load', () => {
+		// `override val mangaSubString = "comics-new"` over a template's
+		// `open val mangaSubString get() = "manga"` is ordinary Kotlin and is a
+		// strict-mode TypeError against a prototype accessor with no setter.
+		// Measured over 300 listings it was 30 of the 47 bundles that converted
+		// cleanly and then died on import.
+		const demo = instantiate(
+			kt(
+				'open class Template {',
+				'    open val slug get() = "manga"',
+				'}',
+				'class Special : Template() {',
+				'    override val slug = "comics-new"',
+				'}',
+				'class Demo : Source() {',
+				'    fun base(): String = Template().slug',
+				'    fun overridden(): String = Special().slug',
+				'}'
+			)
+		);
+
+		expect(demo.base()).toBe('manga');
+		expect(demo.overridden()).toBe('comics-new');
 	});
 });
