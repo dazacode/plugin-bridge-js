@@ -700,12 +700,20 @@ describe('Kotlin the vendored grammar cannot read, repaired before it is parsed'
 		expect(conversion.js).toContain('(__k.last(episodes)).episode_number = 2;');
 	});
 
-	it('refuses an assignment the parser recovered into an `if`', async () => {
+	it('puts back an assignment the parser recovered into an `if`', async () => {
 		// An unbraced branch — `if (m) episodes.first().name = "x"` — parses as
 		// `(if …) = "x"`, because the assignable rule does not reach over a call.
-		// Emitting that produced an immediately-invoked function on the left of
+		// Emitting *that* produced an immediately-invoked function on the left of
 		// an `=`: a JavaScript syntax error, in a bundle that reported nothing
 		// refused and so took every other member down with it at load.
+		//
+		// **This test used to assert the refusal**, which was the right answer
+		// while the alternative was broken output. It is not the only honest
+		// answer: the association is recoverable, because the target is the
+		// branch body and the assignment belongs inside the `if`. Put back where
+		// it was written it is an ordinary conditional write, and the reason to
+		// bother is that the line is in `MangaThemesia` — a template with 112
+		// instances in one catalogue, every one of which refused for it.
 		const conversion = await convertKotlin(
 			[
 				{
@@ -723,10 +731,88 @@ describe('Kotlin the vendored grammar cannot read, repaired before it is parsed'
 			{ parser }
 		);
 
-		expect(conversion.blocking.flatMap((refusal) => refusal.obstacles.map((o) => o.kind))).toEqual([
-			'an assignment target this build cannot read (`if_expression`)'
-		]);
-		expect(conversion.js).not.toContain("= 'Movie';");
+		expect(conversion.blocking).toEqual([]);
+		// The write is *inside* the branch, which is the whole point: emitted
+		// outside it, the name would be set unconditionally.
+		expect(conversion.js).toMatch(
+			/if \(.*isMovie.*\) \{\s*__k\.first\(episodes\)\.name = 'Movie';/
+		);
+	});
+
+	it('still refuses the recovered shapes it cannot re-associate', async () => {
+		// Three of them, each needing machinery the re-association skips.
+		// `if (c) a = x else b = y` is the one that matters: two writes share one
+		// value and the grammar gives no honest way to say which branch the
+		// parser kept, so guessing would write to the wrong one silently.
+		const conversion = await convertKotlin(
+			[
+				{
+					path: 'Demo.kt',
+					source: kt(
+						'class Demo : ParsedAnimeHttpSource() {',
+						'    fun label(a: List<SEpisode>, b: List<SEpisode>, m: Boolean) {',
+						'        if (m)',
+						'            a.first().name = "One"',
+						'        else',
+						'            b.first().name = "Two"',
+						'    }',
+						'}'
+					)
+				}
+			],
+			{ parser }
+		);
+
+		// Refused, whatever it is named: the point is that nothing is emitted
+		// for it, not which sentence says so.
+		expect(conversion.blocking).not.toEqual([]);
+		expect(conversion.js).not.toContain("= 'Two';");
+	});
+
+	it('calls a translated superclass through real `super`, and the driver through `__super`', async () => {
+		// A multisrc template is a class this build emits and the extension
+		// really `extends`, so `super.chapterFromElement()` there is ordinary
+		// JavaScript meaning the template's method. Emitting `__super.` instead
+		// reached past the template to the driver's base class, which has never
+		// heard of it — and the call was refused by name, taking the extension
+		// with it. `MangaThemesia` has 112 instances in one catalogue.
+		//
+		// The discrimination is the point, so both halves are asserted: a member
+		// the template declares goes through `super`, and one only the driver
+		// has still goes through `__super`.
+		const conversion = await convertKotlin(
+			[
+				{
+					path: 'Demo.kt',
+					source: kt(
+						'class Demo : Theme() {',
+						'    override fun chapterFromElement(element: Element): SEpisode {',
+						'        val base = super.chapterFromElement(element)',
+						'        return base',
+						'    }',
+						'    fun head() = super.headersBuilder()',
+						'}'
+					)
+				},
+				{
+					path: 'theme/Theme.kt',
+					source: kt(
+						'abstract class Theme : ParsedAnimeHttpSource() {',
+						'    open fun chapterFromElement(element: Element): SEpisode = SEpisode.create()',
+						'}'
+					)
+				}
+			],
+			{ parser }
+		);
+
+		expect(conversion.blocking).toEqual([]);
+		expect(conversion.js).toContain('class Demo extends Theme');
+		// The template's own member: real `super`.
+		expect(conversion.js).toMatch(/super\.chapterFromElement\(/);
+		expect(conversion.js).not.toMatch(/__super\.chapterFromElement\(/);
+		// The driver's: still `__super`, because the template does not declare it.
+		expect(conversion.js).toMatch(/__super\.headersBuilder\(/);
 	});
 
 	it('interpolates a multi-dollar string where Kotlin 2.1 says it does', async () => {
@@ -1276,5 +1362,34 @@ describe('the cookie shapes that convert, and the ones that still refuse', () =>
 		);
 
 		expect(result.refusals.map((one) => one.member)).toContain('stored');
+	});
+});
+
+describe('a refusal that constructor code names', () => {
+	it('blocks, even where the host would never reach the member', async () => {
+		// The shape that reached a device: a template builds its filter options
+		// in a property initialiser out of a member that refused. Reachability
+		// pruned the refusal — nothing the host calls reaches it — so the
+		// conversion reported complete, packaged, installed, and threw on the
+		// line that constructs the class. `namedAtConstruction` is the clause
+		// that was missing.
+		const conversion = await convertKotlin(
+			[
+				{
+					path: 'Demo.kt',
+					source: kt(
+						'class Demo : HttpSource() {',
+						'    private val helper = Unreachable(context)',
+						'    private val options = listOf(helper.label)',
+						'    override fun popularMangaRequest(page: Int) = GET(baseUrl)',
+						'}'
+					)
+				}
+			],
+			{ parser }
+		);
+
+		expect(conversion.complete).toBe(false);
+		expect(conversion.blocking.map((one) => one.member)).toContain('helper');
 	});
 });

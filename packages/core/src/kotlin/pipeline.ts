@@ -389,6 +389,8 @@ export async function convertKotlin(
 	// So the exemption holds only while nothing translated calls the member. A
 	// refused member with a surviving caller blocks, whatever it is called.
 	const calledByTranslated = new Set<string>();
+	/** The subset of the above that constructor code names. See `blocking`. */
+	const namedAtConstruction = new Set<string>();
 	const kept = new Set(translated);
 	for (const edges of graph) {
 		if (!kept.has(edges.member)) continue;
@@ -402,12 +404,33 @@ export async function convertKotlin(
 		// it asks for and does not find; it cannot degrade around a free
 		// variable in code that survived.
 		for (const mentioned of edges.references) calledByTranslated.add(mentioned);
+		// A property initialiser is constructor code: it runs the moment the
+		// class is built, whether anything calls the member or not, so a name it
+		// reads has to exist *at load* and reachability has nothing to say
+		// about it.
+		if (!edges.construction) continue;
+		for (const called of edges.calls) namedAtConstruction.add(called.member);
+		for (const mentioned of edges.references) namedAtConstruction.add(mentioned);
 	}
 
+	// The third clause is `namedAtConstruction`, and it is the one that was
+	// missing. A refused member the host cannot reach is pruned, and rightly —
+	// the driver degrades around a member it asks for and does not find. A
+	// member a *property initialiser* names is not that: `MadaraBase` builds its
+	// filter options out of `intl` in its constructor, and with `intl` refused
+	// and pruned the bundle converted, packaged, installed and then threw on the
+	// line that constructs the class. Nothing reported a refusal, because
+	// reachability had already decided the member did not matter.
+	//
+	// Reachability answers "would the host ever call this". It does not answer
+	// "would the bundle load", and constructor code is the second question.
+	// Narrowed to construction on purpose: a method body that names a refused
+	// member and is never called is inert, and refusing for it would throw away
+	// extensions over code nothing runs.
 	const blocking = refusals.filter(
 		(one) =>
 			(!isHostDrawn(one.member) || calledByTranslated.has(one.member)) &&
-			(!graphed.has(one.member) || reachable.has(one.member))
+			(!graphed.has(one.member) || reachable.has(one.member) || namedAtConstruction.has(one.member))
 	);
 	const message = refusals.length === 0 ? null : describeRefusals(refusals);
 
