@@ -20,6 +20,12 @@
  * | GitLab | `<host>/<owner>/<repo>/-/raw/<ref>/<path>` |
  * | Gitea, Forgejo, Codeberg | `<host>/<owner>/<repo>/raw/branch/<ref>/<path>` |
  *
+ * **A pasted URL may already be on the raw host**, and often is: it is what
+ * these repositories publish and what somebody copies out of a browser tab.
+ * `parseRepositoryUrl` normalises that back to the forge origin, so the three
+ * shapes above stay the only thing `rawCandidates` has to know about. See
+ * that function for what went wrong while it did not.
+ *
  * ## Rule 9
  *
  * No host is named here except the three forge *software* conventions and
@@ -28,6 +34,17 @@
  * which is the only approach that works for a forge nobody has heard of, and
  * the only one that keeps a hostname list out of this repository.
  */
+
+/**
+ * GitHub, and the separate host it serves file bytes from.
+ *
+ * Named rather than inlined because three places now compare against them and
+ * a fourth builds a URL from one. Both are already named in this package —
+ * `repository-index.ts` and `git-trees.ts` — so this adds no host to the
+ * repository (see the rule 9 note above).
+ */
+const GITHUB = 'https://github.com';
+const GITHUB_RAW_HOST = 'raw.githubusercontent.com';
 
 /** Where a repository lives, in the parts every forge agrees on. */
 export interface GitRepository {
@@ -52,6 +69,30 @@ export function parseRepositoryUrl(url: URL): GitRepository | null {
 	const owner = segments[0];
 	const repo = segments[1].replace(/\.git$/, '');
 	if (owner.length === 0 || repo.length === 0) return null;
+
+	/*
+	 * `raw.githubusercontent.com/<owner>/<repo>/<ref>/<path…>` — the same
+	 * repository, reached through GitHub's file host.
+	 *
+	 * **Normalised to the forge origin**, because every question asked of a
+	 * `GitRepository` afterwards is "which forge is this", and the answer is
+	 * GitHub rather than "a raw host". `parseRawUrl` in `git-trees.ts` has
+	 * done exactly this since it was written; this is the same normalisation,
+	 * arrived at later.
+	 *
+	 * The ref is unmarked here — there is no `/tree/`, the third segment
+	 * simply *is* the branch — so the marker scan below would miss it.
+	 *
+	 * Both halves were wrong together, and the visible cost was the second
+	 * one: an un-normalised origin failed `rawCandidates`'s GitHub test and
+	 * fell through to the two self-hostable shapes, so a paste of this form
+	 * produced 70 candidates in Gitea and GitLab path syntax aimed at a host
+	 * that serves neither — every one a guaranteed 404, and together an error
+	 * message that buried whatever the real problem was under seventy URLs.
+	 */
+	if (url.host === GITHUB_RAW_HOST) {
+		return { origin: GITHUB, owner, repo, ref: segments[2] ?? null };
+	}
 
 	// `/tree/<ref>` on GitHub and Gitea, `/-/tree/<ref>` on GitLab, and
 	// `/src/branch/<ref>` on Gitea's own file browser. Picking the ref out
@@ -88,14 +129,17 @@ export function rawCandidates(
 	};
 
 	const { origin, owner, repo } = repository;
-	const isGitHub = origin === 'https://github.com';
+	// True for a URL pasted on the raw host too — `parseRepositoryUrl`
+	// normalises that origin, which is what keeps this one comparison correct
+	// for both spellings instead of needing a second.
+	const isGitHub = origin === GITHUB;
 
 	for (const ref of wanted) {
 		if (isGitHub) {
 			// `raw.githubusercontent.com` sends `access-control-allow-origin: *`;
 			// `github.com/<owner>/<repo>/raw/...` redirects there, so it is only a
 			// slower way to reach the same bytes.
-			add(`https://raw.githubusercontent.com/${owner}/${repo}/${ref}/${path}`);
+			add(`https://${GITHUB_RAW_HOST}/${owner}/${repo}/${ref}/${path}`);
 			continue;
 		}
 		// Both self-hostable shapes, because the host does not say which

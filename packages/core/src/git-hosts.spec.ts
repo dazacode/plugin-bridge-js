@@ -42,6 +42,26 @@ describe('reading a pasted URL as a repository', () => {
 		expect(repo('https://example.invalid/')).toBeNull();
 		expect(repo('https://example.invalid/onlyone')).toBeNull();
 	});
+
+	// The regression. A raw URL is what these repositories publish and what
+	// people copy out of a browser tab, and it used to parse as a repository on
+	// an origin no forge shape matched — see `rawCandidates` below for what
+	// that produced.
+	it('reads GitHub’s raw host as GitHub, with the ref it is carrying', () => {
+		expect(repo('https://raw.githubusercontent.com/owner/repo/nightly/index.pb')).toMatchObject({
+			// Normalised: the repository is on the forge, not on the file host.
+			origin: 'https://github.com',
+			owner: 'owner',
+			repo: 'repo',
+			// Unmarked — there is no `/tree/` here, the third segment is the
+			// branch — so the marker scan would have missed it.
+			ref: 'nightly'
+		});
+	});
+
+	it('names no ref when a raw URL carries none', () => {
+		expect(repo('https://raw.githubusercontent.com/owner/repo')?.ref).toBeNull();
+	});
 });
 
 describe('raw file URLs', () => {
@@ -62,6 +82,25 @@ describe('raw file URLs', () => {
 			'https://forge.example/owner/repo/raw/branch/main/index.json',
 			'https://forge.example/owner/repo/-/raw/main/index.json'
 		]);
+	});
+
+	it('never aims another forge’s path syntax at GitHub’s raw host', () => {
+		// What the bug looked like from the outside. With the origin
+		// un-normalised, `isGitHub` was false and every candidate came back as
+		// `…/raw/branch/<ref>/…` (Gitea) or `…/-/raw/<ref>/…` (GitLab) on a host
+		// that serves neither: 70 guaranteed 404s, and an error message about
+		// the repository that was really about this function.
+		const candidates = rawCandidates(
+			repo('https://raw.githubusercontent.com/owner/repo/repo/index.pb')!,
+			'index.pb',
+			DEFAULT_REFS
+		);
+
+		expect(candidates.some((url) => url.includes('/raw/branch/'))).toBe(false);
+		expect(candidates.some((url) => url.includes('/-/raw/'))).toBe(false);
+		// And the ref it was carrying is tried first, so the pasted branch is
+		// the one that answers.
+		expect(candidates[0]).toBe('https://raw.githubusercontent.com/owner/repo/repo/index.pb');
 	});
 
 	it('tries a named branch before the defaults', () => {
