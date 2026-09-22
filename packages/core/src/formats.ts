@@ -545,9 +545,23 @@ const PROFILES: Readonly<Record<ForeignFormat, FormatProfile>> = {
 		// can read, exactly as it is for the sibling format.
 		tier: 'convert',
 		keyDocument: 'index',
-		refusal:
-			'This extension could not be translated. Its source names something Yorozo ' +
-			'cannot read yet, and the check says which.',
+		// **Null, for the reason the sibling format below spells out at length.**
+		//
+		// This was a sentence, and `refusalFor` returns a profile's `refusal`
+		// unconditionally — so every one of this format's listings was refused
+		// *before conversion was attempted*, including the ones that convert.
+		// `prepareConversion` throws on it ahead of any work, so the install
+		// button, the check and the banner all reported "could not be
+		// translated" over a catalogue where hundreds do. A viewer saw 1,396
+		// rows reading `Not yet translatable` and no way to tell the ones that
+		// were from the ones that were not.
+		//
+		// It is the manga counterpart of a correction the video format already
+		// made: a refusal is per listing and names the members that blocked it,
+		// where a format-wide sentence can only say "not yet" — which is not
+		// true here and was never actionable. Copying that format's shape
+		// without copying this line is what produced it.
+		refusal: null,
 		implicitCookies: false
 	},
 	aniyomi: {

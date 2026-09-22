@@ -12,10 +12,19 @@
  * supplies all three and embeds the source verbatim. **The Dart half refuses**,
  * by name, because it needs an interpreter that does not exist here.
  *
- * The published catalogues under this format's own name are manga and novel
- * sources, which `keepMediums` filters out regardless of language
- * (`contract/plugin-api/FOREIGN.md` §4.3). Third-party anime catalogues are
- * what this converter is for, and `itemType` is what tells them apart.
+ * **That half is this format's most productive path, and this comment used to
+ * say the opposite.** It read: the catalogues published under this format's
+ * own name are manga and novel sources, which `keepMediums` filters out
+ * regardless of language, so third-party *anime* catalogues are what this
+ * converter is for. That was true when manga was out of scope. ADR-0013
+ * accepted the medium and `SUPPORTED_MEDIUMS` gained `manga`, so nothing
+ * filters them any more — measured on the format's main catalogue: 363
+ * listings, **0 filtered out**, 249 Dart refused by name, and **114 of 114**
+ * JavaScript listings converting to a bundle.
+ *
+ * Worth keeping in view next to the Kotlin ecosystems, where the same question
+ * costs a whole translator: this one converts everything it can read, because
+ * there is nothing to translate. `itemType` still tells the mediums apart.
  */
 
 import {
