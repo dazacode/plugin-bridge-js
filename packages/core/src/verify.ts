@@ -55,6 +55,16 @@ export interface VerificationResult {
 	readonly detail: string | null;
 	/** What it found, for a caller that wants to say so. */
 	readonly searchHits: number;
+	/**
+	 * Which of the two walks ran, so a caller can name what it counted.
+	 *
+	 * The counts below are shared by both and the nouns are not. A run over a
+	 * book source that reports "3 episode(s), 24 stream(s)" is describing a
+	 * chapter list and a page list in the vocabulary of the other medium — it
+	 * reads as a bridge that does not know what it is holding, which was the
+	 * first thing somebody asked about it.
+	 */
+	readonly medium: 'video' | 'book';
 	/** Episodes, or — for a source driven through `ABI.md` §8 — chapters. */
 	readonly episodeCount: number;
 	/** Streams, or — for the same source — page images. */
@@ -298,7 +308,14 @@ export async function verifyConvertedPlugin(
 		...sandboxOptions
 	} = options;
 
-	const nothing = { searchHits: 0, episodeCount: 0, streamCount: 0, torrentCount: 0 };
+	// Read off what the listing served rather than off which walk ran, because
+	// a conversion that refused never reached a walk and its report still has
+	// to name the right nouns. `drive` below picks the walk from what the
+	// bundle declares; for a book listing the two agree, and where a row
+	// predates the field this answers `video`, which is what every caller of
+	// this meant before books existed.
+	const medium: 'video' | 'book' = plugin.converted?.mediaKind === 'manga' ? 'book' : 'video';
+	const nothing = { medium, searchHits: 0, episodeCount: 0, streamCount: 0, torrentCount: 0 };
 	let sandbox: PluginSandbox | null = null;
 	const deadline = Date.now() + budgetMs;
 	const outOfTime = () => Date.now() > deadline;
@@ -431,6 +448,7 @@ export async function verifyConvertedPlugin(
 				(page) => typeof page.url === 'string' && page.url.startsWith('https://')
 			);
 			const counts = {
+				medium,
 				searchHits: searchHits,
 				episodeCount: chapters.length,
 				streamCount: readable.length,
@@ -545,6 +563,7 @@ export async function verifyConvertedPlugin(
 			);
 
 			const counts = {
+				medium,
 				searchHits: searchHits,
 				episodeCount: episodes.length,
 				streamCount: playable.length,

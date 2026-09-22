@@ -90,6 +90,20 @@ export interface CheckResult {
 	 * be read off a console rather than grepped for.
 	 */
 	readonly sites?: readonly ObstacleSite[];
+	/**
+	 * Which medium the run was about, so a row can name what the counts are.
+	 *
+	 * The two walks share these fields and not their vocabulary: `episodeCount`
+	 * holds chapters and `streamCount` holds page images for a source driven
+	 * through `ABI.md` §8. A row that prints them as episodes and streams reads
+	 * as a bridge that does not know a book from a season — which is the first
+	 * thing somebody asked about it, from a screen that had just verified a
+	 * manga source correctly.
+	 *
+	 * Absent means video, which is what every caller of this meant before books
+	 * existed.
+	 */
+	readonly medium?: 'video' | 'book';
 	/** What it managed before failing, when it managed anything. */
 	readonly searchHits?: number;
 	readonly episodeCount?: number;
