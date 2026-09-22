@@ -207,7 +207,84 @@ const __super = {
 
   getMangaUrl: function (manga) { return __absolute(manga.url, __BASE_URL); },
   getChapterUrl: function (chapter) { return __absolute(chapter.url, __BASE_URL); },
-  fetchPopularManga: function (page) { return __source.popularMangaRequest(page); },
+
+  /* The Rx-era half of the base class.
+   *
+   * Upstream's older API is 'fetchX(): Observable<T>', and it is still what
+   * most of this catalogue overrides: 271 members named 'fetchSearchManga',
+   * 122 'fetchChapterList'. An extension that overrides one of these
+   * routinely also calls 'super' on it — wrapping the base behaviour rather
+   * than replacing it — so the base has to have one.
+   *
+   * Each is the request/parse pair this driver already runs, wrapped in an
+   * Observable. They answer the *Kotlin* shape, not the ABI's: the caller is
+   * translated Kotlin that will '.map' over a MangasPage, and normalising
+   * early would hand it an object with different field names.
+   *
+   * 'fetchPopularManga' used to return the *request* rather than the page,
+   * which nothing could have mapped over. */
+  fetchPopularManga: function (page) {
+    return Observable.fromCallable(async function () {
+      return __call('popularMangaParse', [await __send(__call('popularMangaRequest', [page]))]);
+    });
+  },
+  fetchLatestUpdates: function (page) {
+    return Observable.fromCallable(async function () {
+      return __call('latestUpdatesParse', [await __send(__call('latestUpdatesRequest', [page]))]);
+    });
+  },
+  fetchSearchManga: function (page, query, filters) {
+    return Observable.fromCallable(async function () {
+      const request = __call('searchMangaRequest', [page, query, filters || []]);
+      return __call('searchMangaParse', [await __send(request)]);
+    });
+  },
+  fetchMangaDetails: function (manga) {
+    return Observable.fromCallable(async function () {
+      return __call('mangaDetailsParse', [await __send(__call('mangaDetailsRequest', [manga]))]);
+    });
+  },
+  fetchChapterList: function (manga) {
+    return Observable.fromCallable(async function () {
+      return __call('chapterListParse', [await __send(__call('chapterListRequest', [manga]))]);
+    });
+  },
+  fetchPageList: function (chapter) {
+    return Observable.fromCallable(async function () {
+      return __call('pageListParse', [__both(await __send(__call('pageListRequest', [chapter])))]);
+    });
+  },
+
+  /* The coroutine half, which is the API upstream actually has now.
+   *
+   * 'suspend fun getPopularManga(page): MangasPage' and its siblings replaced
+   * the Rx generation, and the catalogue has moved: 332 of this repository's
+   * source files declare 'getPopularManga', 331 'getLatestUpdates', 330
+   * 'getPageList', and about 300 'getSearchMangaList'. An extension that
+   * overrides one of these calls 'super' on it as readily as it does the Rx
+   * one, so the base has to answer.
+   *
+   * Each unwraps the Observable the pair above already builds, which is what
+   * upstream's own default does in the other direction ('fetchX' delegates to
+   * 'getX' there, and the deprecated half is the wrapper). Written this way
+   * round because the request/parse pair is what this driver implements, and
+   * one description of it is better than two. */
+  getPopularManga: async function (page) { return await __super.fetchPopularManga(page); },
+  getLatestUpdates: async function (page) { return await __super.fetchLatestUpdates(page); },
+  getSearchMangaList: async function (page, query, filters) {
+    return await __super.fetchSearchManga(page, query, filters);
+  },
+  /* The spelling before it was renamed. Both are live upstream and an
+     extension writes one or the other, never both. */
+  getSearchManga: async function (page, query, filters) {
+    return await __super.fetchSearchManga(page, query, filters);
+  },
+  getMangaDetails: async function (manga) { return await __super.fetchMangaDetails(manga); },
+  getChapterList: async function (manga) { return await __super.fetchChapterList(manga); },
+  getPageList: async function (chapter) { return await __super.fetchPageList(chapter); },
+  getImageUrl: async function (page) {
+    return __call('imageUrlParse', [await __send(__call('imageRequest', [page]))]);
+  },
 
   setupPreferenceScreen: function () {}
 };
@@ -359,8 +436,33 @@ function __chapterRef(sourceChapterId) {
 }
 
 /** One list page, fetched and normalised. */
-async function __page(kind, request) {
-  const response = await __send(request);
+/**
+ * One catalogue page, through whichever half of the API this extension wrote.
+ *
+ * Most of the catalogue overrides the request/parse pair, and this driver was
+ * built for that. A large minority overrides 'fetchX' instead — the older
+ * Observable API — and for those the pair below is *not* what the extension
+ * implements: calling it runs the base class's request against a source whose
+ * author wrote something else entirely, which is a wrong page rather than a
+ * missing one.
+ *
+ * So the override wins when there is one. 'await' handles the Observable
+ * because '__observable' is thenable, and it handles a plain value too, which
+ * is what an extension that ignored the Rx wrapper returns.
+ */
+function __overrideName(names) {
+  for (let i = 0; i < names.length; i += 1) if (__declares(names[i])) return names[i];
+  return null;
+}
+
+async function __page(kind, coroutine, args) {
+  const override = __overrideName(
+    coroutine.concat(['fetch' + kind.charAt(0).toUpperCase() + kind.slice(1)])
+  );
+  if (override !== null) {
+    return __normalisePage(await __source[override].apply(__source, args));
+  }
+  const response = await __send(__call(kind + 'Request', args));
   return __normalisePage(__call(kind + 'Parse', [response]));
 }
 `;
@@ -416,24 +518,37 @@ export default {
     // An empty query is the shelf, not a search for nothing: the browse screen
     // asks for a catalogue before anybody has typed.
     if (text.length === 0) {
-      return await __page('popularManga', __call('popularMangaRequest', [wanted]));
+      return await __page('popularManga', ['getPopularManga'], [wanted]);
     }
-    return await __page('searchManga', __call('searchMangaRequest', [wanted, text, []]));
+    return await __page(
+      'searchManga',
+      ['getSearchMangaList', 'getSearchManga'],
+      [wanted, text, []]
+    );
   },
 
   async browse(shelf, page, ctx) {
     __enter(ctx);
     const wanted = Number(page) > 0 ? Number(page) : 1;
-    const latest = shelf === 'latest' && __declares('latestUpdatesRequest');
+    const latest =
+      shelf === 'latest' &&
+      (__declares('latestUpdatesRequest') ||
+        __declares('fetchLatestUpdates') ||
+        __declares('getLatestUpdates'));
     const kind = latest ? 'latestUpdates' : 'popularManga';
-    return await __page(kind, __call(kind + 'Request', [wanted]));
+    const coroutine = latest ? ['getLatestUpdates'] : ['getPopularManga'];
+    return await __page(kind, coroutine, [wanted]);
   },
 
   async listChapters(sourceMediaId, ctx) {
     __enter(ctx);
     const manga = __mangaRef(sourceMediaId);
-    const response = await __send(__call('chapterListRequest', [manga]));
-    const rows = __call('chapterListParse', [response]);
+    // Same rule as '__page': the override wins, because an extension that
+    // wrote 'fetchChapterList' may not have written the pair at all.
+    const chapterOverride = __overrideName(['getChapterList', 'fetchChapterList']);
+    const rows = chapterOverride !== null
+      ? await __source[chapterOverride](manga)
+      : __call('chapterListParse', [await __send(__call('chapterListRequest', [manga]))]);
 
     const chapters = [];
     for (const row of Array.isArray(rows) ? rows : []) {
@@ -466,11 +581,13 @@ export default {
     const target = chapter && chapter.sourceChapterId
       ? String(chapter.sourceChapterId)
       : String(sourceMediaId);
-    const response = await __send(__call('pageListRequest', [__chapterRef(target)]));
-
+    const reference = __chapterRef(target);
     // The widened value, so whichever overload this extension wrote is the one
     // that answers. See '__both'.
-    const rows = __call('pageListParse', [__both(response)]);
+    const pageOverride = __overrideName(['getPageList', 'fetchPageList']);
+    const rows = pageOverride !== null
+      ? await __source[pageOverride](reference)
+      : __call('pageListParse', [__both(await __send(__call('pageListRequest', [reference])))]);
 
     const pages = [];
     for (const row of Array.isArray(rows) ? rows : []) {
@@ -480,6 +597,17 @@ export default {
       // A page that carries only a url resolves its image separately — the
       // second request upstream's 'imageUrlParse' exists for. Skipped rather
       // than guessed when the extension declares no way to do it.
+      // 'getImageUrl(page)' is the coroutine spelling of the same second
+      // request, and the one an extension written against the current API
+      // declares instead of 'imageUrlParse'.
+      const urlOverride = __overrideName(['getImageUrl', 'fetchImageUrl']);
+      if (image.length === 0 && String(row.url || '').length > 0 && urlOverride !== null) {
+        try {
+          image = String((await __source[urlOverride]({ index: pages.length, url: row.url, imageUrl: '' })) || '');
+        } catch (error) {
+          image = '';
+        }
+      }
       if (image.length === 0 && String(row.url || '').length > 0 && __declares('imageUrlParse')) {
         try {
           const resolved = await __send(__call('imageUrlRequest', [row]));

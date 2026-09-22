@@ -107,10 +107,13 @@ import {
 	HOST_PROPERTY_METHODS,
 	KNOWN_SIGNATURES,
 	OUT_OF_SCOPE_KINDS,
+	swallowedWhenElse,
+	SUPER_BASE_PROPERTIES,
 	SUPER_MEMBERS,
 	SUPER_RECEIVER_MEMBERS,
 	SUPER_SUSPEND_MEMBERS,
 	BASE_CONSTANTS,
+	ARGUMENT_LAMBDA_METHODS,
 	BUILDER_LAMBDA_METHODS,
 	TOLERATED_JSON_FLAGS,
 	VARARG_OPTIONS,
@@ -628,6 +631,15 @@ interface Frame {
 	readonly loop?: boolean;
 	/** Set when a `return@label` actually used `exit`, so the label is emitted. */
 	broke?: boolean;
+	/**
+	 * This callback's identity, for a `return@label` written inside a *nested*
+	 * callback — Kotlin's non-local return, which JavaScript has no statement
+	 * for. Assigned on first use and answered by a `try`/`catch` around this
+	 * frame's body; see `nonLocalTarget`.
+	 */
+	jumpId?: number;
+	/** Set when a non-local jump actually named this frame, so the catch is emitted. */
+	catchesJump?: boolean;
 }
 
 interface Emitted {
@@ -709,6 +721,32 @@ export interface Declared {
 	/** Parameter names for declarations whose calls can be resolved across files. */
 	readonly signatures: ReadonlyMap<string, readonly string[]>;
 	/**
+	 * Every member name each class declares directly, and what each class
+	 * extends — together, the class hierarchy across the whole unit.
+	 *
+	 * Both exist for one question, asked at a `super.` call: **is this
+	 * extension's superclass one this build translated?** A multisrc template
+	 * is, and it is emitted as a real `class` the extension really `extends`
+	 * — so `super.chapterFromElement()` there is ordinary JavaScript, and
+	 * emitting the driver's `__super.chapterFromElement` instead would reach
+	 * past the template to a base class that has never heard of it. Kept per
+	 * class rather than merged into `methods`, because the merged set cannot
+	 * tell which class a name came from and that is the whole question.
+	 */
+	readonly classMembers: ReadonlyMap<string, ReadonlySet<string>>;
+	readonly classBases: ReadonlyMap<string, string>;
+	/**
+	 * The *properties* each class declares, as against `classMembers`, which
+	 * holds everything.
+	 *
+	 * One question needs the distinction: `list.distinctBy(GenreRoute::slug)`
+	 * is Kotlin's unbound reference to a property and becomes `(r) => r.slug`,
+	 * where the same form over a method becomes `(r, …a) => r.slug(…a)`.
+	 * Getting it the wrong way round puts a function where a value belongs, and
+	 * a de-duplication keyed on a function keeps one row out of every hundred.
+	 */
+	readonly classFields: ReadonlyMap<string, ReadonlySet<string>>;
+	/**
 	 * File-scope `fun`s and `val`s, which are values rather than types.
 	 *
 	 * Only the types crossed a file boundary before this, and every emitted
@@ -764,6 +802,23 @@ export interface Declared {
 	 */
 	readonly extensions: ReadonlySet<string>;
 	/**
+	 * File-scope extension functions — `fun Element.imgAttr()` written beside
+	 * the class rather than inside it.
+	 *
+	 * `extensions` above cannot hold these: it is keyed by the declaring
+	 * *class*, and these have none. They are module-scope functions taking
+	 * their receiver first, and every emitted file joins one module, so the
+	 * name is in scope at a call in any of them by its own spelling — the same
+	 * argument `values` makes for a file-scope `fun`.
+	 *
+	 * Left out, a template that keeps its helpers in a second file refused
+	 * every call to them. Measured: `GalleryAdultsUtils.kt` declares
+	 * `Element.imgAttr()` and `GalleryAdults.kt` calls it six times, which
+	 * refused 21 listings of 300 for a function this build had already
+	 * translated.
+	 */
+	readonly moduleExtensions: ReadonlySet<string>;
+	/**
 	 * Signatures keyed by the declaring class, as `Owner.method`.
 	 *
 	 * The bare name cannot carry these: this ecosystem declares `videosFromUrl`
@@ -782,11 +837,15 @@ const EMPTY_DECLARED: Declared = {
 	suspends: new Set(),
 	newable: new Set(),
 	signatures: new Map(),
+	classMembers: new Map(),
+	classBases: new Map(),
+	classFields: new Map(),
 	values: new Set(),
 	valueSuspends: new Set(),
 	getters: new Set(),
 	qualified: new Map(),
 	extensions: new Set(),
+	moduleExtensions: new Set(),
 	qualifiedSignatures: new Map(),
 	objects: new Set()
 };
@@ -808,13 +867,36 @@ export function mergeDeclared(parts: readonly Declared[]): Declared {
 	const signatures = new Map<string, readonly string[]>();
 	const qualified = new Map<string, string>();
 	const extensions = new Set<string>();
+	const moduleExtensions = new Set<string>();
 	const qualifiedSignatures = new Map<string, readonly string[]>();
 	const objects = new Set<string>();
+	const classMembers = new Map<string, Set<string>>();
+	const classFields = new Map<string, Set<string>>();
+	const classBases = new Map<string, string>();
 	const ambiguous = new Set<string>();
 	for (const part of parts) {
+		for (const [owner, members] of part.classMembers) {
+			// Unioned rather than replaced: the same class name in two files is
+			// two classes, and a `super.` that finds either is better than one
+			// that finds whichever was surveyed last. The cost of the union is
+			// a `super.` allowed through that JavaScript then resolves on the
+			// prototype chain — which is the same answer Kotlin gave.
+			const into = classMembers.get(owner) ?? new Set<string>();
+			for (const member of members) into.add(member);
+			classMembers.set(owner, into);
+		}
+		for (const [owner, fields] of part.classFields) {
+			const into = classFields.get(owner) ?? new Set<string>();
+			for (const field of fields) into.add(field);
+			classFields.set(owner, into);
+		}
+		for (const [owner, base] of part.classBases) {
+			if (!classBases.has(owner)) classBases.set(owner, base);
+		}
 		for (const name of part.objects) objects.add(name);
 		for (const [name, shape] of part.qualifiedSignatures) qualifiedSignatures.set(name, shape);
 		for (const name of part.extensions) extensions.add(name);
+		for (const name of part.moduleExtensions) moduleExtensions.add(name);
 		for (const [name, hoisted] of part.qualified) qualified.set(name, hoisted);
 		for (const name of part.types) types.add(name);
 		for (const name of part.methods) methods.add(name);
@@ -839,11 +921,15 @@ export function mergeDeclared(parts: readonly Declared[]): Declared {
 		suspends,
 		newable,
 		signatures,
+		classMembers,
+		classFields,
+		classBases,
 		values,
 		valueSuspends,
 		getters,
 		qualified,
 		extensions,
+		moduleExtensions,
 		qualifiedSignatures,
 		objects
 	};
@@ -875,13 +961,28 @@ class Emitter {
 		// A `val X get() = …` next door is a function here, and a read of it is
 		// a call. Left out, the name resolved and the *function* was the value.
 		for (const name of neighbours.getters) this.moduleGetters.add(name);
-		for (const [name, signature] of neighbours.signatures) this.signatures.set(name, signature);
+		for (const [name, signature] of neighbours.signatures) {
+			this.addSignatureCandidate(name, signature);
+			this.signatures.set(name, signature);
+		}
 		for (const [name, hoisted] of neighbours.qualified) this.qualifiedTypes.set(name, hoisted);
 		for (const name of neighbours.extensions) this.neighbourExtensions.add(name);
+		for (const name of neighbours.moduleExtensions) this.neighbourModuleExtensions.add(name);
 		for (const [name, shape] of neighbours.qualifiedSignatures) {
 			this.qualifiedSignatures.set(name, shape);
 		}
 		for (const name of neighbours.objects) this.declaredObjects.add(name);
+		for (const [owner, members] of neighbours.classMembers) {
+			const into = this.classMemberIndex.get(owner) ?? new Set<string>();
+			for (const member of members) into.add(member);
+			this.classMemberIndex.set(owner, into);
+		}
+		for (const [owner, fields] of neighbours.classFields) {
+			const into = this.classFieldIndex.get(owner) ?? new Set<string>();
+			for (const field of fields) into.add(field);
+			this.classFieldIndex.set(owner, into);
+		}
+		for (const [owner, base] of neighbours.classBases) this.classBaseIndex.set(owner, base);
 	}
 
 	private used = new Set<string>();
@@ -945,8 +1046,19 @@ class Emitter {
 	private readonly declaredObjects = new Set<string>();
 	/** Member extension functions this file declares, as `Owner.name`. */
 	private readonly declaredExtensions = new Set<string>();
+	private readonly declaredModuleExtensions = new Set<string>();
 	/** The same, from the files beside it. */
 	private readonly neighbourExtensions = new Set<string>();
+	/** See `Declared.moduleExtensions`. */
+	private readonly neighbourModuleExtensions = new Set<string>();
+	/** See `Declared.classMembers`. Named apart from the `classMembers` set
+	 * above, which is the members of the class being emitted right now. */
+	private readonly classMemberIndex = new Map<string, Set<string>>();
+	/** See `Declared.classFields`. */
+	private readonly classFieldIndex = new Map<string, Set<string>>();
+	/** Identities handed out to callbacks that catch a non-local `return@label`. */
+	private jumpIds = 1;
+	private readonly classBaseIndex = new Map<string, string>();
 	/** The base class of the class being emitted, for the check above. */
 	private ownerBase: string | null = null;
 	/** `Owner.Nested` → the module-scope name that nested type was emitted as. */
@@ -1086,6 +1198,30 @@ class Emitter {
 	private suspendMembers = new Set<string>();
 	private readonly signatures = new Map<string, readonly string[]>(KNOWN_SIGNATURES);
 	private readonly ambiguousSignatures = new Set<string>();
+	/**
+	 * Every parameter list this build has seen under a name, including the ones
+	 * `signatures` had to give up on.
+	 *
+	 * A name is ambiguous when two declarations disagree about it, and the
+	 * honest answer at most call sites is to refuse. But the call site is not
+	 * always silent about which one it means: **an argument passed by name is a
+	 * parameter of the callee**, so a candidate that does not declare that name
+	 * is not the function being called. Where exactly one candidate survives
+	 * that test the call is not ambiguous at all, and refusing it throws away a
+	 * fact the source stated.
+	 *
+	 * Measured: `WordSet.startsWith(dateString)` in two shared templates
+	 * collides with Kotlin's own `String.startsWith(prefix, ignoreCase)`, which
+	 * deleted the known signature and refused every
+	 * `date.startsWith(it, ignoreCase = true)` in the catalogue — 21 of 300
+	 * listings, none of which had written anything ambiguous.
+	 */
+	private readonly signatureCandidates = new Map<string, readonly (readonly string[])[]>(
+		[...KNOWN_SIGNATURES].map(([name, signature]): [string, readonly (readonly string[])[]] => [
+			name,
+			[signature]
+		])
+	);
 
 	private className: string | null = null;
 	private superClass: string | null = null;
@@ -1110,8 +1246,12 @@ class Emitter {
 			getters: this.moduleGetters,
 			qualified: this.qualifiedTypes,
 			extensions: this.declaredExtensions,
+			moduleExtensions: this.declaredModuleExtensions,
 			qualifiedSignatures: this.qualifiedSignatures,
-			objects: this.declaredObjects
+			objects: this.declaredObjects,
+			classMembers: this.classMemberIndex,
+			classFields: this.classFieldIndex,
+			classBases: this.classBaseIndex
 		};
 	}
 
@@ -1147,11 +1287,72 @@ class Emitter {
 			const body = kids(child).find(
 				(part) => part.type === 'class_body' || part.type === 'enum_class_body'
 			);
+			// The hierarchy, for `super.` — see `Declared.classMembers`. Read off
+			// the *Kotlin* here rather than the emitted text, because this runs
+			// in the survey pass before anything has been emitted; whether the
+			// supertype turns into a real `extends` is settled later by
+			// `resolvedBase`, and asking `classMembers` about a name it never
+			// recorded answers no, which is the safe direction.
+			if (name !== null) {
+				const base = this.baseInvocation(child)?.type ?? null;
+				if (base !== null) this.classBaseIndex.set(name, base);
+				const members = this.classMemberIndex.get(name) ?? new Set<string>();
+				const fields = this.classFieldIndex.get(name) ?? new Set<string>();
+				// A `val` in the primary constructor is a property of the class
+				// exactly as one in the body is, and for the DTOs this ecosystem
+				// writes it is the *only* place they are declared.
+				for (const param of this.primaryConstructorParams(child)) {
+					if (param.isProperty) {
+						members.add(param.name);
+						fields.add(param.name);
+					}
+				}
+				for (const member of kids(body)) {
+					const memberName = this.nameOf(member);
+					if (
+						memberName !== null &&
+						(member.type === 'function_declaration' || member.type === 'property_declaration')
+					) {
+						members.add(memberName);
+						if (member.type === 'property_declaration') fields.add(memberName);
+					}
+				}
+				this.classMemberIndex.set(name, members);
+				this.classFieldIndex.set(name, fields);
+			}
 			this.registerSignatures(kids(body), name);
 		}
 	}
 
+	/**
+	 * Whether `base`, or anything it extends, declares `name`.
+	 *
+	 * Walks the chain because a template hierarchy is two deep in this
+	 * ecosystem — `MangaThemesiaAlt : MangaThemesia` is the shape — and a
+	 * member declared at the top is still reachable from the bottom by
+	 * JavaScript's prototype chain, which is what the emitted `extends`
+	 * builds.
+	 *
+	 * Bounded by the number of classes: a Kotlin hierarchy cannot be circular,
+	 * but this table is read off a parse that may have recovered from
+	 * something, and a cycle here would otherwise hang the emitter rather than
+	 * refuse a member.
+	 */
+	private baseDeclares(base: string, name: string): boolean {
+		const seen = new Set<string>();
+		let at: string | undefined = base;
+		while (at !== undefined && !seen.has(at)) {
+			seen.add(at);
+			if (this.classMemberIndex.get(at)?.has(name) === true) return true;
+			at = this.classBaseIndex.get(at);
+		}
+		return false;
+	}
+
 	private rememberSignature(name: string, signature: readonly string[]): void {
+		// Before the ambiguity check, not after: a name this build gave up on is
+		// exactly the one whose other spellings are worth keeping.
+		this.addSignatureCandidate(name, signature);
 		if (this.ambiguousSignatures.has(name)) return;
 		const existing = this.signatures.get(name);
 		if (existing === undefined || sameNames(existing, signature))
@@ -1160,6 +1361,23 @@ class Emitter {
 			this.signatures.delete(name);
 			this.ambiguousSignatures.add(name);
 		}
+	}
+
+	private addSignatureCandidate(name: string, signature: readonly string[]): void {
+		const known = this.signatureCandidates.get(name) ?? [];
+		if (known.some((candidate) => sameNames(candidate, signature))) return;
+		this.signatureCandidates.set(name, [...known, signature]);
+	}
+
+	/**
+	 * The one parameter list under `name` that could have taken these argument
+	 * names, or null where none or several could.
+	 */
+	private onlyCandidate(name: string, written: readonly string[]): readonly string[] | null {
+		const candidates = (this.signatureCandidates.get(name) ?? []).filter((candidate) =>
+			written.every((one) => candidate.includes(one))
+		);
+		return candidates.length === 1 ? candidates[0] : null;
 	}
 
 	private parameterNames(node: KNode): string[] {
@@ -1307,6 +1525,57 @@ class Emitter {
 
 	/* ── classes ─────────────────────────────────────────────────────────── */
 
+	/**
+	 * An `interface`, emitted as the one thing it is used for here.
+	 *
+	 * Every interface in this ecosystem is a **capability marker with no
+	 * bodies** — `interface UriFilter { fun addToUri(builder: HttpUrl.Builder) }`
+	 * and thirty near-copies of it — and every use is the same line:
+	 * `filters.filterIsInstance<UriFilter>().forEach { it.addToUri(url) }`. So
+	 * what the interface has to do at runtime is answer *is this one*, and
+	 * nothing else: the implementing classes carry the method already, because
+	 * they declare it themselves.
+	 *
+	 * JavaScript cannot express what Kotlin means here. A class can extend one
+	 * class, and the filters already extend `Filter.Select` or `Filter.Text`,
+	 * so an implementer cannot also extend this. `Symbol.hasInstance` is the
+	 * expression that fits: `x instanceof UriFilter` becomes "does x have the
+	 * members the interface declares", which is what the Kotlin type test
+	 * decided too and is decided over the same set of objects. `__isType`
+	 * already routes a declared type through `instanceof`, so `filterIsInstance`
+	 * and `is` both answer correctly with nothing else changed.
+	 *
+	 * A member **with a body** is refused rather than dropped. Kotlin lets an
+	 * interface carry a default implementation, and nothing here would inherit
+	 * it — the implementer would silently answer `undefined` from a method the
+	 * source had written out. None occur in the measured catalogue; this is the
+	 * floor under that.
+	 */
+	private interfaceDeclaration(node: KNode, name: string): string | null {
+		const body = kids(node).find((child) => child.type === 'class_body');
+		const members: string[] = [];
+		for (const member of kids(body)) {
+			if (member.type === 'function_declaration') {
+				if (kids(member).some((child) => child.type === 'function_body')) {
+					return this.declineMember(
+						name,
+						node,
+						`an \`interface\` member \`${this.nameOf(member) ?? '?'}\` with a body`
+					);
+				}
+				const method = this.nameOf(member);
+				if (method !== null) members.push(method);
+				continue;
+			}
+			if (member.type === 'property_declaration') {
+				const held = this.propertyName(member);
+				if (held !== null) members.push(held);
+			}
+		}
+		const test = `${this.helper('hasMembers')}(__v, ${JSON.stringify(members)})`;
+		return `class ${this.safe(name)} { static [Symbol.hasInstance](__v) { return ${test}; } }`;
+	}
+
 	private classDeclaration(node: KNode, rename?: string): string | null {
 		const name = rename ?? this.nameOf(node) ?? 'class';
 		const kinds = new Set(node.allChildren.map((child) => child.type));
@@ -1314,9 +1583,7 @@ class Emitter {
 			kids(kids(node).find((child) => child.type === 'modifiers')).map((m) => m.text)
 		);
 
-		if (kinds.has('interface')) {
-			return this.declineMember(name, node, 'an `interface` declaration');
-		}
+		if (kinds.has('interface')) return this.interfaceDeclaration(node, name);
 		if (kinds.has('enum_class_body')) return this.enumDeclaration(node, name);
 		if (modifiers.has('data')) return this.dataDeclaration(node, name);
 
@@ -1375,6 +1642,16 @@ class Emitter {
 		const members = body === null ? [] : kids(body);
 		const outerOwner = this.owner;
 		const outerBase = this.ownerBase;
+		// Saved with them, and for the same reason. A nested class — this
+		// ecosystem writes `protected class SMangaDto(…)` inside the template it
+		// belongs to — replaced the enclosing class's member table and never
+		// put it back, so from the nested declaration to the end of the file
+		// `this.somethingTheClassDeclares()` was a member of a four-field DTO.
+		// `isSourceMember` then said no and the call was refused as a
+		// passthrough onto a shim, naming a method the source had declared
+		// forty lines further down.
+		const outerMembers = this.classMembers;
+		const outerSuspends = this.suspendMembers;
 		this.owner = name;
 		this.ownerBase = base;
 
@@ -1400,6 +1677,18 @@ class Emitter {
 		for (const name of this.blockingMembers(members)) this.suspendMembers.add(name);
 
 		this.registerExtensions(members, 'method');
+		// A companion's members hoist to module scope, so an extension function
+		// declared there is a *module* one — and it has to be known before the
+		// members above it are emitted, because that is where it is called from.
+		// `private fun String.hexBytes()` sits at the bottom of Madara's
+		// companion and is used two hundred lines higher up; registered only as
+		// it was emitted, the call site had never heard of it and the whole
+		// template refused.
+		for (const member of members) {
+			if (member.type !== 'companion_object') continue;
+			const inner = kids(member).find((part) => part.type === 'class_body');
+			this.registerExtensions(kids(inner), 'module');
+		}
 
 		const constructorParams = this.primaryConstructorParams(node);
 		for (const param of constructorParams) this.classMembers.add(param.name);
@@ -1438,6 +1727,15 @@ class Emitter {
 					break;
 				case 'function_declaration': {
 					const fnName = this.nameOf(child) ?? 'fun';
+					// `protected abstract fun getInfoSelector(tag: String): String`
+					// — a member this class deliberately does not define, because
+					// the subclass is required to. There is nothing to emit and
+					// nothing missing: JavaScript finds the subclass's own method
+					// on the prototype, which is where Kotlin was going to look
+					// too. Refusing it as a body-less declaration refused the
+					// *template* over the one member that was never meant to have
+					// one, and with it every extension built on that template.
+					if (this.hasModifier(child, 'abstract')) break;
 					const emitted = this.member(fnName, child, () =>
 						this.functionDeclaration(child, 'method')
 					);
@@ -1518,6 +1816,8 @@ class Emitter {
 		nested.restore();
 		this.owner = outerOwner;
 		this.ownerBase = outerBase;
+		this.classMembers = outerMembers;
+		this.suspendMembers = outerSuspends;
 		const heritage = base === null ? '' : `extends ${base} `;
 		const cls = `class ${this.safe(name)} ${heritage}${block([...ctor, ...memberLines])}`;
 		// A `@Serializable` class is a *shape* as well as a class: the decoder
@@ -1974,6 +2274,25 @@ class Emitter {
 					if (this.emittedNames.has(name)) {
 						this.refuse(child, `a second companion member named \`${name}\``);
 					}
+					// `private val LATEST_PREF_ENTRIES get() = arrayOf(…)` — a
+					// computed property, which is a *function* at module scope and
+					// not a value. Read as a value it has no initialiser at all,
+					// and the companion refused for a member the class computes
+					// on every read. `moduleGetters` is what makes the call sites
+					// add the parentheses back.
+					const getter = accessorOf(child, undefined, 'getter');
+					if (getter !== undefined) {
+						const body = kids(getter).find((part) => part.type === 'function_body');
+						if (body === undefined) this.refuse(getter, 'a getter with no body');
+						const emittedBody = this.functionScope('function', null, [], () =>
+							this.functionBody(body)
+						);
+						this.moduleNames.add(name);
+						this.moduleGetters.add(name);
+						this.emittedNames.add(name);
+						const prefix = emittedBody.isAsync ? 'async ' : '';
+						return `${prefix}function ${this.safe(name)}() ${emittedBody.text}`;
+					}
 					const value = this.propertyValue(child, name);
 					this.moduleNames.add(name);
 					this.emittedNames.add(name);
@@ -2143,6 +2462,13 @@ class Emitter {
 	): { kind: 'assign' | 'member'; text: string } | null {
 		const name = this.propertyName(node);
 		if (name === null) return this.declineMember('val', node, 'an unnamed property');
+
+		// `protected abstract val isHentaiSite: Boolean` — a property this class
+		// deliberately does not define, because the subclass is required to.
+		// The same argument the abstract *function* above makes: there is
+		// nothing to emit and nothing missing, and refusing it refused the
+		// template over the one member that was never meant to have a value.
+		if (this.hasModifier(node, 'abstract')) return null;
 
 		const delegate = kids(node).find((child) => child.type === 'property_delegate');
 		const getter = accessorOf(node, detached, 'getter');
@@ -2343,6 +2669,21 @@ class Emitter {
 					// above the declaration reads it, and reading it is a call.
 					if (accessorOf(child, declarations[index + 1], 'getter') !== undefined) {
 						this.moduleGetters.add(declared);
+					}
+					continue;
+				}
+				if (child.type === 'function_declaration' && receiverOf(child) !== null) {
+					// Not a module *value* — it takes its receiver first, so the
+					// bare name is not what a reader of it writes — but it is a
+					// module-scope function, and a file next door has to be able
+					// to find it. `moduleSuspends` for the same reason a
+					// file-scope `suspend fun` needs it: the await is invisible
+					// at the call and a promise is not.
+					const declared = this.nameOf(child);
+					if (declared === null) continue;
+					this.declaredModuleExtensions.add(declared);
+					if (this.hasModifier(child, 'suspend') || BLOCKING_CALLS.test(child.text)) {
+						this.moduleSuspends.add(declared);
 					}
 					continue;
 				}
@@ -3055,6 +3396,19 @@ class Emitter {
 			// `__k.emptyList();`: `undefined` where a list was meant, which is
 			// the same "installs, searches and shows nothing" this function was
 			// written to prevent.
+			// The same split again, inside a branch: `if (x) return emptyList()`
+			// leaves the bare jump in the `if` and the call beside the `if`. The
+			// pairing above cannot see it — the child here is the `if` — and the
+			// orphan is a sibling statement, so without this the branch returned
+			// `undefined` and the list was evaluated and dropped.
+			const branch = danglingBranchJump(child);
+			if (branch !== null && next !== undefined && next.line === branch.line) {
+				this.jumpValues.set(branch, next);
+				out.push({ type: child.type, node: child });
+				index += 1;
+				continue;
+			}
+
 			const dangling = this.danglingElvisJump(child);
 			if (dangling !== null && next !== undefined && next.line === dangling.line) {
 				this.jumpValues.set(dangling, next);
@@ -3285,6 +3639,12 @@ class Emitter {
 	): string {
 		const frame = this.guards;
 		if (frame === null || !frame.hoistable.has(node)) {
+			// `x ?: return@map null` in an argument, inside a block nested in the
+			// `map`. There is no statement position to hoist to that would leave
+			// the right function — but a non-local jump is a *call* that throws,
+			// and a call is an expression. See `nonLocalTarget`.
+			const nonLocal = this.nonLocalGuard(guarded);
+			if (nonLocal !== null) return nonLocal;
 			this.refuse(node, 'a `?: return` used as a value');
 		}
 		// Emitted before the temporary is claimed and before the lines are
@@ -3301,6 +3661,47 @@ class Emitter {
 			`if (${holder} == null) ${block([this.stmt(guarded.jump, guarded.detached ?? this.jumpValues.get(guarded.jump))])}`
 		);
 		return holder;
+	}
+
+	/**
+	 * `x ?: return@label v` where the label names a callback further out, as an
+	 * expression: `(x ?? __k.jump(id, v))`.
+	 *
+	 * Only for a labelled jump that `nonLocalTarget` accepts. An unlabelled
+	 * `?: return` still refuses here, because what it means is a return from
+	 * the *member*, and the frame that would have to catch it is not one this
+	 * has decided to wrap.
+	 */
+	private nonLocalGuard(guarded: { value: KNode; jump: KNode; detached?: KNode }): string | null {
+		const jump = guarded.jump;
+		const keyword = jump.allChildren[0]?.type;
+		if (keyword !== 'return@' && keyword !== 'return') return null;
+		const carriedValue =
+			kids(jump).find((child) => child.type !== 'label') ?? guarded.detached ?? null;
+		const label = kids(jump).find((child) => child.type === 'label')?.text ?? null;
+		// `x ?: return null`, where hoisting the guard to statement level would
+		// have reordered it past a side effect. What Kotlin returns from is the
+		// member — whether the guard sits inside an inline lambda or directly in
+		// the member's own body — and the member is what catches. This is the
+		// last resort: `hoistedGuard` prefers the plain `if`/`return`, which
+		// costs nothing, and only an expression position no move can reach gets
+		// here.
+		if (label === null) {
+			const member = this.memberJumpTarget();
+			if (member === null) return null;
+			const value = carriedValue === null ? 'undefined' : this.expr(carriedValue);
+			return `(${this.expr(guarded.value)} ?? ${this.helper('jump')}(${member}, ${value}))`;
+		}
+		// An inlined block leaves by a JavaScript label, which is a statement —
+		// so it is no use here and the guard still refuses.
+		if (this.inlinedFrameLabelled(label) !== null) return null;
+		// `mustCross` is off: even a jump to the callback this code is already
+		// inside needs the throw, because the position it is written in is an
+		// argument and JavaScript has no `return` there.
+		const target = this.nonLocalTarget(label, false);
+		if (target === null) return null;
+		const value = carriedValue === null ? 'undefined' : this.expr(carriedValue);
+		return `(${this.expr(guarded.value)} ?? ${this.helper('jump')}(${target}, ${value}))`;
 	}
 
 	private localProperty(node: KNode): string {
@@ -3381,6 +3782,52 @@ class Emitter {
 		const target = kids(node)[0];
 		const value = kids(node)[kids(node).length - 1];
 		const operator = node.allChildren.find((child) => ASSIGN_OPS.has(child.type))?.type ?? '=';
+
+		// **The `if` that swallowed its own assignment.**
+		//
+		// `if (date.isNotEmpty()) chapters.first().date_upload = parse(date)`
+		// parses as `(if …) = parse(date)`: Kotlin's assignable rule does not
+		// reach over a call, so the grammar takes the whole `if` as the left
+		// side rather than the property inside its branch. `assignable` has
+		// described this recovery since it was written and refused it, which
+		// was right — handing it to `expr` put an immediately-invoked function
+		// on the left of an `=` and produced a bundle that would not load.
+		//
+		// Refusing it is not the only honest answer, though, because the
+		// association is recoverable: the target is the branch body, and the
+		// assignment belongs inside the `if` rather than around it. Put back
+		// where it was written, this is an ordinary conditional write.
+		//
+		// Worth the re-association because it is not rare. The line above is in
+		// `MangaThemesia`, a template with **112 instances** in one catalogue,
+		// and a template's blocker is every instance's blocker.
+		//
+		// Only the `else`-less form. `if (c) a = x else b = y` is two writes
+		// with one value and the grammar gives no honest way to tell which
+		// branch the parser kept, so it stays refused by `assignable` below.
+		// Narrow on purpose: a plain `=`, a target that is not indexed, and a
+		// value that is an ordinary expression. Each of the three excluded
+		// shapes needs machinery further down this method that this early
+		// return would skip, and skipping it silently is how a write ends up
+		// pointing at the wrong container. They keep the refusal they had.
+		const swallowedIf =
+			target !== undefined && target.type === 'directly_assignable_expression'
+				? kids(target).find((child) => child.type === 'if_expression')
+				: undefined;
+		if (swallowedIf !== undefined && operator === '=') {
+			const branches = kids(swallowedIf).filter((child) => child.type === 'control_structure_body');
+			const condition = kids(swallowedIf)[0];
+			const swallowed = branches.length === 1 ? kids(branches[0])[0] : undefined;
+			if (
+				condition !== undefined &&
+				swallowed !== undefined &&
+				!this.isIndexedTarget(swallowed) &&
+				this.elvisJump(value) === null
+			) {
+				const write = `${this.assignable(swallowed)} = ${this.expr(value)};`;
+				return `if (${this.expr(condition)}) ${block([write])}`;
+			}
+		}
 
 		// `map[key] = value` goes through the runtime for the same reason a read
 		// of `map[key]` does: a Kotlin Map is a real `Map` here, and a plain
@@ -3599,7 +4046,8 @@ class Emitter {
 
 	private jump(node: KNode, detached?: KNode): string {
 		const keyword = node.allChildren[0]?.type ?? '';
-		const value = kids(node).find((child) => child.type !== 'label') ?? detached;
+		const value =
+			kids(node).find((child) => child.type !== 'label') ?? detached ?? this.jumpValues.get(node);
 
 		if (keyword === 'throw') {
 			if (value === undefined) this.refuse(node, 'a `throw` with nothing to throw');
@@ -3625,14 +4073,26 @@ class Emitter {
 				// A bare `return` inside a Kotlin inline lambda returns from the
 				// *enclosing function*. The same text in JavaScript returns from
 				// the lambda, and the method then produces a different value with
-				// nothing anywhere reporting an error.
-				if (label === null) this.refuse(node, 'a non-local `return` from a lambda');
+				// nothing anywhere reporting an error — so it leaves by the same
+				// throw a labelled non-local return uses, and the member catches
+				// it. Kotlin only permits this inside an *inline* lambda, so a
+				// source that compiles and writes one has said which function it
+				// meant: the enclosing member.
+				if (label === null) {
+					const member = this.memberJumpTarget();
+					if (member === null) this.refuse(node, 'a non-local `return` from a lambda');
+					const carried = value === undefined ? 'undefined' : this.expr(value);
+					return `throw ${this.helper('jump')}(${member}, ${carried});`;
+				}
 				// The label is compared against the innermost *callback*, not the
 				// innermost frame: an inlined block sits inside the callback it
 				// was written in, so `map { x.apply { return@map … } }` names the
 				// `map` this code is already inside of.
 				if (label !== this.enclosingCallbackLabel()) {
-					this.refuse(node, `a \`return@${label}\` crossing a lambda`);
+					const target = this.nonLocalTarget(label);
+					if (target === null) this.refuse(node, `a \`return@${label}\` crossing a lambda`);
+					const carried = value === undefined ? 'undefined' : this.expr(value);
+					return `throw ${this.helper('jump')}(${target}, ${carried});`;
 				}
 			}
 			if (value === undefined) return 'return;';
@@ -3658,7 +4118,14 @@ class Emitter {
 
 	private ifStatement(node: KNode, sink: Sink = null): string {
 		const condition = kids(node)[0];
-		const branches = kids(node).filter((child) => child.type === 'control_structure_body');
+		const all = kids(node).filter((child) => child.type === 'control_structure_body');
+		// The `when`'s own `else` branch, mis-attached to this `if` by the
+		// grammar — always the last one, because the shape it is recognised by
+		// puts it after the `else`. `whenChain` picks it up from the same
+		// recogniser and emits it where it was written; here it is simply not an
+		// else. Dropped by position rather than by identity: the two child
+		// accessors wrap the same tree-sitter node in different objects.
+		const branches = swallowedWhenElse(node) === null ? all : all.slice(0, -1);
 		const head = `if (${this.expr(condition)}) ${block(this.branchLines(branches[0] ?? null, sink))}`;
 		if (branches.length < 2) {
 			// An `if` with no `else`, used as a value, is absent when it misses.
@@ -3703,6 +4170,11 @@ class Emitter {
 			const test = this.whenTest(entry, name);
 			if (test === null) fallback = branch;
 			else clauses.push(`if (${test}) ${branch}`);
+			// This entry's body may have eaten the `else ->` that follows it —
+			// see `swallowedWhenElse`. The branch belongs to this `when`, and
+			// this is the only place that can put it back.
+			const stolen = this.swallowedElse(body);
+			if (stolen !== null) fallback = block(this.branchLines(stolen, sink));
 		}
 
 		// A `when` used as a value with no `else` is absent when nothing matches.
@@ -3714,6 +4186,24 @@ class Emitter {
 		if (name === null) return chain;
 		lines.push(chain);
 		return block(lines);
+	}
+
+	/**
+	 * The `when` `else` branch a `when` entry's body swallowed, if it did.
+	 *
+	 * Searched rather than read off a fixed position: the `if` that took it is
+	 * the last statement of the entry, but it may be nested one deep inside a
+	 * `control_structure_body` or an inner `if`/`else` chain, and only the last
+	 * one in source order can be the `when`'s.
+	 */
+	private swallowedElse(body: KNode | null): KNode | null {
+		if (body === null) return null;
+		let found: KNode | null = null;
+		for (const node of walk(body)) {
+			const swallowed = swallowedWhenElse(node);
+			if (swallowed !== null) found = swallowed.branch;
+		}
+		return found;
 	}
 
 	private tryBlock(node: KNode, sink: Sink): string {
@@ -3731,7 +4221,18 @@ class Emitter {
 			this.declare(name);
 			const lines = inner === undefined ? [] : this.statementList(inner, sink);
 			this.popScope();
-			text += ` catch (${this.safe(name)}) ${block(lines)}`;
+			// A non-local `return` crosses a callback by throwing — see
+			// `nonLocalTarget` — and a `catch` the source wrote must not swallow
+			// it. Kotlin's `return` is not an exception there, so a `try` around
+			// it never sees one; here it would, and the member would answer the
+			// handler's value instead of the one the source returned. Emitted
+			// in every translated `catch` rather than only where a jump is known
+			// to be in flight: whether one is depends on code emitted *after*
+			// this line, and a guard that is sometimes absent is the kind of
+			// conditional correctness this converter has been bitten by before.
+			// It costs one comparison on a path that is already an error.
+			const guard = [`if (${this.helper('isJump')}(${this.safe(name)})) throw ${this.safe(name)};`];
+			text += ` catch (${this.safe(name)}) ${block([...guard, ...lines])}`;
 		}
 		if (ensure !== undefined) {
 			const inner = kids(ensure).find((child) => child.type === 'statements');
@@ -3864,7 +4365,11 @@ class Emitter {
 			}
 			case 'equality_expression':
 				return this.binary(node, (operator) => (operator.startsWith('==') ? '===' : '!=='));
-			case 'comparison_expression':
+			case 'comparison_expression': {
+				const generic = this.genericReference(node);
+				if (generic !== null) return generic;
+				return this.binary(node, (operator) => operator);
+			}
 			case 'additive_expression':
 			case 'multiplicative_expression':
 				return this.binary(node, (operator) => operator);
@@ -3899,6 +4404,8 @@ class Emitter {
 				return this.lambda(node, false);
 			case 'callable_reference':
 				return this.callableReference(node);
+			case 'object_literal':
+				return this.objectLiteral(node);
 			case 'spread_expression': {
 				const value = kids(node)[0];
 				if (value === undefined) this.refuse(node, 'an empty `*` vararg spread');
@@ -4121,6 +4628,50 @@ class Emitter {
 	 * against; what decides the translation is the member name, exactly as it
 	 * would for `it.isNotBlank()`.
 	 */
+	/**
+	 * `List<String>::isNotEmpty` — an unbound reference whose receiver type
+	 * carries type arguments, which the grammar reads as arithmetic.
+	 *
+	 * `List < String > (::isNotEmpty)` is a valid parse of those characters and
+	 * the one tree-sitter takes, so the reference arrives as a comparison whose
+	 * last operand is a bare `::member`. Nothing else produces that shape: a
+	 * real comparison cannot have a callable reference on its right, because
+	 * Kotlin has no ordering on functions.
+	 *
+	 * The type before the `<` is read back out of the text, so a declared DTO
+	 * still resolves to its own member and the runtime's tables still answer
+	 * for `List`, `Set` and `Map` — the three this ecosystem writes it with.
+	 */
+	private genericReference(node: KNode): string | null {
+		const parts = node.allChildren;
+		const reference = parts[parts.length - 1];
+		if (reference === undefined || reference.type !== 'callable_reference') return null;
+		const member = kids(reference)[0];
+		if (kids(reference).length !== 1 || member?.type !== 'simple_identifier') return null;
+		const owner = /^([A-Za-z_]\w*)\s*</.exec(node.text.trim())?.[1] ?? null;
+		if (owner === null) return null;
+
+		const name = member.text;
+		if (
+			this.declaredTypes.has(owner) &&
+			!this.declaredObjects.has(owner) &&
+			this.qualifiedSignatures.has(`${owner}.${name}`) &&
+			!this.declaredSuspends.has(name)
+		) {
+			return `(__recv, ...__a) => __recv.${this.safe(name)}(...__a)`;
+		}
+		if (this.classFieldIndex.get(owner)?.has(name) === true) {
+			return `(__recv) => __recv.${this.safe(name)}`;
+		}
+		const helper = EXTENSION_METHODS.get(name);
+		if (helper !== undefined) return `(__a) => ${this.helper(helper)}(__a)`;
+		const property = EXTENSION_PROPERTIES.get(name);
+		if (property !== undefined) return `(__a) => ${this.helper(property)}(__a)`;
+		if (HOST_PROPERTY_METHODS.has(name)) return `(__a) => __a.${name}`;
+		if (HOST_METHODS.has(name)) return `(__a) => __a.${name}()`;
+		return null;
+	}
+
 	private callableReference(node: KNode): string {
 		if (node.allChildren.some((child) => child.type === 'class')) {
 			this.refuse(node, '`::class` reflection');
@@ -4195,11 +4746,82 @@ class Emitter {
 			return `(__recv, ...__a) => __recv.${member.text}(...__a)`;
 		}
 
+		// The same unbound form over a *property*: `distinctBy(GenreRoute::slug)`
+		// and `sortedBy(Chapter::number)`. Kotlin's reference to a property is a
+		// function of one argument that reads it, which is the shape every
+		// caller of these — `distinctBy`, `sortedBy`, `groupBy`, `map` — is
+		// about to call. Read off the declaration rather than guessed: the
+		// method branch above has already claimed anything the file set says is
+		// a method.
+		if (named && this.classFieldIndex.get(owner.text)?.has(member.text) === true) {
+			return `(__recv) => __recv.${member.text}`;
+		}
+
 		const helper = EXTENSION_METHODS.get(member.text);
 		if (helper !== undefined) return `(__a) => ${this.helper(helper)}(__a)`;
+		// `sumOf(ByteArray::size)` — a reference to one of the properties the
+		// runtime answers rather than JavaScript. Read as a bare property it
+		// would be `__a.size` on an array, which is `undefined`, and the sum of
+		// a list of those is `NaN` with nothing refused.
+		const property = EXTENSION_PROPERTIES.get(member.text);
+		if (property !== undefined) return `(__a) => ${this.helper(property)}(__a)`;
 		if (HOST_PROPERTY_METHODS.has(member.text)) return `(__a) => __a.${member.text}`;
 		if (HOST_METHODS.has(member.text)) return `(__a) => __a.${member.text}()`;
 		this.refuse(node, `\`::${member.text}\``);
+	}
+
+	/**
+	 * `object : Callback { … }` — Kotlin's anonymous implementation of an
+	 * interface, which is a JavaScript object literal and nothing more.
+	 *
+	 * This is how the ecosystem writes a callback, an okhttp `Interceptor`, a
+	 * `Comparator` and a one-off filter: a supertype with no state, and a
+	 * method or two. JavaScript has the same expression, so the members are
+	 * emitted into a literal under their own names and whatever receives it
+	 * calls them exactly as the Kotlin did.
+	 *
+	 * **Arrow functions, not methods.** The bodies here reach outward far more
+	 * often than inward — an interceptor reads `baseUrl`, a callback reads a
+	 * preference — and a `function` would rebind `this` to the literal, so
+	 * every one of those reads would answer `undefined` with nothing thrown.
+	 * An arrow keeps `this` meaning the source object, which is what the
+	 * emitter does for every other nested function for the same reason.
+	 *
+	 * Two shapes are refused rather than approximated:
+	 *
+	 * - **A constructed supertype** (`object : Filter.Select<String>("x", a)`).
+	 *   That object is the base plus an override, and a literal carrying only
+	 *   the override is missing everything the base was going to supply.
+	 * - **A body that writes a bare `this`**, which in Kotlin means the
+	 *   anonymous object and here would mean the enclosing source. The two are
+	 *   different objects and nothing would say which one answered.
+	 */
+	private objectLiteral(node: KNode): string {
+		const invoked = this.baseInvocation(node);
+		if (invoked !== null) {
+			this.refuse(node, `an anonymous \`object : ${invoked.type}(…)\` over a constructed base`);
+		}
+		const body = kids(node).find((child) => child.type === 'class_body');
+		if (body === undefined) this.refuse(node, 'an anonymous `object :` with no body');
+		if (/(^|[^.@\w])this([^.@\w]|$)/.test(body.text)) {
+			this.refuse(node, 'a bare `this` inside an anonymous `object :`');
+		}
+		const fields: string[] = [];
+		for (const child of kids(body)) {
+			if (child.type === 'getter' || child.type === 'setter') continue;
+			if (child.type === 'function_declaration') {
+				const name = this.nameOf(child) ?? 'fun';
+				fields.push(`${JSON.stringify(name)}: ${this.functionDeclaration(child, 'local')}`);
+				continue;
+			}
+			if (child.type === 'property_declaration') {
+				const name = this.propertyName(child) ?? 'val';
+				fields.push(`${JSON.stringify(name)}: ${this.propertyValue(child, name)}`);
+				continue;
+			}
+			this.refuse(child, spoken(child));
+		}
+		return `(${block(fields.map(comma))})`;
 	}
 
 	/* ── calls ───────────────────────────────────────────────────────────── */
@@ -4319,6 +4941,36 @@ class Emitter {
 		const safe = suffix.allChildren[0]?.type === '?.';
 
 		if (receiver.type === 'super_expression') {
+			// **A superclass this build translated is a real JavaScript one.**
+			//
+			// A multisrc template is emitted as a `class` and the extension
+			// really does `extends` it (`orderByInheritance` exists to order
+			// the two), so `super.chapterFromElement()` inside such an
+			// extension is ordinary JavaScript and means the template's method.
+			// Emitting `__super.chapterFromElement` instead would reach past
+			// the template to the driver's base class, which has never heard of
+			// it — and every such call was refused by name instead, which took
+			// the whole extension with it.
+			//
+			// Checked against the hierarchy rather than assumed from the
+			// presence of a base: a class extending a template may still call
+			// `super.headersBuilder()`, which the template does not declare and
+			// the driver does. That one has to keep going to `__super`, and
+			// asking `classMembers` is what tells the two apart.
+			//
+			// It also fixes a silent wrongness in the other direction. Where a
+			// template *does* override a driver member, `__super.x()` ran the
+			// driver's version and skipped the override the extension asked
+			// for — no error, just the wrong behaviour.
+			if (this.ownerBase !== null && this.baseDeclares(this.ownerBase, name)) {
+				if (lambda !== null) this.refuse(lambda, `a lambda passed to \`super.${name}()\``);
+				const inherited = `super.${name}(${this.plainArguments(name, args).join(', ')})`;
+				// Awaited on the same rule the driver's half uses: the emitter
+				// marks a translated member `async` when it suspends, so a call
+				// to one is a promise and a promise that is filtered rather
+				// than awaited walks nothing and answers an empty list.
+				return this.declaredSuspends.has(name) ? this.awaited(inherited) : inherited;
+			}
 			// The base class is real — `shims/aniyomi-entry.ts` declares it — so a
 			// written `super.foo(x)` is honoured rather than refused. See
 			// `SUPER_MEMBERS` for why that leaves rule 3 intact.
@@ -4552,6 +5204,10 @@ class Emitter {
 			// an override in this class keeps winning.
 			if (this.neighbourExtensions.has(`${this.ownerBase}.${name}`)) extension = 'method';
 		}
+		// Declared at file scope next door. Asked last, so a helper this build
+		// implements and a declaration on the class both still win: what is
+		// filled here is only the gap where nothing else answered at all.
+		if (extension === undefined && this.neighbourModuleExtensions.has(name)) extension = 'module';
 		if (extension !== undefined) {
 			// `element.getInfo("x")` calls `getInfo(element, "x")`: the receiver
 			// is the first argument, which is where the declaration put it. A
@@ -4578,7 +5234,10 @@ class Emitter {
 			const types = this.reifiedArguments(suffix, name, typeArgument);
 			const tail = this.callArguments(name, args, lambda, labelled, false);
 			const call = `${callee}(${[...types, receiverText, ...tail].join(', ')})`;
-			if (!safe) return this.suspendMembers.has(name) ? this.awaited(call) : call;
+			if (!safe) {
+				const suspends = this.suspendMembers.has(name) || this.moduleSuspends.has(name);
+				return suspends ? this.awaited(call) : call;
+			}
 			const inner = `${callee}(${[...types, '__r', ...tail].join(', ')})`;
 			return `${this.helper('sc')}(${receiverText}, (__r) => ${inner})`;
 		}
@@ -4595,7 +5254,24 @@ class Emitter {
 		// symbol, not the fallback the header refuses: `typeFilter.toUriPart()`
 		// names a member of the `UriPartFilter` a few lines below it, and that
 		// class is emitted into the same module.
-		const declared = this.declaredMethods.has(name);
+		// `this.pageListParseAlternative(document)` — the receiver is the source
+		// object and the name is a member of it, which is a resolved call and
+		// not the passthrough the header refuses. Written out rather than left
+		// implicit all over this ecosystem, and refused every time: the implicit
+		// form takes the `bareCall` path, which consults `classMembers`, and
+		// nothing on this path did.
+		//
+		// Narrow on purpose. Inside `apply {}` a bare `this` is the *applied*
+		// record, and the emitted receiver text says so — only a `this` that
+		// came out as the source object counts.
+		const ownReceiver =
+			// Both spellings. A `this` reaches this emitter as a
+			// `this_expression` in most positions and as a plain identifier in
+			// others — the same split the identifier case above documents.
+			(receiver.type === 'this_expression' || receiver.text === 'this') &&
+			(receiverText === 'this' || receiverText === this.selfReference());
+		const ownMember = ownReceiver && this.isSourceMember(name);
+		const declared = this.declaredMethods.has(name) || ownMember;
 		if (!HOST_METHODS.has(name) && !crossFileObject && !declared && scopeFunction) {
 			// Passthrough is an allowlist. See the file header: a fallback turns
 			// an unrecognised Kotlin helper into a call on a shim that has never
@@ -4603,11 +5279,12 @@ class Emitter {
 			// than here, where a sentence can be written about it.
 			this.refuse(suffix, `\`.${name}()\``);
 		}
-		const builderLambda = lambda !== null && BUILDER_LAMBDA_METHODS.has(name);
+		const argumentLambda = ARGUMENT_LAMBDA_METHODS.has(name);
+		const builderLambda = lambda !== null && (BUILDER_LAMBDA_METHODS.has(name) || argumentLambda);
 		if (lambda !== null && !builderLambda) this.refuse(lambda, `a lambda passed to \`.${name}()\``);
 
 		const argumentsText = builderLambda
-			? this.callArguments(name, args, lambda, labelled, true)
+			? this.callArguments(name, args, lambda, labelled, !argumentLambda)
 			: this.plainArguments(name, args, this.receiverTypeOf(receiver));
 		// `element.parent()` is a jsoup call and a runtime field; see
 		// `HOST_PROPERTY_METHODS` for what emitting it as written cost.
@@ -4619,6 +5296,7 @@ class Emitter {
 		// value. Asked before `declaredSuspends`, because a file that declares
 		// its own `sign` has already taken the `declared` branch above.
 		if (!declared && AWAITED_HOST_METHODS.has(name)) return this.awaited(call);
+		if (ownMember && this.suspendMembers.has(name)) return this.awaited(call);
 		return declared && this.declaredSuspends.has(name) ? this.awaited(call) : call;
 	}
 
@@ -4669,9 +5347,37 @@ class Emitter {
 			const call = `${this.helper('synchronized')}(${lock}, ${this.lambda(lambda, false, labelled ?? name)})`;
 			return this.asyncLambdas > before ? this.awaited(call) : call;
 		}
+		// `Interceptor { chain -> … }` — Kotlin's SAM constructor, written where
+		// the lambda is not already in an `addInterceptor` position. The
+		// interceptor *is* the function, and the runtime calls a function and an
+		// object with `intercept` the same way, so the constructor is the
+		// identity and the lambda is the whole value.
+		if (name === 'Interceptor' && lambda !== null && args.length === 0) {
+			return this.lambda(lambda, false, labelled ?? name);
+		}
 		if (name === 'async') {
 			if (lambda === null) this.refuse(callee, 'an `async` with no block');
 			return `${this.helper('async')}(${this.lambda(lambda, false, labelled ?? name)})`;
+		}
+		// `coroutineScope { … }` and `supervisorScope { … }` are structured
+		// concurrency: the block runs, its children run, and the scope does not
+		// finish until they all have. In a runtime with one thread that is
+		// exactly "run the block and await it" — which is what `withContext` and
+		// `runBlocking` above already do, and the `async` below is what makes
+		// the children run at all.
+		//
+		// The difference between the two is failure handling: `coroutineScope`
+		// cancels its siblings when one child throws and `supervisorScope` does
+		// not. There is nothing to cancel here — an `async` is a promise already
+		// in flight — so both become the same await, and a throw propagates out
+		// of the scope in either, which is the behaviour every use in this
+		// catalogue is written against.
+		if (name === 'coroutineScope' || name === 'supervisorScope') {
+			if (lambda === null) this.refuse(callee, `a \`${name}\` with no block`);
+			const body = this.functionScope('lambda', labelled ?? name, [], () =>
+				block(this.lambdaLines(lambda))
+			);
+			return this.awaited(`(async () => ${body.text})()`);
 		}
 		if (name === 'runBlocking') {
 			// The sandbox has one thread and no way to block on a promise, so the
@@ -4993,7 +5699,15 @@ class Emitter {
 			qualified !== undefined && named_.every((one) => qualified.includes(one))
 				? qualified
 				: undefined;
-		const signature = usable ?? this.signatures.get(name);
+		const bare = usable ?? this.signatures.get(name);
+		// A list that does not declare what the call names cannot be the callee,
+		// and neither can a name this build marked ambiguous and then dropped.
+		// `signatureCandidates` still holds every spelling; where exactly one of
+		// them accounts for the names written, that one is the answer.
+		const signature =
+			bare !== undefined && named_.every((one) => bare.includes(one))
+				? bare
+				: (this.onlyCandidate(name, named_) ?? bare);
 		if (signature === undefined) {
 			const options = VARARG_OPTIONS.get(name);
 			if (options === undefined) this.refuse(named[0], `a named argument to \`${name}\``);
@@ -5265,8 +5979,18 @@ class Emitter {
 
 		const receiver = kids(node)[0];
 		if (receiver.type === 'super_expression') {
-			// `__super` holds methods, not fields: the base's state lives on the
-			// source object, which `this` already reaches.
+			// `override val client = super.client.newBuilder()…` — by far the
+			// commonest `super.` property in this ecosystem, and the one place
+			// where reading it off `this` would be wrong twice over: `client` is
+			// the member being declared, so `this.client` is either undefined or
+			// itself. What the Kotlin means is the base class's, and the base
+			// class's *is* the runtime's — one object, reached bare.
+			const base = kids(node)[kids(node).length - 1];
+			const property = kids(base).find((child) => child.type === 'simple_identifier')?.text;
+			if (property !== undefined && SUPER_BASE_PROPERTIES.has(property)) return property;
+			// Everything else: `__super` holds methods, not fields, and the rest
+			// of the base's state lives on the source object, which `this`
+			// already reaches.
 			this.refuse(node, '`super.` used as a property');
 		}
 		const suffix = kids(node)[kids(node).length - 1];
@@ -5847,6 +6571,54 @@ class Emitter {
 	 * `break` out of an arrow function, so a `return@let` written inside a
 	 * lambda nested in an inlined `let` is still refused rather than rerouted.
 	 */
+	/**
+	 * The callback a `return@label` names from inside a *nested* callback, with
+	 * an identity assigned — or null when no enclosing callback carries that
+	 * label.
+	 *
+	 * Kotlin's non-local return. `map { x?.let { y ?: return@map null } }` leaves
+	 * the `map` block from inside the `let` block, and JavaScript has no
+	 * statement that returns from anything but the function it is written in.
+	 * A throw does cross, so the jump becomes one and the named frame catches
+	 * it: exact, including through `await`, and paid for only where it is used.
+	 *
+	 * Bounded at the first real `function`. A method boundary is not something
+	 * a Kotlin lambda label can name, and a throw that escaped one would leave
+	 * the member rather than the block.
+	 */
+	private nonLocalTarget(label: string, mustCross = true): number | null {
+		let crossed = false;
+		for (let index = this.frames.length - 1; index >= 0; index -= 1) {
+			const frame = this.frames[index];
+			// Inlined blocks are not callbacks; crossing one costs nothing.
+			if (frame.kind === 'inline') continue;
+			if (frame.label === label) {
+				if (mustCross && !crossed) return null;
+				frame.jumpId ??= this.jumpIds++;
+				frame.catchesJump = true;
+				return frame.jumpId;
+			}
+			if (frame.kind === 'function') return null;
+			crossed = true;
+		}
+		return null;
+	}
+
+	/**
+	 * The enclosing member, as a jump target — for Kotlin's *unlabelled*
+	 * non-local return out of an inline lambda. See `nonLocalTarget`.
+	 */
+	private memberJumpTarget(): number | null {
+		for (let index = this.frames.length - 1; index >= 0; index -= 1) {
+			const frame = this.frames[index];
+			if (frame.kind !== 'function') continue;
+			frame.jumpId ??= this.jumpIds++;
+			frame.catchesJump = true;
+			return frame.jumpId;
+		}
+		return null;
+	}
+
 	/** The label of the innermost frame that is a real JavaScript callback. */
 	private enclosingCallbackLabel(): string | null {
 		for (let index = this.frames.length - 1; index >= 0; index -= 1) {
@@ -5972,6 +6744,12 @@ class Emitter {
 		// identifier rather than as `this_expression`, and it means what it
 		// means there: see the `this_expression` case for the receivers.
 		if (name === 'this') return this.receiverAlias() ?? this.receiverParam ?? 'this';
+		// `override fun onFailure(call: Call, e: IOException) = Unit` — Kotlin's
+		// "no value", and this ecosystem's way of writing an override that does
+		// nothing. JavaScript's is `undefined`. Asked here rather than in a
+		// table because it is a keyword-shaped name, and after the lookups above
+		// so a source that declares its own `Unit` still means its own.
+		if (name === 'Unit') return 'undefined';
 
 		// A constant the extension inherited from its base class, written bare
 		// the way Kotlin lets it be. Checked after this file's own declarations,
@@ -6130,7 +6908,15 @@ class Emitter {
 		this.pushScope();
 		for (const param of params) this.declare(param);
 		try {
-			const raw = run();
+			const body = run();
+			// A `return@thisLabel` written inside a callback nested in this one
+			// left by throwing; this is where it lands. See `nonLocalTarget` for
+			// why a throw is the only expression JavaScript has for it.
+			const raw =
+				frame.catchesJump === true && body.startsWith('{')
+					? `{ try ${body} catch (__j) { if (${this.helper('isJump')}(__j, ${frame.jumpId})) ` +
+						`return ${this.helper('jumpValue')}(__j); throw __j; } }`
+					: body;
 			// `__self` is declared once per real function, so an `apply {}` nested
 			// anywhere inside it can still reach the source's own members.
 			const text =
@@ -6910,6 +7696,25 @@ function hoistableGuards(root: KNode): ReadonlySet<KNode> {
 
 	visit(root, false, false);
 	return out;
+}
+
+/**
+ * A bare `return`/`throw` that is the whole body of a branch, whose value the
+ * grammar left outside the branch. See `rejoinJumps`.
+ */
+function danglingBranchJump(node: KNode): KNode | null {
+	if (node.type !== 'if_expression') return null;
+	let found: KNode | null = null;
+	for (const child of kids(node)) {
+		if (child.type !== 'control_structure_body') continue;
+		const only = kids(child);
+		const jump = only.length === 1 ? only[0] : undefined;
+		if (jump === undefined || jump.type !== 'jump_expression') continue;
+		if (!kids(jump).every((part) => part.type === 'label')) continue;
+		if (!/^(?:return|throw)\b/.test(jump.text.trim())) continue;
+		found = jump;
+	}
+	return found;
 }
 
 /** Whether a call's receiver chain is a `?.`, which makes the call conditional. */

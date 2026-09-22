@@ -236,11 +236,11 @@ describe('the node-kind allowlist', () => {
 	});
 
 	it('names a kind it does not handle rather than skipping it', () => {
-		const tree = parse(kt('class Demo {', '    val x = object : Callback {}', '}'));
+		const tree = parse(kt('class Demo {', '    val x = [1, 2]', '}'));
 
 		const obstacles = scanObstacles(tree.root, 'x');
 
-		expect(obstacles.map((one) => one.kind)).toContain('an anonymous `object :` implementation');
+		expect(obstacles.map((one) => one.kind)).toContain('a collection literal');
 	});
 
 	it('stops descending at the first obstacle on a branch', () => {
@@ -267,7 +267,6 @@ describe('naming the obstacle rather than the category', () => {
 	it.each([
 		['Injekt.get<Application>()', 'Injekt.get'],
 		['WebView(context)', 'WebView'],
-		['Interceptor { chain -> chain.proceed(chain.request()) }', 'an okhttp Interceptor'],
 		['KeyGenerator.getInstance("AES")', 'javax.crypto'],
 		// The transformation string, which is the leaf the scanner reaches and
 		// the only place the mode is knowable.
@@ -289,7 +288,14 @@ describe('naming the obstacle rather than the category', () => {
 		// passthrough allowlist because both had a way past it — a declared
 		// method for the first, a capitalised receiver for the second.
 		['loadForRequest(url)', 'reading a cookie jar'],
-		['CookieManager.getInstance()', 'the WebView cookie store']
+		['CookieManager.getInstance()', 'the WebView cookie store'],
+		// An *application* interceptor translates now — `__proceed` in the
+		// runtime runs the chain — so `Interceptor` is no longer a refused name.
+		// The network variant is, and at the one line that installs it.
+		[
+			'client.newBuilder().addNetworkInterceptor { it.proceed(it.request()) }',
+			'an okhttp network interceptor'
+		]
 	])('names %s as %s', (text, expected) => {
 		expect(namedObstacle(text)).toBe(expected);
 	});

@@ -111,6 +111,7 @@ export const SUPPORTED_KINDS: ReadonlySet<string> = new Set([
 	'type_identifier',
 	'class_declaration',
 	'object_declaration',
+	'object_literal',
 	// Erased: `registerAlias` records what it points at and nothing is emitted.
 	'type_alias',
 	// Emitted into the constructor, in the order it was declared.
@@ -260,8 +261,49 @@ export const SUPPORTED_KINDS: ReadonlySet<string> = new Set([
  * `type_alias` was on this list and is not any more: it is erased rather than
  * refused, because erasing it is what Kotlin itself does. See `registerAlias`.
  */
+/**
+ * A `when`'s `else ->` that the branch above it swallowed — a defect in the
+ * vendored grammar, not in the Kotlin.
+ *
+ *     when (filter) {
+ *         is TextFilter -> if (filter.state.isNotBlank()) { … }
+ *         else -> Unit
+ *     }
+ *
+ * Kotlin reads that `else` as the `when`'s last entry. The grammar attaches it
+ * to the `if` instead, which leaves the entry's arrow with nowhere to go and
+ * parses it as an `ERROR` node holding the two characters `->`. So the marker
+ * is unmistakable: an `if_expression` whose `else` is followed immediately by
+ * an `ERROR` whose whole text is `->`.
+ *
+ * It matters because it is not rare. `-> if (…) { … }` followed by another
+ * entry is ordinary in this ecosystem's filter code, and every occurrence
+ * refused the whole member as "a passage this build could not parse" —
+ * including `Madara.addFilters`, and with it the largest template in the
+ * catalogue.
+ *
+ * Returns the body that really belongs to the `when`, so both halves of this
+ * build can repair it: the scan forgives the marker, and the emitter moves the
+ * branch back where it was written.
+ */
+export function swallowedWhenElse(node: KNode): { marker: KNode; branch: KNode } | null {
+	if (node.type !== 'if_expression') return null;
+	const parts = node.allChildren;
+	const at = parts.findIndex((child) => child.type === 'else');
+	if (at === -1) return null;
+	const marker = parts[at + 1];
+	const branch = parts[at + 2];
+	if (marker === undefined || marker.type !== 'ERROR' || marker.text.trim() !== '->') return null;
+	if (branch === undefined || branch.type !== 'control_structure_body') return null;
+	return { marker, branch };
+}
+
 export const OUT_OF_SCOPE_KINDS: ReadonlyMap<string, string> = new Map([
-	['object_literal', 'an anonymous `object :` implementation'],
+	// `object_literal` was here. `object : Callback { … }` is an anonymous
+	// implementation of an interface, and a JavaScript object literal is the
+	// same expression — so the emitter writes one, and refuses the two shapes
+	// it cannot express faithfully (a constructed base, a bare `this`) by name
+	// rather than refusing the construct. See `objectLiteral` in `emit.ts`.
 
 	['collection_literal', 'a collection literal'],
 	['secondary_constructor', 'a secondary constructor']
@@ -283,7 +325,19 @@ const NAMED_OBSTACLES: readonly {
 }[] = [
 	{ pattern: /\bInjekt\b/, name: 'Injekt.get' },
 	{ pattern: /\b(?:WebView|WebSettings|WebViewClient)\b/, name: 'WebView' },
-	{ pattern: /\bInterceptor\b/, name: 'an okhttp Interceptor' },
+	// `Interceptor` was here, refused by name. It is not refused any more: an
+	// okhttp *application* interceptor wraps one call, and `__proceed` in the
+	// runtime runs the chain inside the sandbox with the same reach the plugin
+	// already had.
+	//
+	// A **network** interceptor is a different hook and is still refused. It
+	// sits between the client and each individual hop of a redirect chain; the
+	// host follows redirects itself and reports only where they ended, so there
+	// are no per-hop connections here for one to wrap. Refused at the line that
+	// installs it rather than at the runtime, because it can never run: a
+	// conversion that succeeds and then throws on the first request is the
+	// outcome this file exists to avoid.
+	{ pattern: /\baddNetworkInterceptor\b/, name: 'an okhttp network interceptor' },
 	// Narrowed rather than deleted when `ctx.crypto` arrived. What is left is
 	// the part of javax.crypto that still has no honest answer:
 	//
@@ -567,6 +621,9 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 	['iterator', 'iterator'],
 	['trimMargin', 'trimMargin'],
 	['encodeToString', 'encodeToString'],
+	// kotlinx's `T.toJsonElement()`, which this catalogue's filter code uses to
+	// turn a DTO list into something it can store. See the helper.
+	['toJsonElement', 'toJsonElement'],
 	['asUriPart', 'asQueryPart'],
 	['head', 'firstOrNull'],
 	['rateLimit', 'rateLimit'],
@@ -600,6 +657,13 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 	['take', 'take'],
 	['drop', 'drop'],
 	['joinToString', 'joinToString'],
+	['joinTo', 'joinTo'],
+	['mapTo', 'mapTo'],
+	// The reified argument is the constructor, so these are an `instanceof`
+	// — see the helpers for why a type-blind fallback would be worse than
+	// a refusal.
+	['firstInstance', 'firstInstance'],
+	['firstInstanceOrNull', 'firstInstanceOrNull'],
 	['toList', 'toList'],
 	['toSet', 'toSet'],
 	// Kotlin distinguishes a List from a MutableList and from an Iterable; the
@@ -799,6 +863,20 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 	// keiyoushi's `SimpleDateFormat.tryParse`, which answers 0 rather than
 	// throwing — the idiom around it is `?.time ?: 0L`
 	['tryParse', 'tryParse'],
+	// **And the three names that replaced it.** `tryParse` is `@Deprecated` in
+	// the catalogue's own `core/utils/Date.kt`, and the catalogue has moved on
+	// — knowing only the old spelling refused the entire `MangaThemesia`
+	// template and every `Keyoapp` one, which between them are 130 extensions.
+	// All three answer epoch millis or 0; the distinctions upstream draws
+	// between them are about which fields the *pattern* carries, and the
+	// runtime reads the pattern either way.
+	['tryParseDate', 'tryParseDate'],
+	['tryParseDateTime', 'tryParseDate'],
+	['tryParseZonedDateTime', 'tryParseDate'],
+
+	// keiyoushi's two "…or null" readers over jsoup, where blank means absent.
+	['textOrNull', 'textOrNull'],
+	['attrOrNull', 'attrOrNull'],
 
 	// request bodies, in the shape `__bodyOf` already understands
 	['toMediaType', 'toMediaType'],
@@ -897,6 +975,10 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 export const DECODING_METHODS: ReadonlySet<string> = new Set([
 	'decodeFromString',
 	'decodeFromStream',
+	// `json.decodeFromJsonElement<Foo>(element)` — the same call whose payload
+	// is already parsed rather than text. `decode` reads a non-string payload
+	// as the parsed value, so only the name was missing.
+	'decodeFromJsonElement',
 	'parseAs'
 ]);
 
@@ -927,8 +1009,31 @@ export const TOLERATED_JSON_FLAGS: ReadonlySet<string> = new Set([
  */
 export const BUILDER_LAMBDA_METHODS: ReadonlySet<string> = new Set([
 	'putJsonObject',
-	'putJsonArray'
+	'putJsonArray',
+	// RxJava's two deferring constructors. The lambda *is* the argument here —
+	// `Observable.fromCallable { … }` means "run this when somebody asks" —
+	// which is the same shape the two above have and the reason this table
+	// exists rather than a second one.
+	'fromCallable',
+	'defer'
 ]);
+
+/**
+ * Methods whose trailing lambda is an ordinary *parameter* lambda, not a
+ * receiver one.
+ *
+ * `BUILDER_LAMBDA_METHODS` above hands the block a receiver — `putJsonObject {
+ * put(…) }` is written against the object being built. These are the other
+ * shape: `client.newBuilder().addInterceptor { chain -> … }` is Kotlin's SAM
+ * conversion of a one-method interface, so the block takes the chain as an
+ * argument and `it` is bound to it.
+ *
+ * Kept apart because emitting one as the other is silent: a receiver-form
+ * block has no `it`, so `addInterceptor { it.proceed(it.request()) }` — which
+ * is how most of them are written — refused for an `it` with no lambda around
+ * it, naming a construct the source never wrote.
+ */
+export const ARGUMENT_LAMBDA_METHODS: ReadonlySet<string> = new Set(['addInterceptor']);
 
 /**
  * Kotlin properties (no call parentheses) that must go through the runtime.
@@ -982,6 +1087,17 @@ export const HOST_PROPERTY_METHODS: ReadonlySet<string> = new Set([
  * is a deliberate cost rather than an oversight.
  */
 export const HOST_METHODS: ReadonlySet<string> = new Set([
+	// The Rx-era doors on a Call, and the operators on what they answer.
+	// Emitted unchanged because `__observable` defines them — see it for
+	// why an Observable here is a promise with a `map`.
+	'asObservable',
+	'asObservableSuccess',
+	'doOnNext',
+	'onErrorReturn',
+	'subscribeOn',
+	'observeOn',
+	'toBlocking',
+	'single',
 	// jsoup
 	'select',
 	'selectFirst',
@@ -1029,6 +1145,15 @@ export const HOST_METHODS: ReadonlySet<string> = new Set([
 	// java.time, for the one chain this ecosystem writes.
 	'toInstant',
 	'toEpochMilli',
+	// kotlinx-datetime's spelling of the same reading, and the one the modern
+	// half of this catalogue writes.
+	'toEpochMilliseconds',
+	'toEpochSeconds',
+	// okhttp's CacheControl.Builder, whose every setting the host decides.
+	'maxStale',
+	'minFresh',
+	'onlyIfCached',
+	'noTransform',
 	// okhttp's HttpUrl fragment, which this ecosystem packs a second id into.
 	'fragment',
 	'encodedFragment',
@@ -1096,11 +1221,30 @@ export const HOST_METHODS: ReadonlySet<string> = new Set([
 	'headers',
 	'header',
 	'request',
+	// `client.newBuilder().addInterceptor(…)`, the one line that installs one.
+	// The network variant is here too so that it reaches the runtime, which
+	// refuses it by name with a sentence about redirects — a refusal a reader
+	// can act on, rather than one about the word `Interceptor` appearing.
+	'addInterceptor',
+	// The okhttp interceptor chain: `chain.request()` reads what it was handed
+	// and `chain.proceed(request)` runs the rest. `intercept` is the member an
+	// extension's own `Interceptor` class declares, called by name from the
+	// runtime. See `__proceed`.
+	'proceed',
+	'intercept',
+	// `response.newBuilder().body(…).build()`, which is how an interceptor
+	// hands back something other than what it was given.
+	'newBuilder',
 	'url',
 	'location',
 	'headersOf',
 	'isSuccessful',
 	'close',
+	// okhttp's `Response.closeQuietly()`, which this ecosystem calls on a
+	// response it is discarding. The host buffers the whole body before the
+	// extension sees it, so both are already nothing to do — but a name that is
+	// absent dies in the sandbox rather than refusing here.
+	'closeQuietly',
 	'stop',
 	// The two cookie calls the host jar makes true, rather than merely
 	// tolerable. `ADR-0005` §3: the plugin declares intent, the host carries
@@ -1128,6 +1272,12 @@ export const HOST_METHODS: ReadonlySet<string> = new Set([
 	'removeAllQueryParameters',
 	'addPathSegment',
 	'addPathSegments',
+	// The encoded pair of the segment builders, and the two setters — a source
+	// that composed a path itself passes it through these so its separators are
+	// not re-encoded into `%2F`.
+	'addEncodedPathSegments',
+	'setPathSegment',
+	'setEncodedPathSegment',
 	'encodedPath',
 	'queryParameter',
 	'queryParameterNames',
@@ -1445,6 +1595,19 @@ export const BASE_CONSTANTS: ReadonlyMap<string, string> = new Map([
  * here only because the emitter asks the question thousands of times.
  */
 export const GLOBAL_NAMES: ReadonlySet<string> = new Set([
+	'Arrays',
+	// `object : Interceptor { … }` and `class X : Interceptor` — the type an
+	// extension names when it writes one out rather than passing a lambda. The
+	// runtime calls `intercept` by name, so the interface itself carries no
+	// behaviour; it is here so that naming it resolves.
+	'Interceptor',
+	'CacheControl',
+	/* `TimeZone.getTimeZone("UTC")`, which 115 sources set on a date format,
+	   and `Regex.escape(literal)`, which is the companion rather than the
+	   constructor. Both are capitalised receivers the emitter passes through, so
+	   an absent name is a death at load rather than a refusal. */
+	'TimeZone',
+	'Regex',
 	'GET',
 	'POST',
 	'Request',
@@ -1462,7 +1625,11 @@ export const GLOBAL_NAMES: ReadonlySet<string> = new Set([
 	'AnimesPage',
 	'AnimeFilterList',
 	'RegexOption',
+	'Observable',
+	'UpdateStrategy',
+	'SMangaUpdate',
 	'SimpleDateFormat',
+	'DateTimeFormatter',
 	'Locale',
 	'Calendar',
 	'Base64',
@@ -1569,7 +1736,7 @@ export const GLOBAL_NAMES: ReadonlySet<string> = new Set([
  * inside a sandbox — so `aniyomi-conversion.spec.ts` asserts the driver declares
  * every name below.
  */
-export const SUPER_MEMBERS: ReadonlySet<string> = new Set([
+const SUPER_MEMBERS_VIDEO: ReadonlySet<string> = new Set([
 	'popularAnimeParse',
 	'searchAnimeParse',
 	'latestUpdatesParse',
@@ -1636,6 +1803,99 @@ export const SUPER_MEMBERS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * The same, for the image medium — and the list whose absence capped it.
+ *
+ * Every name in `SUPER_MEMBERS_VIDEO` is an anime one, so a manga extension
+ * writing `super.imageRequest(page)` — the ordinary way to add a `Referer` to
+ * an image request, and the hook upstream added for exactly that — was refused
+ * by name. **The driver had implemented it all along**, along with twenty-two
+ * others; only this list had not heard of them. Measured over 300 listings of
+ * a real catalogue, `super.imageRequest()` was the *sole* remaining blocker on
+ * 32 of them, more than twice the number that converted at all.
+ *
+ * This is the fourth time an anime-only allowlist has capped the manga medium
+ * — `ABI_MEMBERS` above carries the third, in the same shape and with the same
+ * comment. The pattern is worth naming: a set written when there was one
+ * medium reads as a general rule and behaves as a filter on the other one.
+ *
+ * **Every name here is declared by `shims/mihon-entry.ts`**, checked by a test
+ * that runs inside a real bundle rather than over the driver's source text —
+ * see the note on `SUPER_MEMBERS`. Names a *blocked* extension asks for and
+ * the driver does not have (`fetchSearchManga`, `fetchChapterList`, the rest
+ * of the Rx-era `fetch*` family) are deliberately absent: adding one here
+ * without adding it there converts a clean refusal into
+ * `__super.x is not a function` on a viewer's device.
+ */
+const SUPER_MEMBERS_IMAGE: ReadonlySet<string> = new Set([
+	'popularMangaParse',
+	'searchMangaParse',
+	'latestUpdatesParse',
+	'chapterListParse',
+	'mangaDetailsParse',
+	'pageListParse',
+	'imageUrlParse',
+	'headersBuilder',
+
+	// The request half. `imageRequest` is the one whose headers are
+	// load-bearing (ABI.md §8.3): an image host answers 403 without a Referer
+	// on a page whose chapter loaded fine.
+	'popularMangaRequest',
+	'latestUpdatesRequest',
+	'searchMangaRequest',
+	'mangaDetailsRequest',
+	'chapterListRequest',
+	'pageListRequest',
+	'imageUrlRequest',
+	'imageRequest',
+
+	'popularMangaNextPageSelector',
+	'searchMangaNextPageSelector',
+	'latestUpdatesNextPageSelector',
+
+	'getMangaUrl',
+	'getChapterUrl',
+	'setupPreferenceScreen',
+
+	// The Rx-era half of the base class, which most of this catalogue's older
+	// extensions override — and, having overridden one, routinely call
+	// `super` on it to wrap the base rather than replace it. The driver
+	// implements each as the request/parse pair wrapped in an Observable.
+	'fetchPopularManga',
+	'fetchLatestUpdates',
+	'fetchSearchManga',
+	'fetchMangaDetails',
+	'fetchChapterList',
+	'fetchPageList'
+]);
+
+/**
+ * Both media's base members, merged.
+ *
+ * Merged rather than selected by medium because the emitter does not know
+ * which format it is translating, and `ABI_MEMBERS` already took this shape
+ * for the same reason. The two vocabularies barely overlap — anime spells
+ * everything `*Anime*`, `*Episode*`, `*Video*`; manga spells it `*Manga*`,
+ * `*Chapter*`, `*Page*` — and the three names genuinely common to both
+ * (`latestUpdatesParse`, `latestUpdatesRequest`, `headersBuilder`) mean the
+ * same thing in each.
+ *
+ * What the merge costs, stated rather than discovered: an *anime* extension
+ * writing `super.imageRequest()` now compiles instead of being refused, and
+ * would fail inside the sandbox because the video driver has no such member.
+ * No such extension exists — it is a manga member, in a manga base class — and
+ * the alternative is threading a medium through the emitter to prevent
+ * something nobody writes.
+ */
+export const SUPER_MEMBERS: ReadonlySet<string> = new Set([
+	...SUPER_MEMBERS_VIDEO,
+	...SUPER_MEMBERS_IMAGE
+]);
+
+/** Exported for the two cross-check tests, which each assert their own
+ * driver declares its own half. See `SUPER_MEMBERS_IMAGE`. */
+export { SUPER_MEMBERS_VIDEO, SUPER_MEMBERS_IMAGE };
+
+/**
  * The `super.` members whose call site has a receiver to pass.
  *
  * `sortVideos`, `sortHosters` and `sort` are declared upstream as extension
@@ -1649,6 +1909,21 @@ export const SUPER_MEMBERS: ReadonlySet<string> = new Set([
  * `__super.sortVideos()` instead would call the base ordering on `undefined`,
  * and the extension would silently lose the list it was sorting.
  */
+/**
+ * Base-class *properties* a `super.` read resolves to a runtime global.
+ *
+ * Only where the base's value is the runtime's own object and reading it off
+ * `this` would be wrong. `super.client` is the whole reason: it appears inside
+ * the declaration of `client` itself, wrapping the base's HTTP client in a
+ * builder, so `this.client` would be the half-built member or the recursion.
+ * `super.headers` is the same shape one line away.
+ *
+ * Deliberately short. A base property this build does not supply under its own
+ * name is still refused, because guessing which object holds it is how a
+ * scraper reads a header off the wrong one.
+ */
+export const SUPER_BASE_PROPERTIES: ReadonlySet<string> = new Set(['client', 'headers']);
+
 export const SUPER_RECEIVER_MEMBERS: ReadonlySet<string> = new Set([
 	'sortHosters',
 	'sortVideos',
@@ -1758,6 +2033,9 @@ export const KNOWN_SIGNATURES: ReadonlyMap<string, readonly string[]> = new Map(
 	// order, including `limit`/`truncated` — a signature that stopped at
 	// `postfix` would put the transform where the limit belongs.
 	['joinToString', ['separator', 'prefix', 'postfix', 'limit', 'truncated', 'transform']],
+	// Kotlin's `joinTo` takes the buffer first and then `joinToString`'s
+	// arguments, so the names are the same list with `buffer` in front.
+	['joinTo', ['buffer', 'separator', 'prefix', 'postfix', 'limit', 'truncated', 'transform']],
 	// Common host/extractor entry points use named arguments to make the
 	// otherwise opaque request shape readable. These are all trailing optional
 	// values, so reordering is safe and preserves omitted defaults.
@@ -1947,7 +2225,34 @@ export const ABI_MEMBERS: ReadonlySet<string> = new Set([
 	'popularMangaSelector',
 	'searchMangaSelector',
 	'latestUpdatesSelector',
-	'chapterListSelector'
+	'chapterListSelector',
+
+	/* **The two generations of entry point above the request/parse pair**, both
+	   of which `shims/mihon-entry.ts` now runs in preference to it.
+
+	   `fetchX(): Observable<T>` is the deprecated Rx API and `suspend fun
+	   getX(): T` is the one that replaced it — and the catalogue has moved.
+	   Measured over this repository's ~800 Kotlin sources: 332 declare
+	   `getPopularManga`, 331 `getLatestUpdates`, 330 `getPageList`, ~300
+	   `getSearchMangaList`, against 152 for `fetchSearchManga` and 100 for
+	   `fetchChapterList`. An extension that writes only these declares no
+	   member of the pair at all, so `substantive` was false for it and a
+	   conversion that had succeeded was thrown away with a sentence about the
+	   extension that was really a fact about this list — the third time that
+	   has happened here, and the reason the rule is to add a name only
+	   alongside the driver that calls it. */
+	'getPopularManga',
+	'getLatestUpdates',
+	'getSearchMangaList',
+	'getSearchManga',
+	'getChapterList',
+	'getPageList',
+	'getImageUrl',
+	'fetchPopularManga',
+	'fetchLatestUpdates',
+	'fetchSearchManga',
+	'fetchChapterList',
+	'fetchPageList'
 ]);
 
 /**
@@ -2105,6 +2410,36 @@ export const COMMENT_KINDS: ReadonlySet<string> = new Set([
 	'shebang_line'
 ]);
 
+/**
+ * Whether a subtree holds a parse error this build cannot put right.
+ *
+ * Three cases, and the third is the one worth stating: a node may report
+ * `hasError` with no ERROR or MISSING node beneath it at all — tree-sitter
+ * recovers by guessing and does not always leave a marker — and that is still
+ * an error, at *this* node. So a `hasError` no child accounts for is
+ * unrepaired, which is what keeps the guard from being loosened into nothing.
+ */
+function unrepairedError(node: KNode): boolean {
+	if (COMMENT_KINDS.has(node.type)) return false;
+	if (!node.hasError && node.type !== 'ERROR' && !node.isMissing) return false;
+
+	const swallowed = swallowedWhenElse(node);
+	if (swallowed !== null) {
+		// By kind rather than by identity: the two child accessors wrap the same
+		// tree-sitter node in different objects, so `===` across them is false.
+		return node.allChildren.some(
+			(child) => child.type !== 'ERROR' && child.type !== 'else' && unrepairedError(child)
+		);
+	}
+	if (node.type === 'ERROR' || node.isMissing) return true;
+
+	const children = node.allChildren.filter((child) => !COMMENT_KINDS.has(child.type));
+	if (children.some(unrepairedError)) return true;
+	// `hasError` here with nothing beneath it carrying one: the guess is at this
+	// node, and there is no marker to forgive.
+	return !children.some((child) => child.hasError || child.type === 'ERROR' || child.isMissing);
+}
+
 function scanInto(node: KNode, memberName: string, found: Untranslatable[]): void {
 	// A comment mentioning `WebView` is prose, not a WebView. Scanning one would
 	// refuse a member for what its author wrote *about* the code.
@@ -2122,13 +2457,22 @@ function scanInto(node: KNode, memberName: string, found: Untranslatable[]): voi
 	//
 	// `emitKotlin`'s own header comment already states the policy this restores:
 	// an error is fatal to whichever member contains it.
+	// One exception, and it is a defect in the grammar rather than in the
+	// source: see `swallowedWhenElse`. The marker is forgiven and the branch is
+	// put back by the emitter, so a construct this build reads correctly is not
+	// refused for the shape of the tree it arrived in. `hasError` propagates
+	// upward, so the question has to be asked of the whole subtree rather than
+	// of this node — `unrepairedError` is that question.
+	const swallowed = swallowedWhenElse(node);
 	if (node.type === 'ERROR' || node.isMissing || node.hasError) {
-		found.push({
-			kind: 'a passage this build could not parse',
-			line: node.line,
-			memberName
-		});
-		return;
+		if (unrepairedError(node)) {
+			found.push({
+				kind: 'a passage this build could not parse',
+				line: node.line,
+				memberName
+			});
+			return;
+		}
 	}
 
 	const outOfScope = OUT_OF_SCOPE_KINDS.get(node.type);
@@ -2194,7 +2538,10 @@ function scanInto(node: KNode, memberName: string, found: Untranslatable[]): voi
 		return;
 	}
 
-	for (const child of node.children) scanInto(child, memberName, found);
+	for (const child of node.children) {
+		if (swallowed !== null && (child.type === 'ERROR' || child.type === 'else')) continue;
+		scanInto(child, memberName, found);
+	}
 }
 
 /** Node kinds under this one with no handler. For the survey and the specs. */

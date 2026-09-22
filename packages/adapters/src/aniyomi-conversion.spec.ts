@@ -30,7 +30,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { openPluginArchive } from '@plugin-bridge/core/archive';
-import { SUPER_MEMBERS } from '@plugin-bridge/core/kotlin/subset';
+import { SUPER_MEMBERS_VIDEO } from '@plugin-bridge/core/kotlin/subset';
 import { aniyomiEntrypoint } from '@plugin-bridge/runtime/shims/aniyomi-entry';
 import { formatProfile } from '@plugin-bridge/core/formats';
 import { namesCookieJar, packageBundle } from '@plugin-bridge/core/package';
@@ -794,11 +794,17 @@ describe('the base class an extension reaches through super', () => {
 		// to one and forgotten in the other is `__super.x is not a function`
 		// inside a sandbox, on a viewer's device — so the check runs inside a real
 		// bundle rather than over the driver's source text.
+		//
+		// **This driver's half only.** `SUPER_MEMBERS` is the union of both
+		// media now, and asserting the union here would require the video driver
+		// to implement `imageRequest` and the rest of the manga base class.
+		// `mihon-conversion.spec.ts` makes the same assertion about the other
+		// half, so neither list can outrun its driver.
 		const module = await load(`
 class Extension {
   constructor() { this.baseUrl = '${BASE_URL}'; }
   popularAnimeRequest(page) {
-    const names = ${JSON.stringify([...SUPER_MEMBERS])};
+    const names = ${JSON.stringify([...SUPER_MEMBERS_VIDEO])};
     const missing = names.filter((name) => typeof __super[name] !== 'function');
     throw new Error('absent from the driver: [' + missing.join(', ') + ']');
   }

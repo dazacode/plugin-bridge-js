@@ -1627,16 +1627,107 @@ describe('okhttp, over the host', () => {
 		expect(response.isSuccessful).toBe(false);
 	});
 
-	it('refuses an interceptor rather than losing it silently', () => {
-		// An interceptor accepted and dropped leaves an extension believing it
-		// signs its own requests. The refusal names the thing it refused.
-		expect(() => runtime.client.newBuilder().addInterceptor(() => {})).toThrow(/interceptor/);
+	// What the runtime hands an interceptor. Declared here because this file
+	// drives an *emitted module*, so nothing it calls has a type of its own.
+	interface Chain {
+		request(): { url: string };
+		proceed(request: unknown): Promise<{
+			code: number;
+			body: { string(): string };
+			newBuilder(): { body(text: string): { build(): unknown } };
+		}>;
+	}
+
+	it('runs an application interceptor, and lets it rewrite the request', async () => {
+		const { ctx, sent } = context();
+		runtime.enter(ctx);
+		// The chain runs inside the sandbox: 'proceed' at the end of it is this
+		// runtime's own send, so an interceptor needs nothing the plugin did not
+		// already have. What is asserted is the whole contract — the interceptor
+		// sees the request, what it proceeds with is what goes out, and what it
+		// returns is what the caller gets.
+		const client = runtime.client
+			.newBuilder()
+			.addInterceptor(function (chain: Chain) {
+				const asked = chain.request();
+				return chain.proceed(
+					runtime.globals.GET(asked.url + '?signed=1', { Referer: 'https://s.invalid/' })
+				);
+			})
+			.build();
+
+		const response = await client
+			.newCall(runtime.globals.GET('https://example.invalid/a'))
+			.execute();
+
+		expect(sent.at(-1)?.url).toBe('https://example.invalid/a?signed=1');
+		expect(response.code).toBe(200);
+	});
+
+	it('runs interceptors outermost first, in the order they were added', async () => {
+		const { ctx } = context();
+		runtime.enter(ctx);
+		const order: string[] = [];
+		const client = runtime.client
+			.newBuilder()
+			.addInterceptor(function (chain: Chain) {
+				order.push('first');
+				return chain.proceed(chain.request());
+			})
+			.addInterceptor(function (chain: Chain) {
+				order.push('second');
+				return chain.proceed(chain.request());
+			})
+			.build();
+
+		await client.newCall(runtime.globals.GET('https://example.invalid/a')).execute();
+
+		expect(order).toEqual(['first', 'second']);
+	});
+
+	it('lets an interceptor replace the body it was handed', async () => {
+		const { ctx } = context();
+		runtime.enter(ctx);
+		const client = runtime.client
+			.newBuilder()
+			.addInterceptor(async function (chain: Chain) {
+				const answered = await chain.proceed(chain.request());
+				return answered.newBuilder().body('rewritten').build();
+			})
+			.build();
+
+		const response = await client
+			.newCall(runtime.globals.GET('https://example.invalid/a'))
+			.execute();
+
+		expect(response.body.string()).toBe('rewritten');
+	});
+
+	it('refuses a NETWORK interceptor, which has no per-hop connection to wrap', () => {
+		// The host follows redirects itself and reports only where they ended,
+		// so there is nothing here for one to sit between. Running it once over
+		// the final hop would leave an extension believing it had rewritten
+		// every hop when it had rewritten one.
 		expect(() => runtime.client.newBuilder().addNetworkInterceptor(() => {})).toThrow(
-			/interceptor/
+			/network interceptor/
 		);
 		// A timeout is a no-op, not a refusal: extensions set them idly.
 		expect(runtime.client.newBuilder().readTimeout(30).build()).toBe(runtime.client);
 		expect(runtime.network.client).toBe(runtime.client);
+	});
+
+	it('does not hand the shared client to an extension that built its own', () => {
+		// The one that would be silent: a client built to carry an interceptor
+		// must not come back as the one every other request uses.
+		const own = runtime.client
+			.newBuilder()
+			.addInterceptor(function (chain: Chain) {
+				return chain.proceed(chain.request());
+			})
+			.build();
+
+		expect(own).not.toBe(runtime.client);
+		expect(runtime.client.interceptors).toEqual([]);
 	});
 
 	it('refuses to reach the network outside an ABI call', async () => {
@@ -3615,8 +3706,10 @@ describe('followRedirects(false), which is an answer and not a detour', () => {
 		expect('follow' in requests[2]).toBe(false);
 	});
 
-	it('still refuses an interceptor, which has no chain to install into', () => {
-		expect(() => runtime.client.newBuilder().addInterceptor(() => {})).toThrow(/interceptor/);
+	it('still refuses a network interceptor, which has no per-hop connection', () => {
+		expect(() => runtime.client.newBuilder().addNetworkInterceptor(() => {})).toThrow(
+			/network interceptor/
+		);
 	});
 });
 
@@ -3857,5 +3950,29 @@ describe('the types a manga extension writes by name', () => {
 		// `hasNextPage` is a strict boolean: a source returning a truthy string
 		// would otherwise paginate forever.
 		expect((new MangasPage([], 'yes') as { hasNextPage: unknown }).hasNextPage).toBe(false);
+	});
+});
+
+/* ── the two companions a capitalised receiver reaches ────────────────────── */
+
+describe('names that are a companion rather than a constructor', () => {
+	it('escapes a literal into a pattern that matches exactly it', () => {
+		// `Regex(pattern)` is a call and goes to `__k.regex`. `Regex.escape(x)`
+		// is a *member*, and reached the sandbox as a bare name nothing defined
+		// — a bundle that converted, packaged and then died at load with `Regex
+		// is not defined`. Measured: it is the whole of `Madara.wordRegex`.
+		const escaped = runtime.globals.Regex.escape('a.b+c(d)');
+
+		expect(new RegExp(escaped).test('a.b+c(d)')).toBe(true);
+		expect(new RegExp(escaped).test('axbxcxd')).toBe(false);
+	});
+
+	it('answers a time zone, which the date parser already behaves as', () => {
+		// 115 sources write `dateFormat.timeZone = TimeZone.getTimeZone("UTC")`
+		// and nothing else with it. The parser reads every field as UTC, so the
+		// zone is a label it never consults — which is what makes answering one
+		// honest rather than a stub.
+		expect(runtime.globals.TimeZone.getTimeZone('UTC').getID()).toBe('UTC');
+		expect(runtime.globals.TimeZone.getDefault().getID()).toBe('UTC');
 	});
 });

@@ -147,6 +147,16 @@ export const RUNTIME_HELPERS = [
 	'take',
 	'drop',
 	'joinToString',
+	/* The same, with a buffer to append into — see the helper. Every
+	   `Keyoapp` extension calls it, which is 18 of one catalogue. */
+	'joinTo',
+	/* `map` with a destination, same shape as `joinTo`. */
+	'mapTo',
+	/* keiyoushi's readers for a heterogeneous list. `filters.firstInstance<
+	   GenreFilter>()` is how every filter panel in the image ecosystem reads
+	   the filter it cares about out of the list the host hands back. */
+	'firstInstance',
+	'firstInstanceOrNull',
 	'toList',
 	'toSet',
 	'toMutableMap',
@@ -293,6 +303,27 @@ export const RUNTIME_HELPERS = [
 	   already performs. */
 	'filterIsInstance',
 
+	/* The body of the `Symbol.hasInstance` an emitted `interface` carries: does
+	   this object have the members the interface declares? See
+	   `interfaceDeclaration` for why a Kotlin interface becomes a membership
+	   test rather than a base class. */
+	'hasMembers',
+
+	/* kotlinx's encoder, the direction `decode` already goes: a JsonElement is
+	   a plain JavaScript value here, so this is a copy with the `@SerialName`
+	   renames put back. See the helper for what it matches on. */
+	'toJsonElement',
+
+	/* Kotlin's **non-local return**, which JavaScript has no statement for:
+	   `map { x?.let { y ?: return@map null } }` leaves the `map` block from
+	   inside the `let` block. `jump` throws a private marker carrying the
+	   value, and the callback the label named catches it — `isJump` tells it
+	   from a real error and `jumpValue` unwraps it. Emitted only where a jump
+	   actually crosses a callback, so nothing else pays for it. */
+	'jump',
+	'isJump',
+	'jumpValue',
+
 	/* `buildString { append(…) }`: the block is called with a string
 	   accumulator as its receiver, and the accumulated text comes back. */
 	'buildString',
@@ -381,6 +412,21 @@ export const RUNTIME_HELPERS = [
 	'stringBuilder',
 	'dateOf',
 	'tryParse',
+	/* `tryParse`'s replacement. keiyoushi deprecated the name above in favour
+	   of `tryParseDate`/`tryParseDateTime`/`tryParseZonedDateTime`, and the
+	   catalogue moved: the whole `MangaThemesia` template (112 instances) and
+	   every `Keyoapp` one (18) call the new spelling, so being one rename
+	   behind refused both templates entirely. */
+	/* Only the one helper: `tryParseDateTime` and `tryParseZonedDateTime` are
+	   Kotlin spellings the member table folds onto this, not helpers the
+	   emitter ever calls. `RUNTIME_HELPERS` is what the emitter may emit, and
+	   listing a name here that nothing emits fails the runtime's own
+	   cross-check — which is how this comment came to exist. */
+	'tryParseDate',
+	/* keiyoushi's `Element?.textOrNull()` — `text()` with blank read as
+	   absent. The same template reads its description through it. */
+	'textOrNull',
+	'attrOrNull',
 
 	/* Request bodies. `__bodyOf` already understands the shape; these two build
 	   it from the extension's own side. */
@@ -554,7 +600,21 @@ export const RUNTIME_GLOBALS = [
 	/* Dates. `episodeFromElement` parses an upload date on nearly every list
 	   page, and `SimpleDateFormat("dd MMM yyyy", Locale.ENGLISH).parse(text)`
 	   is how all of them do it. */
+	/* The two model types the image ecosystem added after the fork.
+	   `UpdateStrategy` is a library-refresh hint carried on a title;
+	   `SMangaUpdate` is details and chapters from one request. */
+	/* RxJava's one type, as this ecosystem uses it. */
+	'Observable',
+	'UpdateStrategy',
+	'SMangaUpdate',
 	'SimpleDateFormat',
+	/* The `java.time` formatter the same helpers are called on —
+	   `DateTimeFormatter.ofPattern("yyyy-MM-dd").tryParseDate(date)`. Shimmed
+	   onto the pattern reader `SimpleDateFormat` already has rather than a
+	   second one: the two pattern languages agree on everything a scraper
+	   writes, and disagreeing about a letter nobody uses is cheaper than
+	   maintaining two parsers. */
+	'DateTimeFormatter',
 	'Locale',
 
 	/* `Calendar.getInstance().get(Calendar.YEAR)` builds a year filter on nine
@@ -578,6 +638,23 @@ export const RUNTIME_GLOBALS = [
 	/* kotlin.random.Random, which is `Math.random` and promises nothing. Its
 	   neighbour `SecureRandom` is the one that does, and is separate below. */
 	'Random',
+	/* java.util.Arrays, reached statically the way Java spells it. Named for the
+	   reason `Uri` and `System` are: a capitalised receiver is passed through,
+	   so an absent name is a death in the sandbox rather than a refusal here. */
+	'Arrays',
+	/* okhttp's `Interceptor`, named as a supertype or as a type argument. The
+	   runtime calls `intercept` by name — see `__proceed` — so the value here
+	   carries no behaviour and exists so that naming the type resolves. */
+	'Interceptor',
+	/* okhttp's `CacheControl`, named as the third argument of `GET`. Carried
+	   rather than refused; see the value for why. */
+	'CacheControl',
+	/* `TimeZone.getTimeZone("UTC")`, which 115 sources set on a date format,
+	   and `Regex.escape(literal)`, which is the companion rather than the
+	   constructor. Both are capitalised receivers the emitter passes through, so
+	   an absent name is a death at load rather than a refusal. */
+	'TimeZone',
+	'Regex',
 	/* java.net.URLEncoder/URLDecoder — form encoding, not encodeURIComponent. */
 	'URLEncoder',
 	'URLDecoder',

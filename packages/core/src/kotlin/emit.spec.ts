@@ -214,7 +214,26 @@ const helpers: Record<string, (...args: never[]) => unknown> = {
 	lowercase: (text: string) => text.toLowerCase(),
 	uppercase: (text: string) => text.toUpperCase(),
 	padStart: (text: string, length: number, pad: string) => text.padStart(length, pad),
-	startsWith: (text: string, prefix: string) => text.startsWith(prefix),
+	startsWith: (text: string, prefix: string, ignoreCase?: boolean) =>
+		ignoreCase === true
+			? text.toLowerCase().startsWith(prefix.toLowerCase())
+			: text.startsWith(prefix),
+	// The body of the `Symbol.hasInstance` an emitted `interface` carries.
+	hasMembers: (value: Any, names: string[]) =>
+		value !== null &&
+		(typeof value === 'object' || typeof value === 'function') &&
+		names.every((name) => (value as Record<string, Any>)[name] !== undefined),
+	filterIsInstance: (list: Any[], type: Any) =>
+		list.filter((item) => (typeof type === 'function' ? item instanceof (type as never) : true)),
+	distinctBy: (list: Any[], key: (item: Any) => Any) => {
+		const seen = new Set<Any>();
+		return list.filter((item) => {
+			const at = key(item);
+			if (seen.has(at)) return false;
+			seen.add(at);
+			return true;
+		});
+	},
 	endsWith: (text: string, suffix: string) => text.endsWith(suffix),
 	isBlank: (text: string) => text.trim().length === 0,
 	isNotBlank: (text: string) => text.trim().length > 0,
@@ -284,6 +303,12 @@ const helpers: Record<string, (...args: never[]) => unknown> = {
 		try {
 			return settle(true, fn(), null);
 		} catch (error) {
+			// A non-local return is not a failure; the runtime re-throws it here
+			// and so must this, or a `return` written inside a `runCatching`
+			// would answer the fallback instead.
+			if (error !== null && typeof error === 'object' && '__jump' in (error as object)) {
+				throw error;
+			}
 			return settle(false, null, error);
 		}
 	},
@@ -357,6 +382,22 @@ const helpers: Record<string, (...args: never[]) => unknown> = {
 		getString: (_key: string, fallback: Any) => fallback,
 		edit: () => ({ putString: () => undefined, apply: () => undefined })
 	}),
+
+	// Kotlin's non-local return, as the runtime implements it: a marker thrown
+	// through whatever callbacks lie between, and caught by the frame the jump
+	// named. The three have to agree with `kotlin-runtime.ts`; what they are
+	// asserted on here is the behaviour, not the shape.
+	jump: (id: Any, value: Any) => {
+		throw { __jump: id, value };
+	},
+	isJump: (error: Any, id: Any) => {
+		if (error === null || typeof error !== 'object') return false;
+		const marker = (error as { __jump?: Any }).__jump;
+		// `undefined` for the id means "is this a jump at all" — and the marker
+		// has to be *present*, or an ordinary Error would answer yes to it.
+		return marker !== undefined && (id === undefined || marker === id);
+	},
+	jumpValue: (error: Any) => (error as { value: Any }).value,
 
 	await: (value: Any) => Promise.resolve(value),
 	awaitAll: (values: Any[]) => Promise.all(values),
@@ -890,10 +931,12 @@ describe('control flow', () => {
 		expect(demo.width('')).toBe(0);
 	});
 
-	it('still refuses a labelled return that crosses a callback', () => {
+	it('leaves the labelled frame when the jump crosses a callback', () => {
 		// The label names the `withContext`, but the jump is written inside a
-		// `map` callback — there is no `return` in JavaScript that leaves both.
-		// Labelling the frame must not turn this one into a guess.
+		// `map` callback. There is no `return` in JavaScript that leaves both —
+		// this was refused for that reason until the emitter grew a jump that
+		// crosses one: a throw carrying the value, caught by the frame the label
+		// named. `jump(` is the marker; the `catch` is on the `withContext`.
 		const source = kt(
 			'class Demo : Source() {',
 			'    fun go(rows: List<String>): String = runBlocking {',
@@ -908,9 +951,9 @@ describe('control flow', () => {
 		);
 
 		const emitted = translate(source);
-		expect(emitted.refusals.flatMap((one) => one.obstacles.map((o) => o.kind))).toContain(
-			'a `return@withContext` crossing a lambda'
-		);
+		expect(emitted.refusals).toEqual([]);
+		expect(emitted.js).toContain('__k.jump(');
+		expect(emitted.js).toContain('__k.isJump(');
 	});
 
 	it('drops the type annotation a `for` binding may carry', () => {
@@ -2875,15 +2918,14 @@ describe('a name declared somewhere the emitter had not looked', () => {
 		expect(demo.keep(['a', '   ', 'b'])).toEqual(['a', 'b']);
 	});
 
-	it('still refuses the guard when it sits one callback deeper', () => {
+	it('does not hoist the guard into the wrong callback when it sits one deeper', () => {
 		// `runCatching { … ifEmpty { return@mapNotNull null } … }` inside a
-		// `mapNotNull`. Kotlin inlines `runCatching` too, so this is legal there —
-		// but here the guard would hoist into the `runCatching` callback and the
-		// jump would return from *that*, handing `mapNotNull` a value instead of
-		// dropping the row. A wrong list, silently.
-		//
-		// So the guard only applies where it lands in the lambda the jump names,
-		// and this stays refused.
+		// `mapNotNull`. Kotlin inlines `runCatching` too, so this is legal there.
+		// Hoisting is still wrong here — the guard would land in the
+		// `runCatching` callback and its `return` would leave *that*, handing
+		// `mapNotNull` a value instead of dropping the row, silently — so the
+		// guard is not hoisted. It leaves by the throw instead, which crosses
+		// the callback and is caught by the frame the label names.
 		const source = kt(
 			'class Demo : Source() {',
 			'    fun go(rows: List<String>): List<String> = rows.mapNotNull { row ->',
@@ -2897,9 +2939,11 @@ describe('a name declared somewhere the emitter had not looked', () => {
 		);
 
 		const emitted = translate(source);
-		expect(emitted.refusals.flatMap((one) => one.obstacles.map((o) => o.kind))).toContain(
-			'a `return@mapNotNull` crossing a lambda'
-		);
+		expect(emitted.refusals).toEqual([]);
+		expect(emitted.js).toContain('__k.jump(');
+		// And the hoist did not happen: the guard's subject is still read where
+		// it was written, inside the `runCatching` block.
+		expect(emitted.js).not.toMatch(/const __t\d+ = [^;]*pick\(row\);\n[^;]*mapNotNull/);
 	});
 
 	it('gives `ifEmpty { return emptyList() }` its value back', () => {
@@ -2965,7 +3009,9 @@ describe('a name declared somewhere the emitter had not looked', () => {
 	it('does not hoist a `let` guard past something that has already run', () => {
 		// Hoisting moves the guard's subject ahead of everything written before
 		// it. `first()` is written first and must stay first, so this guard
-		// cannot move and is refused rather than reordered.
+		// cannot move — and it is not moved. It leaves by the throw the member
+		// catches instead, which keeps the written order and still returns from
+		// the member, which is what the Kotlin says.
 		const source = kt(
 			'class Demo : Source() {',
 			'    fun go(row: String): String = join(first(), row.let { it ?: return "" })',
@@ -2974,9 +3020,12 @@ describe('a name declared somewhere the emitter had not looked', () => {
 			'}'
 		);
 
-		expect(translate(source).refusals.flatMap((one) => one.obstacles.map((o) => o.kind))).toContain(
-			'a `?: return` used as a value'
-		);
+		const emitted = translate(source);
+		expect(emitted.refusals).toEqual([]);
+		// The subject is evaluated in place, inside the argument, not lifted into
+		// a `const` above the call.
+		expect(emitted.js).toContain('__k.jump(');
+		expect(emitted.js).toMatch(/join\(this\.first\(\)/);
 	});
 
 	it('still calls `let` as a function when its block is not a guard', () => {
@@ -3491,16 +3540,32 @@ describe('declarative rate limits, translated onto the request policy', () => {
 describe('refusing by name', () => {
 	it.each([
 		[
-			'an anonymous object',
-			inClass('    val callback = object : Callback {', '        override fun on() = 1', '    }'),
-			'an anonymous `object :` implementation'
+			// Not the anonymous object itself — that translates now — but the one
+			// shape of it this build will not express: an `object :` over a base
+			// it *constructs* is the base plus an override, and a literal
+			// carrying only the override is missing everything the base supplied.
+			'an anonymous object over a constructed base',
+			inClass(
+				'    val sorter = object : Filter.Sort("Sort", arrayOf("A"), null) {',
+				'        override fun on() = 1',
+				'    }'
+			),
+			'an anonymous `object : Filter.Sort(…)` over a constructed base'
 		],
 		['a dependency container', inClass('    val app = Injekt.get<Application>()'), 'Injekt.get'],
 		['a WebView', inClass('    fun solve() = WebView(context).loadUrl(baseUrl)'), 'WebView'],
 		[
-			'an okhttp interceptor',
-			inClass('    fun tap() = client.newBuilder().addInterceptor(Interceptor { it })'),
-			'an okhttp Interceptor'
+			// The interceptor hook that has nothing here to hook into. An
+			// *application* interceptor wraps one call and runs; a network one
+			// sits between the client and each redirect hop, and the host follows
+			// redirects itself.
+			'an okhttp network interceptor',
+			inClass(
+				'    val tapped = client.newBuilder()',
+				'        .addNetworkInterceptor { chain -> chain.proceed(chain.request()) }',
+				'        .build()'
+			),
+			'an okhttp network interceptor'
 		],
 		[
 			'a key derivation',
@@ -3513,29 +3578,6 @@ describe('refusing by name', () => {
 			'an embedded JavaScript engine'
 		],
 		['a coroutine launch', inClass('    fun go() = launch { load() }'), 'launch {}'],
-		[
-			// The construct this whole request-policy path is built around, and
-			// the one it does not touch. `adr/0006-local-http-server.md` §5:
-			// recognising what an arbitrary lambda *means* is the intent
-			// recognition this converter refuses, and the measurement is that
-			// accepting the body unblocks nothing — an extension whose
-			// interceptor does anything worth recognising also reaches for
-			// `.proceed()` and a cookie jar.
-			'a hand-written interceptor lambda',
-			inClass(
-				'    val tapped = client.newBuilder()',
-				'        .addInterceptor { chain -> chain.proceed(chain.request()) }',
-				'        .build()'
-			),
-			'`.addInterceptor()`'
-		],
-		[
-			'an interceptor object nobody has heard of',
-			inClass(
-				'    val tapped = client.newBuilder().addInterceptor(SigningInterceptor(key)).build()'
-			),
-			'`.addInterceptor()`'
-		],
 		[
 			'a rate limit whose period is not a literal',
 			inClass('    val paced = client.newBuilder().rateLimit(1, everySeconds).build()'),
@@ -3550,17 +3592,37 @@ describe('refusing by name', () => {
 		expect(refusalNames(source)).toContain(expected);
 	});
 
-	it('says the construct by name when an interceptor lambda is refused', () => {
-		const message = translate(
+	it('translates a hand-written interceptor lambda, binding `it` to the chain', () => {
+		// This was refused by name until the runtime grew a chain to run it in.
+		// The regression it guards is narrower than that: `addInterceptor`'s
+		// block takes the chain as a *parameter*, so `it` is bound to it — and
+		// emitted as a receiver block instead, the same source refuses for "an
+		// `it` with no lambda around it", naming a construct nobody wrote.
+		const emission = translate(
 			inClass(
 				'    val tapped = client.newBuilder().addInterceptor { it.proceed(it.request()) }.build()'
 			)
-		).refusals[0].obstacles[0].kind;
+		);
 
-		// Worth asserting separately from the table: the sentence a reader gets
-		// has to name `addInterceptor`, because "unsupported expression" tells
-		// whoever picks this up next exactly nothing about what to do.
-		expect(message).toContain('addInterceptor');
+		expect(emission.refusals).toEqual([]);
+		expect(emission.js).toContain('addInterceptor');
+		expect(emission.js).toContain('proceed');
+	});
+
+	it('translates an interceptor object the extension declares itself', () => {
+		const emission = translate(
+			inClass(
+				'    val tapped = client.newBuilder().addInterceptor(SigningInterceptor(key)).build()'
+			)
+		);
+
+		// `SigningInterceptor` is still refused — it is a type this file never
+		// declared — but for being an unknown constructor, which is a sentence
+		// about the extension, rather than for the word `Interceptor`.
+		expect(
+			refusalNames(inClass('    val t = client.newBuilder().addInterceptor(S(k)).build()'))
+		).not.toContain('an okhttp Interceptor');
+		expect(emission.refusals.length).toBeGreaterThan(0);
 	});
 
 	it('honours a written `super.` call, which is not the same as falling back', () => {
@@ -3721,62 +3783,74 @@ describe('refusing by name', () => {
 		);
 	});
 
-	it('refuses a non-local return from a lambda it cannot inline', () => {
-		// Kotlin returns from the enclosing function; JavaScript returns from the
-		// lambda. `mapNotNull` is not a block this emitter inlines — it is a real
-		// callback the runtime calls — so emitting it would change the method's
-		// value with no error anywhere.
-		expect(
-			refusalNames(
-				inClass(
-					'    fun find(words: List<String>): List<String> {',
-					'        return words.mapNotNull {',
-					'            if (it.isEmpty()) return emptyList()',
-					'            it',
-					'        }',
-					'    }'
-				)
+	it('returns from the MEMBER on a non-local return, not from the lambda', () => {
+		// Kotlin's bare `return` inside an inline lambda returns from the
+		// enclosing function; JavaScript's returns from the lambda, and the
+		// method then produces a different value with nothing reporting it.
+		// `mapNotNull` is a real callback the runtime calls, so the jump has to
+		// cross it — which it does by throwing a marker the member catches.
+		//
+		// Asserted by running it: `find` must answer the empty list, not a list
+		// with the non-empty words in it.
+		const demo = instantiate(
+			inClass(
+				'    fun find(words: List<String>): List<String> {',
+				'        return words.mapNotNull {',
+				'            if (it.isEmpty()) return emptyList()',
+				'            it',
+				'        }',
+				'    }'
 			)
-		).toContain('a non-local `return` from a lambda');
+		);
+
+		expect(demo.find(['a', 'b'])).toEqual(['a', 'b']);
+		expect(demo.find(['a', '', 'b'])).toEqual([]);
 	});
 
-	it('refuses a non-local return nested one lambda deeper than the block it inlines', () => {
-		// The `let` could be inlined; the `map` inside it could not, and a bare
-		// `return` there is still a return from `find`. Inlining the outer block
-		// does not make the inner one safe, so the member is still refused.
-		expect(
-			refusalNames(
-				inClass(
-					'    fun find(words: List<String>): List<String> {',
-					'        words.let { all ->',
-					'            return all.map {',
-					'                if (it.isEmpty()) return emptyList()',
-					'                it',
-					'            }',
-					'        }',
-					'    }'
-				)
+	it('returns from the member when the jump is one lambda deeper still', () => {
+		// The `let` inlines; the `map` inside it does not, and a bare `return`
+		// there is still a return from `find`. Two callbacks deep is the same
+		// throw, caught in the same place.
+		const demo = instantiate(
+			inClass(
+				'    fun find(words: List<String>): List<String> {',
+				'        words.let { all ->',
+				'            return all.map {',
+				'                if (it.isEmpty()) return emptyList()',
+				'                it',
+				'            }',
+				'        }',
+				'    }'
 			)
-		).toContain('a non-local `return` from a lambda');
+		);
+
+		expect(demo.find(['a', 'b'])).toEqual(['a', 'b']);
+		expect(demo.find(['a', '', 'b'])).toEqual([]);
 	});
 
-	it('refuses a non-local return from a bare `runCatching`, whose value is a Result', () => {
+	it('returns from the member out of a bare `runCatching`, whose value is a Result', () => {
 		// `runCatching { … }.getOrElse { … }` is a try/catch and inlines. A bare
-		// `runCatching` has to *produce* a `Result`, and there is nowhere in that
-		// object for a return from the enclosing method to go.
-		expect(
-			refusalNames(
-				inClass(
-					'    fun parse(text: String): Int {',
-					'        val result = runCatching {',
-					'            if (text.isEmpty()) return -1',
-					'            text.toInt()',
-					'        }',
-					'        return result.getOrDefault(0)',
-					'    }'
-				)
+		// `runCatching` has to *produce* a `Result`, so the return has nowhere in
+		// that object to go and leaves by the throw instead.
+		//
+		// The marker must not be caught by `runCatching` itself: a `Result` that
+		// swallowed it would answer 0 where Kotlin answers -1. That is what the
+		// second assertion is.
+		const demo = instantiate(
+			inClass(
+				'    fun parse(text: String): Int {',
+				'        val result = runCatching {',
+				'            if (text.isEmpty()) return -1',
+				'            text.toInt()',
+				'        }',
+				'        return result.getOrDefault(0)',
+				'    }'
 			)
-		).toContain('a non-local `return` from a lambda');
+		);
+
+		expect(demo.parse('12')).toBe(12);
+		expect(demo.parse('')).toBe(-1);
+		expect(demo.parse('not a number')).toBe(0);
 	});
 
 	it('refuses a `vararg` that is not the last parameter', () => {
@@ -3856,7 +3930,7 @@ describe('refusing by name', () => {
 			inClass(
 				'    override fun videoListParse(response: Response): List<Video> {',
 				'        val a = Injekt.get<Loader>()',
-				'        val b = object : Callback {}',
+				'        val b = WebView(context)',
 				'        return emptyList()',
 				'    }'
 			)
@@ -3865,7 +3939,7 @@ describe('refusing by name', () => {
 		expect(emission.refusals).toHaveLength(1);
 		expect(emission.refusals[0].obstacles.map((one) => one.kind)).toEqual([
 			'Injekt.get',
-			'an anonymous `object :` implementation'
+			'WebView'
 		]);
 	});
 
@@ -3995,5 +4069,192 @@ describe('assigning to a property of something', () => {
 				)
 			)
 		).toEqual(['an indexed `+=`']);
+	});
+});
+
+/* ── the constructs the manga half of this ecosystem is written in ────────── */
+
+describe('a `when` whose branch swallowed the entry after it', () => {
+	// A defect in the vendored grammar, not in the Kotlin. `-> if (…) { … }`
+	// followed by another entry parses the `else` as the `if`'s, which leaves
+	// the entry's arrow as an ERROR node — and an ERROR anywhere under a member
+	// refuses that member outright. Measured, it refused `Madara.addFilters`
+	// and with it the largest template in this catalogue.
+
+	it('runs the branch the source wrote, not the one the tree says', () => {
+		const demo = instantiate(
+			inClass(
+				'    fun name(value: Any): String {',
+				'        when (value) {',
+				'            is String -> if (value.isNotBlank()) {',
+				'                return "text"',
+				'            }',
+				'            else -> return "other"',
+				'        }',
+				'        return "fell through"',
+				'    }',
+				'}'.slice(0, 0) + '    fun unused(): Int = 0'
+			)
+		);
+
+		expect(demo.name('hello')).toBe('text');
+		// The `else` belongs to the `when`. Attached to the `if`, a blank string
+		// would have taken it — and an Int, which matches no branch, would have
+		// fallen out of the `when` entirely.
+		expect(demo.name('')).toBe('fell through');
+		expect(demo.name(1)).toBe('other');
+	});
+
+	it('still refuses a parse error that is not this one', () => {
+		// The forgiveness is for one recognised marker. Anything else under a
+		// member is still fatal to it, which is the rule this relaxed.
+		expect(refusalNames(inClass('    fun broken() = when { -> }'))).toContain(
+			'a passage this build could not parse'
+		);
+	});
+});
+
+describe('an anonymous `object :`, which is an object literal here', () => {
+	it('carries its members, and reaches the source from inside them', () => {
+		const emission = translate(
+			inClass(
+				'    val prefix = "p:"',
+				'    fun tag(): Any {',
+				'        return object : Callback {',
+				'            override fun onName(value: String): String = label(value)',
+				'        }',
+				'    }',
+				'    fun label(value: String): String = prefix + value'
+			)
+		);
+
+		expect(emission.refusals).toEqual([]);
+
+		const make = new Function('__k', `${emission.js}\nreturn new Demo();`) as (k: Any) => {
+			tag: () => { onName: (value: string) => string };
+		};
+		const demo = make(runtime);
+
+		// The body reads `label`, a member of the *source* — so the block is an
+		// arrow and `this` is still the extension. A `function` here would have
+		// bound `this` to the literal and answered `label is not a function`.
+		expect(demo.tag().onName('x')).toBe('p:x');
+	});
+
+	it('refuses the one shape a literal cannot be: a constructed base', () => {
+		// `object : Filter.Select("Sort", arrayOf("A")) { … }` is the base plus
+		// an override, and a literal carrying only the override is missing
+		// everything the base was going to supply.
+		expect(
+			refusalNames(
+				inClass(
+					'    val sorter = object : Filter.Select("Sort", arrayOf("A")) {',
+					'        override fun on() = 1',
+					'    }'
+				)
+			).join(' ')
+		).toContain('over a constructed base');
+	});
+});
+
+describe('an `interface`, which is a membership test here', () => {
+	it('answers `is` and `filterIsInstance` for anything carrying its members', () => {
+		// Every interface in this ecosystem is a capability marker with no
+		// bodies, and the only question asked of one is
+		// `filters.filterIsInstance<UriFilter>()`. JavaScript cannot express the
+		// Kotlin — the implementers already extend `Filter.Select` and a class
+		// extends one thing — so `instanceof` is answered by the members.
+		const answers = evaluate(
+			kt(
+				'interface UriFilter {',
+				'    fun addToUri(builder: String)',
+				'}',
+				'class Demo : Source() {',
+				'    fun go() = 1',
+				'}'
+			),
+			'[{ addToUri: () => 1 } instanceof UriFilter, { other: 2 } instanceof UriFilter]'
+		);
+
+		// `__isType` routes a declared type through `instanceof`, so this is the
+		// same answer `filterIsInstance<UriFilter>()` and `is UriFilter` give.
+		expect(answers).toEqual([true, false]);
+	});
+
+	it('refuses an interface member with a body, rather than dropping it', () => {
+		// Kotlin allows a default implementation and nothing here would inherit
+		// it: the implementer would answer `undefined` from a method the source
+		// wrote out.
+		expect(
+			refusalNames(
+				kt(
+					'interface UriFilter {',
+					'    fun addToUri(builder: String): String = builder + "!"',
+					'}',
+					'class Demo : Source() {',
+					'    fun go() = 1',
+					'}'
+				)
+			).join(' ')
+		).toContain('with a body');
+	});
+});
+
+describe('the member table a nested class used to overwrite', () => {
+	it('keeps the enclosing class visible to the members below it', () => {
+		// `protected class SMangaDto(…)` inside a template replaced the member
+		// table and never put it back, so from the nested declaration to the end
+		// of the file `this.somethingThisClassDeclares()` was read as a member of
+		// a four-field DTO — and refused as a passthrough onto a shim, naming a
+		// method the source had declared forty lines further down.
+		const demo = instantiate(
+			inClass(
+				'    class Row(val title: String)',
+				'    fun go(): String = this.later()',
+				'    fun later(): String = "found"'
+			)
+		);
+
+		expect(demo.go()).toBe('found');
+	});
+});
+
+describe('a signature two declarations disagree about', () => {
+	it('reads the call by the names it writes, rather than refusing it', () => {
+		// `WordSet.startsWith(dateString)` in two shared templates collides with
+		// Kotlin's `String.startsWith(prefix, ignoreCase)`, which deleted the
+		// known signature and refused every `date.startsWith(it, ignoreCase =
+		// true)` in the catalogue — 21 listings of 300, none of which had
+		// written anything ambiguous. An argument passed by name is a parameter
+		// of the callee, so a candidate without it is not the callee.
+		const demo = instantiate(
+			inClass(
+				'    fun startsWith(dateString: String): Boolean = dateString.length > 2',
+				'    fun check(text: String): Boolean = text.startsWith("AB", ignoreCase = true)'
+			)
+		);
+
+		expect(demo.check('abcd')).toBe(true);
+		expect(demo.check('zzz')).toBe(false);
+	});
+});
+
+describe('an unbound reference to a property', () => {
+	it('reads the property, where the same form over a method calls it', () => {
+		// `distinctBy(GenreRoute::slug)` is a function of one argument that
+		// reads it. Emitted as the method form it would be a function where a
+		// value belongs, and a de-duplication keyed on a function keeps one row
+		// out of every hundred.
+		const found = evaluate(
+			kt(
+				'class Row(val slug: String)',
+				'class Demo : Source() {',
+				'    fun pick(rows: List<Row>): List<Row> = rows.distinctBy(Row::slug)',
+				'}'
+			),
+			'new Demo().pick([{ slug: "a" }, { slug: "a" }, { slug: "b" }])'
+		);
+
+		expect(found).toHaveLength(2);
 	});
 });

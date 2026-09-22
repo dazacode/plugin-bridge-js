@@ -121,6 +121,75 @@ function __then(value, fn) {
   return __thenable(value) ? value.then(fn) : fn(value);
 }
 
+/**
+ * RxJava's Observable, as the one thing this ecosystem actually uses it for.
+ *
+ * The idiom is uniform across the catalogue — 238 occurrences of exactly this
+ * shape:
+ *
+ *   client.newCall(request).asObservableSuccess().map { response -> parse(it) }
+ *
+ * One value, one transform, awaited by the caller. That is a promise with a
+ * 'map', so that is what this is: the value may already be a promise, 'map'
+ * chains onto it, and the whole thing is **thenable**, so 'await' and the
+ * runtime's own '__then' both handle it without knowing what it is.
+ *
+ * Deliberately not a scheduler. 'subscribeOn'/'observeOn' answer the same
+ * object because there is one thread here and pretending otherwise would be a
+ * lie with moving parts. The multi-value operators are absent rather than
+ * approximated — nothing in this catalogue emits twice, and a 'concat' that
+ * quietly dropped a second emission is the silent wrongness this runtime
+ * exists to refuse.
+ */
+function __observable(value) {
+  return {
+    __isObservable: true,
+    then: function (onResolved, onRejected) {
+      return Promise.resolve(value).then(onResolved, onRejected);
+    },
+    map: function (fn) { return __observable(__then(value, fn)); },
+    flatMap: function (fn) {
+      return __observable(__then(value, function (item) { return __unwrapObservable(fn(item)); }));
+    },
+    doOnNext: function (fn) {
+      return __observable(__then(value, function (item) { fn(item); return item; }));
+    },
+    onErrorReturn: function (fn) {
+      return __observable(Promise.resolve(value).catch(function (error) { return fn(error); }));
+    },
+    subscribeOn: function () { return this; },
+    observeOn: function () { return this; },
+    toBlocking: function () { return this; },
+    single: function () { return value; },
+    first: function () { return value; }
+  };
+}
+
+function __isObservable(value) {
+  return value !== null && typeof value === 'object' && value.__isObservable === true;
+}
+
+/** An Observable as its value, and anything else unchanged — what 'flatMap'
+ * needs when the lambda answers another Observable. */
+function __unwrapObservable(value) {
+  return __isObservable(value) ? value.single() : value;
+}
+
+var Observable = {
+  just: function (value) { return __observable(value); },
+  /* Deferred, both of them: Kotlin writes 'fromCallable { … }' precisely so
+     the work does not start until somebody subscribes, and the extensions that
+     use it are relying on that to keep a request out of a constructor. The
+     lambda runs when the value is first asked for, which here is the moment
+     the caller awaits. */
+  fromCallable: function (fn) { return __observable(__then(null, function () { return fn(); })); },
+  defer: function (fn) {
+    return __observable(__then(null, function () { return __unwrapObservable(fn()); }));
+  },
+  error: function (error) { return __observable(Promise.reject(error)); },
+  empty: function () { return __observable(null); }
+};
+
 function __arr(value) {
   if (Array.isArray(value)) return value;
   if (value === null || value === undefined) return [];
@@ -1047,6 +1116,33 @@ function SimpleDateFormat(pattern, locale) {
   this.__parts = __datePattern(this.pattern);
 }
 
+/**
+ * java.time's formatter, over the pattern reader SimpleDateFormat already has.
+ *
+ * Extensions reach it one way — 'DateTimeFormatter.ofPattern("yyyy-MM-dd")',
+ * usually straight into 'tryParseDate' — and the two pattern languages agree
+ * on every letter that appears in one of those. Where they differ is in
+ * fields a scraper does not write, so a second pattern reader would be a
+ * second thing to keep correct for no case anybody has.
+ */
+var DateTimeFormatter = {
+  ofPattern: function (pattern, locale) {
+    return new SimpleDateFormat(pattern, locale);
+  },
+  /* The constants upstream exposes for the shapes with no pattern of their
+     own. ISO dates are what a JSON API sends. */
+  ISO_LOCAL_DATE: null,
+  ISO_LOCAL_DATE_TIME: null,
+  ISO_INSTANT: null,
+  ISO_OFFSET_DATE_TIME: null,
+  ISO_ZONED_DATE_TIME: null
+};
+DateTimeFormatter.ISO_LOCAL_DATE = DateTimeFormatter.ofPattern('yyyy-MM-dd');
+DateTimeFormatter.ISO_LOCAL_DATE_TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss");
+DateTimeFormatter.ISO_INSTANT = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'");
+DateTimeFormatter.ISO_OFFSET_DATE_TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ssXXX");
+DateTimeFormatter.ISO_ZONED_DATE_TIME = DateTimeFormatter.ISO_OFFSET_DATE_TIME;
+
 function __datePattern(pattern) {
   var source = '';
   var fields = [];
@@ -1142,6 +1238,43 @@ SimpleDateFormat.prototype.format = function (value) {
 
 /** Set by extensions that care; the parser above is UTC either way. */
 SimpleDateFormat.prototype.setTimeZone = function () {};
+
+/**
+ * java.util.TimeZone, as the one thing it is used for here.
+ *
+ * 115 sources in this catalogue write
+ * 'dateFormat.timeZone = TimeZone.getTimeZone("UTC")' and nothing else with
+ * it. The parser above reads every field as UTC already, so the zone it
+ * carries is a label the formatter never consults — which is what makes
+ * answering one honest rather than a stub: the behaviour it asks for is
+ * already the behaviour.
+ *
+ * Named so the bundle *loads*. A capitalised receiver is passed through by the
+ * emitter, so an absent name is 'TimeZone is not defined' at load, inside a
+ * sandbox, rather than a refusal here with a sentence attached.
+ */
+var TimeZone = {
+  getTimeZone: function (id) { return { id: __str(id), getID: function () { return __str(id); } }; },
+  getDefault: function () { return TimeZone.getTimeZone('UTC'); }
+};
+
+/**
+ * kotlin.text.Regex's statics, which are not the constructor.
+ *
+ * 'Regex(pattern)' is a call and goes to '__k.regex', where the pattern is
+ * translated. 'Regex.escape(literal)' is a *member* of the companion, and
+ * reached the sandbox as a bare name nothing defined. It turns a literal into
+ * a pattern that matches it, which here means putting a backslash in front of
+ * every character the regex syntax would otherwise read — Java's '\Q…\E'
+ * says the same thing in a form this runtime's translator does not read.
+ */
+var Regex = {
+  escape: function (literal) {
+    return __str(literal).replace(/[\\^$.|?*+()\\[\\]{}\\\\\\/-]/g, '\\\\$&');
+  },
+  escapeReplacement: function (literal) { return __str(literal).replace(/\\$/g, '$$$$'); },
+  fromLiteral: function (literal) { return __k.regex(Regex.escape(literal)); }
+};
 
 /* --- java.util.Calendar --------------------------------------------------- */
 
@@ -2002,6 +2135,10 @@ var __k = {
    * silently, exactly where the extension was already handling an error.
    */
   map: function (list, fn) {
+    // Dispatched, like the Result branch below it: an Observable's 'map' is a
+    // transform of the one value it carries, and reading it as a list would
+    // walk the wrapper's own keys.
+    if (__isObservable(list)) return list.map(fn);
     if (__isResult(list)) {
       if (list.isFailure) return list;
       return __then(fn(list.__value), function (value) { return __success(value); });
@@ -2052,6 +2189,7 @@ var __k = {
   },
 
   flatMap: function (list, fn) {
+    if (__isObservable(list)) return list.flatMap(fn);
     return __then(__each(__arr(list), function (item) { return fn(item); }), function (values) {
       var out = [];
       for (var i = 0; i < values.length; i += 1) {
@@ -2236,6 +2374,74 @@ var __k = {
    * appends 'truncated' — a genre list joined without it is longer than the
    * extension meant it to be.
    */
+  /**
+   * 'joinTo(buffer, separator, …) { … }' — 'joinToString' with somewhere to
+   * put the result.
+   *
+   * The one idiom in this catalogue is inside a 'buildString'/'apply', where
+   * the buffer is the implicit receiver: 'altNames.joinTo(this, "\\n") { "- $it" }'.
+   * So the work is 'joinToString' plus an append, and the buffer is returned
+   * because Kotlin returns it and a chain may go on from there.
+   *
+   * A buffer that cannot be appended to answers the joined text instead,
+   * which is what a caller reading the result expects and is never wrong in a
+   * way that is silent.
+   */
+  /**
+   * 'firstInstance<T>()' / 'firstInstanceOrNull<T>()' — keiyoushi's reader for
+   * a heterogeneous list, and the idiom behind every filter panel in this
+   * catalogue: 'filters.firstInstance<GenreFilter>()' picks the one filter of
+   * a given type out of the list the host handed back.
+   *
+   * The type arrives as the emitter's reified argument, which is the
+   * constructor itself, so the test is an ordinary 'instanceof'. Without a
+   * usable one the answer is null rather than a guess: picking the first
+   * element regardless of type would hand a genre filter's state to a sort
+   * filter and narrow a search by the wrong thing, silently.
+   */
+  firstInstanceOrNull: function (list, type) {
+    var items = __arr(list);
+    if (typeof type !== 'function') return null;
+    for (var at = 0; at < items.length; at += 1) {
+      if (items[at] instanceof type) return items[at];
+    }
+    return null;
+  },
+
+  /** The same, where Kotlin throws rather than answering null. Throwing is
+   * right: the caller goes straight on to read a field off it. */
+  firstInstance: function (list, type) {
+    var found = __k.firstInstanceOrNull(list, type);
+    if (found === null) {
+      throw new Error('This converted extension expected a filter that was not in the list.');
+    }
+    return found;
+  },
+
+  /** 'mapTo(destination) { … }' — 'map' with somewhere to put the result,
+   * and the destination is returned because Kotlin returns it. */
+  mapTo: function (list, destination, transform) {
+    return __then(
+      __each(__arr(list), function (item) {
+        return typeof transform === 'function' ? transform(item) : item;
+      }),
+      function (values) {
+        for (var at = 0; at < values.length; at += 1) destination.push(values[at]);
+        return destination;
+      }
+    );
+  },
+
+  joinTo: function (list, buffer) {
+    var rest = Array.prototype.slice.call(arguments, 2);
+    var text = __k.joinToString.apply(null, [list].concat(rest));
+    if (buffer !== null && buffer !== undefined && typeof buffer.append === 'function') {
+      buffer.append(text);
+      return buffer;
+    }
+    return text;
+  },
+
   joinToString: function (list) {
     var rest = Array.prototype.slice.call(arguments, 1);
     var fn = null;
@@ -2517,10 +2723,18 @@ var __k = {
     try {
       var produced = block.call(receiver, receiver);
       if (__thenable(produced)) {
-        return produced.then(__success, __failure);
+        return produced.then(__success, function (error) {
+          if (error instanceof __Jump) throw error;
+          return __failure(error);
+        });
       }
       return __success(produced);
     } catch (error) {
+      // A non-local return is not a failure. Kotlin's 'return' inside a
+      // 'runCatching' leaves the enclosing function; it does not produce a
+      // failed Result, and swallowing the marker here would answer the
+      // fallback where the source answered its own value. See '__k.jump'.
+      if (error instanceof __Jump) throw error;
       return __failure(error);
     }
   },
@@ -2668,6 +2882,50 @@ var __k = {
    * compiler already knew what was in that list, and this runtime does not get
    * to disagree by guessing.
    */
+  /**
+   * Whether an object carries every member a name lists.
+   *
+   * The whole of what an emitted 'interface' is: this ecosystem's interfaces
+   * declare capability methods and nothing else, and the only question ever
+   * asked of one is 'filterIsInstance<UriFilter>()'. A method is checked as a
+   * function, because that is what the caller is about to invoke; anything
+   * else is checked for presence only, since a property declared on an
+   * interface may legitimately hold null.
+   */
+  /**
+   * Kotlin's non-local return, as the one expression that crosses a function.
+   *
+   * 'jump' THROWS rather than returning, which is what makes it usable in the
+   * middle of an expression: 'x ?? __k.jump(3, null)' is a value position, and
+   * JavaScript's own 'return' is not. The marker is a private class, so a
+   * source that catches Error or a specific type of its own cannot swallow it
+   * by accident — and the catch the emitter writes re-throws anything whose id
+   * is not the one it is waiting for, so two nested jumps do not collide.
+   */
+  jump: function (id, value) {
+    throw new __Jump(id, value);
+  },
+  isJump: function (error, id) {
+    if (!(error instanceof __Jump)) return false;
+    // No id asked for: "is this any jump at all", which is what an emitted
+    // 'catch' translated from the source's own 'try' asks before it decides
+    // whether the thing it caught was ever an error.
+    return id === undefined || error.id === id;
+  },
+  jumpValue: function (error) {
+    return error.value;
+  },
+
+  hasMembers: function (value, names) {
+    if (value === null || value === undefined) return false;
+    if (typeof value !== 'object' && typeof value !== 'function') return false;
+    for (var i = 0; i < names.length; i += 1) {
+      var member = value[names[i]];
+      if (member === undefined) return false;
+    }
+    return true;
+  },
+
   filterIsInstance: function (list, type) {
     var items = __arr(list);
     if (!__knownType(type)) return items.slice();
@@ -4621,6 +4879,26 @@ var __k = {
   },
 
   /**
+   * 'value.toJsonElement()' — kotlinx's encoder, in the direction the decoder
+   * already goes.
+   *
+   * A JsonElement in this runtime is a plain JavaScript value: that is what
+   * '__k.decode' answers and what every DTO field read depends on. So encoding
+   * one is a *plain copy* — nothing here is a class the JSON would not accept
+   * — with one thing put back that the decoder took out.
+   *
+   * That one thing is the '@SerialName' rename. '__applyShapes' maps a wire
+   * name onto the field name a DTO reads by; an encode has to map it the other
+   * way, or a filter list written out under the field names would come back
+   * from the site under names it does not use. The shape is matched exactly as
+   * the decoder matches it — one shape or none — so a record nothing claims is
+   * copied as it stands.
+   */
+  toJsonElement: function (value) {
+    return __encodeElement(value, 0);
+  },
+
+  /**
    * Kotlin's plusAssign, which MUTATES rather than rebinding.
    *
    * 'val episodes = mutableListOf(); episodes += more' adds to the list the
@@ -4736,6 +5014,47 @@ var __k = {
     } catch (error) {
       return 0;
     }
+  },
+
+  /**
+   * The name that replaced 'tryParse'.
+   *
+   * keiyoushi deprecated 'SimpleDateFormat.tryParse' in favour of
+   * 'tryParseDate' / 'tryParseDateTime' / 'tryParseZonedDateTime' on
+   * DateTimeFormatter, and the catalogue followed: MangaThemesia and Keyoapp
+   * both call it, which is 130 extensions between them.
+   *
+   * One helper for all three spellings. Upstream separates them by which
+   * fields the pattern carries — a date, a date and a time, or either plus a
+   * zone — and the reader below takes that from the pattern rather than from
+   * the method name, so the distinction is already made where it matters. All
+   * three answer epoch millis, and 0 for anything unreadable, which is what
+   * 'tryParse' already promised and what this ecosystem stores for 'no date'.
+   */
+  tryParseDate: function (format, text) {
+    return __k.tryParse(format, text);
+  },
+
+  /**
+   * keiyoushi's 'Element?.textOrNull()' — the element's text, with blank read
+   * as absent.
+   *
+   * Null rather than '' because the call sites assign straight into a model
+   * field ('description = …?.textOrNull()') where the two are different: an
+   * empty string is a description somebody wrote and left empty, and null is
+   * one the page does not carry.
+   */
+  textOrNull: function (node) {
+    if (node === null || node === undefined || typeof node.text !== 'function') return null;
+    var text = __str(node.text());
+    return text.trim().length === 0 ? null : text;
+  },
+
+  /** The same, for an attribute: jsoup answers '' for one that is not there. */
+  attrOrNull: function (node, name) {
+    if (node === null || node === undefined || typeof node.attr !== 'function') return null;
+    var value = __str(node.attr(name));
+    return value.trim().length === 0 ? null : value;
   }
 };
 
@@ -4858,7 +5177,62 @@ var Html = {
  */
 var Instant = {
   ofEpochMilli: function (millis) { return __instant(Number(millis)); },
-  now: function () { return __instant(Date.now()); }
+  now: function () { return __instant(Date.now()); },
+  /*
+   * kotlinx-datetime's three readers of an ISO-8601 string, which this
+   * catalogue uses for an upload date more than any other spelling: 12 sources
+   * write 'Instant.tryParse(publishedAt)' and 6 more the 'parseOrNull' form.
+   *
+   * They differ only in what an unreadable string does. 'parse' throws — the
+   * caller wrapped it in a try or meant to — 'parseOrNull' answers null, and
+   * keiyoushi's own 'tryParse' answers 0L, because its callers assign it
+   * straight to 'date_upload' where 0 means "no date".
+   */
+  parse: function (text) {
+    var at = Date.parse(__str(text));
+    if (!Number.isFinite(at)) {
+      throw new Error('This converted extension could not read ' + __str(text) + ' as a date.');
+    }
+    return __instant(at);
+  },
+  parseOrNull: function (text) {
+    var at = Date.parse(__str(text));
+    return Number.isFinite(at) ? __instant(at) : null;
+  },
+  tryParse: function (text) {
+    var at = Date.parse(__str(text));
+    return Number.isFinite(at) ? at : 0;
+  },
+  fromEpochMilliseconds: function (millis) { return __instant(Number(millis)); },
+  fromEpochSeconds: function (seconds) { return __instant(Number(seconds) * 1000); }
+};
+
+/**
+ * okhttp's CacheControl, which the host's transport decides for itself.
+ *
+ * Carried as a value rather than refused, for the reason the timeouts on
+ * '__clientBuilder' are: an extension writes 'CacheControl.FORCE_NETWORK' as
+ * the third argument of GET, where this runtime already drops it, and refusing
+ * the name would lose the extension over a line that changes nothing it can
+ * observe. The host owns caching (ABI.md), and it is the one that has to.
+ */
+var CacheControl = {
+  FORCE_NETWORK: { noCache: true },
+  FORCE_CACHE: { onlyIfCached: true },
+  Builder: function () {
+    var builder = {
+      noCache: function () { return builder; },
+      noStore: function () { return builder; },
+      maxAge: function () { return builder; },
+      maxStale: function () { return builder; },
+      minFresh: function () { return builder; },
+      onlyIfCached: function () { return builder; },
+      noTransform: function () { return builder; },
+      immutable: function () { return builder; },
+      build: function () { return {}; }
+    };
+    return builder;
+  }
 };
 
 var OffsetDateTime = {
@@ -4876,6 +5250,8 @@ function __instant(millis) {
     toInstant: function () { return value; },
     toEpochMilli: function () { return millis; },
     toEpochMilliseconds: function () { return millis; },
+    epochSeconds: Math.floor(millis / 1000),
+    toEpochSeconds: function () { return Math.floor(millis / 1000); },
     toString: function () { return new Date(millis).toISOString(); }
   };
   return value;
@@ -4884,6 +5260,49 @@ function __instant(millis) {
 /* --- the shapes a '@Serializable' class registers -------------------------- */
 
 var __SHAPES = [];
+
+/** See '__k.toJsonElement'. */
+function __encodeElement(value, depth) {
+  if (depth > 12 || value === null || value === undefined) return value === undefined ? null : value;
+  if (typeof value !== 'object') return value;
+  if (Array.isArray(value)) {
+    var list = [];
+    for (var i = 0; i < value.length; i += 1) list.push(__encodeElement(value[i], depth + 1));
+    return list;
+  }
+  if (value instanceof Map) {
+    var fromMap = {};
+    value.forEach(function (held, key) { fromMap[String(key)] = __encodeElement(held, depth + 1); });
+    return fromMap;
+  }
+  if (value instanceof Set) {
+    var fromSet = [];
+    value.forEach(function (held) { fromSet.push(__encodeElement(held, depth + 1)); });
+    return fromSet;
+  }
+
+  var found = null;
+  var matches = 0;
+  for (var s = 0; s < __SHAPES.length; s += 1) {
+    if (!__shapeFits(__SHAPES[s], value)) continue;
+    matches += 1;
+    found = __SHAPES[s];
+  }
+  // The reverse of '__applyShapes': field name back to wire name.
+  var renames = {};
+  if (matches === 1 && found !== null) {
+    for (var alias in found.aliases) renames[found.aliases[alias]] = alias;
+  }
+
+  var out = {};
+  for (var key in value) {
+    if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+    var held = value[key];
+    if (typeof held === 'function') continue;
+    out[renames[key] === undefined ? key : renames[key]] = __encodeElement(held, depth + 1);
+  }
+  return out;
+}
 
 /** True when this record carries every field the shape requires. */
 function __shapeFits(shape, value) {
@@ -5449,7 +5868,8 @@ function __responseOf(raw, text, request) {
         }
         return null;
       },
-      close: function () {}
+      close: function () {},
+      closeQuietly: function () {}
     },
     /**
      * Parsed against the FINAL url, so that attr("abs:href") is right after a
@@ -5462,6 +5882,65 @@ function __responseOf(raw, text, request) {
     parseAs: function (descriptor) { return __k.decode(descriptor, read()); },
     peekBody: function () { return response.body; },
     close: function () {},
+    /* okhttp's 'Response.closeQuietly()' — the same nothing as 'close', since
+       the host buffered the body before this object existed. */
+    closeQuietly: function () {},
+    /*
+     * 'response.newBuilder().body(…).build()', which is how an interceptor
+     * replaces what it was handed — the decrypting image interceptors in this
+     * ecosystem all end on this line.
+     *
+     * The body is taken as text, because that is the only shape this runtime
+     * has: the host read the whole response before the plugin saw it, and
+     * '__responseOf' is built around that. A builder that accepted a stream
+     * would be accepting something nothing downstream could read.
+     */
+    newBuilder: function () {
+      var nextCode = raw.status;
+      var nextHeaders = raw.headers;
+      var nextText = null;
+      var made = {
+        code: function (value) { nextCode = Number(value); return made; },
+        message: function () { return made; },
+        request: function () { return made; },
+        protocol: function () { return made; },
+        header: function (name, value) {
+          var pairs = __headerPairs(nextHeaders);
+          var kept = [];
+          for (var i = 0; i < pairs.length; i += 1) {
+            if (String(pairs[i][0]).toLowerCase() !== String(name).toLowerCase()) kept.push(pairs[i]);
+          }
+          kept.push([String(name), __str(value)]);
+          nextHeaders = __headersObject(kept);
+          return made;
+        },
+        addHeader: function (name, value) {
+          var pairs = __headerPairs(nextHeaders);
+          pairs.push([String(name), __str(value)]);
+          nextHeaders = __headersObject(pairs);
+          return made;
+        },
+        removeHeader: function (name) {
+          var pairs = __headerPairs(nextHeaders);
+          var kept = [];
+          for (var i = 0; i < pairs.length; i += 1) {
+            if (String(pairs[i][0]).toLowerCase() !== String(name).toLowerCase()) kept.push(pairs[i]);
+          }
+          nextHeaders = __headersObject(kept);
+          return made;
+        },
+        headers: function (value) { nextHeaders = value || {}; return made; },
+        body: function (value) {
+          nextText = value === null || value === undefined ? '' : __str(value);
+          return made;
+        },
+        build: function () {
+          var next = Object.assign({}, raw, { status: nextCode, headers: nextHeaders });
+          return __responseOf(next, nextText === null ? text : nextText, request);
+        }
+      };
+      return made;
+    },
     use: function (block) { return block(response); }
   };
   return response;
@@ -5495,6 +5974,19 @@ async function __execute(request, follow) {
   return __responseOf(raw, await raw.text(), request);
 }
 
+/**
+ * The marker '__k.jump' throws; see it for why this is not an Error.
+ *
+ * A plain constructor rather than a class extending Error: a converted
+ * extension that writes 'catch (e: Exception)' around a block containing a
+ * non-local return would otherwise swallow the jump and answer the wrong
+ * value. Nothing here is an Error, so nothing catches it by type.
+ */
+function __Jump(id, value) {
+  this.id = id;
+  this.value = value;
+}
+
 function __hasHeader(headers, name) {
   for (var key in headers) {
     if (Object.prototype.hasOwnProperty.call(headers, key) && key.toLowerCase() === name) return true;
@@ -5503,21 +5995,23 @@ function __hasHeader(headers, name) {
 }
 
 /**
- * An interceptor is refused, loudly.
+ * A NETWORK interceptor is refused, loudly. An application interceptor is not
+ * — see '__proceed', which runs the chain.
  *
- * There is no chain to install one in: the host owns the transport and buffers
- * the whole body. Accepting the call and dropping it would leave an extension
- * believing it signs its own requests, or rewrites its own urls, when it does
- * neither — and the symptom would be a 403 from somewhere far away.
+ * The two are not the same hook. An application interceptor wraps one call and
+ * is handed the request and the response, both of which this runtime has. A
+ * network interceptor sits between the client and each individual hop of a
+ * redirect chain, and sees the raw connection: the host follows redirects
+ * itself and reports only the destination, so there is nothing here for one to
+ * sit between. Accepting it and running it once over the final hop would leave
+ * an extension believing it had rewritten every hop when it had rewritten one.
  */
 function __noInterceptor(name) {
   return function () {
     throw new Error(
-      'This converted extension installs an okhttp ' + name + '. Yorozo routes every request ' +
-      'through the host, which has no interceptor chain, so the extension can be converted but ' +
-      'not run as written. The named declarative helpers do translate — .rateLimit() and ' +
-      '.rateLimitHost() become a host-enforced request policy — but an interceptor body is ' +
-      'arbitrary code and what it means cannot be read out of it.'
+      'This converted extension installs an okhttp ' + name + '. Yorozo lets the host follow ' +
+      'redirects and reports only where they ended, so there are no per-hop connections for a ' +
+      'network interceptor to wrap. An ordinary addInterceptor { } does run.'
     );
   };
 }
@@ -5563,10 +6057,24 @@ var __cookieJar = {
  * changed. The flag is therefore carried into the request, where ctx.http turns
  * it into the host's 'follow: false'.
  */
-function __clientBuilder(follow) {
+function __clientBuilder(follow, inherited) {
   var redirects = follow;
+  var chain = (inherited || []).slice();
   var builder = {
-    addInterceptor: __noInterceptor('interceptor'),
+    /* Kept in written order, which is the order okhttp runs them in: the first
+       one added is the outermost, and it sees the request before the ones
+       after it and the response after them. */
+    addInterceptor: function (interceptor) {
+      if (interceptor === null || interceptor === undefined) return builder;
+      if (typeof interceptor !== 'function' && typeof interceptor.intercept !== 'function') {
+        throw new Error(
+          'This converted extension installed something as an okhttp interceptor that has no ' +
+          'intercept(chain).'
+        );
+      }
+      chain.push(interceptor);
+      return builder;
+    },
     addNetworkInterceptor: __noInterceptor('network interceptor'),
     connectTimeout: function () { return builder; },
     readTimeout: function () { return builder; },
@@ -5590,20 +6098,85 @@ function __clientBuilder(follow) {
     // here, because conversion refuses it. See __cookieJar.
     cookieJar: function () { return builder; },
     retryOnConnectionFailure: function () { return builder; },
-    build: function () { return redirects === false ? __clientWith(false) : client; }
+    build: function () {
+      /* The shared client only when nothing was changed: an extension that
+         built one to install an interceptor must not get the one everything
+         else uses. */
+      if (redirects !== false && chain.length === 0) return client;
+      return __clientWith(redirects !== false, chain);
+    }
   };
   return builder;
 }
 
+/**
+ * The okhttp *application* interceptor chain, run inside the sandbox.
+ *
+ * What an application interceptor does is wrap one call: it is handed the
+ * request, may rewrite it, calls 'proceed', and may inspect or replace what
+ * comes back. None of that needs the transport — 'proceed' at the end of the
+ * chain is this runtime's own send — so the chain runs here, in the plugin's
+ * own module, with exactly the reach the plugin already had.
+ *
+ * Two things are still refused rather than approximated, and both are about
+ * what the host owns rather than about difficulty:
+ *
+ * - **A network interceptor** sits between the client and each individual
+ *   redirect hop. The host follows redirects itself and reports only where it
+ *   ended up, so there are no hops here to sit between.
+ * - **A streaming body.** The host buffers the whole response before a plugin
+ *   sees it, so an interceptor that wraps the source of a body rather than its
+ *   bytes has nothing to wrap.
+ */
+async function __proceed(request, chain, index, follow) {
+  if (index >= chain.length) return await __execute(request, follow);
+  var interceptor = chain[index];
+  var link = {
+    request: function () { return request; },
+    proceed: function (next) { return __proceed(next, chain, index + 1, follow); },
+    /* okhttp hands the chain the call and the connection. The call is the
+       request this one is wrapping; there is no connection, and a source that
+       asks for one is asking about a socket this build does not have. */
+    call: function () { return { request: function () { return request; }, cancel: function () {} }; },
+    connection: function () { return null; },
+    /* The per-call timeout setters, which answer the chain so the fluent form
+       keeps working. Timeouts belong to the host's transport — see
+       '__clientBuilder' for why accepting one and not acting on it is right. */
+    withConnectTimeout: function () { return link; },
+    withReadTimeout: function () { return link; },
+    withWriteTimeout: function () { return link; },
+    readTimeoutMillis: function () { return 0; },
+    connectTimeoutMillis: function () { return 0; },
+    writeTimeoutMillis: function () { return 0; }
+  };
+  /* 'addInterceptor { chain -> … }' is Kotlin's SAM form and arrives as a
+     function; 'addInterceptor(MyInterceptor())' arrives as an object with the
+     member the interface names. Both are the same one call. */
+  var run = typeof interceptor === 'function' ? interceptor : interceptor.intercept;
+  var answer = await run.call(interceptor, link);
+  if (answer === null || answer === undefined) {
+    throw new Error('This converted extension has an interceptor that returned no response.');
+  }
+  return answer;
+}
+
 /** A client, and the redirect policy every call it makes carries. */
-function __clientWith(follow) {
+function __clientWith(follow, interceptors) {
+  var chain = interceptors || [];
   var made = {
+    interceptors: chain,
     newCall: function (request) {
       return {
-        execute: function () { return __execute(request, follow); },
-        await: function () { return __execute(request, follow); },
+        execute: function () { return __proceed(request, chain, 0, follow); },
+        await: function () { return __proceed(request, chain, 0, follow); },
+        /* The Rx-era doors onto the same two calls. 238 members in one
+           catalogue are written as
+           'client.newCall(r).asObservableSuccess().map { … }', so these are
+           the entry point for most of this ecosystem's older half. */
+        asObservable: function () { return __observable(__proceed(request, chain, 0, follow)); },
+        asObservableSuccess: function () { return __observable(this.awaitSuccess()); },
         awaitSuccess: async function () {
-          var response = await __execute(request, follow);
+          var response = await __proceed(request, chain, 0, follow);
           if (!response.isSuccessful) {
             throw new Error('This source answered ' + response.code + ' for ' + request.url + '.');
           }
@@ -5616,7 +6189,7 @@ function __clientWith(follow) {
         stop: function () {}
       };
     },
-    newBuilder: function () { return __clientBuilder(follow); },
+    newBuilder: function () { return __clientBuilder(follow, chain); },
     cookieJar: __cookieJar
   };
   return made;
@@ -5746,6 +6319,32 @@ function __httpUrlBuilder(scheme, authority, path, pairs, fragment) {
       for (var i = 0; i < written.length; i += 1) {
         if (written[i].length > 0) builder.addPathSegment(written[i]);
       }
+      return builder;
+    },
+    /* The already-encoded pair of the two above: a path this source composed
+       itself, where re-encoding would turn its separators into '%2F'. */
+    addEncodedPathSegments: function (segments) {
+      var written = __str(segments).split('/');
+      for (var i = 0; i < written.length; i += 1) {
+        if (written[i].length > 0) builder.addEncodedPathSegment(written[i]);
+      }
+      return builder;
+    },
+    /* 'setPathSegment(i, value)' rewrites one segment in place, which is how a
+       source turns a chapter url into its page url. */
+    setPathSegment: function (index, value) {
+      var written = path.split('/');
+      // The leading '' from the opening slash is not a segment.
+      var at = Number(index) + 1;
+      if (at > 0 && at < written.length) written[at] = encode(value);
+      path = written.join('/');
+      return builder;
+    },
+    setEncodedPathSegment: function (index, value) {
+      var written = path.split('/');
+      var at = Number(index) + 1;
+      if (at > 0 && at < written.length) written[at] = __str(value);
+      path = written.join('/');
       return builder;
     },
     fragment: function (value) {
@@ -6751,6 +7350,53 @@ var Log = (function () {
  * something else as UTF-8 would produce a different string, so anything else
  * refuses instead.
  */
+/**
+ * java.util.Arrays, the static methods this ecosystem's crypto helpers use.
+ *
+ * 'copyOfRange' pads with zeros past the end, exactly as Java does — a caller
+ * that asks for 16 bytes of an 8-byte array gets 16 there, and a 'slice' here
+ * would have answered 8 and derived a short key without saying so.
+ */
+/**
+ * okhttp's 'Interceptor', as a name rather than as behaviour.
+ *
+ * An extension writes 'object : Interceptor { override fun intercept(chain) }'
+ * or 'class RateLimit : Interceptor'. Neither inherits anything — the member
+ * is the whole interface — so what this has to do is exist, and answer
+ * 'instanceof' for anything carrying that member.
+ */
+var Interceptor = {};
+Object.defineProperty(Interceptor, Symbol.hasInstance, {
+  value: function (value) { return __k.hasMembers(value, ['intercept']); }
+});
+
+var Arrays = {
+  copyOfRange: function (source, from, to) {
+    var items = __arr(source);
+    var out = new Array(Math.max(0, to - from));
+    for (var i = from; i < to; i += 1) out[i - from] = i < items.length ? items[i] : 0;
+    return source instanceof Uint8Array ? Uint8Array.from(out) : out;
+  },
+  copyOf: function (source, length) { return Arrays.copyOfRange(source, 0, length); },
+  /* Both Java overloads: fill(a, v) and fill(a, from, to, v). */
+  fill: function (target, a, b, c) {
+    var value = c === undefined ? a : c;
+    var from = c === undefined ? 0 : a;
+    var to = c === undefined ? target.length : b;
+    for (var i = from; i < to; i += 1) target[i] = value;
+    return target;
+  },
+  equals: function (a, b) {
+    var left = __arr(a);
+    var right = __arr(b);
+    if (left.length !== right.length) return false;
+    for (var i = 0; i < left.length; i += 1) if (left[i] !== right[i]) return false;
+    return true;
+  },
+  asList: function (items) { return __arr(items).slice(); },
+  toString: function (items) { return '[' + __arr(items).join(', ') + ']'; }
+};
+
 var URLEncoder = {
   encode: function (value, charset) {
     __requireUtf8(charset, 'URLEncoder');
@@ -8378,6 +9024,43 @@ var CheckBox = AnimeFilter.CheckBox;
  * — at which point this line has to become a definition, deliberately.
  */
 var SManga = SAnime;
+
+/**
+ * The library-update hint a source may set on a title.
+ *
+ * Two members, and the catalogue overwhelmingly writes one: 61 uses of
+ * 'ONLY_FETCH_ONCE' against 7 of 'ALWAYS_UPDATE'. It means "this title's
+ * chapter list is immutable, do not re-fetch it in a library update" — a
+ * finished one-shot, usually.
+ *
+ * Carried as a value on 'SManga.update_strategy' rather than acted on here:
+ * scheduling library refreshes is the host's, and a source saying a title
+ * never changes is advice the host may take. What matters at this layer is
+ * that the name resolves and the field survives, because the alternative was
+ * refusing 68 extensions over an enum nobody reads at conversion time.
+ */
+var UpdateStrategy = {
+  ALWAYS_UPDATE: 'ALWAYS_UPDATE',
+  ONLY_FETCH_ONCE: 'ONLY_FETCH_ONCE'
+};
+
+/**
+ * Details and chapters together, from one request.
+ *
+ * 'fetchMangaUpdate' is upstream's answer to a source that can serve both in a
+ * single call — a GraphQL document returning the title and its chapter list —
+ * where the older API forced two. It is a pair and nothing more, so it is one
+ * here too.
+ *
+ * Both fields are optional in Kotlin and both are named at every construction
+ * site in this catalogue, so the shape is built from named arguments and the
+ * emitter's named-argument table is what orders them.
+ */
+function SMangaUpdate(manga, chapters) {
+  if (!(this instanceof SMangaUpdate)) return new SMangaUpdate(manga, chapters);
+  this.manga = manga === undefined ? null : manga;
+  this.chapters = chapters === undefined ? null : chapters;
+}
 
 /**
  * A chapter, which is where the two ecosystems actually differ.
