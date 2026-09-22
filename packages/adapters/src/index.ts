@@ -23,6 +23,7 @@ import { cloudstreamAdapter } from './cloudstream';
 import { hayaseAdapter } from './hayase';
 import { lnreaderAdapter } from './lnreader';
 import { mangayomiAdapter } from './mangayomi';
+import { mihonAdapter } from './mihon';
 import { nuvioAdapter } from './nuvio';
 import { soraAdapter } from './sora';
 import { stremioAdapter } from './stremio';
@@ -49,6 +50,15 @@ import { stremioAdapter } from './stremio';
  */
 export const FOREIGN_ADAPTERS: readonly ForeignAdapter[] = [
 	soraAdapter,
+	// **Ahead of its sibling, deliberately.** It is the same ecosystem's manga
+	// half and its negative is the cheapest here — the index it reads is a
+	// gzipped protobuf, so a text document is refused on the magic bytes. But
+	// the ordering is not about cost. The one text document it still
+	// recognises is the deprecated stub, whose shape is *identical* to the
+	// sibling format's index, so with the sibling first that stub parses
+	// cleanly into a two-row catalogue of placeholders. This adapter answers
+	// with a sentence instead, and has to be asked first to get the chance.
+	mihonAdapter,
 	aniyomiAdapter,
 	lnreaderAdapter,
 	cloudstreamAdapter,

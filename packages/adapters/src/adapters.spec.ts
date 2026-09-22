@@ -18,7 +18,8 @@ import {
 	listingRefusal,
 	loadForeignIndex,
 	ForeignFormatError,
-	type ConversionServices
+	type ConversionServices,
+	ForeignIndexError
 } from '@plugin-bridge/core/adapter';
 import { FOREIGN_ADAPTERS, adapterFor } from './index';
 import { CERTIFICATE_KEY_PREFIX } from '@plugin-bridge/adapters/aniyomi';
@@ -78,13 +79,49 @@ describe('each adapter recognises only its own format', () => {
 	// The load-bearing property behind detection: adapters are tried in order
 	// and the first that parses wins, so an adapter that accepted a body
 	// belonging to another format would shadow it for every repository.
+	/**
+	 * The one pair where this property does not hold, stated rather than
+	 * quietly excluded.
+	 *
+	 * The manga format's only text document is a deprecated stub, and its shape
+	 * is *identical* to the sibling format's real index — same array, same
+	 * `{name, pkg, apk, lang, version, sources}` rows. The sibling cannot tell
+	 * them apart and should not be taught to: that would be one format's
+	 * knowledge living in another's parser.
+	 *
+	 * What protects a viewer instead is ordering plus the kind of refusal, and
+	 * both are asserted below rather than left to this exclusion.
+	 */
+	const AMBIGUOUS: readonly (readonly [string, string])[] = [['aniyomi', 'mihon']];
+
 	it.each(formats)('%s refuses the other formats’ indexes', (format) => {
 		const adapter = adapterFor(format);
 		for (const other of formats) {
 			if (other === format) continue;
+			if (AMBIGUOUS.some(([one, two]) => one === format && two === other)) continue;
 			const { body, url } = bodyOf(other);
 			expect(() => adapter.parseIndex(body, url)).toThrow();
 		}
+	});
+
+	it('answers the ambiguous document with a sentence instead of a wrong success', () => {
+		const { body, url } = bodyOf('mihon');
+
+		// Left to itself, the sibling takes it and produces a catalogue of two
+		// rows called "Outdated App" and "Update to Mihon 0.20.1+".
+		const sibling = adapterFor('aniyomi').parseIndex(body, url);
+		expect(sibling.plugins.length).toBeGreaterThan(0);
+
+		// The right adapter refuses with an *index* error, which detection
+		// propagates rather than swallowing, and says where the real index is.
+		expect(() => adapterFor('mihon').parseIndex(body, url)).toThrow(ForeignIndexError);
+		expect(() => adapterFor('mihon').parseIndex(body, url)).toThrow(/index\.pb/);
+	});
+
+	it('asks the adapter that can answer before the one that cannot', () => {
+		// Ordering is what turns that refusal into the one a viewer sees.
+		const order = FOREIGN_ADAPTERS.map((adapter) => adapter.format);
+		expect(order.indexOf('mihon')).toBeLessThan(order.indexOf('aniyomi'));
 	});
 
 	it.each(formats)('%s refuses a body that is not JSON', (format) => {

@@ -46,6 +46,7 @@ export const REPOSITORY_FORMATS = [
 	'hayase',
 	'lnreader',
 	'mangayomi',
+	'mihon',
 	'aniyomi',
 	'cloudstream',
 	'stremio',
@@ -66,6 +67,7 @@ export const FOREIGN_FORMATS = [
 	'hayase',
 	'lnreader',
 	'mangayomi',
+	'mihon',
 	'aniyomi',
 	'cloudstream',
 	'stremio',
@@ -531,6 +533,21 @@ const PROFILES: Readonly<Record<ForeignFormat, FormatProfile>> = {
 			'This source is written in Dart, and running one means providing a Dart ' +
 			'interpreter. Yorozo converts the JavaScript sources in this format; this is ' +
 			'not one of them.',
+		implicitCookies: false
+	},
+	mihon: {
+		format: 'mihon',
+		label: 'Mihon',
+		// The manga counterpart of the format below, and translated the same
+		// way: from published Kotlin *source*, not from the app it ships as.
+		// `tier: 'convert'` is the claim that a listing here may install — which
+		// listing actually does is decided per listing by what the translator
+		// can read, exactly as it is for the sibling format.
+		tier: 'convert',
+		keyDocument: 'index',
+		refusal:
+			'This extension could not be translated. Its source names something Yorozo ' +
+			'cannot read yet, and the check says which.',
 		implicitCookies: false
 	},
 	aniyomi: {

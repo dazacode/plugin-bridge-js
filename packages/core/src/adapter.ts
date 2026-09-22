@@ -189,7 +189,7 @@ export interface ForeignAdapter {
 	 * Only reached when the caller supplied a byte fetcher. A host that has
 	 * only `getText` is not broken, it simply cannot see this format.
 	 */
-	parseIndexBytes?(bytes: Uint8Array, indexUrl: string): RepositoryIndex;
+	parseIndexBytes?(bytes: Uint8Array, indexUrl: string): RepositoryIndex | Promise<RepositoryIndex>;
 
 	/**
 	 * The same, for a format whose index is genuinely split across two
@@ -280,8 +280,17 @@ export function loadForeignIndex(
 	bytes?: Uint8Array
 ): Promise<RepositoryIndex> {
 	if (bytes !== undefined && adapter.parseIndexBytes !== undefined) {
+		// A promise, because the one format that needs this decompresses first
+		// and the platform's decompressor is a stream. Written as a `.catch`
+		// rather than a `try` so that a rejected promise falls through to the
+		// text door the same way a thrown error does — the two are the same
+		// refusal and reading only one of them would leave the other unhandled.
 		try {
-			return Promise.resolve(adapter.parseIndexBytes(bytes, indexUrl));
+			return Promise.resolve(adapter.parseIndexBytes(bytes, indexUrl)).catch((error: unknown) => {
+				if (!(error instanceof ForeignFormatError)) throw error;
+				if (adapter.loadIndex !== undefined) return adapter.loadIndex(body, indexUrl, getText);
+				return adapter.parseIndex(body, indexUrl);
+			});
 		} catch (error) {
 			// A hard error about *this* format is the answer; only "not mine"
 			// is worth asking the same adapter's other door about.
