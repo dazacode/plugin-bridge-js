@@ -8359,6 +8359,104 @@ AnimeFilter.TriState.prototype.isExcluded = function () { return Number(this.sta
 var TriState = AnimeFilter.TriState;
 var CheckBox = AnimeFilter.CheckBox;
 
+/* ── the manga half ────────────────────────────────────────────────────────
+ *
+ * The video ecosystem above is a fork of the manga one, and several of these
+ * types were renamed rather than changed when it forked. Where that is true
+ * they are **aliased, not copied**: two definitions of one thing drift, and
+ * the drift would show up as a filter that reads its own state wrongly rather
+ * than as an error anybody sees.
+ *
+ * Where the fork genuinely diverged — a chapter numbers itself differently
+ * from an episode, a page has no counterpart at all — they are their own.
+ */
+
+/**
+ * 'SManga' is what 'SAnime' was renamed from: same fields, same status
+ * constants, same 'setUrlWithoutDomain'. Aliased for that reason, and the one
+ * thing that would force them apart is a field added to one and not the other
+ * — at which point this line has to become a definition, deliberately.
+ */
+var SManga = SAnime;
+
+/**
+ * A chapter, which is where the two ecosystems actually differ.
+ *
+ * 'chapter_number' rather than 'episode_number', and it is a Float in Kotlin
+ * whose unset value is -1: a book has chapter 10.5 and the numbering has to
+ * survive it. Everything else matches an episode, including the date being
+ * epoch milliseconds and 0 meaning "not stated".
+ */
+var SChapter = {
+  create: function () {
+    var chapter = {
+      url: '',
+      name: '',
+      date_upload: 0,
+      chapter_number: -1,
+      scanlator: null
+    };
+    chapter.setUrlWithoutDomain = function (url) {
+      chapter.url = __withoutDomain(url);
+      return chapter;
+    };
+    return chapter;
+  }
+};
+
+/**
+ * One image in a chapter, and the type with no video counterpart at all.
+ *
+ * 'Page(index, url = "", imageUrl = null)' is the Kotlin signature, and both
+ * defaults matter: extensions construct it three ways — positionally with an
+ * image url, positionally with only a page url it will resolve later through
+ * 'imageUrlParse', and with 'imageUrl' named. The last is why the defaults are
+ * written out rather than left undefined: 'Page(index, imageUrl = x)' arrives
+ * here as a two-argument call whose second argument is the *url* slot unless
+ * the emitter named it, and a page whose 'url' holds an image is one the
+ * driver would try to fetch a document from.
+ */
+function Page(index, url, imageUrl) {
+  if (!(this instanceof Page)) return new Page(index, url, imageUrl);
+  this.index = Number(index) || 0;
+  this.url = url === undefined || url === null ? '' : __str(url);
+  this.imageUrl = imageUrl === undefined ? null : imageUrl;
+}
+
+/**
+ * What every list page returns here, the counterpart of 'AnimesPage'.
+ *
+ * 'mangas' is the ecosystem's own spelling and stays that way, for the reason
+ * 'animes' does: extensions build one by hand on nearly every list page and
+ * read both halves straight back.
+ */
+function MangasPage(mangas, hasNextPage) {
+  if (!(this instanceof MangasPage)) return new MangasPage(mangas, hasNextPage);
+  this.mangas = __arr(mangas);
+  this.hasNextPage = hasNextPage === true;
+}
+
+/**
+ * 'Filter' and 'FilterList', which the video fork renamed and did not change.
+ *
+ * Every member, every state constant and every question asked about a
+ * tri-state is identical — 'AnimeFilter' above IS this class, one rename
+ * later. So the bare names an extension imports resolve to the same objects,
+ * and 'Filter.TriState.STATE_INCLUDE' is the same number in both.
+ */
+var Filter = AnimeFilter;
+var FilterList = AnimeFilterList;
+
+/* The nested filter types imported by their bare name here, the same way
+   'TriState' and 'CheckBox' are above. A file declaring its own is renamed
+   around by the emitter before it reaches these. */
+var Select = Filter.Select;
+var Text = Filter.Text;
+var Group = Filter.Group;
+var Sort = Filter.Sort;
+var Header = Filter.Header;
+var Separator = Filter.Separator;
+
 /**
  * Compatibility facade for the constructor-shaped spelling used by converted
  * extensions. Only the generic one-argument packer is supported; overloads

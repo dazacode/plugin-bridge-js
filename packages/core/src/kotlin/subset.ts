@@ -1524,6 +1524,24 @@ export const GLOBAL_NAMES: ReadonlySet<string> = new Set([
 	'TriState',
 	'CheckBox',
 
+	// The manga half. `SManga`, `Filter` and `FilterList` are the video
+	// ecosystem's names one rename earlier and the runtime aliases them;
+	// `SChapter`, `Page` and `MangasPage` are its own. The nested filter types
+	// follow `TriState` above: an `import …model.Filter.Select` writes them
+	// bare.
+	'SManga',
+	'SChapter',
+	'Page',
+	'MangasPage',
+	'Filter',
+	'FilterList',
+	'Select',
+	'Text',
+	'Group',
+	'Sort',
+	'Header',
+	'Separator',
+
 	// `java.text.Normalizer`, `android.text.Html` and java.time's instants.
 	'Normalizer',
 	'Html',
@@ -1700,6 +1718,18 @@ export const KNOWN_SIGNATURES: ReadonlyMap<string, readonly string[]> = new Map(
 	// reached only when a call names something that can only be its.
 	['Video', ['url', 'quality', 'videoUrl', 'headers', 'subtitleTracks', 'audioTracks']],
 	['Track', ['url', 'lang']],
+
+	// **`Page(index, url = "", imageUrl = null)`**, and the reason it is here
+	// rather than left to positional calls: `Page(index, imageUrl = it)` is how
+	// this ecosystem builds a page list, and it was the single largest refusal
+	// left after the manga types landed. Without the signature the call is
+	// refused; emitted positionally without one it would put an image url in
+	// the `url` slot, which is the slot the driver fetches a *document* from.
+	['Page', ['index', 'url', 'imageUrl']],
+
+	// `MangasPage(mangas = …, hasNextPage = …)`, the same shape as its video
+	// counterpart and named about as often as it is passed positionally.
+	['MangasPage', ['mangas', 'hasNextPage']],
 
 	// `Hoster(hosterUrl = …, hosterName = …)`, which is how every extension
 	// written against the hoster API builds one — by name, and usually skipping

@@ -669,6 +669,32 @@ export const RUNTIME_GLOBALS = [
 	   import them by. */
 	'TriState',
 	'CheckBox',
+
+	/* The manga half. `SManga`, `Filter` and `FilterList` are the names the
+	   video ecosystem renamed rather than changed, and the runtime aliases
+	   them for that reason; `SChapter`, `Page` and `MangasPage` are its own.
+
+	   These were the top of the refusal list the first time the translator was
+	   run over a manga catalogue: `MangasPage(…)`, `SManga` and `Page(…)`
+	   between them accounted for more blocked members than every genuinely
+	   hard construct put together. Nothing about the front-end needed to
+	   change — it refuses a name it has never been told about, and these are
+	   the names. */
+	'SManga',
+	'SChapter',
+	'Page',
+	'MangasPage',
+	'Filter',
+	'FilterList',
+	/* The nested filter types, under the bare names an
+	   `import …model.Filter.Select` produces — the same reason `TriState` and
+	   `CheckBox` are spelled out above. */
+	'Select',
+	'Text',
+	'Group',
+	'Sort',
+	'Header',
+	'Separator',
 	'Instant',
 	'OffsetDateTime',
 	'ZonedDateTime',

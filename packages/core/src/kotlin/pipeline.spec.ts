@@ -241,19 +241,26 @@ describe('a file that declares a name the runtime already defines', () => {
 				{ path: 'Dto.kt', source: DTO },
 				{
 					path: 'More.kt',
-					source: kt('package com.example.demo.dto', '', 'data class Page(val first: Video)')
+					source: kt('package com.example.demo.dto', '', 'data class Chunk(val first: Video)')
 				}
 			],
 			{ parser }
 		);
 
-		// `Meta` names `Video` from the same package, and `Page` from another
+		// `Meta` names `Video` from the same package, and `Chunk` from another
 		// file in that package: both mean the DTO, and neither is written out
 		// as the runtime's.
+		//
+		// `Chunk` is deliberately a name the runtime does **not** define — it
+		// used to be `Page`, which stopped being one the day the manga types
+		// landed. The contrast is the point of the test: a declared name that
+		// collides with the runtime is renamed, one that does not is left
+		// alone, and a fixture that quietly became a collision would only
+		// assert the first half twice.
 		const dto = result.perFile.find((one) => one.path === 'Dto.kt');
 		const more = result.perFile.find((one) => one.path === 'More.kt');
 		expect(dto?.js).toContain('function Video_(');
-		expect(more?.js).toContain('function Page(');
+		expect(more?.js).toContain('function Chunk(');
 		expect(result.complete).toBe(true);
 	});
 

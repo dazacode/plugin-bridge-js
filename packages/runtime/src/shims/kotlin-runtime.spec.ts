@@ -3787,3 +3787,75 @@ describe('assembling a conversion', () => {
 		expect(hosts.filter((host) => !host.includes('example.invalid'))).toEqual([]);
 	});
 });
+
+describe('the types a manga extension writes by name', () => {
+	it('gives a chapter its own number field, which a book needs as a fraction', () => {
+		const chapter = (runtime.globals.SChapter as { create(): Record<string, unknown> }).create();
+
+		// `chapter_number`, not `episode_number`: the two ecosystems diverge
+		// here and nowhere else in this type, and -1 is Kotlin's unset Float.
+		expect(chapter.chapter_number).toBe(-1);
+		expect(chapter).not.toHaveProperty('episode_number');
+		expect(chapter.date_upload).toBe(0);
+		expect(chapter.scanlator).toBeNull();
+
+		chapter.chapter_number = 10.5;
+		expect(chapter.chapter_number).toBe(10.5);
+	});
+
+	it('is the same object under both names where the fork only renamed it', () => {
+		// Aniyomi's `SAnime` is `SManga` one rename later, and `AnimeFilter` is
+		// `Filter`. Aliased rather than copied, because two definitions of one
+		// thing drift and the drift would be a filter misreading its own state.
+		expect(runtime.globals.SManga).toBe(runtime.globals.SAnime);
+		expect(runtime.globals.Filter).toBe(runtime.globals.AnimeFilter);
+		expect(runtime.globals.FilterList).toBe(runtime.globals.AnimeFilterList);
+
+		const filter = runtime.globals.Filter as { TriState: { STATE_INCLUDE: number } };
+		expect(filter.TriState.STATE_INCLUDE).toBe(1);
+	});
+
+	it('exposes the nested filter types under the bare names an import produces', () => {
+		const filter = runtime.globals.Filter as Record<string, unknown>;
+		for (const name of ['Select', 'Text', 'Group', 'Sort', 'Header', 'Separator']) {
+			expect(runtime.globals[name]).toBe(filter[name]);
+		}
+	});
+
+	it('keeps a page url and an image url in different slots', () => {
+		// The failure this prevents is silent: `Page(index, imageUrl = it)` is
+		// how a page list is built, and emitted positionally without a
+		// signature the image url lands in `url` — the slot the driver fetches
+		// a *document* from. The emitter's `KNOWN_SIGNATURES` is the other half
+		// of this; here it is only asserted that the two slots are distinct.
+		const Page = runtime.globals.Page as new (
+			index: number,
+			url?: string,
+			imageUrl?: string | null
+		) => Record<string, unknown>;
+
+		const resolved = new Page(0, '', 'https://example.invalid/1.jpg');
+		expect(resolved.index).toBe(0);
+		expect(resolved.url).toBe('');
+		expect(resolved.imageUrl).toBe('https://example.invalid/1.jpg');
+
+		// The other construction: a page whose image is resolved later.
+		const deferred = new Page(1, 'https://example.invalid/read/1');
+		expect(deferred.url).toBe('https://example.invalid/read/1');
+		expect(deferred.imageUrl).toBeNull();
+	});
+
+	it('builds a list page whose halves are both readable', () => {
+		const MangasPage = runtime.globals.MangasPage as new (
+			mangas: unknown,
+			hasNextPage: unknown
+		) => Record<string, unknown>;
+
+		const page = new MangasPage([{ title: 'A Book' }], true);
+		expect(page.mangas).toHaveLength(1);
+		expect(page.hasNextPage).toBe(true);
+		// `hasNextPage` is a strict boolean: a source returning a truthy string
+		// would otherwise paginate forever.
+		expect((new MangasPage([], 'yes') as { hasNextPage: unknown }).hasNextPage).toBe(false);
+	});
+});

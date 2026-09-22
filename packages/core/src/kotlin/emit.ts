@@ -6232,7 +6232,10 @@ class Emitter {
 		if (this.declaredTypes.has(declared)) {
 			return this.safe(this.localTypes.get(declared) ?? declared);
 		}
-		const filter = /^AnimeFilter\.(\w+)$/.exec(type);
+		// Both spellings of one class: the video ecosystem renamed `Filter` to
+		// `AnimeFilter` when it forked and changed nothing else, so a subclass
+		// of either resolves and the runtime aliases the two together.
+		const filter = /^(?:AnimeFilter|Filter)\.(\w+)$/.exec(type);
 		if (filter !== null && ANIME_FILTER_KINDS.has(filter[1])) return type;
 		// The bare spelling, which comes of `import …model.AnimeFilter.TriState`.
 		// Nine sources here write that, and the base was dropped in silence: a
