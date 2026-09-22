@@ -40,7 +40,14 @@ import { CRYPTO } from './crypto.ts';
 
 interface HostRequest {
 	readonly id: number;
-	readonly kind: 'load' | 'searchCatalog' | 'listEpisodes' | 'resolve' | 'browse';
+	readonly kind:
+		| 'load'
+		| 'searchCatalog'
+		| 'listEpisodes'
+		| 'resolve'
+		| 'browse'
+		| 'listChapters'
+		| 'readChapter';
 	readonly payload: unknown;
 }
 
@@ -64,6 +71,11 @@ interface PluginModule {
 	searchCatalog?(query: string, page: number, ctx: unknown, cursor?: string): Promise<unknown>;
 	listEpisodes?(sourceMediaId: string, ctx: unknown): Promise<unknown>;
 	resolve?(sourceMediaId: string, episode: unknown, ctx: unknown): Promise<unknown>;
+	// ABI.md §8. Optional like the rest: a plugin declares the chapter pair or
+	// the playback pair, and asking for one it does not have is how a caller
+	// finds out which.
+	listChapters?(sourceMediaId: string, ctx: unknown): Promise<unknown>;
+	readChapter?(sourceMediaId: string, chapter: unknown, ctx: unknown): Promise<unknown>;
 	browse?(shelf: string, page: number, ctx: unknown, cursor?: string): Promise<unknown>;
 }
 
@@ -420,7 +432,25 @@ self.onmessage = async (event: MessageEvent) => {
 				} finally {
 					URL.revokeObjectURL(url);
 				}
-				reply({ id: data.id, ok: true, value: { id: plugin?.id ?? null } });
+				// Which terminal methods the module actually declares, reported
+				// once at load rather than discovered by calling one and seeing
+				// `undefined` come back. A plugin serves video or it serves a
+				// book (`ABI.md` §8.1), and a caller that had to probe would pay
+				// a round trip on every listing to learn something the module
+				// stated the moment it was imported.
+				const declares = (
+					[
+						'searchCatalog',
+						'browse',
+						'listEpisodes',
+						'resolve',
+						'listChapters',
+						'readChapter'
+					] as const
+				).filter(
+					(name) => typeof (plugin as Record<string, unknown> | null)?.[name] === 'function'
+				);
+				reply({ id: data.id, ok: true, value: { id: plugin?.id ?? null, declares } });
 				return;
 			}
 			case 'searchCatalog': {
@@ -445,6 +475,21 @@ self.onmessage = async (event: MessageEvent) => {
 					episode: unknown;
 				};
 				const value = await required().resolve?.(sourceMediaId, episode, makeContext());
+				reply({ id: data.id, ok: true, value });
+				return;
+			}
+			case 'listChapters': {
+				const { sourceMediaId } = data.payload as { sourceMediaId: string };
+				const value = await required().listChapters?.(sourceMediaId, makeContext());
+				reply({ id: data.id, ok: true, value });
+				return;
+			}
+			case 'readChapter': {
+				const { sourceMediaId, chapter } = data.payload as {
+					sourceMediaId: string;
+					chapter: unknown;
+				};
+				const value = await required().readChapter?.(sourceMediaId, chapter, makeContext());
 				reply({ id: data.id, ok: true, value });
 				return;
 			}

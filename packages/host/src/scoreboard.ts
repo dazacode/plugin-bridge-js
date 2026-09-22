@@ -55,6 +55,12 @@ import type { VerificationStep } from '@plugin-bridge/core/verify';
 export const STEPS: readonly VerificationStep[] = [
 	'load',
 	'search',
+	// The two a manga source is driven through instead. A listing reaches one
+	// pair or the other, never both, so a run over one medium leaves the other
+	// pair at zero — which is the honest shape: a column of zeroes says "no
+	// listing here served that", where folding them together would say nothing.
+	'chapters',
+	'pages',
 	'episodes',
 	'resolve',
 	'reach'
@@ -155,7 +161,7 @@ function emptyTally(): FormatTally {
 		untested: 0,
 		wouldNotConvert: 0,
 		converted: 0,
-		failed: { load: 0, search: 0, episodes: 0, resolve: 0, reach: 0 },
+		failed: { load: 0, search: 0, episodes: 0, chapters: 0, pages: 0, resolve: 0, reach: 0 },
 		works: 0,
 		reach: {
 			portable: 0,

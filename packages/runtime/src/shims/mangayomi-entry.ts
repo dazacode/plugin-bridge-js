@@ -495,7 +495,7 @@ const VIDEO_TERMINAL_METHODS = `  async listEpisodes(sourceMediaId, ctx) {
 const MANGA_TERMINAL_METHODS = `  async listChapters(sourceMediaId, ctx) {
     __enter(ctx);
     const provider = __provider();
-    const detail = __decode(await __need(provider, 'getDetail')(__foreign(sourceMediaId)));
+    const detail = __decode(await __need(provider, 'getDetail')(String(sourceMediaId)));
     if (!detail || typeof detail !== 'object') return [];
 
     // \`chapters\` is this format's own name for them, and \`episodes\` is what the
@@ -518,7 +518,15 @@ const MANGA_TERMINAL_METHODS = `  async listChapters(sourceMediaId, ctx) {
     const dates = [];
     for (const row of rows) {
       if (!row || typeof row !== 'object') continue;
-      const url = __absolute(String(row.url || ''), __BASE_URL);
+      // **Verbatim, not absolute.** \`ABI.md\` §8.2 says a chapter id is the
+      // source's own, as it minted it, and this is the case that proves why:
+      // these sources hand the value straight back to their own page-list
+      // method, and a third of them mint an opaque id rather than a path. Run
+      // through the absolute/relative round trip, a bare id acquires a leading
+      // slash — the source then builds a doubled path, the endpoint answers
+      // with an error, and the report says the chapter has no pages. Nothing
+      // in that chain names the step that broke it.
+      const url = String(row.url || '');
       if (url.length === 0) continue;
       const split = __splitVolume(typeof row.name === 'string' ? row.name : '');
       urls.push(url);
@@ -551,8 +559,12 @@ const MANGA_TERMINAL_METHODS = `  async listChapters(sourceMediaId, ctx) {
     // The source minted the id and it is the whole address here, so it is
     // preferred whenever it is present; the title's own id is what a source
     // that enumerated nothing gets asked with.
-    const target = chapter && chapter.sourceChapterId ? chapter.sourceChapterId : sourceMediaId;
-    return { pages: __pages(await __need(provider, 'getPageList')(__foreign(target))) };
+    // An id the source minted goes back untouched; the title's own id is the
+    // one that was absolutised on the way out and has to be undone.
+    const target = chapter && chapter.sourceChapterId
+      ? String(chapter.sourceChapterId)
+      : String(sourceMediaId);
+    return { pages: __pages(await __need(provider, 'getPageList')(target)) };
   }`;
 
 const MANGA_TERMINAL_HELPERS = `
@@ -634,7 +646,8 @@ export function mangayomiEntrypoint(options: MangayomiEntrypointOptions): string
 		`const __PLUGIN_ID = ${JSON.stringify(options.pluginId)};`,
 		`const __FALLBACK_SOURCE = ${JSON.stringify(options.source)};`,
 		`const __BASE_URL = String(__FALLBACK_SOURCE.baseUrl || '');`,
-		`const __SETTING_ID_MAP = ${JSON.stringify(options.settingIds ?? {})};`
+		`const __SETTING_ID_MAP = ${JSON.stringify(options.settingIds ?? {})};`,
+		`const __VERBATIM_IDS = ${options.serves === 'manga'};`
 	].join('\n');
 
 	// `let`, at module scope, so a source that reassigns one of these is
@@ -720,7 +733,20 @@ function __foreign(id) {
 /** A listing row, as a catalogue entry. */
 function __entry(row) {
   if (!row || typeof row !== 'object') return null;
-  const link = __absolute(String(row.link || row.url || ''), __BASE_URL);
+  // \`ABI.md\` §1: a \`sourceMediaId\` is the source's own id for the title, as
+  // the source minted it — and it is handed straight back to the same source's
+  // detail method. Absolutising it and undoing that on the way back is lossy in
+  // exactly one direction: a source whose link was *already* absolute gets its
+  // base stripped and then asks the network for a path, which the request gate
+  // refuses with "Not a URL". Sources in this ecosystem disagree about the
+  // convention — one builds \`apiUrl + id\`, another fetches the link as given —
+  // so the only value that is right for both is the one the source wrote.
+  //
+  // Applied to books only, because no manga binding has been stored yet and a
+  // video one has. The poster is still absolutised: the *host* fetches that,
+  // and it is never handed back.
+  const raw = String(row.link || row.url || '');
+  const link = __VERBATIM_IDS ? raw : __absolute(raw, __BASE_URL);
   const title = String(row.name || row.title || '').trim();
   if (link.length === 0 || title.length === 0) return null;
   return {

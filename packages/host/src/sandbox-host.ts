@@ -238,6 +238,17 @@ export class PluginSandbox {
 	 * hosts, none of which appear anywhere in its code because the page it
 	 * scraped is what names them.
 	 */
+	/**
+	 * The terminal methods this bundle's module actually declares.
+	 *
+	 * Reported by the worker at load. A plugin answers the playback pair or the
+	 * chapter pair (`ABI.md` §8.1), and a caller that wants to drive the right
+	 * one reads this rather than calling a method to see whether `undefined`
+	 * comes back — which costs a round trip per listing and cannot tell "not
+	 * declared" from "declared, and returned nothing".
+	 */
+	declares: readonly string[] = [];
+
 	private readonly refused: string[] = [];
 	/**
 	 * Hosts this session learned, and may therefore reach.
@@ -356,7 +367,8 @@ export class PluginSandbox {
 			'load',
 			{ source, settings, locale: 'en' },
 			LOAD_TIMEOUT_MS
-		)) as { id: string | null };
+		)) as { id: string | null; declares?: readonly string[] };
+		sandbox.declares = loaded.declares ?? [];
 
 		// A bundle whose default export disagrees with its manifest is a bundle
 		// that would produce bindings under an id nothing else uses.
@@ -384,6 +396,14 @@ export class PluginSandbox {
 
 	browse(shelf: string, page: number, cursor?: string): Promise<unknown> {
 		return this.call('browse', { shelf, page, cursor });
+	}
+
+	listChapters(sourceMediaId: string): Promise<unknown> {
+		return this.call('listChapters', { sourceMediaId });
+	}
+
+	readChapter(sourceMediaId: string, chapter: unknown): Promise<unknown> {
+		return this.call('readChapter', { sourceMediaId, chapter });
 	}
 
 	/**

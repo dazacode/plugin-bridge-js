@@ -33,8 +33,19 @@ import {
 } from '@plugin-bridge/host/sandbox-host';
 import type { ExternalIdKind } from './formats';
 
-/** Which part of the path failed, so a message can name it. */
-export type VerificationStep = 'load' | 'search' | 'episodes' | 'resolve' | 'reach';
+/**
+ * Which part of the path failed, so a message can name it.
+ *
+ * `chapters` and `pages` are the manga path's middle two (`ABI.md` §8). A
+ * listing is driven through one pair or the other and never both, so a run
+ * over one medium leaves the other pair's counts at zero — which is the
+ * truthful shape. Folding them into `episodes` and `resolve` would have read
+ * "that source listed no episodes" about a source that was never asked for
+ * any, which is how an instrument reports its own question as the catalogue's
+ * failure.
+ */
+export type VerificationStep =
+	'load' | 'search' | 'episodes' | 'chapters' | 'pages' | 'resolve' | 'reach';
 
 export interface VerificationResult {
 	readonly ok: boolean;
@@ -44,7 +55,9 @@ export interface VerificationResult {
 	readonly detail: string | null;
 	/** What it found, for a caller that wants to say so. */
 	readonly searchHits: number;
+	/** Episodes, or — for a source driven through `ABI.md` §8 — chapters. */
 	readonly episodeCount: number;
+	/** Streams, or — for the same source — page images. */
 	readonly streamCount: number;
 	/**
 	 * How many of what it resolved were peer-to-peer descriptors.
@@ -148,6 +161,16 @@ interface EpisodeRow {
 	readonly sourceEpisodeId?: unknown;
 }
 
+interface ChapterRow {
+	readonly number?: unknown;
+	readonly sourceChapterId?: unknown;
+}
+
+interface PageRow {
+	readonly url?: unknown;
+	readonly headers?: unknown;
+}
+
 interface StreamRow {
 	readonly url?: unknown;
 	readonly container?: unknown;
@@ -171,7 +194,15 @@ function headersOf(stream: StreamRow): Record<string, string> {
 }
 
 /** How far through the path a result got, for comparing two failures. */
-const STEP_ORDER: readonly VerificationStep[] = ['load', 'search', 'episodes', 'resolve', 'reach'];
+const STEP_ORDER: readonly VerificationStep[] = [
+	'load',
+	'search',
+	'episodes',
+	'chapters',
+	'pages',
+	'resolve',
+	'reach'
+];
 
 function reachedFurther(candidate: VerificationResult, incumbent: VerificationResult): boolean {
 	return (
@@ -342,6 +373,116 @@ export async function verifyConvertedPlugin(
 		 * either way — a second copy of them is how the searched path and the
 		 * id path would start reporting different things for the same failure.
 		 */
+		/**
+		 * The same, for a source that serves books.
+		 *
+		 * Deliberately a sibling of `attempt` rather than a branch inside it.
+		 * The two share their shape and nothing else: every message differs,
+		 * because a sentence about episodes is wrong here and a reader of the
+		 * report has no way to tell a mis-worded failure from a real one.
+		 */
+		const attemptChapters = async (candidate: string): Promise<VerificationResult> => {
+			let chapters: ChapterRow[];
+			try {
+				chapters = ((await live.listChapters(candidate)) ?? []) as ChapterRow[];
+			} catch (error) {
+				return {
+					ok: false,
+					failedAt: 'chapters',
+					detail: messageOf(error),
+					...nothing,
+					searchHits: searchHits
+				};
+			}
+			const chapter = chapters.find((row) => typeof row.sourceChapterId === 'string');
+			if (chapter === undefined || outOfTime()) {
+				return {
+					ok: false,
+					failedAt: 'chapters',
+					detail:
+						(chapters.length === 0
+							? 'That source listed no chapters for the first thing it found.'
+							: 'Its chapter list carried no id this client can use.') + alsoRefused(sandbox),
+					...nothing,
+					searchHits: searchHits,
+					episodeCount: chapters.length
+				};
+			}
+
+			let pages: PageRow[];
+			try {
+				const read = (await live.readChapter(candidate, {
+					number: Number(chapter.number) || 1,
+					sourceChapterId: String(chapter.sourceChapterId)
+				})) as { pages?: PageRow[] } | null;
+				pages = read?.pages ?? [];
+			} catch (error) {
+				return {
+					ok: false,
+					failedAt: 'pages',
+					detail: messageOf(error),
+					...nothing,
+					searchHits: searchHits,
+					episodeCount: chapters.length
+				};
+			}
+
+			const readable = pages.filter(
+				(page) => typeof page.url === 'string' && page.url.startsWith('https://')
+			);
+			const counts = {
+				searchHits: searchHits,
+				episodeCount: chapters.length,
+				streamCount: readable.length,
+				torrentCount: 0
+			};
+
+			if (readable.length === 0) {
+				return {
+					ok: false,
+					failedAt: 'pages',
+					detail:
+						(pages.length === 0
+							? 'That source returned no pages for its first chapter.'
+							: 'The pages it returned are not https.') + alsoRefused(sandbox),
+					...counts
+				};
+			}
+
+			// A returned image url is a claim, exactly as a stream url is. The
+			// first page is fetched where a probe exists, with the headers the
+			// source asked for — `ABI.md` §8.3 is the whole reason those travel
+			// beside the url, and a probe that dropped them would report 403 on
+			// every source that protects its images and call it broken.
+			if (reach !== undefined && !outOfTime()) {
+				const first = readable[0];
+				const headers = (first.headers ?? {}) as Record<string, string>;
+				try {
+					const outcome = await reach(String(first.url), headers, [
+						...(sandbox?.reachableHosts ?? plugin.hosts),
+						...hostsOf(String(first.url))
+					]);
+					if (!outcome.ok) {
+						return {
+							ok: false,
+							failedAt: 'reach',
+							detail: `${hostOf(String(first.url))}: ${outcome.detail}`,
+							...counts
+						};
+					}
+				} catch (error) {
+					return {
+						ok: false,
+						failedAt: 'reach',
+						detail: `${hostOf(String(first.url))}: ${messageOf(error)}`,
+						...counts
+					};
+				}
+			}
+
+			return { ok: true, failedAt: null, detail: null, ...counts };
+		};
+
 		const attempt = async (candidate: string): Promise<VerificationResult> => {
 			let episodes: EpisodeRow[];
 			try {
@@ -501,12 +642,39 @@ export async function verifyConvertedPlugin(
 		// describing the source; a later probe failing at `episodes` because
 		// this addon has no metadata for that particular title is describing
 		// the title. Reporting the second would bury the first.
+		// Which pair this bundle declares, read from what the module reported at
+		// load. A source that serves books has no `resolve` to call, and asking
+		// it for one would report the question as the catalogue's failure.
+		const readsChapters = live.declares.includes('listChapters');
+		const drive = readsChapters ? attemptChapters : attempt;
+
+		/**
+		 * How many search results are worth asking about.
+		 *
+		 * One, for a searched video source: the first result is what a viewer
+		 * would have clicked, and if it has no episodes that is a fact about the
+		 * source. Every result for an id-addressed one, where a missing title is
+		 * a fact about the title.
+		 *
+		 * **A few, for a book source**, and that is not leniency. These
+		 * catalogues publish one listing per language and filter their chapter
+		 * lists by it, so the first hit for a fixed search term routinely has
+		 * nothing translated into the language the listing serves. Asking only
+		 * about that one produced 45 rows reading "listed no chapters" for a
+		 * source that works — the harness reporting its own question as the
+		 * catalogue's failure, which is the thing this file exists not to do.
+		 * Bounded rather than exhaustive, because a source with genuinely no
+		 * chapters anywhere must still be able to fail.
+		 */
+		const CHAPTER_CANDIDATES = 3;
+		const limit = idAddressed ? candidates.length : readsChapters ? CHAPTER_CANDIDATES : 1;
+
 		let worst: VerificationResult | null = null;
-		for (const candidate of candidates) {
-			const outcome = await attempt(candidate);
+		for (const candidate of candidates.slice(0, limit)) {
+			const outcome = await drive(candidate);
 			if (outcome.ok) return outcome;
 			if (worst === null || reachedFurther(outcome, worst)) worst = outcome;
-			if (!idAddressed || outOfTime()) break;
+			if (outOfTime()) break;
 		}
 		return (
 			worst ?? {
@@ -542,6 +710,8 @@ export function describeVerification(name: string, result: VerificationResult): 
 		load: 'could not be loaded',
 		search: 'could not search',
 		episodes: 'could not list episodes',
+		chapters: 'could not list chapters',
+		pages: 'could not return the pages of a chapter',
 		resolve: 'could not resolve a stream',
 		// Not "resolved a stream that does not exist" any more. The probe now
 		// says which of the several possible reasons applied, and most of them
