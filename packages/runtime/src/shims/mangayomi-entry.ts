@@ -675,13 +675,64 @@ ${MANGAYOMI_RUNTIME}
 /* --- extractors this build does not have ----------------------------------- */
 ${stubs}
 
+/**
+ * The source record this bundle runs as, from what the script declared.
+ *
+ * It used to be \`mangayomiSources[0]\`, and that is right for the majority —
+ * one file, one source. It is wrong for the shape that matters most here: a
+ * script may declare **one template covering many languages**, carrying
+ * \`langs\` and an \`ids\` map instead of a \`lang\` and an \`id\`, because the
+ * foreign app instantiates it once per language. Taking entry zero of that
+ * gives a record whose \`lang\` is \`undefined\`, and a source that builds a
+ * query from \`this.source.lang\` then asks its API for
+ * \`translatedLanguage[]=undefined\` and is answered 400.
+ *
+ * That failure is invisible from the outside: the request is made, the source
+ * catches the parse and returns an empty list, and the report says the source
+ * listed no chapters. It cost 45 listings — one source, published once per
+ * language — before anybody looked at the URL.
+ *
+ * So the *listing* supplies what identifies the instance, which is what the
+ * listing is: the per-language instantiation of that template. Everything else
+ * — base urls, date formats, whatever the author put there — still comes from
+ * the script, which remains the copy they tested against.
+ */
+function __instantiate(declared, listing) {
+  const lang = String((listing && listing.lang) || '');
+
+  // A script that declares one entry per language already has the right one.
+  let chosen = null;
+  for (const row of declared) {
+    if (row && typeof row === 'object' && String(row.lang || '') === lang && lang.length > 0) {
+      chosen = row;
+      break;
+    }
+  }
+  if (chosen === null) chosen = declared[0];
+  if (!chosen || typeof chosen !== 'object') return listing;
+
+  const merged = {};
+  for (const key in chosen) merged[key] = chosen[key];
+  if (lang.length > 0) merged.lang = lang;
+
+  // The per-language id, where the template carries the map the foreign app
+  // reads. Ids are how a source keys its own stored state, so taking the
+  // template's would have every language share one.
+  if (chosen.ids && typeof chosen.ids === 'object' && chosen.ids[lang] !== undefined) {
+    merged.id = chosen.ids[lang];
+  } else if (listing && listing.id !== undefined) {
+    merged.id = listing.id;
+  }
+  return merged;
+}
+
 /* --- the source, verbatim -------------------------------------------------- */
 
 const __Extension = (function () {
 ${options.script}
 
   if (typeof mangayomiSources !== 'undefined' && Array.isArray(mangayomiSources) && mangayomiSources.length > 0) {
-    __SOURCE = mangayomiSources[0];
+    __SOURCE = __instantiate(mangayomiSources, __FALLBACK_SOURCE);
   }
   return typeof DefaultExtension === 'function' ? DefaultExtension : null;
 })();
