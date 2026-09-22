@@ -1916,7 +1916,38 @@ export const ABI_MEMBERS: ReadonlySet<string> = new Set([
 	'videoListParse',
 	'getVideoList',
 	'videoFromElement',
-	'videosFromElement'
+	'videosFromElement',
+
+	/* The manga half. Without these the test above is unsatisfiable for an
+	   entire medium: every member a manga extension declares is spelled
+	   differently, so `abiMembers` came back empty for all of them and every
+	   conversion was refused as "translates, but declares nothing this build
+	   would call" — a sentence about the extension that was really a fact
+	   about this list. */
+	'popularMangaRequest',
+	'popularMangaParse',
+	'popularMangaFromElement',
+	'latestUpdatesRequest',
+	'latestUpdatesParse',
+	'latestUpdatesFromElement',
+	'searchMangaRequest',
+	'searchMangaParse',
+	'searchMangaFromElement',
+	'mangaDetailsParse',
+	'chapterListRequest',
+	'chapterListParse',
+	'chapterFromElement',
+	'pageListRequest',
+	'pageListParse',
+	'imageUrlParse',
+	'imageRequest',
+
+	/* The selector families, which for a themed extension are often the only
+	   thing it declares — and are exactly what makes it more than a shell. */
+	'popularMangaSelector',
+	'searchMangaSelector',
+	'latestUpdatesSelector',
+	'chapterListSelector'
 ]);
 
 /**

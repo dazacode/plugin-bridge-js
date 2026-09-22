@@ -15,7 +15,7 @@
  * A stable convention across the ecosystem, and the only thing assumed here:
  *
  * ```
- * src/<lang>/<directory>/build.gradle          extName, pkgNameSuffix, themePkg
+ * src/<lang>/<directory>/build.gradle[.kts]    extName, pkgNameSuffix, themePkg/theme
  * src/<lang>/<directory>/src/…/<Class>.kt      the extension itself
  * lib-multisrc/<theme>/                        the shared template, when there is one
  * lib/<name>/                                  shared helper modules
@@ -908,7 +908,12 @@ export async function fetchExtensionSource(
 	);
 
 	const declared = buildGradle === null ? {} : readBuildGradle(buildGradle);
-	const theme = declared['themePkg'];
+	// Two spellings of one field. The video ecosystem writes `themePkg` in a
+	// Groovy `build.gradle`; the manga one writes `theme` in a Kotlin DSL
+	// `build.gradle.kts`. Both name a directory under `lib-multisrc/`, both are
+	// read the same way, and the layout around them is identical — which is why
+	// this file serves both rather than being copied for the second.
+	const theme = declared['themePkg'] ?? declared['theme'];
 	const themePackage = typeof theme === 'string' && theme.length > 0 ? theme : null;
 	const libNames = buildGradle === null ? [] : libDependencies(buildGradle);
 

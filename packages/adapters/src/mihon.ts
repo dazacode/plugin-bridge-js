@@ -55,6 +55,7 @@ import {
 	convertedPluginId,
 	foreignListing,
 	hostsFromUrls,
+	hostsInSource,
 	keepMediums,
 	ForeignFormatError,
 	ForeignIndexError,
@@ -67,7 +68,10 @@ import {
 	parseRepositoryUrl,
 	rawCandidates
 } from '@plugin-bridge/core/git-hosts';
+import { packageBundle } from '@plugin-bridge/core/package';
 import { gunzip, isGzip, ProtobufError, ProtoMessage } from '@plugin-bridge/core/protobuf';
+import { obstacleSites } from '@plugin-bridge/core/obstacles';
+import { readMihonBuildFile } from './mihon-build-file';
 import type { ForeignFormat } from '@plugin-bridge/core/formats';
 import type { RepositoryIndex, RepositoryPlugin } from '@plugin-bridge/core/repository-index';
 
@@ -241,10 +245,58 @@ function readExtension(extension: ProtoMessage): RepositoryPlugin | null {
 				contentRating: rating,
 				extensionLib: extension.string(4) ?? '',
 				sourceDir: sourceDirFromIconUrl(resources?.string(2)),
+				// Where that directory lives, and at which ref. The index is a
+				// list of built artifacts and names no source location; the icon
+				// is served from a CDN mirroring the source repository, so the
+				// one field carries both halves of the address.
+				sourceRepository: sourceRepositoryFromIconUrl(resources?.string(2)),
 				sources
 			}
 		}
 	});
+}
+
+/** The repository an extension's source lives in, from the same icon URL. */
+const ICON_URL_REPOSITORY = /^https?:\/\/cdn\.jsdelivr\.net\/gh\/([^/@]+)\/([^/@]+)@([^/]+)\//;
+
+/**
+ * Where to fetch the Kotlin from, recovered from the icon URL.
+ *
+ * The index publishes no source location — it is a list of built artifacts —
+ * but every listing's icon is served from a CDN that mirrors the *source*
+ * repository at a ref, so the one field says which repository, which fork and
+ * which commit the extension was built from. Read together with
+ * `sourceDirFromIconUrl`, it is the whole address.
+ *
+ * A ref is carried through rather than dropped because it pins the read: a
+ * repository whose default branch moved between publishing the index and
+ * converting from it would otherwise translate a file the listing was not
+ * built from.
+ */
+function sourceRepositoryFromIconUrl(iconUrl: string | undefined): string | null {
+	if (iconUrl === undefined) return null;
+	const match = ICON_URL_REPOSITORY.exec(iconUrl);
+	if (match === null) return null;
+	const [, owner, repository, ref] = match;
+	if (!/^[\w.-]+$/.test(owner) || !/^[\w.-]+$/.test(repository) || !/^[\w./-]+$/.test(ref)) {
+		return null;
+	}
+	return `https://github.com/${owner}/${repository}/tree/${ref}`;
+}
+
+/**
+ * The file whose class the translator should treat as the extension.
+ *
+ * Every listing in this catalogue annotates exactly one class `@Source`, and
+ * upstream's own build refuses a module with more than one — so this is not a
+ * heuristic, it is the ecosystem's own rule read off the source. It matters
+ * because `convertKotlin` takes the *first* file's class as the extension, and
+ * these modules routinely ship a DTO file whose name sorts earlier.
+ */
+function entryFirst(files: readonly { path: string; source: string }[]): typeof files {
+	const entry = files.findIndex((file) => /(^|\n)\s*@Source\b/.test(file.source));
+	if (entry <= 0) return files;
+	return [files[entry], ...files.filter((_, at) => at !== entry)];
 }
 
 export const mihonAdapter: ForeignAdapter = {
@@ -401,7 +453,138 @@ export const mihonAdapter: ForeignAdapter = {
 	 *   already uses, since the translator needs to see the class the
 	 *   generator would have produced, not the abstract one actually on disk.
 	 */
-	async convert(_listing: RepositoryPlugin, _services: ConversionServices): Promise<Uint8Array> {
-		throw new ForeignFormatError('Conversion for the Mihon format is not built yet.');
+	async convert(listing: RepositoryPlugin, services: ConversionServices): Promise<Uint8Array> {
+		const origin = listing.origin;
+		if (origin === undefined || origin.format !== 'mihon') {
+			throw new ForeignFormatError('That listing did not come from a Mihon repository.');
+		}
+		const detail = origin.detail ?? {};
+
+		const sourceDir = detail['sourceDir'];
+		const repositoryUrl = detail['sourceRepository'];
+		if (typeof sourceDir !== 'string' || typeof repositoryUrl !== 'string') {
+			throw new ForeignFormatError(
+				`This repository does not say where ${listing.name} is built from, and the published ` +
+					'artifact is Android bytecode this build cannot read.'
+			);
+		}
+
+		// `src/<lang>/<directory>`, which is the layout `source-repo.ts` already
+		// knows — the two ecosystems share it, which is why that file serves
+		// both rather than having been copied for the second.
+		const [, lang, directory] = sourceDir.split('/');
+		if (lang === undefined || directory === undefined) {
+			throw new ForeignFormatError(`The source location for ${listing.name} could not be read.`);
+		}
+
+		const { fetchExtensionSource } = await import('@plugin-bridge/core/source-repo');
+		const source = await fetchExtensionSource(
+			{ repositoryUrl, lang, directory },
+			services.listFiles,
+			services.getText
+		);
+		if (source.kotlinFiles.size === 0) {
+			throw new ForeignFormatError(
+				`The source for ${listing.name} could not be found in the repository it is built from.`
+			);
+		}
+
+		// The extension, then its template, then the shared modules — the order
+		// `convertKotlin` reads as "entry first, neighbours after". Sorted
+		// within each group so the same extension read twice hands the
+		// translator the same files in the same order: a refusal naming a
+		// different member on a second run is a bug nobody can reproduce.
+		const own = entryFirst([...source.kotlinFiles].map(([path, text]) => ({ path, source: text })));
+		const theme = [...source.themeFiles].map(([path, text]) => ({
+			path: `theme/${path}`,
+			source: text
+		}));
+		const modules = [...source.libModules]
+			.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+			.flatMap(([name, files]) =>
+				[...files].map(([path, text]) => ({ path: `lib/${name}/${path}`, source: text }))
+			);
+
+		const kotlin = [...own, ...theme, ...modules];
+		const { translateKotlin } = await import('@plugin-bridge/core/kotlin/translate-host');
+		const conversion = await translateKotlin(kotlin, {
+			wasm: services.loadWasm,
+			createWorker: services.createTranslateWorker
+		});
+
+		if (conversion.className === null) {
+			throw new ForeignFormatError(
+				`No extension class could be read out of ${listing.name}'s source.`
+			);
+		}
+		if (!conversion.complete) {
+			// Each kind once per listing, so a caller counting them counts
+			// listings a fix would unblock rather than how often a construct
+			// appears — `FOREIGN.md` §4.1.4's distinction, and the one that
+			// produced the negative result about extractor modules.
+			const kinds = new Set<string>();
+			for (const refusal of conversion.blocking) {
+				for (const obstacle of refusal.obstacles) kinds.add(obstacle.kind);
+			}
+			throw new ForeignFormatError(
+				`${listing.name} could not be translated: ${[...kinds].sort().join(', ')}.`,
+				[...kinds].sort(),
+				obstacleSites(conversion, kotlin)
+			);
+		}
+		if (!conversion.substantive) {
+			// Everything declared translated and none of it is a member the host
+			// would ever call: every method it runs lives in a base class this
+			// conversion could not read. Installing it produces a source that
+			// searches and finds nothing.
+			throw new ForeignFormatError(
+				`${listing.name} translates, but none of what it declares is a member this build ` +
+					'would ever call.'
+			);
+		}
+
+		// **The base URL comes from the build file, not from a heuristic.** The
+		// sibling format has to read a constant out of the Kotlin and guess
+		// among several spellings when it cannot; here the generated subclass
+		// upstream would have supplied it, and the declaration it is generated
+		// *from* is a literal in a file this conversion already fetched.
+		const build = readMihonBuildFile(source.buildGradle ?? '');
+		const declared = build.sources.find((one) => one.lang === lang) ?? build.sources[0];
+		const baseUrl =
+			declared?.baseUrl?.kind === 'static'
+				? declared.baseUrl.url
+				: declared?.baseUrl?.kind === 'mirrors'
+					? declared.baseUrl.urls[0]
+					: (declared?.baseUrl?.url ?? '');
+		if (!baseUrl.startsWith('https://')) {
+			throw new ForeignFormatError(
+				`${listing.name} declares no https base URL that can be read without running it.`
+			);
+		}
+
+		const { mihonEntrypoint } = await import('@plugin-bridge/runtime/shims/mihon-entry');
+		const entrypointSource = mihonEntrypoint({
+			pluginId: listing.id,
+			translatedSource: conversion.js,
+			className: conversion.className,
+			baseUrl,
+			lang
+		});
+
+		// Over the emitted module rather than the Kotlin: the emitter has
+		// already folded constants and concatenations, so more of the hosts
+		// that will actually be reached are visible as literals in the output.
+		const hosts = [...new Set([...listing.hosts, ...hostsInSource(conversion.js)])].sort();
+
+		return packageBundle({
+			id: listing.id,
+			name: listing.name,
+			description: 'Converted Mihon source.',
+			version: listing.version,
+			author: listing.author,
+			hosts,
+			origin,
+			entrypointSource
+		});
 	}
 };

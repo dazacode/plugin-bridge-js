@@ -1,0 +1,519 @@
+/**
+ * A translated manga extension, wrapped as a Yorozo plugin bundle.
+ *
+ * The sibling of `aniyomi-entry.ts`, and it exists for the same reason: an
+ * extension in this ecosystem is a **subclass**, and most of what makes it work
+ * lives in the class it extends, which is not in the file being converted.
+ *
+ * ## What is shared with the video half, and what is not
+ *
+ * The two ecosystems are one fork apart, so the *shapes* are the same — a
+ * request, a list of elements, a next-page check — and `FOREIGN.md` §4.1.3's
+ * argument applies unchanged: a template is ordinary machinery a host may ship,
+ * because it can be written without naming a single site. There are no
+ * hostnames here and there never may be.
+ *
+ * What differs is everything below a title. An episode yields hosters and a
+ * hoster yields videos; a chapter yields **pages**, and a page is an image with
+ * headers. That difference is why this is a second file rather than a parameter
+ * on the first: the two would share their outer third and disagree everywhere
+ * that matters, and a driver that is right about half a medium is the failure
+ * `ABI.md` §8.5 refuses at load.
+ *
+ * ## The two base classes, and the overloads that come with them
+ *
+ * Upstream has `HttpSource` (fetch and parse it yourself) and
+ * `ParsedHttpSource` (declare selectors, let the base walk the document).
+ * Three members are declared on **both**, taking a `Response` on one and a
+ * `Document` on the other: `mangaDetailsParse`, `pageListParse` and
+ * `imageUrlParse`.
+ *
+ * Kotlin tells those apart by overload resolution. JavaScript has none, so once
+ * a class is translated each is *one* name for two methods, and the driver has
+ * to decide what to hand it. It does not decide: it passes a value that answers
+ * **both** protocols — the response, widened with the document's selector
+ * methods. See `__both`. That is a widening rather than a guess, which is the
+ * distinction that makes it allowed here: guessing wrong would hand a JSON
+ * parser an HTML document, and the symptom is an empty chapter list out of a
+ * bundle that reported nothing refused.
+ *
+ * ## Overrides win, always
+ *
+ * Every member below is called *through* the translated instance when it
+ * defines one, and falls back to the default only when it does not — the same
+ * ordering, and for the same measured reason, as the video driver.
+ */
+
+import { DOM_RUNTIME_SOURCE } from './generated/dom-source';
+import { JS_RUNTIME } from './js-runtime';
+import { kotlinRuntime } from './kotlin-runtime';
+import { STREAM_GUARDS } from './stream-guards';
+
+export interface MihonEntrypointOptions {
+	/** Must equal the manifest id, or the sandbox refuses to load the bundle. */
+	readonly pluginId: string;
+	/** `emit.ts`'s output, embedded verbatim so a conversion can be read. */
+	readonly translatedSource: string;
+	/** The class the translated source declares. */
+	readonly className: string;
+	/** The extension's own base URL, from its build file or its constants. */
+	readonly baseUrl: string;
+	/** The language this listing serves, which the generated subclass supplies. */
+	readonly lang?: string;
+	/** Foreign preference key to manifest setting id. */
+	readonly settingIds?: Readonly<Record<string, string>>;
+}
+
+const MIHON_DRIVER = String.raw`
+/* --- the base class this build supplies ------------------------------------ */
+
+/** Whether the translated class actually defines a member. */
+function __declares(name) {
+  return typeof __source[name] === 'function';
+}
+
+/** Why the last call to each selector member came back with nothing. */
+var __selectorFailure = {};
+
+/**
+ * A selector the extension declares, or '' when it declares none.
+ *
+ * The failure is recorded rather than swallowed for the reason the video
+ * driver records it: a themed extension writes one selector in terms of
+ * another, that other lives in the template file, and if the template was not
+ * part of the conversion the call throws. "Declares no selector" would send
+ * whoever reads the error to the wrong file.
+ */
+function __selector(name) {
+  delete __selectorFailure[name];
+  if (!__declares(name)) return '';
+  try {
+    const value = __source[name]();
+    return typeof value === 'string' ? value : '';
+  } catch (error) {
+    __selectorFailure[name] = error && error.message ? String(error.message) : String(error);
+    return '';
+  }
+}
+
+function __selectorReason(name) {
+  const failure = __selectorFailure[name];
+  if (failure === undefined) return 'declares no ' + name;
+  return 'declares ' + name + ', but calling it failed (' + failure + ')';
+}
+
+/**
+ * A response that also answers as a document.
+ *
+ * The overload problem, solved by widening rather than by choosing. Three
+ * members upstream take a Response on one base class and a Document on the
+ * other, and after translation each is one function. This hands it an object
+ * that satisfies whichever protocol the body actually uses.
+ *
+ * **The document is parsed lazily**, which is the part that makes this safe
+ * rather than merely convenient: an extension that reads JSON never causes an
+ * HTML parse, so a JSON body is not run through a parser that would quietly
+ * succeed on it and produce an empty selection.
+ *
+ * Response members win where the names would collide. Nothing on a jsoup
+ * Document is called 'body', 'code' or 'headers', so in practice they do not.
+ */
+function __both(response) {
+  let document = null;
+  const asDocument = function () {
+    if (document === null) document = response.asJsoup();
+    return document;
+  };
+
+  const widened = Object.create(response);
+  const forward = [
+    'select', 'selectFirst', 'getElementById', 'getElementsByTag',
+    'getElementsByClass', 'getElementsByAttribute', 'text', 'html', 'outerHtml',
+    'attr', 'hasAttr', 'children', 'parent', 'ownText', 'data', 'title'
+  ];
+  for (const name of forward) {
+    widened[name] = (function (member) {
+      return function () {
+        const target = asDocument();
+        if (typeof target[member] !== 'function') {
+          throw new Error('The parsed document has no ' + member + '().');
+        }
+        return target[member].apply(target, arguments);
+      };
+    })(name);
+  }
+  widened.asJsoup = asDocument;
+  return widened;
+}
+
+/**
+ * The base class's own implementations, reachable as 'super'.
+ *
+ * An explicit 'super.' call is the extension telling us in its own source that
+ * the base behaviour belongs at this point, which is a different act from
+ * inventing a fallback for a member we failed to read. The video driver's
+ * header argues this at length and the argument is unchanged here.
+ */
+const __super = {
+  popularMangaParse: function (response) { return __parsePage('popularManga', response); },
+  searchMangaParse: function (response) { return __parsePage('searchManga', response); },
+  latestUpdatesParse: function (response) { return __parsePage('latestUpdates', response); },
+
+  chapterListParse: function (response) { return __defaultChapterList(response); },
+
+  mangaDetailsParse: function (value) {
+    const document = value && typeof value.asJsoup === 'function' ? value.asJsoup() : value;
+    const manga = SManga.create();
+    manga.title = __textOf(document, 'h1');
+    manga.description = __textOf(document, 'p');
+    manga.initialized = true;
+    return manga;
+  },
+
+  pageListParse: function () {
+    throw new Error(
+      'This extension declares no pageListParse, so nothing here knows how to read the ' +
+      'images out of a chapter.'
+    );
+  },
+
+  imageUrlParse: function () {
+    throw new Error('This extension declares no imageUrlParse.');
+  },
+
+  headersBuilder: function () { return Headers.Builder(); },
+
+  popularMangaRequest: function (page) { return GET(__BASE_URL + '/?page=' + page, __headers()); },
+  latestUpdatesRequest: function (page) { return GET(__BASE_URL + '/?page=' + page, __headers()); },
+  searchMangaRequest: function (page, query) {
+    return GET(__BASE_URL + '/?q=' + encodeURIComponent(String(query || '')), __headers());
+  },
+
+  mangaDetailsRequest: function (manga) { return GET(__absolute(manga.url, __BASE_URL), __headers()); },
+  chapterListRequest: function (manga) { return __super.mangaDetailsRequest(manga); },
+  pageListRequest: function (chapter) { return GET(__absolute(chapter.url, __BASE_URL), __headers()); },
+  imageUrlRequest: function (page) { return GET(__absolute(page.url, __BASE_URL), __headers()); },
+
+  /* The one request whose headers are load-bearing. 'ABI.md' §8.3: an image
+     host answers 403 without a Referer on a page whose chapter loaded fine, and
+     this is the hook upstream added for exactly that. */
+  imageRequest: function (page) {
+    return GET(__absolute(page.imageUrl || page.url, __BASE_URL), __headers());
+  },
+
+  popularMangaNextPageSelector: function () { return ''; },
+  searchMangaNextPageSelector: function () { return ''; },
+  latestUpdatesNextPageSelector: function () { return ''; },
+
+  getMangaUrl: function (manga) { return __absolute(manga.url, __BASE_URL); },
+  getChapterUrl: function (chapter) { return __absolute(chapter.url, __BASE_URL); },
+  fetchPopularManga: function (page) { return __source.popularMangaRequest(page); },
+
+  setupPreferenceScreen: function () {}
+};
+
+/** The first text a selector finds, or '' — used only by the default details. */
+function __textOf(document, selector) {
+  try {
+    const found = document.selectFirst(selector);
+    return found === null || found === undefined ? '' : String(found.text());
+  } catch (error) {
+    return '';
+  }
+}
+
+function __headers() {
+  if (__declares('headersBuilder')) {
+    try {
+      const built = __source.headersBuilder();
+      if (built && typeof built.build === 'function') return built.build();
+      if (built && typeof built === 'object') return built;
+    } catch (error) {
+      /* An extension whose header builder throws still gets to make requests. */
+    }
+  }
+  return {};
+}
+
+/**
+ * One list page, read with the selectors the extension declares.
+ *
+ * The two halves are separately overridable and usually only one of them is: an
+ * extension that rewrites '<kind>Parse' has taken over the whole page, and one
+ * that only declares selectors has not.
+ */
+function __parsePage(kind, response) {
+  const document = response.asJsoup();
+  const selector = __selector(kind + 'Selector');
+  if (selector.length === 0) {
+    throw new Error(
+      'This extension ' + __selectorReason(kind + 'Selector') + ' and no ' + kind + 'Parse, so ' +
+      'there is nothing to read a results page with.'
+    );
+  }
+
+  const mangas = [];
+  for (const element of document.select(selector)) {
+    mangas.push(__source[kind + 'FromElement'](element));
+  }
+
+  const next = __selector(kind + 'NextPageSelector');
+  const hasNextPage = next.length > 0 && document.selectFirst(next) !== null;
+
+  // The plain record rather than the runtime's constructor, so translated code
+  // reading '.mangas' off a 'super' call gets the shape it expects.
+  return { mangas: mangas, hasNextPage: hasNextPage };
+}
+
+/** A chapter list, read with 'chapterListSelector' and 'chapterFromElement'. */
+function __defaultChapterList(response) {
+  const document = response.asJsoup();
+  const selector = __selector('chapterListSelector');
+  if (selector.length === 0) {
+    throw new Error(
+      'This extension ' + __selectorReason('chapterListSelector') + ' and no chapterListParse, ' +
+      'so there is nothing to read a chapter list with.'
+    );
+  }
+  if (!__declares('chapterFromElement')) {
+    throw new Error('This extension declares a chapterListSelector but no chapterFromElement.');
+  }
+  const chapters = [];
+  for (const element of document.select(selector)) {
+    chapters.push(__source.chapterFromElement(element));
+  }
+  return chapters;
+}
+
+/** Calls the override when there is one, the base implementation otherwise. */
+function __call(name, args) {
+  const target = __declares(name) ? __source[name] : __super[name];
+  if (typeof target !== 'function') {
+    throw new Error('This extension does not implement ' + name + '.');
+  }
+  return target.apply(__source, args);
+}
+
+/**
+ * One request, sent through the extension's own client.
+ *
+ * 'client.newCall(request).execute()' rather than a bare fetch, because that is
+ * what the translated code itself calls and it is where the declared request
+ * policy is applied — the rate limit an extension set to protect a source.
+ * Sending around it would convert an extension that throttles itself into one
+ * that does not, which 'FOREIGN.md' §4.1.8 records as the reason the policy
+ * exists at all.
+ */
+async function __send(request) {
+  if (request === null || request === undefined) {
+    throw new Error('This extension built no request.');
+  }
+  const call = typeof request === 'string' ? GET(request, __headers()) : request;
+  return await client.newCall(call).execute();
+}
+
+function __normalisePage(value) {
+  const decoded = value && typeof value === 'object' ? value : {};
+  const rows = Array.isArray(decoded.mangas) ? decoded.mangas : [];
+  const entries = [];
+  for (const row of rows) {
+    const entry = __entryOf(row);
+    if (entry !== null) entries.push(entry);
+  }
+  return { entries: entries, hasMore: decoded.hasNextPage === true };
+}
+
+/**
+ * One catalogue entry.
+ *
+ * 'url' is kept **verbatim** as the source minted it. 'ABI.md' §1 says a
+ * sourceMediaId is the source's own id, and it is handed straight back to this
+ * same extension's detail request — which builds an absolute url from it
+ * itself. Rewriting it here and undoing that on the way back is lossy in one
+ * direction, and the symptom is a request for a path the gate refuses.
+ */
+function __entryOf(manga) {
+  if (!manga || typeof manga !== 'object') return null;
+  const url = String(manga.url || '');
+  const title = String(manga.title || '').trim();
+  if (url.length === 0 || title.length === 0) return null;
+  return {
+    sourceMediaId: url,
+    title: title,
+    alternativeTitles: [],
+    posterImageUrl: __absolute(String(manga.thumbnail_url || ''), __BASE_URL) || undefined
+  };
+}
+
+/** A stub carrying the manga url, which is all the request members read. */
+function __mangaRef(sourceMediaId) {
+  const manga = SManga.create();
+  manga.url = String(sourceMediaId);
+  return manga;
+}
+
+function __chapterRef(sourceChapterId) {
+  const chapter = SChapter.create();
+  chapter.url = String(sourceChapterId);
+  return chapter;
+}
+
+/** One list page, fetched and normalised. */
+async function __page(kind, request) {
+  const response = await __send(request);
+  return __normalisePage(__call(kind + 'Parse', [response]));
+}
+`;
+
+export function mihonEntrypoint(options: MihonEntrypointOptions): string {
+	const constants = [
+		`const __PLUGIN_ID = ${JSON.stringify(options.pluginId)};`,
+		`const __BASE_URL = ${JSON.stringify(options.baseUrl.replace(/\/+$/, ''))};`,
+		`const __LANG = ${JSON.stringify(options.lang ?? '')};`
+	].join('\n');
+
+	// Before the runtime, for the reason the video entry gives: the preference
+	// section reads this map while it is being evaluated.
+	const settingIds = `var __SETTING_ID_MAP = ${JSON.stringify(options.settingIds ?? {})};`;
+
+	return `${JS_RUNTIME}
+${STREAM_GUARDS}
+${DOM_RUNTIME_SOURCE}
+const __rt = globalThis.__yorozoRuntime;
+${settingIds}
+${kotlinRuntime()}
+${constants}
+
+/* --- the translated extension ---------------------------------------------- */
+
+${options.translatedSource}
+
+/**
+ * The instance, with what the generated subclass would have supplied.
+ *
+ * Upstream's build step generates a concrete class carrying \`name\`, \`lang\`,
+ * \`id\` and \`baseUrl\`; the class in the source tree is abstract and has none
+ * of them. \`mihon-build-file.ts\` reads those from the module's build file and
+ * they are attached here, because a source that builds every request from
+ * \`baseUrl\` gets \`undefined/manga/1\` without them.
+ */
+const __source = new ${options.className}();
+if (!__source.baseUrl) __source.baseUrl = __BASE_URL;
+if (!__source.lang && __LANG.length > 0) __source.lang = __LANG;
+
+${MIHON_DRIVER}
+
+/* --- the adapter ----------------------------------------------------------- */
+
+export default {
+  id: __PLUGIN_ID,
+
+  async searchCatalog(query, page, ctx) {
+    __enter(ctx);
+    const wanted = Number(page) > 0 ? Number(page) : 1;
+    const text = String(query || '');
+
+    // An empty query is the shelf, not a search for nothing: the browse screen
+    // asks for a catalogue before anybody has typed.
+    if (text.length === 0) {
+      return await __page('popularManga', __call('popularMangaRequest', [wanted]));
+    }
+    return await __page('searchManga', __call('searchMangaRequest', [wanted, text, []]));
+  },
+
+  async browse(shelf, page, ctx) {
+    __enter(ctx);
+    const wanted = Number(page) > 0 ? Number(page) : 1;
+    const latest = shelf === 'latest' && __declares('latestUpdatesRequest');
+    const kind = latest ? 'latestUpdates' : 'popularManga';
+    return await __page(kind, __call(kind + 'Request', [wanted]));
+  },
+
+  async listChapters(sourceMediaId, ctx) {
+    __enter(ctx);
+    const manga = __mangaRef(sourceMediaId);
+    const response = await __send(__call('chapterListRequest', [manga]));
+    const rows = __call('chapterListParse', [response]);
+
+    const chapters = [];
+    for (const row of Array.isArray(rows) ? rows : []) {
+      if (!row || typeof row !== 'object') continue;
+      const url = String(row.url || '');
+      if (url.length === 0) continue;
+      const number = Number(row.chapter_number);
+      const name = String(row.name || '');
+      const date = Number(row.date_upload) || 0;
+      chapters.push({
+        // Verbatim, and handed back to this extension's own page request.
+        sourceChapterId: url,
+        // Upstream's unset value is -1, which is not a chapter number. A list
+        // that states none is numbered by its own order, newest first, which
+        // is how these sites render.
+        number: Number.isFinite(number) && number >= 0 ? number : chapters.length + 1,
+        title: name.length > 0 ? name : undefined,
+        scanlator: typeof row.scanlator === 'string' && row.scanlator.length > 0
+          ? row.scanlator
+          : undefined,
+        publishedAt: date > 0 ? new Date(date).toISOString() : undefined
+      });
+    }
+    chapters.sort(function (a, b) { return a.number - b.number; });
+    return chapters;
+  },
+
+  async readChapter(sourceMediaId, chapter, ctx) {
+    __enter(ctx);
+    const target = chapter && chapter.sourceChapterId
+      ? String(chapter.sourceChapterId)
+      : String(sourceMediaId);
+    const response = await __send(__call('pageListRequest', [__chapterRef(target)]));
+
+    // The widened value, so whichever overload this extension wrote is the one
+    // that answers. See '__both'.
+    const rows = __call('pageListParse', [__both(response)]);
+
+    const pages = [];
+    for (const row of Array.isArray(rows) ? rows : []) {
+      if (!row || typeof row !== 'object') continue;
+      let image = String(row.imageUrl || '');
+
+      // A page that carries only a url resolves its image separately — the
+      // second request upstream's 'imageUrlParse' exists for. Skipped rather
+      // than guessed when the extension declares no way to do it.
+      if (image.length === 0 && String(row.url || '').length > 0 && __declares('imageUrlParse')) {
+        try {
+          const resolved = await __send(__call('imageUrlRequest', [row]));
+          image = String(__call('imageUrlParse', [__both(resolved)]) || '');
+        } catch (error) {
+          image = '';
+        }
+      }
+      if (image.length === 0) continue;
+
+      // The headers the extension asks for on an *image*, which is the whole
+      // reason 'imageRequest' is a separate member upstream and the whole
+      // reason 'PageImage.headers' is in the ABI.
+      let headers;
+      if (__declares('imageRequest')) {
+        try {
+          const request = __source.imageRequest({ index: pages.length, url: row.url || '', imageUrl: image });
+          if (request && typeof request === 'object') {
+            if (request.url) image = String(request.url);
+            if (request.headers && typeof request.headers === 'object') headers = request.headers;
+          }
+        } catch (error) {
+          /* A builder that throws leaves the page reachable without headers. */
+        }
+      }
+
+      pages.push({
+        index: pages.length,
+        url: __absolute(image, __BASE_URL),
+        headers: headers
+      });
+    }
+    return { pages: pages };
+  }
+};
+`;
+}
