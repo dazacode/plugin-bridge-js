@@ -467,3 +467,53 @@ describe('a data class copy', () => {
 		expect(demo.pageByPosition()).toBe(1);
 	});
 });
+
+describe('detached accessors and minimal declarations', () => {
+	it('reads computed properties, replaces a LazyMutable, and constructs an empty subclass', async () => {
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'data class Series(val genre: String) {',
+				'    val label: String',
+				'        get() = "$genre series"',
+				'}',
+				'class Demo {',
+				'    private var built = 0',
+				'    var host by LazyMutable { built += 1; "mirror$built" }',
+				'    var token: String? = null',
+				'        private set',
+				'    fun hosts(): String { val first = host; val again = host; host = "chosen"; return "$first $again $host $built" }',
+				'    fun login(): String? { token = "t"; return token }',
+				'    fun label() = Series("action").label',
+				'    fun year() = currentYear',
+				'    fun filters() = listOf("a", "b").map { object : Filter.CheckBox(it, true) {} }',
+				'    companion object {',
+				'        private val currentYear: Int',
+				'            get() = 2000 + 26',
+				'    }',
+				'}'
+			)
+		);
+		expect(demo.hosts()).toBe('mirror1 mirror1 chosen 1');
+		expect(demo.login()).toBe('t');
+		expect(demo.label()).toBe('action series');
+		expect(demo.year()).toBe(2026);
+		expect(
+			demo.filters().map((item: { name: string; state: boolean }) => `${item.name}=${item.state}`)
+		).toEqual(['a=true', 'b=true']);
+	});
+
+	it('still refuses an anonymous subclass with its own body', () => {
+		expect(
+			refusalNames(
+				kt(
+					'class Demo {',
+					'    val cache = object : LinkedHashMap<String, String>() {',
+					'        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?) = size > 10',
+					'    }',
+					'}'
+				)
+			)
+		).toEqual(['an anonymous `object : LinkedHashMap(…)` over a constructed base']);
+	});
+});

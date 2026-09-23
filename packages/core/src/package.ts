@@ -156,8 +156,12 @@ const ENTRYPOINT = 'source';
  * 51: the video libraries' update hint and catching map variant now use the
  *     existing runtime equivalents. Extensions that called those names were
  *     refused before, so reconversion is needed to pick up the widened subset.
+ *
+ * 52: detached class and companion getters, mutable lazy properties, and
+ *     empty anonymous subclasses now keep their Kotlin behavior. Previously
+ *     refused members can enter a bundle after reconversion.
  */
-export const CONVERTER_VERSION = 51;
+export const CONVERTER_VERSION = 52;
 
 export interface BundleInput {
 	readonly id: string;

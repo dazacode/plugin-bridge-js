@@ -2895,7 +2895,8 @@ class Emitter {
 		for (const child of members) {
 			if (child.type !== 'companion_object') continue;
 			const inner = kids(child).find((part) => part.type === 'class_body');
-			for (const part of kids(inner)) {
+			const parts = kids(inner);
+			for (const [index, part] of parts.entries()) {
 				const declared =
 					part.type === 'property_declaration'
 						? this.propertyName(part)
@@ -2903,6 +2904,15 @@ class Emitter {
 							? this.nameOf(part)
 							: null;
 				if (declared === null) continue;
+				// A companion getter is a hoisted function, including when the
+				// grammar puts its accessor beside the property. Mark it before
+				// earlier class members are emitted so their reads call it.
+				if (
+					part.type === 'property_declaration' &&
+					accessorOf(part, parts[index + 1], 'getter') !== undefined
+				) {
+					this.moduleGetters.add(declared);
+				}
 				if (this.emittedNames.has(declared) || this.companionClaims.has(declared)) {
 					let binding = `${plainName(owner)}_${plainName(declared)}`;
 					while (this.emittedNames.has(binding) || this.moduleNames.has(binding)) binding += '_';
@@ -2992,7 +3002,9 @@ class Emitter {
 				this.companionRenames = this.registerCompanionNames(kids(body), name);
 				this.companionMembers = [];
 				const nested: string[] = [];
-				for (const child of kids(body)) {
+				const bodyMembers = kids(body);
+				for (const [index, child] of bodyMembers.entries()) {
+					if (child.type === 'getter' || child.type === 'setter') continue;
 					if (child.type === 'function_declaration') {
 						fields.push(this.functionDeclaration(child, 'method'));
 						continue;
@@ -3019,7 +3031,7 @@ class Emitter {
 					}
 					const member = this.propertyName(child);
 					if (member === null) this.refuse(child, 'an unnamed property');
-					const getter = kids(child).find((part) => part.type === 'getter');
+					const getter = accessorOf(child, bodyMembers[index + 1], 'getter');
 					if (getter === undefined) {
 						fields.push(`${JSON.stringify(member)}: ${this.propertyValue(child, member)}`);
 						continue;
@@ -3296,8 +3308,10 @@ class Emitter {
 	private companionBody(node: KNode): string[] {
 		const body = kids(node).find((child) => child.type === 'class_body');
 		const out: string[] = [];
+		const members = kids(body);
 
-		for (const child of kids(body)) {
+		for (const [index, child] of members.entries()) {
+			if (child.type === 'getter' || child.type === 'setter') continue;
 			if (child.type === 'property_declaration') {
 				const name = this.propertyName(child) ?? 'val';
 				const binding = this.companionRenames.get(name) ?? name;
@@ -3311,7 +3325,7 @@ class Emitter {
 					// and the companion refused for a member the class computes
 					// on every read. `moduleGetters` is what makes the call sites
 					// add the parentheses back.
-					const getter = accessorOf(child, undefined, 'getter');
+					const getter = accessorOf(child, members[index + 1], 'getter');
 					if (getter !== undefined) {
 						const body = kids(getter).find((part) => part.type === 'function_body');
 						if (body === undefined) this.refuse(getter, 'a getter with no body');
@@ -3829,9 +3843,11 @@ class Emitter {
 		const call = kids(delegate)[0];
 		const called = call === undefined ? null : this.nameOf(call);
 
-		if (called === 'lazy') {
+		// LazyMutable computes once like lazy, then lets the property's
+		// overridable setter replace the memoised value.
+		if (called === 'lazy' || called === 'LazyMutable') {
 			const lambda = this.lambdaOf(call);
-			if (lambda === null) this.refuse(delegate, 'a `lazy` without a block');
+			if (lambda === null) this.refuse(delegate, `a \`${called}\` without a block`);
 			const body = this.functionScope('lambda', called, [], () => block(this.lambdaLines(lambda)));
 			return `${body.isAsync ? 'async ' : ''}() => ${body.text}`;
 		}
@@ -6724,6 +6740,14 @@ class Emitter {
 	private objectLiteral(node: KNode): string {
 		const invoked = this.baseInvocation(node);
 		if (invoked !== null) {
+			// An empty anonymous subclass adds nothing to a constructed base;
+			// creating that base gives the same fields and methods. A body needs
+			// its own inherited scope, which this emitter cannot represent.
+			const base = this.resolvedBase(invoked.type);
+			const members = kids(kids(node).find((child) => child.type === 'class_body'));
+			if (base !== null && members.length === 0) {
+				return `new ${base}(${this.plainArguments(invoked.type, [...invoked.args]).join(', ')})`;
+			}
 			this.refuse(node, `an anonymous \`object : ${invoked.type}(…)\` over a constructed base`);
 		}
 		const body = kids(node).find((child) => child.type === 'class_body');
