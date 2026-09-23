@@ -3179,6 +3179,15 @@ var __k = {
     return job;
   },
 
+  /** A throw, as a call: 'x ?: throw e' in a position only an expression can hold. */
+  raise: function (error) {
+    // Kotlin's 'throw null' is a NullPointerException, not a throw of nothing.
+    if (error === null || error === undefined) {
+      throw new Error('This converted extension threw a value that was null.');
+    }
+    throw error;
+  },
+
   /**
    * java.util.UUID.randomUUID(), as its text: 122 random bits in the
    * version-4 layout. What an extension does with one is send it as a session

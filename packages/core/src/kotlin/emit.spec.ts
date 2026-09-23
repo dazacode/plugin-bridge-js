@@ -421,6 +421,9 @@ const helpers: Record<string, (...args: never[]) => unknown> = {
 	error: (message?: string) => {
 		throw new Error(message ?? 'error');
 	},
+	raise: (error: Any) => {
+		throw error;
+	},
 	check: (value: Any, message?: () => Any) => {
 		if (value !== true) throw new Error(String(message?.() ?? 'check failed'));
 	},
@@ -4945,5 +4948,57 @@ describe("the standard library's own checks and references", () => {
 			{ chapter_number: 3 },
 			{ chapter_number: 1 }
 		]);
+	});
+});
+
+describe('throwing where Kotlin throws', () => {
+	it('keeps `?: throw` in an argument, evaluated only when the left side is null', () => {
+		const demo = instantiate(
+			inClass(
+				'    fun pick(token: String?): String = listOf(token ?: throw Exception("no token")).first()'
+			)
+		);
+
+		expect(demo.pick('t')).toBe('t');
+		expect(() => demo.pick(null)).toThrow('no token');
+	});
+
+	it('rethrows what a `catch` caught, past a clause for a cancellation nothing raises', () => {
+		const demo = instantiate(
+			inClass(
+				'    fun parse(text: String): Int? = try {',
+				'        text.toInt()',
+				'    } catch (e: CancellationException) {',
+				'        throw e',
+				'    } catch (e: Exception) {',
+				'        null',
+				'    }',
+				'    fun strict(text: String): Int = try { text.toInt() } catch (e: Exception) { throw e }'
+			)
+		);
+
+		expect(demo.parse('4')).toBe(4);
+		expect(demo.parse('x')).toBeNull();
+		expect(() => demo.strict('x')).toThrow('not a number');
+	});
+
+	it('still refuses a clause list whose types would have decided which ran', () => {
+		expect(
+			refusalNames(
+				inClass(
+					'    fun go(text: String): Int = try { text.toInt() } catch (e: IOException) { 1 } catch (e: Exception) { 2 }'
+				)
+			)
+		).toContain('more than one `catch` clause');
+	});
+
+	it('writes through an index on the way to a property', () => {
+		const demo = instantiate(
+			inClass('    fun stamp(chapters: List<SChapter>, at: Long) { chapters[0].date_upload = at }')
+		);
+		const chapters = [{ date_upload: 0 }, { date_upload: 0 }];
+		demo.stamp(chapters, 7);
+
+		expect(chapters).toEqual([{ date_upload: 7 }, { date_upload: 0 }]);
 	});
 });

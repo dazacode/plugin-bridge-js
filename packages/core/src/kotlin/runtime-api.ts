@@ -338,6 +338,9 @@ export const RUNTIME_HELPERS = [
 	'coroutineScope',
 	'launch',
 
+	/* `x ?: throw e` where no statement can hold the `throw`: throws its argument. */
+	'raise',
+
 	/* `UUID.randomUUID()`, as the text of a version-4 UUID. */
 	'randomUUID',
 

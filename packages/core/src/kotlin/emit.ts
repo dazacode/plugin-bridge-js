@@ -4356,6 +4356,15 @@ class Emitter {
 	): string {
 		const frame = this.guards;
 		if (frame === null || !frame.hoistable.has(node)) {
+			// A `throw` needs no statement position: it leaves by propagating,
+			// which it does out of a callback exactly as out of the member. So
+			// `ifEmpty { throw … }` where no hoist can reach is the ordinary
+			// call, with a block that throws.
+			const raised = this.raisedBy(guarded);
+			if (raised !== null) {
+				const helper = guarded.test === 'isEmpty' ? 'ifEmpty' : 'ifBlank';
+				return `${this.helper(helper)}(${this.expr(guarded.value)}, () => ${raised})`;
+			}
 			this.refuse(
 				node,
 				`an \`${guarded.test === 'isEmpty' ? 'ifEmpty' : 'ifBlank'}\` that jumps, used as a value`
@@ -4370,6 +4379,24 @@ class Emitter {
 		return holder;
 	}
 
+	/**
+	 * A `throw` jump as an expression that throws, or null for any other jump.
+	 *
+	 * `thrown` answers either a helper call that throws on its own (`__k.error`)
+	 * or a value to be thrown (a caught error, rethrown); `raise` throws the
+	 * latter and is never reached by the former.
+	 */
+	private raisedBy(guarded: { jump: KNode; detached?: KNode }): string | null {
+		const jump = guarded.jump;
+		if (jump.allChildren[0]?.type !== 'throw') return null;
+		const value =
+			kids(jump).find((child) => child.type !== 'label') ??
+			guarded.detached ??
+			this.jumpValues.get(jump);
+		if (value === undefined) return null;
+		return `${this.helper('raise')}(${this.thrown(value)})`;
+	}
+
 	private hoistedGuard(
 		node: KNode,
 		guarded: { value: KNode; jump: KNode; detached?: KNode }
@@ -4382,6 +4409,12 @@ class Emitter {
 			// and a call is an expression. See `nonLocalTarget`.
 			const nonLocal = this.nonLocalGuard(guarded);
 			if (nonLocal !== null) return nonLocal;
+			// `.set("X-Token", token() ?: throw Exception("…"))` — a `throw` is
+			// the one jump that is an expression once it is a call, so it stays
+			// where it was written and is evaluated when Kotlin would have: only
+			// when the left side is null, after everything before it.
+			const raised = this.raisedBy(guarded);
+			if (raised !== null) return `(${this.expr(guarded.value)} ?? ${raised})`;
 			this.refuse(node, 'a `?: return` used as a value');
 		}
 		// Emitted before the temporary is claimed and before the lines are
@@ -4813,6 +4846,16 @@ class Emitter {
 		}
 
 		for (const suffix of parts.slice(1)) {
+			// `chapters[0].date_upload = x` — an index on the way to the property
+			// being written is a *read*, and reads through the runtime's `index`
+			// like any other. Only the final step is the write, and a final index
+			// never reaches here: `isIndexedTarget` sends it to `setIndex`.
+			if (suffix.type === 'indexing_suffix') {
+				const key = kids(suffix)[0];
+				if (key === undefined) this.refuse(suffix, 'an empty index');
+				target = `${this.helper('index')}(${target}, ${this.expr(key)})`;
+				continue;
+			}
 			// Only a property write. An indexed write (`map["k"] = v`) needs the
 			// runtime's own map semantics rather than JavaScript's, and guessing
 			// between them writes to the wrong container.
@@ -4927,6 +4970,14 @@ class Emitter {
 	}
 
 	private thrown(node: KNode): string {
+		// `catch (e: Exception) { …; throw e }` and `onFailure { throw it }` —
+		// rethrowing what was caught, which is a local holding the very error
+		// the runtime threw. Only a local: a name that is not one is not
+		// something this can know is an exception at all.
+		if (node.type === 'simple_identifier') {
+			const local = this.lookup(node.text);
+			if (local !== null) return local;
+		}
 		const isCall = node.type === 'call_expression';
 		const callee = isCall ? kids(node)[0] : node;
 		const typeName = callee?.text ?? '';
@@ -5032,9 +5083,9 @@ class Emitter {
 
 	private tryBlock(node: KNode, sink: Sink): string {
 		const body = kids(node).find((child) => child.type === 'statements');
-		const catches = kids(node).filter((child) => child.type === 'catch_block');
+		const written = kids(node).filter((child) => child.type === 'catch_block');
 		const ensure = kids(node).find((child) => child.type === 'finally_block');
-		if (catches.length > 1) this.refuse(catches[1], 'more than one `catch` clause');
+		const catches = this.reachableCatches(written);
 
 		let text = `try ${block(body === undefined ? [] : this.statementList(body, sink))}`;
 		if (catches.length === 1) {
@@ -5064,6 +5115,32 @@ class Emitter {
 			text += ` finally ${block(inner === undefined ? [] : this.statementList(inner, null))}`;
 		}
 		return text;
+	}
+
+	/**
+	 * The `catch` clauses that can run here, or a refusal.
+	 *
+	 * JavaScript has one `catch` and no type to dispatch on, and this runtime
+	 * throws plain `Error`s, so a Kotlin clause list can be kept only where the
+	 * type tests would not have decided anything. The shape this ecosystem
+	 * writes is exactly that: `catch (e: CancellationException) { throw e }`
+	 * and then `catch (e: Exception) { … }`. Nothing here cancels a coroutine
+	 * — there is no dispatcher to do it — so the first clause can never run,
+	 * and the catch-all is the whole of what is left. Any other list would need
+	 * the type of an error this runtime does not carry, and is refused.
+	 */
+	private reachableCatches(clauses: readonly KNode[]): readonly KNode[] {
+		if (clauses.length <= 1) return clauses;
+		const typeOf = (clause: KNode): string =>
+			typeName(kids(clause).find((child) => child.type.endsWith('type')))
+				.split('.')
+				.pop() ?? '';
+		const last = clauses[clauses.length - 1];
+		const unreachable = clauses.slice(0, -1).every((one) => NEVER_THROWN.has(typeOf(one)));
+		if (!unreachable || !CATCH_ALL.has(typeOf(last))) {
+			this.refuse(clauses[1], 'more than one `catch` clause');
+		}
+		return [last];
 	}
 
 	private bodyLines(node: KNode | null): string[] {
@@ -8440,6 +8517,15 @@ const ANY_MODEL_FIELD: ReadonlySet<string> = new Set([
 /** One term of a `CoroutineScope(…)` context the runtime models. */
 const COROUTINE_CONTEXT =
 	/^(?:Dispatchers\.(?:IO|Default|Main|Unconfined)|SupervisorJob\(\)|Job\(\))$/;
+
+/** Exception types nothing in this runtime can throw; see `reachableCatches`. */
+const NEVER_THROWN: ReadonlySet<string> = new Set([
+	'CancellationException',
+	'TimeoutCancellationException'
+]);
+
+/** Clause types that catch whatever a translated extension can throw. */
+const CATCH_ALL: ReadonlySet<string> = new Set(['Exception', 'Throwable']);
 
 /** The framework's model types, whose fields `MODEL_FIELDS` lists. */
 const MODEL_TYPES: ReadonlySet<string> = new Set(MODEL_FIELDS.keys());
