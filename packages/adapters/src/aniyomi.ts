@@ -185,6 +185,18 @@ export const aniyomiAdapter: ForeignAdapter = {
 			const baseUrls = declared.map((source) =>
 				typeof source.baseUrl === 'string' ? source.baseUrl : null
 			);
+			// The one source's base url as the repository published it, kept for
+			// the converter — see `publishedBaseUrl`. Only for a listing that
+			// declares exactly one source: with several, which of them the
+			// converted class is cannot be read off the index.
+			const published =
+				baseUrls.length === 1 && baseUrls[0] !== null && baseUrls[0].startsWith('https://')
+					? baseUrls[0]
+					: null;
+			const detail = {
+				...(pretranslated === null ? {} : { pretranslated }),
+				...(published === null ? {} : { publishedBaseUrl: published })
+			};
 
 			plugins.push(
 				foreignListing({
@@ -213,7 +225,7 @@ export const aniyomiAdapter: ForeignAdapter = {
 						foreignVersion: String(row['version'] ?? '0'),
 						mediaKind: mediaKindOfPackage(pkg),
 						isNsfw: row['nsfw'] === 1 || row['nsfw'] === true,
-						...(pretranslated === null ? {} : { detail: { pretranslated } })
+						...(Object.keys(detail).length === 0 ? {} : { detail })
 					}
 				})
 			);
@@ -383,7 +395,8 @@ export const aniyomiAdapter: ForeignAdapter = {
 			(conversion.superClass === 'AnimeSourceFactory'
 				? baseUrlFromFactoryTarget(source.files, source.files[0]?.source ?? '')
 				: '') ||
-			baseUrlOfClass(source.files, conversion.className);
+			baseUrlOfClass(source.files, conversion.className) ||
+			publishedBaseUrl(detail);
 		if (!baseUrl.startsWith('https://')) {
 			throw new ForeignFormatError(
 				`${listing.name} declares no https base URL that can be read without running it.`
@@ -463,6 +476,26 @@ export const aniyomiAdapter: ForeignAdapter = {
 		});
 	}
 };
+
+/**
+ * The base url the repository's own index publishes for the listing's one
+ * source, asked last.
+ *
+ * Every reader above looks for the url in the Kotlin, and a template that
+ * *computes* it finds nothing there: AnikotoTheme's `baseUrl` is a preference
+ * whose default is `"https://${domainEntries.first()}"`, over a list the
+ * extension passes by name — five listings refused for declaring no base url
+ * while the bundle, run, would have built exactly the one the index names. The
+ * index value is not a guess at that: the repository's build instantiates the
+ * source and writes down its `baseUrl`, so it is the same default the running
+ * extension starts from. Kept to a listing declaring a single source (see where
+ * it is recorded), and only reached when the source itself says nothing
+ * readable, so no url written in the Kotlin is ever overridden by it.
+ */
+function publishedBaseUrl(detail: Readonly<Record<string, unknown>>): string {
+	const value = detail['publishedBaseUrl'];
+	return typeof value === 'string' && value.startsWith('https://') ? value : '';
+}
 
 /**
  * The base url a multisrc theme takes as a constructor argument.

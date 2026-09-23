@@ -655,6 +655,50 @@ class ExampleAnime : ParsedAnimeHttpSource() {
 		expect(bundle.hosts).toContain('watch.example.invalid');
 	}, 60_000);
 
+	it('falls back to the base url the index publishes when the Kotlin computes it', async () => {
+		// A template's shape: the url is built at run time from a list the
+		// extension passes in, so no reader finds a literal. The repository's
+		// build instantiated the source and wrote its `baseUrl` into the index,
+		// which is the default the running code starts from.
+		const bundle = await openPluginArchive(
+			await convert(`
+package ${PACKAGE}
+
+class ExampleAnime : ParsedAnimeHttpSource() {
+    private val domains = listOf("watch.example.invalid", "mirror.example.invalid")
+    override val name = "Example Anime"
+    override val baseUrl: String get() = "https://${'$'}{domains.first()}"
+    override val lang = "en"
+    override val supportsLatest = false
+
+    override fun popularAnimeRequest(page: Int) = GET("$baseUrl/hot?page=$page", headers)
+
+    override fun popularAnimeSelector() = "li.card"
+
+    override fun popularAnimeNextPageSelector() = "a.next"
+}
+`)
+		);
+
+		expect(bundle.entrypointSource).toContain(
+			'const __BASE_URL = "https://watch.example.invalid";'
+		);
+	}, 60_000);
+
+	it('keeps no published base url for a listing that declares several sources', async () => {
+		// Which of several the converted class is cannot be read off the index,
+		// so none of them is offered as its url.
+		const body = JSON.parse(INDEX_BODY);
+		body[0].sources.push({ name: 'Mirror', lang: 'en', baseUrl: 'https://mirror.example.invalid' });
+		const index = await aniyomiAdapter.loadIndex!(JSON.stringify(body), INDEX_URL, async () =>
+			JSON.stringify({ meta: { name: 'Example extensions', website: REPOSITORY } })
+		);
+		const single = await listing();
+
+		expect(single.origin?.detail?.['publishedBaseUrl']).toBe('https://watch.example.invalid');
+		expect(index.plugins[0].origin?.detail?.['publishedBaseUrl']).toBeUndefined();
+	});
+
 	it('carries the upstream licence, read and identified rather than guessed', async () => {
 		const bundle = await openPluginArchive(await convert(EXTENSION_KT));
 

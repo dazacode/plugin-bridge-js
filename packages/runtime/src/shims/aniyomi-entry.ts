@@ -204,6 +204,31 @@ function __declares(name) {
   return typeof __source[name] === 'function';
 }
 
+/**
+ * Whether the extension overrides one of the base class's suspend entry points
+ * — 'getVideoList(episode)', 'getEpisodeList(anime)' — rather than merely
+ * declaring something under the same name.
+ *
+ * Kotlin keeps overloads apart by their parameters and JavaScript keeps one
+ * slot per name, so a template's own helper can sit where the entry point
+ * would: AnimeStream declares 'protected open suspend fun getVideoList(url:
+ * String, name: String)', the per-mirror hook its subclasses fill in, and
+ * nothing else under that name. The driver took it for the override, called it
+ * with the episode and no name, and the template's default answered an empty
+ * list without fetching anything — eight of nine loaded listings of that
+ * template resolved to no videos, reporting nothing.
+ *
+ * An override has exactly the entry point's parameters (Kotlin allows it no
+ * defaults), so its emitted 'length' is that count. A dispatcher over several
+ * declarations is '(...args)', length 0, and routes a one-argument call to the
+ * declaration that takes one — see '__k.overload' — so it counts too.
+ */
+function __overrides(name, arity) {
+  if (!__declares(name)) return false;
+  const declared = __source[name].length;
+  return declared === arity || declared === 0;
+}
+
 async function __call(name, ...args) {
   return await __source[name](...args);
 }
@@ -506,6 +531,25 @@ async function __listingRequest(kind, page) {
   return await __call(kind + 'Request', page);
 }
 
+/**
+ * One shelf page — popular or latest — through the member the host calls.
+ *
+ * The host calls 'getPopularAnime(page)', and the request/parse pair is only
+ * what the base class's default of it does. An extension overrides the suspend
+ * member when a page takes more than one request, or is an API call with no
+ * parse step at all, and then very often writes the pair as
+ * 'throw UnsupportedOperationException()'. Going straight to the pair ignored
+ * the code that was translated — this file's own rule, "overrides win" — and
+ * either threw or, worse, fetched the default page the author had replaced.
+ * The manga driver has asked for the override first all along.
+ */
+async function __shelf(kind, page) {
+  const override = 'get' + kind.charAt(0).toUpperCase() + kind.slice(1);
+  if (__overrides(override, 1)) return __normalisePage(await __call(override, page));
+  if (!__declares(kind + 'Request')) return { entries: [] };
+  return await __page(kind, await __call(kind + 'Request', page));
+}
+
 /** A page the extension parsed itself, in whatever shape it returned it. */
 function __normalisePage(value) {
   const rows = Array.isArray(value) ? value : (value && value.animes) || [];
@@ -624,14 +668,14 @@ function __arrayOf(value) {
  * signal that survives translation, unlike the argument types Kotlin used.
  */
 function __hasHosters() {
-  return __declares('getHosterList') || __declares('hosterListRequest') ||
+  return __overrides('getHosterList', 1) || __declares('hosterListRequest') ||
     __declares('hosterListParse') || __declares('hosterListSelector') ||
     __declares('hosterFromElement');
 }
 
 /** Whether anything here knows how to get videos from an episode directly. */
 function __hasEpisodeVideos() {
-  return __declares('getVideoList') || __declares('videoListParse') ||
+  return __overrides('getVideoList', 1) || __declares('videoListParse') ||
     __declares('videoListSelector') || __declares('videoFromElement');
 }
 
@@ -662,7 +706,7 @@ async function __hosterListDefault(episode) {
 /** The hoster list, with the extension's own override preferred. */
 async function __hosterList(episode) {
   return __arrayOf(
-    __declares('getHosterList')
+    __overrides('getHosterList', 1)
       ? await __call('getHosterList', episode)
       : await __hosterListDefault(episode)
   );
@@ -716,7 +760,7 @@ async function __videoListDefault(source) {
 async function __hosterVideos(hoster) {
   if (Array.isArray(hoster.videoList)) return hoster.videoList;
   return __arrayOf(
-    __declares('getVideoList')
+    __overrides('getVideoList', 1)
       ? await __call('getVideoList', hoster)
       : await __videoListDefault(hoster)
   );
@@ -732,7 +776,7 @@ async function __hosterVideos(hoster) {
  */
 async function __episodeVideos(episode) {
   return __arrayOf(
-    __declares('getVideoList') && !__hasHosters()
+    __overrides('getVideoList', 1) && !__hasHosters()
       ? await __call('getVideoList', episode)
       : await __videoListDefault(episode)
   );
@@ -983,26 +1027,26 @@ export default {
     // An empty query is the shelf, not a search for nothing: the browse screen
     // asks for a catalogue before anybody has typed, and an extension's popular
     // request is the only thing that answers that.
-    if (text.length === 0) {
-      if (!__declares('popularAnimeRequest')) return { entries: [] };
-      return await __page('popularAnime', await __call('popularAnimeRequest', wanted));
-    }
+    if (text.length === 0) return await __shelf('popularAnime', wanted);
 
-    if (!__declares('searchAnimeRequest')) return { entries: [] };
     // Filters are not part of this ABI, so the extension sees its own default
     // filter state — which is what it would have had before anybody touched a
     // control (see this file's header).
     const filters = __declares('getFilterList') ? __source.getFilterList() : [];
+    if (__overrides('getSearchAnime', 3)) {
+      return __normalisePage(await __call('getSearchAnime', wanted, text, filters));
+    }
+    if (!__declares('searchAnimeRequest')) return { entries: [] };
     return await __page('searchAnime', await __call('searchAnimeRequest', wanted, text, filters));
   },
 
   async browse(shelf, page, ctx) {
     __enter(ctx);
     const wanted = Number(page) > 0 ? Number(page) : 1;
-    const latest = shelf === 'latest' && __declares('latestUpdatesRequest');
-    const kind = latest ? 'latestUpdates' : 'popularAnime';
-    if (!__declares(kind + 'Request')) return { entries: [] };
-    return await __page(kind, await __call(kind + 'Request', wanted));
+    const latest =
+      shelf === 'latest' &&
+      (__declares('latestUpdatesRequest') || __overrides('getLatestUpdates', 1));
+    return await __shelf(latest ? 'latestUpdates' : 'popularAnime', wanted);
   },
 
   async listEpisodes(sourceMediaId, ctx) {
@@ -1010,10 +1054,17 @@ export default {
     const anime = SAnime.create();
     anime.url = __foreign(sourceMediaId);
 
-    const response = await client.newCall(__episodeRequest(anime)).execute();
-    const parsed = __declares('episodeListParse')
-      ? await __call('episodeListParse', response)
-      : await __defaultEpisodeList(response);
+    // The override first, for the reason '__shelf' gives: a source that wrote
+    // its own 'getEpisodeList' usually wrote 'episodeListRequest' as a throw.
+    let parsed;
+    if (__overrides('getEpisodeList', 1)) {
+      parsed = await __call('getEpisodeList', anime);
+    } else {
+      const response = await client.newCall(__episodeRequest(anime)).execute();
+      parsed = __declares('episodeListParse')
+        ? await __call('episodeListParse', response)
+        : await __defaultEpisodeList(response);
+    }
 
     const rows = Array.isArray(parsed) ? parsed : [];
     const episodes = [];

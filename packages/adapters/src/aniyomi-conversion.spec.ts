@@ -854,3 +854,114 @@ class Extension {
 		expect(sources[0].label).toBe('Alpha · 1080p');
 	});
 });
+
+describe('the suspend entry points, which the host calls and an extension overrides', () => {
+	it('lists episodes through an overridden getEpisodeList, not the pair it replaced', async () => {
+		// The template shape that made this matter: the suspend member does the
+		// work and the request it would have defaulted to is a throw. Going to
+		// the pair threw `does not implement`; going to the override is Kotlin.
+		const module = await load(`
+class Extension {
+  constructor() { this.baseUrl = '${BASE_URL}'; }
+  episodeListRequest(anime) { throw __k.unsupported(); }
+  async getEpisodeList(anime) {
+    const doc = (await client.newCall(GET(this.baseUrl + anime.url, {})).execute()).asJsoup();
+    return __k.map(doc.select('ul.eps li'), (el) => {
+      const ep = SEpisode.create();
+      ep.name = 'Own ' + el.text();
+      ep.episode_number = __k.toFloatOrNull(el.attr('data-num')) ?? 0;
+      ep.setUrlWithoutDomain(__k.nn(el.selectFirst('a'), 'a').attr('href'));
+      return ep;
+    });
+  }
+}
+`);
+		const { ctx, requested } = context();
+
+		const episodes = await module.listEpisodes(`${BASE_URL}/anime/one`, ctx);
+
+		expect(requested).toEqual([`${BASE_URL}/anime/one`]);
+		expect(episodes.map((episode) => episode.title)).toEqual(['Own Episode 1', 'Own Episode 2']);
+	});
+
+	it('browses and searches through overridden getPopularAnime and getSearchAnime', async () => {
+		const module = await load(`
+class Extension {
+  constructor() { this.baseUrl = '${BASE_URL}'; }
+  popularAnimeRequest(page) { throw __k.unsupported(); }
+  searchAnimeRequest(page, query, filters) { throw __k.unsupported(); }
+  async getPopularAnime(page) { return this.shelf('Popular ' + page); }
+  async getSearchAnime(page, query, filters) { return this.shelf('Found ' + query); }
+  shelf(title) {
+    const anime = SAnime.create();
+    anime.url = '/anime/one';
+    anime.title = title;
+    return AnimesPage(__k.listOf(anime), true);
+  }
+}
+`);
+		const { ctx } = context();
+
+		const popular = await module.browse('popular', 2, ctx);
+		const empty = await module.searchCatalog('', 1, ctx);
+		const found = await module.searchCatalog('one', 1, ctx);
+
+		expect(popular.entries.map((entry) => entry.title)).toEqual(['Popular 2']);
+		expect(popular.hasMore).toBe(true);
+		expect(empty.entries.map((entry) => entry.title)).toEqual(['Popular 1']);
+		expect(found.entries.map((entry) => entry.title)).toEqual(['Found one']);
+	});
+
+	it('does not take a template helper that shares the name for the entry point', async () => {
+		// AnimeStream's shape: `getVideoList(url, name)` is the template's
+		// per-mirror hook, and the episode's videos come from `videoListParse`
+		// calling it. Handed the episode as `url`, the hook answered nothing
+		// without a request — a source that resolved to no videos, silently.
+		const module = await load(`
+class Extension {
+  constructor() { this.baseUrl = '${BASE_URL}'; }
+  async videoListParse(response) {
+    const doc = response.asJsoup();
+    const out = [];
+    for (const s of doc.select('source')) {
+      const src = s.attr('src');
+      if (src !== '') out.push(...(await this.getVideoList(src, s.attr('label'))));
+    }
+    return out;
+  }
+  async getVideoList(url, name) {
+    return __k.listOf(Video(url, 'Mirror ' + name, url, {}));
+  }
+}
+`);
+		const { ctx, requested } = context();
+
+		const sources = await module.resolve(
+			`${BASE_URL}/anime/one`,
+			{ sourceEpisodeId: `${BASE_URL}/anime/one/1` },
+			ctx
+		);
+
+		expect(requested).toEqual([`${BASE_URL}/anime/one/1`]);
+		expect(sources.map((source) => source.url)).toEqual([
+			'https://cdn.example.invalid/a/index.m3u8'
+		]);
+		expect(sources[0].label).toContain('Mirror 1080p');
+	});
+
+	it('still treats a one-parameter getVideoList as the override it is', async () => {
+		// The existing TRANSLATED class: `getVideoList(episode)` is the entry
+		// point, and the arity check must not have demoted it.
+		const module = await load();
+		const { ctx, requested } = context();
+
+		const sources = await module.resolve(
+			`${BASE_URL}/anime/one`,
+			{ sourceEpisodeId: `${BASE_URL}/anime/one/1` },
+			ctx
+		);
+
+		expect(requested).toEqual([`${BASE_URL}/anime/one/1`]);
+		expect(sources).toHaveLength(1);
+	});
+});

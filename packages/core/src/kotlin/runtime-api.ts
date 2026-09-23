@@ -43,6 +43,9 @@ export const RUNTIME_HELPERS = [
 	'toInt',
 	'toFloatOrNull',
 	'toFloat',
+	'toDouble',
+	'toBigDecimal',
+	'toBigDecimalOrNull',
 	'toLongOrNull',
 	'toLong',
 	'countLeadingZeroBits',
@@ -398,6 +401,13 @@ export const RUNTIME_HELPERS = [
 	   cookie store, a WebView) does not, and reaching it says so by name.
 	   See `recoveryCut` in `emit.ts`. */
 	'recoveryRefused',
+
+	/* A call a helper class makes back into the source object through a typed
+	   property, emitted without an await because the source class did not
+	   start out async there — and checked, because that class's emitter can
+	   still make it async while emitting. A promise here is a loud error, not
+	   a value. See `typedMemberOwner` in `emit.ts`. */
+	'notSuspended',
 
 	/* jsoup's `Elements.eachText()` / `eachAttr()`, which return every match's
 	   text at once — the shortcut scraper code reaches for instead of a `map`. */
@@ -786,6 +796,10 @@ export const RUNTIME_GLOBALS = [
 	'SEpisode',
 	'Video',
 	'Track',
+	/* ext-lib 16's skip markers on a Video. Built and carried; the ABI has no
+	   field for them, so nothing a viewer sees depends on them. */
+	'TimeStamp',
+	'ChapterType',
 	'AnimeFilter',
 	'Json',
 
@@ -1071,6 +1085,14 @@ export const RUNTIME_GLOBALS = [
 	'PrimitiveSerialDescriptor',
 	'PrimitiveKind',
 	'JsonNull',
+
+	/* okhttp's Credentials.basic, a Basic `Authorization` header value. */
+	'Credentials',
+
+	/* java.math.BigDecimal over a BigInt, and the rounding modes it divides
+	   with. */
+	'BigDecimal',
+	'RoundingMode',
 
 	/* java.io.File, as far as `File.createTempFile` goes: see `JSOUP_STATICS`. */
 	'File'
