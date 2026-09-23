@@ -9424,16 +9424,25 @@ class Emitter {
 		// `configureClient() = addCookie { listOf("age" to "18") }` — the same
 		// call the written-receiver form already makes, on the builder that is
 		// the implicit receiver, with the block as an ordinary argument (the
-		// cookies, asked for per request). Only `addCookie`: the other
-		// argument-lambda method is `addInterceptor`, and an interceptor lambda
-		// is a boundary this path must not open by the back door.
+		// cookies, asked for per request). The two interceptor installers take
+		// their block the same way, as the chain's function, and translate
+		// exactly as `client.newBuilder().addInterceptor { … }` already does.
+		//
+		// An interceptor's block is async when it proceeds, and that must not
+		// make the *installer* async: adding an interceptor to a builder
+		// returns the builder, now, and a `client` property awaited on that
+		// account would be a Promise where the host expects a client. The
+		// lambda keeps its own `async`; only the count the enclosing member
+		// reads is put back.
 		if (
 			implicit !== null &&
 			lambda !== null &&
-			name === 'addCookie' &&
+			(name === 'addCookie' || name === 'addInterceptor' || name === 'addNetworkInterceptor') &&
 			!this.isSourceMember(name)
 		) {
+			const before = this.asyncLambdas;
 			const withLambda = this.callArguments(name, args, lambda, labelled, false);
+			if (name !== 'addCookie') this.asyncLambdas = before;
 			return `${implicit}.${name}(${withLambda.join(', ')})`;
 		}
 		// `configureClient() = rateLimit(3)`: the builder is the implicit
@@ -10245,13 +10254,12 @@ class Emitter {
 	 * given by their own signature, so they translate onto the request policy
 	 * exactly as the extension function does.
 	 *
-	 * Returning null rather than refusing is the point: **everything else stays
-	 * refused** by the passthrough rule below, which is where a hand-written
-	 * `addInterceptor { chain -> … }` lands. `adr/0006-local-http-server.md` §5
-	 * is the rule — recognising what an arbitrary body *means* is exactly the
-	 * intent-recognition this converter will not do, and the measured value of
-	 * doing it anyway is zero listings, because a body that does something
-	 * worth recognising also reaches for `.proceed()` and a cookie.
+	 * Returning null rather than recognising more is the point: every other
+	 * interceptor — a hand-written `addInterceptor { chain -> … }` included —
+	 * goes through the passthrough below and is *translated*, body and all,
+	 * and run as a chain by the runtime's `__proceed`. Nothing here decides
+	 * what an arbitrary body means (`adr/0006-local-http-server.md` §5); only
+	 * these two, whose meaning is their signature, become request policy.
 	 */
 	private declarativeInterceptor(suffix: KNode, receiver: KNode, arg: KNode): string | null {
 		const value = this.argumentValue(arg);
