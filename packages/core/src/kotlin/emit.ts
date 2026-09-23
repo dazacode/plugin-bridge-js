@@ -103,6 +103,7 @@ import {
 	EXTENSION_PROPERTIES,
 	FREE_FUNCTIONS,
 	GLOBAL_NAMES,
+	JSOUP_STATICS,
 	HOST_METHODS,
 	HOST_PROPERTY_METHODS,
 	KNOWN_SIGNATURES,
@@ -7681,6 +7682,14 @@ class Emitter {
 			(receiverText === 'this' || receiverText === this.selfReference());
 		const ownMember = ownReceiver && this.isSourceMember(name);
 		const declared = this.declaredMethods.has(name) || ownMember;
+		// jsoup's statics pass through as a capitalised receiver, which checks no
+		// member at all — and the runtime defines only the ones in the table.
+		// `Parser.xmlParser()` in particular must not reach a runtime whose
+		// `Jsoup.parse` would quietly build an HTML tree from the XML.
+		const statics = JSOUP_STATICS.get(receiver.text);
+		if (statics !== undefined && !statics.has(name) && !this.moduleNames.has(receiver.text)) {
+			this.refuse(suffix, `\`${receiver.text}.${name}()\``);
+		}
 		if (!HOST_METHODS.has(name) && !crossFileObject && !declared && scopeFunction) {
 			// Passthrough is an allowlist. See the file header: a fallback turns
 			// an unrecognised Kotlin helper into a call on a shim that has never

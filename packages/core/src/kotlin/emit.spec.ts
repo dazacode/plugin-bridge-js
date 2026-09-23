@@ -5837,3 +5837,50 @@ describe('throwing where Kotlin throws' + ' (control flow)', () => {
 		expect(chapters).toEqual([{ date_upload: 7 }, { date_upload: 0 }]);
 	});
 });
+
+/* ── jsoup's statics, mutation, and the names it shares with other libraries ── */
+
+describe('jsoup beyond select and read', () => {
+	it('emits a zero-argument remove() with no item, so the runtime reads it as jsoup', () => {
+		const { js, refusals } = translate(
+			inClass('    fun strip(doc: Document) { doc.select("script, .ad").remove() }')
+		);
+		expect(refusals).toEqual([]);
+		expect(js).toContain("__k.remove(doc.select('script, .ad'))");
+	});
+
+	it('routes head(), before() and after() through helpers that ask the value', () => {
+		// `Request.Builder().head()` is the HEAD method and `doc.head()` is the
+		// <head>; `Date.before(d)` compares and `el.before(html)` inserts.
+		const { js, refusals } = translate(
+			inClass(
+				'    fun a(doc: Document) = doc.head()',
+				'    fun b(p: Element) { p.after("\\n\\n") }',
+				'    fun c(x: java.util.Date, y: java.util.Date) = x.before(y)'
+			)
+		);
+		expect(refusals).toEqual([]);
+		expect(js).toContain('__k.head(doc)');
+		expect(js).toContain("__k.after(p, '\\n\\n')");
+		expect(js).toContain('__k.before(x, y)');
+	});
+
+	it('lets through the statics the runtime defines and refuses the rest by name', () => {
+		const { js, refusals } = translate(
+			inClass(
+				'    fun a(s: String) = Parser.unescapeEntities(s, false) + Entities.unescape(s)',
+				'    fun b(doc: Document) = doc.select(Evaluator.Tag("a")).size',
+				'    fun c(s: String) = Jsoup.parse(s, "", Parser.htmlParser())'
+			)
+		);
+		expect(refusals).toEqual([]);
+		expect(js).toContain("Evaluator.Tag('a')");
+		// An XML parse is a different tree, not the HTML one with a flag.
+		expect(
+			refusalNames(inClass('    fun d(s: String) = Jsoup.parse(s, "", Parser.xmlParser())'))
+		).toContain('`Parser.xmlParser()`');
+		expect(refusalNames(inClass('    fun e() = Evaluator.AttributeKeyPair("a", "b")'))).toContain(
+			'`Evaluator.AttributeKeyPair()`'
+		);
+	});
+});

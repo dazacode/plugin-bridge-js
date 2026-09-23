@@ -62,12 +62,17 @@ export interface KElement {
 	readonly tagName: string;
 	readonly children: KElement[];
 	readonly parent: KElement | null;
-	select(selector: string): KElement[];
-	selectFirst(selector: string): KElement | null;
+	/** A selector string, or one of jsoup's `Evaluator`s (`jsoupEvaluator`). */
+	select(selector: string | Query): KElement[];
+	selectFirst(selector: string | Query): KElement | null;
 	/** This element or its nearest ancestor matching the selector, else null. */
 	closest(selector: string): KElement | null;
 	/** `''` when absent; an `abs:` prefix resolves the value against the base url. */
 	attr(name: string): string;
+	/** jsoup's setter: sets the attribute and answers this element. */
+	attr(name: string, value: string): KElement;
+	attributes(): { key: string; value: string }[];
+	dataset(): Map<string, string>;
 	hasAttr(name: string): boolean;
 	/** Every descendant's text, whitespace-normalised. */
 	text(): string;
@@ -116,6 +121,32 @@ export interface KElement {
 	cssSelector(): string;
 	/** The document this element was parsed into, or itself if it is one. */
 	ownerDocument(): KDocument | null;
+	setBaseUri(uri: string): void;
+
+	/* Traversal jsoup answers without a selector. */
+	child(index: number): KElement;
+	elementSiblingIndex(): number;
+	parents(): KElement[];
+	nextElementSiblings(): KElement[];
+	previousElementSiblings(): KElement[];
+	childNodes(): KNode[];
+	getElementsByClass(name: string): KElement[];
+	nodeName(): string;
+	normalName(): string;
+	is(query: string | Query): boolean;
+	hasText(): boolean;
+
+	/* Mutation — see `ElementImpl` for why a scraper needs it. */
+	remove(): void;
+	replaceWith(node: KNode): void;
+	before(content: string | KNode): KElement;
+	after(content: string | KNode): KElement;
+	append(html: string): KElement;
+	prepend(html: string): KElement;
+	appendText(text: string): KElement;
+	prependText(text: string): KElement;
+	appendElement(tagName: string): KElement;
+	prependElement(tagName: string): KElement;
 }
 
 /**
@@ -127,8 +158,16 @@ export interface KElement {
  */
 export interface KTextNode {
 	readonly kind: 'text' | 'data' | 'comment';
-	/** The text, entities decoded, whitespace as written. */
+	/** The text, entities decoded, each whitespace run collapsed (not trimmed). */
 	text(): string;
+	/** The text with its whitespace as written. */
+	readonly wholeText: string;
+	getWholeText(): string;
+	isBlank(): boolean;
+	nodeName(): string;
+	readonly parent: KElement | null;
+	remove(): void;
+	outerHtml(): string;
 	toString(): string;
 }
 
@@ -140,6 +179,10 @@ export interface KDocument extends KElement {
 	title(): string;
 	/** jsoup spells the base url this way, and scrapers read it off a node. */
 	location(): string;
+	/** A new element owned by this document and not yet in it. */
+	createElement(tagName: string): KElement;
+	head(): KElement;
+	body(): KElement;
 }
 
 /* ── tag tables ───────────────────────────────────────────────────────────── */
@@ -208,75 +251,184 @@ const IMPLIED_END = new Map<string, Set<string>>();
 /* ── entities ─────────────────────────────────────────────────────────────── */
 
 /**
- * The named references that actually turn up in scraped markup.
+ * Every named reference HTML 4 defines, plus `apos` and the upper-case legacy
+ * spellings, as `name:hex` pairs.
  *
- * Not the HTML5 table — that is two thousand entries to serve a page that will
- * contain six of them. Numeric references are handled generally, and an unknown
- * name is left exactly as written rather than silently becoming nothing.
+ * Not the HTML5 table — that is two thousand entries, most of them
+ * mathematical, to serve pages that contain a dozen. What a scraped page
+ * actually writes is Latin-1 (`&eacute;` in a French synopsis, `&ntilde;` in a
+ * Spanish title), typographic punctuation, Greek and arrows, and that is all of
+ * HTML 4. The first cut of this table held forty names, and every accented
+ * letter outside it came back to a viewer as the literal `&eacute;`. A name
+ * outside the table is left exactly as written rather than silently becoming
+ * nothing, which is also what jsoup does with a name it does not know.
  */
-const ENTITIES: Record<string, string> = {
-	amp: '&',
-	lt: '<',
-	gt: '>',
-	quot: '"',
-	apos: "'",
-	nbsp: '\u00a0',
-	ensp: '\u2002',
-	emsp: '\u2003',
-	thinsp: '\u2009',
-	shy: '\u00ad',
-	ndash: '–',
-	mdash: '—',
-	lsquo: '‘',
-	rsquo: '’',
-	sbquo: '‚',
-	ldquo: '“',
-	rdquo: '”',
-	bdquo: '„',
-	dagger: '†',
-	bull: '•',
-	hellip: '…',
-	prime: '′',
-	lsaquo: '‹',
-	rsaquo: '›',
-	euro: '€',
-	trade: '™',
-	copy: '©',
-	reg: '®',
-	deg: '°',
-	plusmn: '±',
-	times: '×',
-	divide: '÷',
-	middot: '·',
-	laquo: '«',
-	raquo: '»',
-	iexcl: '¡',
-	iquest: '¿',
-	sect: '§',
-	para: '¶',
-	pound: '£',
-	yen: '¥',
-	cent: '¢'
-};
+const ENTITY_TABLE =
+	'QUOT:22 quot:22 AMP:26 amp:26 apos:27 LT:3c lt:3c GT:3e gt:3e nbsp:a0 iexcl:a1 cent:a2 ' +
+	'pound:a3 curren:a4 yen:a5 brvbar:a6 sect:a7 uml:a8 COPY:a9 copy:a9 ordf:aa laquo:ab ' +
+	'not:ac shy:ad REG:ae reg:ae macr:af deg:b0 plusmn:b1 sup2:b2 sup3:b3 acute:b4 micro:b5 ' +
+	'para:b6 middot:b7 cedil:b8 sup1:b9 ordm:ba raquo:bb frac14:bc frac12:bd frac34:be ' +
+	'iquest:bf Agrave:c0 Aacute:c1 Acirc:c2 Atilde:c3 Auml:c4 Aring:c5 AElig:c6 Ccedil:c7 ' +
+	'Egrave:c8 Eacute:c9 Ecirc:ca Euml:cb Igrave:cc Iacute:cd Icirc:ce Iuml:cf ETH:d0 ' +
+	'Ntilde:d1 Ograve:d2 Oacute:d3 Ocirc:d4 Otilde:d5 Ouml:d6 times:d7 Oslash:d8 Ugrave:d9 ' +
+	'Uacute:da Ucirc:db Uuml:dc Yacute:dd THORN:de szlig:df agrave:e0 aacute:e1 acirc:e2 ' +
+	'atilde:e3 auml:e4 aring:e5 aelig:e6 ccedil:e7 egrave:e8 eacute:e9 ecirc:ea euml:eb ' +
+	'igrave:ec iacute:ed icirc:ee iuml:ef eth:f0 ntilde:f1 ograve:f2 oacute:f3 ocirc:f4 ' +
+	'otilde:f5 ouml:f6 divide:f7 oslash:f8 ugrave:f9 uacute:fa ucirc:fb uuml:fc yacute:fd ' +
+	'thorn:fe yuml:ff OElig:152 oelig:153 Scaron:160 scaron:161 Yuml:178 fnof:192 circ:2c6 ' +
+	'tilde:2dc Alpha:391 Beta:392 Gamma:393 Delta:394 Epsilon:395 Zeta:396 Eta:397 Theta:398 ' +
+	'Iota:399 Kappa:39a Lambda:39b Mu:39c Nu:39d Xi:39e Omicron:39f Pi:3a0 Rho:3a1 Sigma:3a3 ' +
+	'Tau:3a4 Upsilon:3a5 Phi:3a6 Chi:3a7 Psi:3a8 Omega:3a9 alpha:3b1 beta:3b2 gamma:3b3 ' +
+	'delta:3b4 epsilon:3b5 zeta:3b6 eta:3b7 theta:3b8 iota:3b9 kappa:3ba lambda:3bb mu:3bc ' +
+	'nu:3bd xi:3be omicron:3bf pi:3c0 rho:3c1 sigmaf:3c2 sigma:3c3 tau:3c4 upsilon:3c5 ' +
+	'phi:3c6 chi:3c7 psi:3c8 omega:3c9 thetasym:3d1 upsih:3d2 piv:3d6 ensp:2002 emsp:2003 ' +
+	'thinsp:2009 zwnj:200c zwj:200d lrm:200e rlm:200f ndash:2013 mdash:2014 lsquo:2018 ' +
+	'rsquo:2019 sbquo:201a ldquo:201c rdquo:201d bdquo:201e dagger:2020 Dagger:2021 bull:2022 ' +
+	'hellip:2026 permil:2030 prime:2032 Prime:2033 lsaquo:2039 rsaquo:203a oline:203e ' +
+	'frasl:2044 euro:20ac image:2111 weierp:2118 real:211c trade:2122 alefsym:2135 larr:2190 ' +
+	'uarr:2191 rarr:2192 darr:2193 harr:2194 crarr:21b5 lArr:21d0 uArr:21d1 rArr:21d2 ' +
+	'dArr:21d3 hArr:21d4 forall:2200 part:2202 exist:2203 empty:2205 nabla:2207 isin:2208 ' +
+	'notin:2209 ni:220b prod:220f sum:2211 minus:2212 lowast:2217 radic:221a prop:221d ' +
+	'infin:221e ang:2220 and:2227 or:2228 cap:2229 cup:222a int:222b there4:2234 sim:223c ' +
+	'cong:2245 asymp:2248 ne:2260 equiv:2261 le:2264 ge:2265 sub:2282 sup:2283 nsub:2284 ' +
+	'sube:2286 supe:2287 oplus:2295 otimes:2297 perp:22a5 sdot:22c5 lceil:2308 rceil:2309 ' +
+	'lfloor:230a rfloor:230b lang:2329 rang:232a loz:25ca spades:2660 clubs:2663 hearts:2665 ' +
+	'diams:2666';
 
-const ENTITY_PATTERN = /&(#[xX][0-9a-fA-F]+|#[0-9]+|[a-zA-Z][a-zA-Z0-9]*);?/g;
+/**
+ * The legacy names, which HTML (and so jsoup) decodes even with no `;` after
+ * them — `&copy 2020`, `&nbsp`. Every other name needs its semicolon.
+ */
+const LEGACY_ENTITIES = tagSet(
+	'AElig AMP Aacute Acirc Agrave Aring Atilde Auml COPY Ccedil ETH Eacute Ecirc Egrave Euml ' +
+		'GT Iacute Icirc Igrave Iuml LT Ntilde Oacute Ocirc Ograve Oslash Otilde Ouml QUOT REG ' +
+		'THORN Uacute Ucirc Ugrave Uuml Yacute aacute acirc acute aelig agrave amp aring atilde ' +
+		'auml brvbar ccedil cedil cent copy curren deg divide eacute ecirc egrave eth euml frac12 ' +
+		'frac14 frac34 gt iacute icirc iexcl igrave iquest iuml laquo lt macr micro middot nbsp ' +
+		'not ntilde oacute ocirc ograve ordf ordm oslash otilde ouml para plusmn pound quot raquo ' +
+		'reg sect shy sup1 sup2 sup3 szlig thorn times uacute ucirc ugrave uml uuml yacute yen ' +
+		'yuml'
+);
 
-function decodeEntities(value: string): string {
+const ENTITIES = new Map<string, string>();
+for (const pair of ENTITY_TABLE.split(' ')) {
+	const colon = pair.indexOf(':');
+	ENTITIES.set(pair.slice(0, colon), String.fromCharCode(parseInt(pair.slice(colon + 1), 16)));
+}
+
+/**
+ * What a numeric reference into the C1 range means, as every browser (and
+ * jsoup) reads it: `&#150;` is an en dash, because the page was written in
+ * windows-1252 by someone who never knew there was a difference.
+ */
+const WINDOWS_1252 = [
+	0x20ac, 0x81, 0x201a, 0x192, 0x201e, 0x2026, 0x2020, 0x2021, 0x2c6, 0x2030, 0x160, 0x2039, 0x152,
+	0x8d, 0x17d, 0x8f, 0x90, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2013, 0x2014, 0x2dc, 0x2122,
+	0x161, 0x203a, 0x153, 0x9d, 0x17e, 0x178
+];
+
+function isAsciiLetter(code: number): boolean {
+	return (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
+}
+
+function isAsciiDigit(code: number): boolean {
+	return code >= 48 && code <= 57;
+}
+
+function isHexDigit(code: number): boolean {
+	return isAsciiDigit(code) || (code >= 65 && code <= 70) || (code >= 97 && code <= 102);
+}
+
+/**
+ * jsoup's character-reference reader (`Tokeniser.consumeCharacterReference`),
+ * which is what both its parser and `Parser.unescapeEntities` run.
+ *
+ * The rules that make it more than a table lookup, each of which changes a
+ * value a scraper reads:
+ *
+ * - A name decodes without its `;` only if it is a legacy name; `&hellip`
+ *   with no semicolon stays as written.
+ * - **In an attribute**, a name followed by a letter, digit, `=`, `-` or `_`
+ *   is not a reference at all. `href="?a=1&copy=2"` is a query string, and
+ *   decoding it to `?a=1©=2` breaks the link — the old decoder here did.
+ * - A number outside Unicode, or a surrogate, becomes U+FFFD; one in the C1
+ *   range is read as windows-1252.
+ * - `&` followed by anything else is just an ampersand.
+ */
+function unescape(value: string, inAttribute: boolean): string {
 	if (value.indexOf('&') < 0) return value;
-	return value.replace(ENTITY_PATTERN, (match, body: string) => {
-		if (body.charAt(0) === '#') {
-			const hex = body.charAt(1) === 'x' || body.charAt(1) === 'X';
-			const code = parseInt(hex ? body.slice(2) : body.slice(1), hex ? 16 : 10);
-			if (!isFinite(code) || code <= 0 || code > 0x10ffff) return match;
-			try {
-				return String.fromCodePoint(code);
-			} catch {
-				return match;
-			}
+	let out = '';
+	let index = 0;
+	for (;;) {
+		const amp = value.indexOf('&', index);
+		if (amp < 0) break;
+		out += value.slice(index, amp);
+		const decoded = readReference(value, amp + 1, inAttribute);
+		if (decoded === null) {
+			out += '&';
+			index = amp + 1;
+		} else {
+			out += decoded.text;
+			index = decoded.end;
 		}
-		const named = ENTITIES[body];
-		return named === undefined ? match : named;
-	});
+	}
+	return out + value.slice(index);
+}
+
+function readReference(
+	value: string,
+	start: number,
+	inAttribute: boolean
+): { text: string; end: number } | null {
+	let cursor = start;
+	if (value.charAt(cursor) === '#') {
+		cursor++;
+		const hex = value.charAt(cursor) === 'x' || value.charAt(cursor) === 'X';
+		if (hex) cursor++;
+		const digitsStart = cursor;
+		while (
+			cursor < value.length &&
+			(hex ? isHexDigit(value.charCodeAt(cursor)) : isAsciiDigit(value.charCodeAt(cursor)))
+		) {
+			cursor++;
+		}
+		if (cursor === digitsStart) return null;
+		const digits = value.slice(digitsStart, cursor);
+		if (value.charAt(cursor) === ';') cursor++;
+		// Anything past eight hex or ten decimal digits is out of range however
+		// it parses, and parseInt would round it rather than say so.
+		let code = digits.length > (hex ? 8 : 10) ? -1 : parseInt(digits, hex ? 16 : 10);
+		if (code >= 0x80 && code < 0x80 + WINDOWS_1252.length) code = WINDOWS_1252[code - 0x80];
+		const valid = code > 0 && code <= 0x10ffff && !(code >= 0xd800 && code <= 0xdfff);
+		return { text: valid ? String.fromCodePoint(code) : '\ufffd', end: cursor };
+	}
+
+	while (cursor < value.length && isAsciiLetter(value.charCodeAt(cursor))) cursor++;
+	while (cursor < value.length && isAsciiDigit(value.charCodeAt(cursor))) cursor++;
+	if (cursor === start) return null;
+	const name = value.slice(start, cursor);
+	const next = value.charAt(cursor);
+	const text = ENTITIES.get(name);
+	if (text === undefined) return null;
+	if (next !== ';' && !LEGACY_ENTITIES.has(name)) return null;
+	// A letter jsoup's reader would have kept consuming (it reads Unicode
+	// letters, not only ASCII) means this was never the name it looked like.
+	if (next !== '' && next.toLowerCase() !== next.toUpperCase()) return null;
+	if (inAttribute && next !== ';' && /[0-9=_-]/.test(next)) return null;
+	return { text, end: next === ';' ? cursor + 1 : cursor };
+}
+
+/** What text content decodes with: the rules outside an attribute. */
+function decodeEntities(value: string): string {
+	return unescape(value, false);
+}
+
+/**
+ * jsoup's `Parser.unescapeEntities(string, inAttribute)` and
+ * `Entities.unescape(string)`, which is the same call with `false`.
+ */
+export function unescapeEntities(value: string, inAttribute: boolean): string {
+	return unescape(typeof value === 'string' ? value : String(value), inAttribute === true);
 }
 
 function escapeText(value: string): string {
@@ -363,6 +515,8 @@ interface Attribute {
 interface CharacterNode {
 	readonly kind: 'text' | 'data' | 'comment';
 	readonly value: string;
+	/** Set when the node is inserted, so that moving it can detach it first. */
+	parent?: ElementImpl | null;
 }
 
 type ChildNode = ElementImpl | CharacterNode;
@@ -402,12 +556,17 @@ class ElementImpl implements KElement {
 	readonly kind = 'element' as const;
 	readonly tagName: string;
 	readonly children: ElementImpl[] = [];
-	readonly childNodes: ChildNode[] = [];
-	readonly attributes: Attribute[] = [];
+	readonly nodes: ChildNode[] = [];
+	readonly attrs: Attribute[] = [];
 	parent: ElementImpl | null = null;
-	/** Cached at insertion time: the tree never changes once parsed. */
+	/**
+	 * Cached at insertion time, and recomputed by `reindex` whenever a
+	 * mutation changes this element's parent's child list.
+	 */
 	siblingIndex = 0;
 	document: DocumentImpl | null = null;
+	/** `setBaseUri` on this element, which its descendants inherit. */
+	baseOverride: string | null = null;
 	private classList: string[] | null = null;
 
 	constructor(tagName: string) {
@@ -415,34 +574,198 @@ class ElementImpl implements KElement {
 	}
 
 	appendChild(node: ChildNode): void {
-		this.childNodes.push(node);
+		this.nodes.push(node);
+		node.parent = this;
 		if (node.kind === 'element') {
-			node.parent = this;
 			node.document = this.document;
 			node.siblingIndex = this.children.length;
 			this.children.push(node);
 		}
 	}
 
+	/* -- mutation -- */
+
+	/*
+	 * jsoup documents are mutable, and scrapers use that: `select("script,
+	 * .ad").remove()` before reading a synopsis's `text()`, `select("br")
+	 * .prepend("\\n")` before reading its `wholeText()`, a `<br>` replaced by
+	 * a newline text node. Until these existed a `remove()` answered false and
+	 * changed nothing, so the synopsis came back with the advert in it and
+	 * nothing anywhere said so.
+	 *
+	 * Every structural change goes through `insertNodes` and `detach`, and both
+	 * rebuild the element list and its sibling indexes from the node list
+	 * rather than patching them: the selector engine's `:eq`, `+` and `~` read
+	 * `siblingIndex`, and a stale one is a wrong match rather than an error.
+	 */
+
+	/** Rebuilds `children` and every child's `siblingIndex` from `nodes`. */
+	private reindex(): void {
+		this.children.length = 0;
+		for (const node of this.nodes) {
+			node.parent = this;
+			if (node.kind === 'element') {
+				node.siblingIndex = this.children.length;
+				this.children.push(node);
+			}
+		}
+	}
+
+	/** Inserts at a node index, moving each node out of wherever it was first. */
+	insertNodes(at: number, incoming: ChildNode[]): void {
+		for (const node of incoming) detach(node);
+		// Detaching may have shortened this list, if a node came from here.
+		const index = Math.max(0, Math.min(at, this.nodes.length));
+		this.nodes.splice(index, 0, ...incoming);
+		for (const node of incoming) {
+			if (node.kind === 'element') adopt(node, this.document);
+		}
+		this.reindex();
+	}
+
+	/** Removes one child node; the caller has already checked it is one. */
+	removeNode(node: ChildNode): void {
+		const at = this.nodes.indexOf(node);
+		if (at < 0) return;
+		this.nodes.splice(at, 1);
+		node.parent = null;
+		if (node.kind === 'element') node.siblingIndex = 0;
+		this.reindex();
+	}
+
+	/** jsoup's `remove()`: out of the tree. Removing a detached node is a no-op. */
+	remove(): void {
+		detach(this);
+	}
+
+	/**
+	 * jsoup's `replaceWith(node)`. The replacement is moved, not copied, which is
+	 * jsoup's rule and what `a.replaceWith(TextNode(...))` relies on.
+	 */
+	replaceWith(replacement: KNode): void {
+		const parent = this.parent;
+		if (parent === null) throw new Error('replaceWith() was called on an element with no parent.');
+		const node = toChildNode(replacement);
+		parent.insertNodes(parent.nodes.indexOf(this), [node]);
+		detach(this);
+	}
+
+	/** jsoup's `before(html)` / `before(node)`: siblings, parsed in the parent's context. */
+	before(content: string | KNode): KElement {
+		this.insertSibling(content, 0);
+		return this;
+	}
+
+	after(content: string | KNode): KElement {
+		this.insertSibling(content, 1);
+		return this;
+	}
+
+	private insertSibling(content: string | KNode, offset: number): void {
+		const parent = this.parent;
+		if (parent === null)
+			throw new Error('before()/after() was called on an element with no parent.');
+		const incoming =
+			typeof content === 'string' ? parseFragment(content, parent) : [toChildNode(content)];
+		parent.insertNodes(parent.nodes.indexOf(this) + offset, incoming);
+	}
+
+	/** jsoup's `append(html)`: parsed in this element's context, added at the end. */
+	append(html: string): KElement {
+		this.insertNodes(this.nodes.length, parseFragment(String(html), this));
+		return this;
+	}
+
+	prepend(html: string): KElement {
+		this.insertNodes(0, parseFragment(String(html), this));
+		return this;
+	}
+
+	/** A text node, never markup: `appendText("<b>")` is the characters. */
+	appendText(text: string): KElement {
+		this.insertNodes(this.nodes.length, [{ kind: 'text', value: String(text) }]);
+		return this;
+	}
+
+	prependText(text: string): KElement {
+		this.insertNodes(0, [{ kind: 'text', value: String(text) }]);
+		return this;
+	}
+
+	/** jsoup answers the NEW element from these two, not this one. */
+	appendElement(tagName: string): KElement {
+		const child = new ElementImpl(String(tagName).toLowerCase());
+		this.insertNodes(this.nodes.length, [child]);
+		return child;
+	}
+
+	prependElement(tagName: string): KElement {
+		const child = new ElementImpl(String(tagName).toLowerCase());
+		this.insertNodes(0, [child]);
+		return child;
+	}
+
 	/* -- attributes -- */
 
-	attr(name: string): string {
+	/**
+	 * jsoup's `attr(name)`, and with a value its `attr(name, value)`, which sets
+	 * the attribute and answers the element — `img.attr("src", url)
+	 * .attr("abs:src")` is written in this catalogue. Before the setter existed
+	 * that call read the attribute instead, answered a string, and the chained
+	 * read got nothing.
+	 */
+	attr(name: string): string;
+	attr(name: string, value: string): KElement;
+	attr(name: string, value?: string): string | KElement {
 		const key = name.toLowerCase();
+		if (value !== undefined) {
+			this.setAttr(key, String(value));
+			return this;
+		}
 		if (key.length > 4 && key.slice(0, 4) === 'abs:') {
 			const raw = this.attr(key.slice(4));
 			if (raw === '') return '';
-			return resolveUrl(this.document === null ? '' : this.document.baseUrl, raw.trim());
+			return resolveUrl(this.baseUri(), raw.trim());
 		}
-		for (const attribute of this.attributes) {
+		for (const attribute of this.attrs) {
 			if (attribute.name === key) return attribute.value;
 		}
 		return '';
 	}
 
+	private setAttr(key: string, value: string): void {
+		const at = this.attrs.findIndex((attribute) => attribute.name === key);
+		if (at >= 0) this.attrs[at] = { name: key, value };
+		else this.attrs.push({ name: key, value });
+		if (key === 'class') this.classList = null;
+	}
+
+	/**
+	 * jsoup's `attributes()`: every attribute as a `key`/`value` pair, in
+	 * document order. Read-only copies — writing goes through `attr`.
+	 */
+	attributes(): { key: string; value: string }[] {
+		return this.attrs.map((attribute) => ({ key: attribute.name, value: attribute.value }));
+	}
+
+	/**
+	 * jsoup's `dataset()`: the `data-*` attributes with the prefix taken off,
+	 * as a map, which is how `body().dataset()["manga-id"]` reads.
+	 */
+	dataset(): Map<string, string> {
+		const out = new Map<string, string>();
+		for (const attribute of this.attrs) {
+			if (attribute.name.length > 5 && attribute.name.slice(0, 5) === 'data-') {
+				out.set(attribute.name.slice(5), attribute.value);
+			}
+		}
+		return out;
+	}
+
 	hasAttr(name: string): boolean {
 		const key = name.toLowerCase();
 		if (key.length > 4 && key.slice(0, 4) === 'abs:') return this.attr(key) !== '';
-		for (const attribute of this.attributes) {
+		for (const attribute of this.attrs) {
 			if (attribute.name === key) return true;
 		}
 		return false;
@@ -488,31 +811,127 @@ class ElementImpl implements KElement {
 		return this.previousElement();
 	}
 
+	/**
+	 * jsoup's `child(index)`, which throws past the end rather than answering
+	 * null — the Kotlin that calls it has no null check to fall back on.
+	 */
+	child(index: number): KElement {
+		const found = this.children[index];
+		if (found === undefined) {
+			throw new Error(
+				'This converted extension read child ' +
+					index +
+					' of an element with ' +
+					this.children.length +
+					'.'
+			);
+		}
+		return found;
+	}
+
+	/** This element's index among its parent's elements, as jsoup counts it. */
+	elementSiblingIndex(): number {
+		return this.parent === null ? 0 : this.siblingIndex;
+	}
+
+	/**
+	 * jsoup's `parents()`: nearest first, up to and including `<html>` but not
+	 * the document itself, which jsoup does not count as an element's parent.
+	 */
+	parents(): KElement[] {
+		const out: ElementImpl[] = [];
+		let current = this.parent;
+		while (current !== null && current.tagName !== '#root') {
+			out.push(current);
+			current = current.parent;
+		}
+		return out;
+	}
+
+	/** Every following element sibling, in document order. */
+	nextElementSiblings(): KElement[] {
+		if (this.parent === null) return [];
+		return this.parent.children.slice(this.siblingIndex + 1);
+	}
+
+	/**
+	 * Every preceding element sibling, NEAREST FIRST — jsoup walks backwards
+	 * from this element, so the list is in reverse document order.
+	 */
+	previousElementSiblings(): KElement[] {
+		if (this.parent === null) return [];
+		return this.parent.children.slice(0, this.siblingIndex).reverse();
+	}
+
+	/** jsoup's `childNodes()`: elements and text alike, in order. */
+	childNodes(): KNode[] {
+		const out: KNode[] = [];
+		for (const node of this.nodes) {
+			const wrapped = wrapNode(node);
+			if (wrapped !== null) out.push(wrapped);
+		}
+		return out;
+	}
+
+	/** The tag name as jsoup's `nodeName()` and `normalName()` both give it here. */
+	nodeName(): string {
+		return this.tagName;
+	}
+
+	normalName(): string {
+		return this.tagName;
+	}
+
+	/**
+	 * jsoup's `is(query)`: whether this element matches, evaluated against the
+	 * whole tree it sits in, so a combinator can look above it.
+	 */
+	is(query: string | Query): boolean {
+		let root: ElementImpl = this;
+		while (root.parent !== null) root = root.parent;
+		return matchesList(root, this, parseSelector(query));
+	}
+
+	/**
+	 * jsoup's `hasText()`: some descendant text node is not blank. A script
+	 * body is data, not text, and does not count.
+	 */
+	hasText(): boolean {
+		for (const node of this.nodes) {
+			// jsoup's `isBlank` is ASCII whitespace only: a text node that is
+			// just `&nbsp;` HAS text, which is the opposite of what `text()`
+			// normalisation would suggest.
+			if (node.kind === 'text' && /[^ \t\n\f\r]/.test(node.value)) return true;
+			if (node.kind === 'element' && node.hasText()) return true;
+		}
+		return false;
+	}
+
 	/* -- node-level siblings, which include text -- */
 
 	/** This element's place among its parent's child *nodes*, or -1. */
 	private nodeIndex(): number {
 		if (this.parent === null) return -1;
-		return this.parent.childNodes.indexOf(this);
+		return this.parent.nodes.indexOf(this);
 	}
 
 	previousSibling(): KNode | null {
 		const at = this.nodeIndex();
 		if (at <= 0 || this.parent === null) return null;
-		return wrapNode(this.parent.childNodes[at - 1]);
+		return wrapNode(this.parent.nodes[at - 1]);
 	}
 
 	nextSibling(): KNode | null {
 		const at = this.nodeIndex();
 		if (at === -1 || this.parent === null) return null;
-		const node = this.parent.childNodes[at + 1];
+		const node = this.parent.nodes[at + 1];
 		return node === undefined ? null : wrapNode(node);
 	}
 
 	textNodes(): KTextNode[] {
 		const out: KTextNode[] = [];
-		for (const node of this.childNodes) {
-			if (node.kind === 'text') out.push(characterNode(node));
+		for (const node of this.nodes) {
+			if (node.kind === 'text') out.push(new TextNodeImpl(node));
 		}
 		return out;
 	}
@@ -551,14 +970,26 @@ class ElementImpl implements KElement {
 		return found;
 	}
 
+	/**
+	 * Every element with this tag name, this one included — jsoup collects from
+	 * the element it is asked of, not from below it.
+	 */
 	getElementsByTag(tag: string): KElement[] {
 		const wanted = String(tag).toLowerCase();
+		return this.collect((element) => wanted === '*' || element.tagName === wanted);
+	}
+
+	/** jsoup's `getElementsByClass`: case-insensitive, this element included. */
+	getElementsByClass(name: string): KElement[] {
+		const wanted = String(name).trim().toLowerCase();
+		return this.collect((element) => element.classes().indexOf(wanted) >= 0);
+	}
+
+	private collect(test: (element: ElementImpl) => boolean): ElementImpl[] {
 		const out: ElementImpl[] = [];
 		const walk = (element: ElementImpl): void => {
-			for (const child of element.children) {
-				if (wanted === '*' || child.tagName === wanted) out.push(child);
-				walk(child);
-			}
+			if (test(element)) out.push(element);
+			for (const child of element.children) walk(child);
 		};
 		walk(this);
 		return out;
@@ -584,17 +1015,33 @@ class ElementImpl implements KElement {
 	clone(): KElement {
 		const copy = new ElementImpl(this.tagName);
 		copy.document = this.document;
-		for (const attribute of this.attributes) {
-			copy.attributes.push({ name: attribute.name, value: attribute.value });
+		for (const attribute of this.attrs) {
+			copy.attrs.push({ name: attribute.name, value: attribute.value });
 		}
-		for (const node of this.childNodes) {
+		for (const node of this.nodes) {
 			copy.appendChild(node.kind === 'element' ? (node.clone() as ElementImpl) : { ...node });
 		}
 		return copy;
 	}
 
+	/** The nearest `setBaseUri` at or above this element, else the document's. */
 	baseUri(): string {
+		let current: ElementImpl | null = this;
+		while (current !== null) {
+			if (current.baseOverride !== null) return current.baseOverride;
+			current = current.parent;
+		}
 		return this.document === null ? '' : this.document.baseUrl;
+	}
+
+	/**
+	 * jsoup's `setBaseUri`: what `abs:` resolves against from here down. On a
+	 * document it is the document's base url, which is where every extension
+	 * in the catalogue calls it — a page fetched from one host whose links are
+	 * meant to resolve against another.
+	 */
+	setBaseUri(uri: string): void {
+		this.baseOverride = String(uri);
 	}
 
 	/**
@@ -633,7 +1080,7 @@ class ElementImpl implements KElement {
 
 	ownText(): string {
 		const accumulator = new TextAccumulator();
-		for (const node of this.childNodes) {
+		for (const node of this.nodes) {
 			if (node.kind === 'text') accumulator.append(node.value);
 			else if (node.kind === 'element' && node.tagName === 'br') accumulator.space();
 		}
@@ -683,7 +1130,7 @@ class ElementImpl implements KElement {
 
 	html(): string {
 		const parts: string[] = [];
-		for (const node of this.childNodes) serialise(node, parts);
+		for (const node of this.nodes) serialise(node, parts);
 		return parts.join('');
 	}
 
@@ -697,14 +1144,14 @@ class ElementImpl implements KElement {
 
 	/* -- selectors -- */
 
-	select(selector: string): KElement[] {
+	select(selector: string | Query): KElement[] {
 		const list = parseSelector(selector);
 		const found: ElementImpl[] = [];
 		collectMatches(this, this, list, found);
 		return found;
 	}
 
-	selectFirst(selector: string): KElement | null {
+	selectFirst(selector: string | Query): KElement | null {
 		return firstMatch(this, this, parseSelector(selector));
 	}
 
@@ -734,12 +1181,50 @@ class ElementImpl implements KElement {
 }
 
 class DocumentImpl extends ElementImpl implements KDocument {
-	readonly baseUrl: string;
+	baseUrl: string;
 
 	constructor(baseUrl: string) {
 		super('#root');
 		this.baseUrl = baseUrl;
 		this.document = this;
+	}
+
+	setBaseUri(uri: string): void {
+		this.baseUrl = String(uri);
+	}
+
+	/**
+	 * jsoup's `head()` and `body()`. The parser always synthesises both, so
+	 * neither is ever null here — as in jsoup, which creates them too.
+	 */
+	head(): KElement {
+		return this.structural('head');
+	}
+
+	body(): KElement {
+		return this.structural('body');
+	}
+
+	private structural(tagName: string): ElementImpl {
+		const html = this.children.find((child) => child.tagName === 'html');
+		const found = html?.children.find((child) => child.tagName === tagName);
+		if (found !== undefined) return found;
+		// Only reachable after an extension removed it; jsoup puts one back.
+		const root = html ?? this;
+		const made = new ElementImpl(tagName);
+		root.insertNodes(tagName === 'head' ? 0 : root.nodes.length, [made]);
+		return made;
+	}
+
+	/**
+	 * jsoup's `createElement(tag)`: a new element belonging to this document but
+	 * not yet in it, so its `abs:` reads resolve against this document's url
+	 * the moment it is given an `href`.
+	 */
+	createElement(tagName: string): KElement {
+		const element = new ElementImpl(String(tagName).toLowerCase());
+		element.document = this;
+		return element;
 	}
 
 	title(): string {
@@ -753,36 +1238,136 @@ class DocumentImpl extends ElementImpl implements KDocument {
 	}
 }
 
-/** A character node, as jsoup's `Node.toString()` and `text()` see one. */
-function characterNode(node: CharacterNode): KTextNode {
-	return {
-		kind: node.kind,
-		text: () => node.value,
-		toString: () =>
-			node.kind === 'comment'
-				? `<!--${node.value}-->`
-				: node.kind === 'data'
-					? node.value
-					: escapeText(node.value)
-	};
+/**
+ * A character node, as jsoup's `TextNode`, `DataNode` and `Comment` present one.
+ *
+ * A view over the tree's own node rather than a copy, so that handing one to
+ * `replaceWith` or `before` moves the node itself, as jsoup does.
+ */
+class TextNodeImpl implements KTextNode {
+	readonly raw: CharacterNode;
+
+	constructor(raw: CharacterNode) {
+		this.raw = raw;
+	}
+
+	get kind(): 'text' | 'data' | 'comment' {
+		return this.raw.kind;
+	}
+
+	/**
+	 * jsoup's `TextNode.text()`, which collapses each run of whitespace to one
+	 * space and does NOT trim — `wholeText` is the unnormalised one.
+	 */
+	text(): string {
+		return this.raw.kind === 'text' ? this.raw.value.replace(TEXT_WHITESPACE, ' ') : this.raw.value;
+	}
+
+	/** `TextNode.getWholeText()`, which Kotlin reads as the property `wholeText`. */
+	get wholeText(): string {
+		return this.raw.value;
+	}
+
+	getWholeText(): string {
+		return this.raw.value;
+	}
+
+	/** ASCII whitespace only, as jsoup's `StringUtil.isBlank` has it. */
+	isBlank(): boolean {
+		return !/[^ \t\n\f\r]/.test(this.raw.value);
+	}
+
+	nodeName(): string {
+		return this.raw.kind === 'text' ? '#text' : this.raw.kind === 'data' ? '#data' : '#comment';
+	}
+
+	/** Read as a property: `HOST_PROPERTY_METHODS` drops the call parentheses. */
+	get parent(): KElement | null {
+		return this.raw.parent ?? null;
+	}
+
+	remove(): void {
+		detach(this.raw);
+	}
+
+	toString(): string {
+		const node = this.raw;
+		return node.kind === 'comment'
+			? `<!--${node.value}-->`
+			: node.kind === 'data'
+				? node.value
+				: escapeText(node.value);
+	}
+
+	outerHtml(): string {
+		return this.toString();
+	}
+}
+
+/**
+ * jsoup's `TextNode(text)`: the characters as given, never parsed as markup
+ * and never entity-decoded — `TextNode("&amp;")` serialises as `&amp;amp;`.
+ */
+export function createTextNode(text: string): KTextNode {
+	return new TextNodeImpl({ kind: 'text', value: String(text) });
 }
 
 /** Either half of a child-node list, as the ABI hands it back. */
 function wrapNode(node: ChildNode | undefined): KNode | null {
 	if (node === undefined) return null;
-	return node.kind === 'element' ? node : characterNode(node);
+	return node.kind === 'element' ? node : new TextNodeImpl(node);
+}
+
+/** What a node handed to a mutation is, underneath the view the ABI gave out. */
+function toChildNode(node: KNode): ChildNode {
+	if (node instanceof ElementImpl) return node;
+	if (node instanceof TextNodeImpl) return node.raw;
+	throw new Error('This converted extension inserted something that is not a jsoup node.');
+}
+
+/** Out of whatever it is in, if anything. */
+function detach(node: ChildNode): void {
+	const parent = node.parent;
+	if (parent !== null && parent !== undefined) parent.removeNode(node);
+}
+
+/** An element and everything below it now belong to this document. */
+function adopt(element: ElementImpl, document: DocumentImpl | null): void {
+	element.document = document;
+	for (const child of element.children) adopt(child, document);
+}
+
+/**
+ * Markup parsed the way jsoup's `append`, `prepend`, `before` and `after` parse
+ * it: as a fragment in the context of the element it lands in.
+ *
+ * The context matters in exactly the way a scraper meets it: text going into a
+ * `<script>` is script source, not markup (`head().prependElement("script")
+ * .append(js)`), and into a `<title>` or `<textarea>` it is text with entities
+ * decoded. Anywhere else it is body content — no `<head>` to fall into, so a
+ * leading `<script>` stays where it was put.
+ */
+function parseFragment(html: string, context: ElementImpl): ChildNode[] {
+	if (RAW_TEXT_TAGS.has(context.tagName)) return html === '' ? [] : [{ kind: 'data', value: html }];
+	if (RCDATA_TAGS.has(context.tagName)) {
+		return html === '' ? [] : [{ kind: 'text', value: decodeEntities(html) }];
+	}
+	const holder = new HtmlParser(html, '', true).parseFragment();
+	const nodes = holder.nodes.slice();
+	for (const node of nodes) holder.removeNode(node);
+	return nodes;
 }
 
 /** `wholeText()`: the text as written, with no whitespace normalisation. */
 function collectWholeText(element: ElementImpl, parts: string[]): void {
-	for (const node of element.childNodes) {
+	for (const node of element.nodes) {
 		if (node.kind === 'text') parts.push(node.value);
 		else if (node.kind === 'element') collectWholeText(node, parts);
 	}
 }
 
 function collectText(element: ElementImpl, accumulator: TextAccumulator): void {
-	for (const node of element.childNodes) {
+	for (const node of element.nodes) {
 		if (node.kind === 'text') {
 			accumulator.append(node.value);
 		} else if (node.kind === 'element') {
@@ -794,7 +1379,7 @@ function collectText(element: ElementImpl, accumulator: TextAccumulator): void {
 
 /** jsoup's `Element.data()`, which reads data and comment nodes and no text. */
 function collectData(element: ElementImpl, parts: string[]): void {
-	for (const node of element.childNodes) {
+	for (const node of element.nodes) {
 		if (node.kind === 'data' || node.kind === 'comment') parts.push(node.value);
 		else if (node.kind === 'element') collectData(node, parts);
 	}
@@ -809,15 +1394,17 @@ function serialise(node: ChildNode, parts: string[]): void {
 	}
 
 	parts.push('<' + node.tagName);
-	for (const attribute of node.attributes) {
+	for (const attribute of node.attrs) {
 		parts.push(' ' + attribute.name);
 		// A valueless attribute goes back out valueless; `checked=""` is not what
 		// was written and not what a regex over the result expects to find.
 		if (attribute.value !== '') parts.push('="' + escapeAttribute(attribute.value) + '"');
 	}
 	parts.push('>');
-	if (VOID_TAGS.has(node.tagName)) return;
-	for (const child of node.childNodes) serialise(child, parts);
+	// A void element has no end tag — unless a mutation gave it children
+	// (`select("br").prepend(…)`), which jsoup then writes out with one.
+	if (VOID_TAGS.has(node.tagName) && node.nodes.length === 0) return;
+	for (const child of node.nodes) serialise(child, parts);
 	parts.push('</' + node.tagName + '>');
 }
 
@@ -890,17 +1477,40 @@ class HtmlParser {
 	private readonly bodyElement: ElementImpl;
 	private stack: ElementImpl[];
 	private inHead = true;
+	/**
+	 * How many stack entries are structural and never popped: the document,
+	 * `<html>` and `<head>`/`<body>` for a document, only the holder for a
+	 * fragment.
+	 */
+	private readonly floor: number;
+	private readonly fragment: boolean;
 
-	constructor(input: string, baseUrl: string) {
+	constructor(input: string, baseUrl: string, fragment = false) {
 		this.input = input;
+		this.fragment = fragment;
 		this.doc = new DocumentImpl(baseUrl);
 		this.htmlElement = new ElementImpl('html');
 		this.headElement = new ElementImpl('head');
 		this.bodyElement = new ElementImpl('body');
+		if (fragment) {
+			// A fragment is body content held by a bare element: no document
+			// structure is synthesised, and nothing can move it into a <head>.
+			this.inHead = false;
+			this.floor = 1;
+			this.stack = [this.bodyElement];
+			return;
+		}
+		this.floor = 3;
 		this.doc.appendChild(this.htmlElement);
 		this.htmlElement.appendChild(this.headElement);
 		this.htmlElement.appendChild(this.bodyElement);
 		this.stack = [this.doc, this.htmlElement, this.headElement];
+	}
+
+	/** Parses as a fragment and answers the element holding the result. */
+	parseFragment(): ElementImpl {
+		this.parse();
+		return this.bodyElement;
 	}
 
 	parse(): DocumentImpl {
@@ -932,7 +1542,7 @@ class HtmlParser {
 	}
 
 	private switchToBody(): void {
-		if (!this.inHead) return;
+		if (!this.inHead || this.fragment) return;
 		this.inHead = false;
 		this.stack = [this.doc, this.htmlElement, this.bodyElement];
 	}
@@ -1057,7 +1667,7 @@ class HtmlParser {
 			for (const existing of attributes) {
 				if (existing.name === attributeName) seen = true;
 			}
-			if (!seen) attributes.push({ name: attributeName, value: decodeEntities(value) });
+			if (!seen) attributes.push({ name: attributeName, value: unescape(value, true) });
 		}
 
 		this.position = index;
@@ -1065,6 +1675,9 @@ class HtmlParser {
 	}
 
 	private openTag(name: string, attributes: Attribute[], selfClosing: boolean): void {
+		// In a fragment the document's own tags have nothing to stand for, and
+		// jsoup's fragment parser drops them the same way.
+		if (this.fragment && (name === 'html' || name === 'head' || name === 'body')) return;
 		if (name === 'html') {
 			this.mergeAttributes(this.htmlElement, attributes);
 			return;
@@ -1084,11 +1697,11 @@ class HtmlParser {
 
 		const closes = IMPLIED_END.get(name);
 		if (closes !== undefined) {
-			while (this.stack.length > 3 && closes.has(this.top().tagName)) this.stack.pop();
+			while (this.stack.length > this.floor && closes.has(this.top().tagName)) this.stack.pop();
 		}
 
 		const element = new ElementImpl(name);
-		for (const attribute of attributes) element.attributes.push(attribute);
+		for (const attribute of attributes) element.attrs.push(attribute);
 		this.top().appendChild(element);
 
 		// `<div/>` is honoured rather than ignored as HTML5 says. XHTML-flavoured
@@ -1117,6 +1730,7 @@ class HtmlParser {
 	}
 
 	private closeTag(name: string): void {
+		if (this.fragment && (name === 'html' || name === 'head' || name === 'body')) return;
 		if (name === 'head') {
 			this.switchToBody();
 			return;
@@ -1124,7 +1738,7 @@ class HtmlParser {
 		// Content after `</body>` is still content, so these two never pop.
 		if (name === 'body' || name === 'html') return;
 
-		for (let index = this.stack.length - 1; index >= 3; index--) {
+		for (let index = this.stack.length - 1; index >= this.floor; index--) {
 			if (this.stack[index].tagName === name) {
 				this.stack.length = index;
 				return;
@@ -1136,7 +1750,7 @@ class HtmlParser {
 
 	private mergeAttributes(element: ElementImpl, attributes: Attribute[]): void {
 		for (const attribute of attributes) {
-			if (!element.hasAttr(attribute.name)) element.attributes.push(attribute);
+			if (!element.hasAttr(attribute.name)) element.attrs.push(attribute);
 		}
 	}
 }
@@ -1606,7 +2220,8 @@ function parseInteger(value: string): number | null {
  */
 const SELECTOR_CACHE = new Map<string, Complex[]>();
 
-function parseSelector(selector: string): Complex[] {
+function parseSelector(selector: string | Query): Complex[] {
+	if (isQuery(selector)) return selector.query;
 	const key = String(selector);
 	const cached = SELECTOR_CACHE.get(key);
 	if (cached !== undefined) return cached;
@@ -1614,6 +2229,39 @@ function parseSelector(selector: string): Complex[] {
 	if (SELECTOR_CACHE.size >= 512) SELECTOR_CACHE.clear();
 	SELECTOR_CACHE.set(key, parsed);
 	return parsed;
+}
+
+/**
+ * A selector that arrives already parsed: jsoup's `Evaluator` objects, which
+ * `select` and `selectFirst` accept in place of a string.
+ */
+export interface Query {
+	readonly query: Complex[];
+}
+
+function isQuery(value: unknown): value is Query {
+	return typeof value === 'object' && value !== null && Array.isArray((value as Query).query);
+}
+
+/**
+ * jsoup's `Evaluator.Tag`, `Evaluator.Class` and `Evaluator.Id`, the three
+ * the catalogue constructs by hand — usually to avoid escaping a class name
+ * in a selector string.
+ *
+ * Each is exactly its selector's simple part, with jsoup's own comparison:
+ * `Tag` compares against the lower-cased tag name *as given* (jsoup does not
+ * lower-case the argument, so `Tag("A")` matches nothing), `Class` is
+ * case-insensitive, `Id` is exact. Any other evaluator is refused before it
+ * gets here.
+ */
+export function jsoupEvaluator(kind: string, value: string): Query {
+	const text = String(value);
+	let part: Simple;
+	if (kind === 'Tag') part = { type: 'tag', name: text };
+	else if (kind === 'Class') part = { type: 'class', value: text.toLowerCase() };
+	else if (kind === 'Id') part = { type: 'id', value: text };
+	else throw new Error('Evaluator.' + kind + ' is not one this runtime implements.');
+	return { query: [[{ combinator: null, parts: [part] }]] };
 }
 
 /* ── selectors: matching ──────────────────────────────────────────────────── */

@@ -716,7 +716,11 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 	// turn a DTO list into something it can store. See the helper.
 	['toJsonElement', 'toJsonElement'],
 	['asUriPart', 'asQueryPart'],
-	['head', 'firstOrNull'],
+	// Not a list's head: okhttp's `Request.Builder().head()` (the HEAD
+	// method) and jsoup's `document.head()`. Mapped to `firstOrNull` it
+	// answered null for both, so a HEAD request died at `.build()` and a
+	// document's <head> read as nothing. The helper asks the value.
+	['head', 'head'],
 	['rateLimit', 'rateLimit'],
 	// The per-host sibling of the one above. Both are emitted with their period
 	// already resolved to milliseconds; see `rateLimitCall` in `emit.ts`.
@@ -1003,6 +1007,10 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 	// jsoup's two upward calls
 	['closest', 'closest'],
 	['ownerDocument', 'ownerDocument'],
+	// jsoup's sibling insertions, spelled like java.util.Date's comparisons:
+	// the helper tells a node from a date by asking the value.
+	['before', 'before'],
+	['after', 'after'],
 
 	// `Throwable.printStackTrace()`, which is what `onFailure { … }` contains
 	['printStackTrace', 'printStackTrace'],
@@ -1326,6 +1334,35 @@ export const HOST_METHODS: ReadonlySet<string> = new Set([
 	'wholeText',
 	'getElementById',
 	'getElementsByTag',
+	'getElementsByClass',
+	// Traversal jsoup answers without a selector, each defined by the shim
+	// with jsoup's own semantics: `parents()` stops below the document,
+	// `previousElementSiblings()` is nearest first, `child(i)` throws past
+	// the end, `is(q)` matches against the whole tree.
+	'child',
+	'elementSiblingIndex',
+	'parents',
+	'nextElementSiblings',
+	'previousElementSiblings',
+	'childNodes',
+	'nodeName',
+	'normalName',
+	'is',
+	'hasText',
+	'attributes',
+	'dataset',
+	'getWholeText',
+	'setBaseUri',
+	// A jsoup document is mutable, and scrapers edit one before reading it.
+	// `remove()` is the collection helper, which dispatches on the argument
+	// count; `before`/`after` are helpers too (see `EXTENSION_METHODS`).
+	'replaceWith',
+	'prepend',
+	'appendText',
+	'prependText',
+	'appendElement',
+	'prependElement',
+	'createElement',
 	'hasClass',
 	'classNames',
 	'clone',
@@ -1939,6 +1976,22 @@ export const BASE_CONSTANTS: ReadonlyMap<string, string> = new Map([
 ]);
 
 /**
+ * The members each of jsoup's static receivers actually has in the runtime.
+ *
+ * A capitalised receiver in `GLOBAL_NAMES` is passed through with no check on
+ * the member, which is right for the model builders and wrong here: these
+ * four define a handful of members each, and `Parser.xmlParser()` in
+ * particular would otherwise hand `Jsoup.parse` a parser it ignores and
+ * build an HTML tree from XML. The emitter refuses any member not listed.
+ */
+export const JSOUP_STATICS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+	['Parser', new Set(['unescapeEntities', 'htmlParser'])],
+	['Entities', new Set(['unescape'])],
+	['Evaluator', new Set(['Tag', 'Class', 'Id'])],
+	['TextNode', new Set<string>()]
+]);
+
+/**
  * Names the runtime defines at bundle scope, used bare.
  *
  * Kept in step with `RUNTIME_GLOBALS` by `subset.spec.ts`; duplicated as a set
@@ -1966,6 +2019,14 @@ export const GLOBAL_NAMES: ReadonlySet<string> = new Set([
 	'Headers',
 	'FormBody',
 	'Jsoup',
+	// jsoup's `Parser.unescapeEntities`, `Entities.unescape`, `TextNode(text)`
+	// and `Evaluator.Tag/Class/Id`. Each defines only those members, and
+	// `JSOUP_STATICS` refuses any other one by name before it can reach a
+	// runtime that has never heard of it.
+	'Parser',
+	'Entities',
+	'TextNode',
+	'Evaluator',
 	'SAnime',
 	'SEpisode',
 	'Video',

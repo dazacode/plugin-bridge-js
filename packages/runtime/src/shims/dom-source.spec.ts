@@ -61,7 +61,10 @@ describe('the generated plugin runtime', () => {
 			'parsePlayerSources',
 			'findManifestUrls',
 			'base64Decode',
-			'base64Encode'
+			'base64Encode',
+			'createTextNode',
+			'jsoupEvaluator',
+			'unescapeEntities'
 		]) {
 			expect(typeof (rt as unknown as Record<string, unknown>)[name]).toBe('function');
 		}

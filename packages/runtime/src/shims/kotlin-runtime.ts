@@ -723,6 +723,12 @@ var __TYPES = {
   // both, which is what MangaThemesia's Element.imgAttr / Elements.imgAttr pair
   // needs told apart.
   Elements: function (v) { return Array.isArray(v); },
+  // jsoup's character nodes, as childNodes() and previousSibling() hand them
+  // out. Unlisted, 'node is TextNode' was answered true for every node — an
+  // element included — which is the let-it-through default above, and wrong
+  // for exactly the loop that asks it: text appended, elements handled apart.
+  TextNode: function (v) { return v !== null && typeof v === 'object' && v.kind === 'text' && typeof v.getWholeText === 'function'; },
+  DataNode: function (v) { return v !== null && typeof v === 'object' && v.kind === 'data' && typeof v.getWholeText === 'function'; },
   // okhttp's Headers, by the shape __headersObject builds: the builder and the
   // name list together, which no Map, list or model has.
   Headers: function (v) {
@@ -4116,6 +4122,17 @@ var __k = {
   },
 
   remove: function (collection, item) {
+    // No argument at all is not a collection's remove — Kotlin has none that
+    // takes nothing. It is jsoup's Node.remove() / Elements.remove(), and
+    // reading it as "remove undefined from this list" answered false and
+    // left the page exactly as it was.
+    if (arguments.length === 1) {
+      if (Array.isArray(collection)) collection = __k.els(collection);
+      if (collection !== null && collection !== undefined && typeof collection.remove === 'function') {
+        return collection.remove();
+      }
+      throw new Error('This converted extension called remove() on something that has no remove().');
+    }
     if (Array.isArray(collection)) {
       var index = collection.indexOf(item);
       if (index === -1) return false;
@@ -8644,8 +8661,47 @@ __kdom = globalThis.__yorozoRuntime;
 /* --- jsoup ---------------------------------------------------------------- */
 
 var Jsoup = {
+  // A third argument is a Parser, and the scanner lets through only
+  // Parser.htmlParser(), which is what parse() does without one.
   parse: function (html, baseUrl) { return __parseDoc(html, baseUrl); },
   parseBodyFragment: function (html, baseUrl) { return __parseDoc(html, baseUrl); }
+};
+
+/**
+ * org.jsoup.parser.Parser, for the two statics the catalogue calls on it.
+ *
+ * unescapeEntities is jsoup's own character-reference reader (the engine's,
+ * which the parser also runs), so a title from a WordPress JSON API decodes
+ * exactly as the same title would out of the page. xmlParser() is NOT here:
+ * an XML parse keeps case, has no void elements and no implied html/body,
+ * and handing back the HTML parser's tree for one is the wrong tree. The
+ * scanner refuses every other member by name.
+ */
+var Parser = {
+  unescapeEntities: function (value, inAttribute) {
+    return __kdom.unescapeEntities(__str(value), inAttribute === true);
+  },
+  htmlParser: function () { return Parser; }
+};
+
+/** org.jsoup.nodes.Entities.unescape(string), which is inAttribute = false. */
+var Entities = {
+  unescape: function (value) { return __kdom.unescapeEntities(__str(value), false); }
+};
+
+/** jsoup's TextNode(text): the characters, never parsed. Callable with or without new. */
+function TextNode(text) { return __kdom.createTextNode(__str(text)); }
+
+/**
+ * org.jsoup.select.Evaluator's Tag, Class and Id — the three the catalogue
+ * builds by hand, and which select() and selectFirst() take in place of a
+ * selector string. Callable with or without new, as a Kotlin constructor
+ * call may arrive either way.
+ */
+var Evaluator = {
+  Tag: function (name) { return __kdom.jsoupEvaluator('Tag', __str(name)); },
+  Class: function (name) { return __kdom.jsoupEvaluator('Class', __str(name)); },
+  Id: function (name) { return __kdom.jsoupEvaluator('Id', __str(name)); }
 };
 
 /**
@@ -8707,8 +8763,13 @@ __KElements.prototype.eachText = function () {
   return out;
 };
 
-/** The first member that HAS the attribute, which is not the first member. */
-__KElements.prototype.attr = function (name) {
+/**
+ * The first member that HAS the attribute, which is not the first member —
+ * or, given a value, jsoup's setter: every member gets it, and the
+ * selection is the answer.
+ */
+__KElements.prototype.attr = function (name, value) {
+  if (arguments.length > 1) return __eachElement(this, 'attr', [name, __str(value)]);
   for (var i = 0; i < this.length; i += 1) {
     var value = this[i].attr(name);
     if (value.length > 0) return value;
@@ -8794,6 +8855,54 @@ __KElements.prototype.toString = function () { return this.outerHtml(); };
 __KElements.prototype.toArray = function () { return Array.prototype.slice.call(this); };
 
 /**
+ * The Elements half of jsoup's mutation and traversal: each is the Element
+ * call applied to every member, and the mutators answer the same Elements so
+ * a chain keeps going — select("p, br").prepend("\\n") is one line in the
+ * catalogue.
+ *
+ * remove() is the one that mattered first. The runtime's collection remove()
+ * took an Elements for a list and removed "undefined" from it — nothing —
+ * so select("script, .ad").remove() left the advert in the synopsis and
+ * answered false, with nothing refused and nothing thrown.
+ */
+function __eachElement(list, name, args) {
+  for (var i = 0; i < list.length; i += 1) list[i][name].apply(list[i], args);
+  return list;
+}
+__KElements.prototype.remove = function () { return __eachElement(this, 'remove', []); };
+__KElements.prototype.prepend = function (html) { return __eachElement(this, 'prepend', [__str(html)]); };
+__KElements.prototype.append = function (html) { return __eachElement(this, 'append', [__str(html)]); };
+__KElements.prototype.before = function (html) { return __eachElement(this, 'before', [__str(html)]); };
+__KElements.prototype.after = function (html) { return __eachElement(this, 'after', [__str(html)]); };
+__KElements.prototype.hasText = function () {
+  for (var i = 0; i < this.length; i += 1) {
+    if (this[i].hasText()) return true;
+  }
+  return false;
+};
+/** Any member matching, as jsoup's Elements.is() answers. */
+__KElements.prototype.is = function (query) {
+  for (var i = 0; i < this.length; i += 1) {
+    if (this[i].is(query)) return true;
+  }
+  return false;
+};
+/** Every member's ancestors, once each, in the order they were first met. */
+__KElements.prototype.parents = function () {
+  var out = [];
+  var seen = new Set();
+  for (var i = 0; i < this.length; i += 1) {
+    var up = this[i].parents();
+    for (var j = 0; j < up.length; j += 1) {
+      if (seen.has(up[j])) continue;
+      seen.add(up[j]);
+      out.push(up[j]);
+    }
+  }
+  return new __KElements(out);
+};
+
+/**
  * The engine's own selections answer as Elements too.
  *
  * dom.ts models select() as a bare array and stays a parser, which is the right
@@ -8869,6 +8978,55 @@ __k.ownerDocument = function (value) {
   var items = __k.els(value).toArray();
   if (items.length === 0 || typeof items[0].ownerDocument !== 'function') return null;
   return items[0].ownerDocument();
+};
+
+/**
+ * before(x) and after(x), which are two different library calls under one name.
+ *
+ * On a jsoup Element or Elements they insert x (markup or a node) beside the
+ * receiver and answer the receiver. On a java.util.Date they compare instants,
+ * and on a Calendar they compare only with another Calendar — Calendar.before
+ * takes an Object and answers false for anything that is not one, which is
+ * the JDK's rule and so this one's. The emitter cannot see the type, so the
+ * value is asked; anything that is neither is an error rather than a guess.
+ */
+function __dateOrder(value, other, name) {
+  function millis(v) {
+    if (v instanceof Date) return v.getTime();
+    if (v !== null && v !== undefined && typeof v.getTime === 'function') return v.getTime();
+    return null;
+  }
+  if (value instanceof __KCalendar) {
+    if (!(other instanceof __KCalendar)) return null;
+    return value.getTimeInMillis() - other.getTimeInMillis();
+  }
+  var a = millis(value);
+  var b = millis(other);
+  if (a === null || b === null) {
+    throw new Error('This converted extension called ' + name + '() on something that is neither a jsoup node nor a date.');
+  }
+  return a - b;
+}
+/**
+ * .head(), which the catalogue writes for two things and neither is a list:
+ * Request.Builder().head() — the HEAD method — and a jsoup document's
+ * head(). Both receivers define it; anything else is a Kotlin sequence's
+ * first element, which is what this name was once mapped to wholesale.
+ */
+__k.head = function (value) {
+  if (value !== null && value !== undefined && typeof value.head === 'function') return value.head();
+  return __k.firstOrNull(value);
+};
+
+__k.before = function (value, other) {
+  if (value !== null && value !== undefined && typeof value.before === 'function') return value.before(other);
+  var order = __dateOrder(value, other, 'before');
+  return order !== null && order < 0;
+};
+__k.after = function (value, other) {
+  if (value !== null && value !== undefined && typeof value.after === 'function') return value.after(other);
+  var order = __dateOrder(value, other, 'after');
+  return order !== null && order > 0;
 };
 
 __k.eachText = function (value) { return __k.els(value).eachText(); };
