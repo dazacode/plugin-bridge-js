@@ -2039,6 +2039,27 @@ describe('okhttp, over the host', () => {
 		expect(response.code).toBe(200);
 	});
 
+	it('reads one response header by name, as okhttp does', async () => {
+		// `response.header("Server") !in SERVER_CHECK` is how an interceptor
+		// tells a challenge from an answer. Missing, it was a TypeError on every
+		// request that reached it.
+		const { ctx } = context({
+			'https://example.invalid/a': {
+				body: '',
+				status: 403,
+				headers: { Server: 'ddos-guard' }
+			}
+		});
+		runtime.enter(ctx);
+		const response = await runtime.client
+			.newCall(runtime.globals.GET('https://example.invalid/a'))
+			.execute();
+
+		expect(response.header('server')).toBe('ddos-guard');
+		expect(response.header('X-Missing')).toBeNull();
+		expect(response.header('X-Missing', 'fallback')).toBe('fallback');
+	});
+
 	it('runs interceptors outermost first, in the order they were added', async () => {
 		const { ctx } = context();
 		runtime.enter(ctx);
@@ -2991,10 +3012,28 @@ describe('the string helpers added for the catalogue', () => {
 
 	it('refuses a charset the host cannot do rather than guessing UTF-8', () => {
 		const bytes = new TextEncoder().encode('x');
-		expect(() => k.stringOf(bytes, runtime.globals.Charsets.ISO_8859_1)).toThrow(
-			/only offers UTF-8/
-		);
+		expect(() => k.stringOf(bytes, runtime.globals.Charsets.UTF_16)).toThrow(/only offers UTF-8/);
 		expect(() => k.toByteArray('x', runtime.globals.Charsets.UTF_16)).toThrow(/only offers UTF-8/);
+	});
+
+	it('decodes and encodes ISO-8859-1 one byte per character, as the JVM does', () => {
+		// Every byte value, including the ones UTF-8 would reject or merge.
+		const every = new Uint8Array(256).map((_, at) => at);
+		const text = k.stringOf(every, runtime.globals.Charsets.ISO_8859_1);
+		expect(text.length).toBe(256);
+		expect(text.charCodeAt(0xe9)).toBe(0xe9);
+		expect(text.charCodeAt(0xff)).toBe(0xff);
+		expect([...k.toByteArray(text, runtime.globals.Charsets.ISO_8859_1)]).toEqual([...every]);
+		// A character with no byte is '?', which is java.lang.String's answer.
+		expect([...k.toByteArray('a€', runtime.globals.Charsets.ISO_8859_1)]).toEqual([97, 63]);
+		// Named by string, as `Charset.forName` and `charset("…")` hand it over.
+		expect(k.stringOf(new Uint8Array([0x68, 0xe9]), 'ISO-8859-1')).toBe('hé');
+	});
+
+	it('decodes US-ASCII with the replacement character above 0x7f', () => {
+		const bytes = new Uint8Array([0x61, 0xe9]);
+		expect(k.stringOf(bytes, runtime.globals.Charsets.US_ASCII)).toBe('a\ufffd');
+		expect([...k.toByteArray('aé', runtime.globals.Charsets.US_ASCII)]).toEqual([97, 63]);
 	});
 
 	it('encodes to bytes and back', () => {

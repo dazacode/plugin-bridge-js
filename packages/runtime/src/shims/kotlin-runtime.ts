@@ -2061,16 +2061,23 @@ var TimeUnit = {
   DAYS: __timeUnit(86400000)
 };
 
-/* --- charsets, of which there is exactly one ------------------------------ */
+/* --- charsets: UTF-8 by the host, the single-byte two here ---------------- */
 
 /**
- * The charsets an extension names, and the one the host can actually do.
+ * The charsets an extension names, and the ones this runtime actually does.
  *
- * 'ctx.text.encode' and 'ctx.text.decode' are UTF-8 and nothing else, so the
- * others are declared but not honoured: naming one is a named failure rather
- * than a decode that quietly produces mojibake. A byte sequence read as the
- * wrong charset is a title that looks almost right, which is the failure this
- * runtime least wants to ship.
+ * 'ctx.text.encode' and 'ctx.text.decode' are UTF-8 and nothing else. The two
+ * single-byte charsets need no host at all - ISO-8859-1 maps each byte to the
+ * code point of the same number and back, US-ASCII is its lower half - so they
+ * are done here, exactly, with the JVM's own answer for a character that has no
+ * byte ('?') and a byte that has no character (U+FFFD). ISO-8859-1 is not rare:
+ * it is how this ecosystem turns a byte array into a string one char per byte
+ * before shifting characters, which is the Voe extractor's whole decoder.
+ *
+ * The UTF-16 family is declared but not honoured: naming one is a named failure
+ * rather than a decode that quietly produces mojibake. A byte sequence read as
+ * the wrong charset is a title that looks almost right, which is the failure
+ * this runtime least wants to ship.
  */
 var Charsets = {
   UTF_8: { name: 'UTF-8' },
@@ -2082,6 +2089,37 @@ var Charsets = {
 };
 
 var StandardCharsets = Charsets;
+
+/* Which of the three a charset argument names: 'utf8', 'latin1' or 'ascii'. */
+function __charsetOf(charset) {
+  if (charset === null || charset === undefined) return 'utf8';
+  var name = typeof charset === 'string' ? charset : __str(charset.name);
+  if (/^(?:iso-?8859-1|iso_8859_1|latin-?1)$/i.test(name)) return 'latin1';
+  if (/^(?:us-?ascii|ascii)$/i.test(name)) return 'ascii';
+  __utf8Only(charset);
+  return 'utf8';
+}
+
+/* Bytes to text in a single-byte charset, as java.lang.String decodes them. */
+function __singleByteDecode(bytes, kind) {
+  var out = '';
+  for (var i = 0; i < bytes.length; i += 1) {
+    var b = bytes[i] & 255;
+    out += kind === 'ascii' && b > 127 ? '\\ufffd' : String.fromCharCode(b);
+  }
+  return out;
+}
+
+/* Text to bytes in a single-byte charset; an unmappable character is '?'. */
+function __singleByteEncode(text, kind) {
+  var limit = kind === 'ascii' ? 127 : 255;
+  var out = new Uint8Array(text.length);
+  for (var i = 0; i < text.length; i += 1) {
+    var c = text.charCodeAt(i);
+    out[i] = c > limit ? 63 : c;
+  }
+  return out;
+}
 
 function __utf8Only(charset) {
   if (charset === null || charset === undefined) return;
@@ -2179,19 +2217,36 @@ var Base64 = {
    * java.util.Base64's getDecoder()/getEncoder(), which android's Base64 is not.
    *
    * Two different classes with the same name: android's is all statics, and
-   * java.util's hands back a coder first. Both spell the work 'decode', so the
-   * accessor can answer this same object and every call site is satisfied.
+   * java.util's hands back a coder first. The decoders can be this same object
+   * - both spell the work 'decode(value)', and a flag argument never arrives.
+   * The encoders cannot: java.util's basic encoder never wraps and never ends
+   * in a newline, and answering with this object made 'encodeToString(bytes)'
+   * android's DEFAULT, which wraps at 76 and appends one. See '__javaEncoder'.
    */
   getDecoder: function () { return Base64; },
-  getEncoder: function () { return Base64; },
+  getMimeDecoder: function () { return Base64; },
+  getEncoder: function () { return __javaEncoder(2); },
   getUrlDecoder: function () { return Base64; },
-  getUrlEncoder: function () { return Base64; },
+  getUrlEncoder: function () { return __javaEncoder(2 | 8); },
 
   /** Android's encode() answers bytes; the text is the same either way. */
   encode: function (bytes, flags) {
     return __host().text.encode(Base64.encodeToString(bytes, flags));
   }
 };
+
+/**
+ * A java.util.Base64.Encoder, as the android flags that produce the same text:
+ * NO_WRAP always, URL_SAFE for the url encoder, NO_PADDING once
+ * 'withoutPadding()' asked for it.
+ */
+function __javaEncoder(flags) {
+  return {
+    encodeToString: function (bytes) { return Base64.encodeToString(bytes, flags); },
+    encode: function (bytes) { return __host().text.encode(Base64.encodeToString(bytes, flags)); },
+    withoutPadding: function () { return __javaEncoder(flags | 1); }
+  };
+}
 
 function __bytesOf(value) {
   if (value === null || value === undefined) return __host().text.encode('');
@@ -2557,6 +2612,30 @@ var __k = {
     var items = __arr(haystack);
     for (var i = 0; i < items.length; i += 1) if (items[i] === needle) return true;
     return false;
+  },
+
+  /**
+   * Kotlin's CharSequence.indexOf(other, startIndex, ignoreCase), reached only
+   * when the call named an argument - 'indexOf("English", ignoreCase = true)'
+   * - because JavaScript's indexOf has no third argument and would search
+   * case-sensitively without a word. A skipped startIndex arrives undefined.
+   * Anything that is not a string keeps its own indexOf.
+   */
+  indexOf: function (value, other, startIndex, ignoreCase) {
+    if (typeof value !== 'string') return value.indexOf(other, startIndex === undefined ? 0 : startIndex);
+    var from = startIndex === undefined || startIndex === null ? 0 : Math.max(0, Number(startIndex));
+    var text = ignoreCase === true ? value.toLowerCase() : value;
+    var needle = ignoreCase === true ? __str(other).toLowerCase() : __str(other);
+    return text.indexOf(needle, from);
+  },
+
+  /* The same, searching backwards from startIndex (the end, when skipped). */
+  lastIndexOf: function (value, other, startIndex, ignoreCase) {
+    if (typeof value !== 'string') return value.lastIndexOf(other);
+    var from = startIndex === undefined || startIndex === null ? value.length : Number(startIndex);
+    var text = ignoreCase === true ? value.toLowerCase() : value;
+    var needle = ignoreCase === true ? __str(other).toLowerCase() : __str(other);
+    return from < 0 ? -1 : text.lastIndexOf(needle, from);
   },
 
   startsWith: function (value, prefix, ignoreCase) {
@@ -3012,6 +3091,61 @@ var __k = {
    * error. A String reversed is a String; reading it as a list would hand the
    * caller '["cba"]' spelled forwards.
    */
+  /** Int.inc()/dec(), and Char's, which step to the neighbouring character. */
+  inc: function (value) {
+    return __isChar(value) ? String.fromCharCode(value.charCodeAt(0) + 1) : value + 1;
+  },
+  dec: function (value) {
+    return __isChar(value) ? String.fromCharCode(value.charCodeAt(0) - 1) : value - 1;
+  },
+
+  /**
+   * groupingBy { key }: Kotlin's lazy Grouping, which does nothing until a
+   * terminal runs. eachCount() is the one this ecosystem writes - a Map from
+   * each key to how many elements had it, in first-seen order, as the
+   * LinkedHashMap Kotlin answers.
+   */
+  /**
+   * java.text.StringCharacterIterator: a cursor over a string. current() is
+   * the character under it, next()/previous() move it and answer the new one,
+   * and walking off either end answers DONE (U+FFFF) as java.text does.
+   */
+  charIterator: function (text) {
+    var value = __str(text);
+    var at = 0;
+    var DONE = '\uffff';
+    var here = function () { return at >= 0 && at < value.length ? value.charAt(at) : DONE; };
+    return {
+      current: here,
+      next: function () { at = Math.min(at + 1, value.length); return here(); },
+      previous: function () {
+        if (at <= 0) return DONE;
+        at -= 1;
+        return here();
+      },
+      first: function () { at = 0; return here(); },
+      last: function () { at = Math.max(0, value.length - 1); return here(); },
+      getIndex: function () { return at; },
+      setIndex: function (index) { at = Number(index); return here(); },
+      getBeginIndex: function () { return 0; },
+      getEndIndex: function () { return value.length; }
+    };
+  },
+
+  groupingBy: function (list, keyOf) {
+    var items = __arr(list);
+    return {
+      eachCount: function () {
+        var counts = new Map();
+        for (var i = 0; i < items.length; i += 1) {
+          var key = keyOf(items[i]);
+          counts.set(key, (counts.get(key) || 0) + 1);
+        }
+        return counts;
+      }
+    };
+  },
+
   reversed: function (list) {
     if (__isComparator(list)) {
       return __comparator(function (a, b) { return -list(a, b); });
@@ -4263,13 +4397,16 @@ var __k = {
     }
     var at = 0;
     return pattern.replace(
-      /%(%|(?:(0)?(\\d+))?(?:\\.(\\d+))?([sdfxX]))/g,
+      /%(%|(?:(0)?(\\d+))?(?:\\.(\\d+))?([sdfxXc]))/g,
       function (whole, kind, zero, width, precision, verb) {
         if (kind === '%') return '%';
         var value = rest[at];
         at += 1;
         var out;
         if (verb === 's') out = value === null || value === undefined ? 'null' : String(value);
+        // '%c', a Char: YouTube's size formatter writes "%.0f%cb" with the unit
+        // letter. Left out, the pattern kept "%c" in the answer, literally.
+        else if (verb === 'c') out = typeof value === 'number' ? String.fromCharCode(value) : __str(value);
         else if (verb === 'd') out = String(Math.trunc(Number(value)) || 0);
         else if (verb === 'f') out = Number(value).toFixed(precision === undefined ? 6 : Number(precision));
         else {
@@ -4597,6 +4734,27 @@ var __k = {
    * The concurrency is dropped: the sandbox has one thread, and requests are
    * made through one host anyway.
    */
+  /**
+   * What an okhttp interceptor's recovery path becomes when it needs a
+   * boundary this runtime does not cross.
+   *
+   * The emitter keeps an interceptor's pass-through - send the request, look at
+   * the answer, hand it back unless it is a challenge - and cuts the part after
+   * that guard when what refused it was the WebView or its cookie store. This is
+   * what runs in its place: the answer the Kotlin would have recovered from
+   * becomes an error naming the interceptor and what it reached for, at the
+   * point the recovery would have begun. Not an empty answer, and not the
+   * challenge page handed on as if it were the content.
+   */
+  recoveryRefused: function (owner, kinds) {
+    var needed = __arr(kinds).map(function (one) { return __str(one); }).join(', ');
+    return new Error(
+      'This converted extension\\'s ' + __str(owner) + ' got an answer it would only get past ' +
+      'through ' + needed + ', which Yorozo does not give a plugin. Answers it passes ' +
+      'through unchanged still work; this one cannot be recovered here.'
+    );
+  },
+
   catchingMap: function (list, fn) {
     return __then(__catching(__arr(list), fn), function (values) {
       var out = [];
@@ -4707,7 +4865,7 @@ var __k = {
    * runtime models one — it joins rather than decodes.
    */
   stringOf: function (value, charset) {
-    __utf8Only(charset);
+    var kind = __charsetOf(charset);
     if (value === null || value === undefined) return '';
     if (typeof value === 'string') return value;
     if (Array.isArray(value)) {
@@ -4715,6 +4873,7 @@ var __k = {
       for (var i = 0; i < value.length; i += 1) if (typeof value[i] !== 'string') chars = false;
       if (chars) return value.join('');
     }
+    if (kind !== 'utf8') return __singleByteDecode(__bytesOf(value), kind);
     return __host().text.decode(__bytesOf(value));
   },
 
@@ -4735,9 +4894,11 @@ var __k = {
     if (value !== null && typeof value === 'object' && value.__bigInteger === true) {
       return value.toByteArray();
     }
-    __utf8Only(charset);
+    var kind = __charsetOf(charset);
     if (value === null || value === undefined) return __host().text.encode('');
-    if (typeof value === 'string') return __host().text.encode(value);
+    if (typeof value === 'string') {
+      return kind === 'utf8' ? __host().text.encode(value) : __singleByteEncode(value, kind);
+    }
     return __bytesOf(value);
   },
 
@@ -4779,8 +4940,24 @@ var __k = {
     }).join('\\n');
   },
 
-  /** Base64 text encoding for the common no-wrap byte-array extension. */
-  encodeToString: function (value) { return Base64.encodeToString(value, Base64.NO_WRAP); },
+  /**
+   * encodeToString, which three different Kotlin APIs spell the same way.
+   *
+   * With one argument it is the byte-array extension this helper was written
+   * for: Base64 text, unwrapped. With a receiver AND a value it is a coder
+   * being asked to encode something - kotlinx's 'json.encodeToString(value)',
+   * or java.util's 'Base64.getEncoder().encodeToString(bytes)' - and the coder
+   * does the work. Treated as the first, both encoded the CODER: AniList's
+   * GraphQL variables went out as the Base64 of the Json object, and the
+   * source answered every search with an error.
+   */
+  encodeToString: function (value, other) {
+    if (arguments.length >= 2 && value !== null && value !== undefined &&
+        typeof value.encodeToString === 'function') {
+      return value.encodeToString.apply(value, Array.prototype.slice.call(arguments, 1));
+    }
+    return Base64.encodeToString(value, Base64.NO_WRAP);
+  },
 
   /** A CharArray, which this runtime models as an array of one-char strings. */
   toCharArray: function (value) { return __str(value).split(''); },
@@ -7433,6 +7610,19 @@ function __responseOf(raw, text, request) {
     request: finalRequest,
     url: finalUrl,
     headers: __headersObject(__headerPairs(raw.headers)),
+    /*
+     * okhttp's 'response.header(name)' and 'header(name, default)': one header,
+     * case-insensitively, or the default (null when none is given). The method
+     * the request builder has always had, and the one an interceptor reads a
+     * challenge off: 'response.header("Server") !in SERVER_CHECK'. Missing, that
+     * line threw a TypeError out of the interceptor on every answer - a hoster
+     * lost for a reason no refusal named.
+     */
+    header: function (name, fallback) {
+      var value = response.headers.get(name);
+      if (value !== null && value !== undefined) return value;
+      return fallback === undefined ? null : fallback;
+    },
     body: {
       string: function () { return read(); },
       bytes: function () { return __host().text.encode(read()); },
@@ -10032,7 +10222,17 @@ __k.extractNextJs = function (receiver, type, predicate) {
  */
 function Json() { return Json; }
 Json.decodeFromString = function (descriptor, text) { return __k.decode(descriptor, text); };
-Json.encodeToString = function (value) { return JSON.stringify(value); };
+Json.encodeToString = function (value) {
+  // kotlinx's two-argument form names the serializer to encode with, and this
+  // runtime runs serializers only for decoding. Stringifying the serializer
+  // object instead would post it.
+  if (arguments.length > 1) {
+    throw new Error(
+      'This converted extension encoded a value with an explicit serializer, which this runtime only runs for decoding.'
+    );
+  }
+  return JSON.stringify(value);
+};
 Json.parseToJsonElement = function (text) { return __k.decode('any', text); };
 `;
 

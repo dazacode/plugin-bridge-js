@@ -941,7 +941,33 @@ ${constants}
 
 ${options.translatedSource}
 
-const __source = new ${options.className}();
+/*
+ * The source a class named by 'extClass' stands for.
+ *
+ * Usually the class itself. An AnimeSourceFactory is not a source: it is
+ * 'createSources() = listOf(SupJav("en"), SupJav("ja"), SupJav("zh"))', one
+ * source per language. Constructed as though it were one, the driver asked a
+ * class with a single member for 'popularAnimeRequest', found nothing, and
+ * every browse came back empty with nothing refused - AnimeWorld India and
+ * SupJav both loaded that way.
+ *
+ * One plugin is one source here, so it is the FIRST one the factory makes: the
+ * extension's own ordering, and the same variant the adapter already reads
+ * this plugin's base url from (baseUrlFromFactoryTarget). A factory that makes
+ * none is an error with its name on it, not an empty source.
+ */
+function __firstSource(made) {
+  if (made === null || typeof made !== 'object' || typeof made.createSources !== 'function') {
+    return made;
+  }
+  const all = __arr(made.createSources());
+  if (all.length === 0) {
+    throw new Error('This converted extension is a source factory that creates no sources.');
+  }
+  return all[0];
+}
+
+const __source = __firstSource(new ${options.className}());
 ${ANIYOMI_DRIVER}
 
 /* --- the adapter ----------------------------------------------------------- */

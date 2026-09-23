@@ -109,6 +109,7 @@ import {
 	HOST_PROPERTY_METHODS,
 	KNOWN_SIGNATURES,
 	OUT_OF_SCOPE_KINDS,
+	RECOVERY_BOUNDARIES,
 	swallowedWhenElse,
 	SUPER_BASE_PROPERTIES,
 	SUPER_MEMBERS,
@@ -159,6 +160,17 @@ export interface MemberEdges {
 	readonly owner: string | null;
 	/** True for a property: it runs whenever its owner is constructed. */
 	readonly construction: boolean;
+	/**
+	 * True for a `by lazy` property that overrides nothing.
+	 *
+	 * Counted as construction above, because reachability over-approximates;
+	 * but its initialiser does not in fact run at construction — it runs on
+	 * the first read — and nothing outside the Kotlin can read it, the driver
+	 * included, since it overrides nothing the driver asks for. `pipeline.ts`
+	 * uses this to stop a refused one blocking when no translated code names
+	 * it. Absent on members this was never worked out for.
+	 */
+	readonly lazy?: boolean;
 	/** Every identifier under the member, deduplicated. */
 	readonly references: readonly string[];
 	/** Call targets, with unresolved receivers kept as conservative edges. */
@@ -192,6 +204,15 @@ export interface Emission {
 	 * against the extension that merely sits beside it.
 	 */
 	readonly graph: readonly MemberEdges[];
+	/**
+	 * Members that translated with a tail cut off, and what the tail needed.
+	 *
+	 * Not refusals — the member is in `translated` and the host calls it — and
+	 * not silence either: each names the boundary the cut-off part reached for,
+	 * so a caller can still say what the converted plugin cannot do. See
+	 * `recoveryCut`.
+	 */
+	readonly deferred: readonly Refusal[];
 }
 
 /**
@@ -391,8 +412,11 @@ const RECEIVER_BUILDERS: ReadonlySet<string> = new Set([
  * okhttp's three spellings of "send this now". Everything else an extension
  * blocks on reaches the network through one of them.
  */
+/** The first segment of a package path, never a name a source declares. */
+const PACKAGE_ROOTS: ReadonlySet<string> = new Set(['java', 'javax', 'android', 'okhttp3', 'okio']);
+
 /** `java.net.URLEncoder`, and the other packages written out in full. */
-const QUALIFIED_GLOBAL = /^(?:java|javax|kotlin|android)\.[\w.]*?\.?(\w+)$/;
+const QUALIFIED_GLOBAL = /^(?:java|javax|kotlin|android|okhttp3|okio)\.[\w.]*?\.?(\w+)$/;
 
 /** `Filter.Sort.Selection` and the video fork's `AnimeFilter.Sort.Selection`. */
 const SORT_SELECTION = /^(?:Anime)?Filter\.Sort\.Selection$/;
@@ -424,14 +448,14 @@ const LOG_CALL = /^Log\.(?:v|d|i|w|e|wtf)$/;
 /**
  * The calls that make a member `async` whether or not it said `suspend`.
  *
- * `.execute()` blocks in Kotlin and cannot here; the crypto four are
- * `AWAITED_HOST_METHODS`, which the runtime shim implements over
+ * `.execute()` blocks in Kotlin and cannot here; the crypto four and an
+ * interceptor chain's `.proceed()` are `AWAITED_HOST_METHODS`, which the runtime shim implements over
  * `crypto.subtle` and which are therefore promises. `blockingMembers` reads
  * this off a member's *source text* and propagates to a fixpoint, so a helper
  * that decrypts makes its callers `async` too.
  */
 const BLOCKING_CALLS =
-	/\.(?:execute|awaitSuccess|await|doFinal|generateKeyPair|verify)\s*\(|(?<!\bMath)\.sign\s*\(|\bThread\s*\.\s*sleep\s*\(|\b(?:client|[a-z]\w*Client)\s*\.\s*(?:get|post|put|head)\s*\(/;
+	/\.(?:execute|awaitSuccess|await|doFinal|generateKeyPair|verify|proceed)\s*\(|(?<!\bMath)\.sign\s*\(|\bThread\s*\.\s*sleep\s*\(|\b(?:client|[a-z]\w*Client)\s*\.\s*(?:get|post|put|head)\s*\(/;
 
 /**
  * keiyoushi's suspend verbs on an okhttp client, and what they are called on.
@@ -1513,6 +1537,22 @@ class Emitter {
 	private readonly destructuredParts: string[] = [];
 	/** What each member mentions; see `MemberEdges`. */
 	private readonly graph: MemberEdges[] = [];
+	/**
+	 * The extension properties the class being emitted declares on the
+	 * settings store, by name. See `extensionProperty`.
+	 */
+	private extensionProperties = new Set<string>();
+	/** The subset of `extensionProperties` with a setter to write through. */
+	private extensionSetters = new Set<string>();
+	/** What the settings store is called in the class being emitted. */
+	private preferenceStores = new Set<string>(['preferences']);
+	/** Members translated with a boundary-reaching tail cut off; see `recoveryCut`. */
+	private readonly deferred: Refusal[] = [];
+	/**
+	 * The cut the *next* function body is emitted under, consumed on entry.
+	 * Set only around the one `functionDeclaration` call that asked for it.
+	 */
+	private cut: RecoveryCut | null = null;
 	/** The class or object whose members are being emitted. */
 	private owner: string | null = null;
 	/**
@@ -2163,7 +2203,8 @@ class Emitter {
 					refusals: this.refusals,
 					usedRuntime: [],
 					fileRefusal: this.fileRefusal,
-					graph: this.graph
+					graph: this.graph,
+					deferred: []
 				};
 			}
 			if (piece !== null && piece.length > 0) parts.push(piece);
@@ -2181,7 +2222,8 @@ class Emitter {
 			refusals: this.refusals,
 			usedRuntime: [...this.used].sort(),
 			fileRefusal: null,
-			graph: this.graph
+			graph: this.graph,
+			deferred: this.deferred
 		};
 	}
 
@@ -2476,6 +2518,9 @@ class Emitter {
 		const outerSuspends = this.suspendMembers;
 		const outerLabel = this.ownerLabel;
 		const outerSelf = this.selfClass;
+		const outerExtensionProperties = this.extensionProperties;
+		const outerSetters = this.extensionSetters;
+		const outerStores = this.preferenceStores;
 		this.owner = name;
 		this.ownerLabel = this.nameOf(node) ?? name;
 		this.ownerBase = base;
@@ -2484,12 +2529,53 @@ class Emitter {
 			exact: !modifiers.has('open') && !modifiers.has('abstract') && !modifiers.has('sealed')
 		};
 
+		// An extension property is not a member of the instance: `private val
+		// SharedPreferences.quality get() = …` is read as `preferences.quality`,
+		// and naming it here made `this.quality` look like a field. See
+		// `extensionProperty`.
+		this.extensionProperties = new Set(
+			members
+				.filter(
+					(child) =>
+						child.type === 'property_declaration' &&
+						extensionReceiverOf(child) === 'SharedPreferences'
+				)
+				.map((child) => this.propertyName(child))
+				.filter((found): found is string => found !== null)
+		);
+		this.extensionSetters = new Set(
+			members
+				.filter(
+					(child, at) =>
+						child.type === 'property_declaration' &&
+						extensionReceiverOf(child) === 'SharedPreferences' &&
+						(accessorOf(child, undefined, 'setter') !== undefined ||
+							members.slice(at + 1, at + 3).some((next) => next.type === 'setter'))
+				)
+				.map((child) => this.propertyName(child))
+				.filter((found): found is string => found !== null)
+		);
+		// The names the settings store goes by here: `preferences`, which is
+		// also what an inherited one is called, and any property this class
+		// builds from `getPreferencesLazy()`/`getPreferences()` or types as a
+		// `SharedPreferences` — NovelCool's is `preference`.
+		this.preferenceStores = new Set(['preferences']);
+		for (const child of members) {
+			if (child.type !== 'property_declaration' || extensionReceiverOf(child) !== null) continue;
+			const declared = this.propertyName(child);
+			if (declared === null) continue;
+			const shape = child.text.replace(/\s+/g, ' ');
+			if (/(?:\bby getPreferencesLazy\b|= getPreferences\(|: SharedPreferences\b)/.test(shape)) {
+				this.preferenceStores.add(declared);
+			}
+		}
 		this.classMembers = new Set(
 			members
 				.map((child) =>
 					child.type === 'function_declaration'
 						? this.nameOf(child)
-						: child.type === 'property_declaration'
+						: child.type === 'property_declaration' &&
+							  extensionReceiverOf(child) !== 'SharedPreferences'
 							? this.propertyName(child)
 							: null
 				)
@@ -2610,7 +2696,11 @@ class Emitter {
 					// below.
 					const mangled =
 						this.overloadsOf(fnName) === null ? null : `${fnName}$${this.signatureOf(child).key}`;
-					const emitted = this.member(fnName, child, () =>
+					const candidate =
+						fnName === 'intercept' && implementsInterceptor(node)
+							? recoveryCandidate(child, this.nameOf(node) ?? name)
+							: null;
+					const emitted = this.memberWithRecovery(fnName, child, candidate, () =>
 						this.functionDeclaration(child, 'method', mangled)
 					);
 					if (emitted !== null) {
@@ -2724,6 +2814,9 @@ class Emitter {
 		this.selfClass = outerSelf;
 		this.classMembers = outerMembers;
 		this.suspendMembers = outerSuspends;
+		this.extensionProperties = outerExtensionProperties;
+		this.extensionSetters = outerSetters;
+		this.preferenceStores = outerStores;
 		const companionMembers = this.companionMembers;
 		this.companionRenames = outerRenames;
 		this.companionMembers = outerCompanion;
@@ -3562,16 +3655,31 @@ class Emitter {
 		 * property's edge as what its initialiser does, and an edge left out
 		 * lets reachability prune a refusal the setter still calls into.
 		 */
-		accessors: readonly KNode[] = []
+		accessors: readonly KNode[] = [],
+		/**
+		 * The parts of `node` that will actually be emitted, when that is not
+		 * all of it — only ever a `recoveryCut`. Edges and the obstacle scan are
+		 * read off these alone: the cut-off tail is never emitted, so what it
+		 * would have called is not reachable from here and what it would have
+		 * refused for is not this member's to answer.
+		 */
+		scope: readonly KNode[] | null = null
 	): string | null {
+		const parts = scope ?? [node, ...accessors];
 		// Recorded before anything is attempted, so a refused member still has
 		// edges — a member reachable only from one has to stay reachable.
 		this.graph.push({
 			member: name,
 			owner: this.owner,
 			construction: node.type === 'property_declaration',
-			references: [...new Set([node, ...accessors].flatMap((one) => mentions(one)))],
-			calls: [node, ...accessors].flatMap((one) => callEdges(one))
+			lazy:
+				node.type === 'property_declaration' &&
+				!this.hasModifier(node, 'override') &&
+				kids(node).some(
+					(child) => child.type === 'property_delegate' && /^by\s+lazy\b/.test(child.text)
+				),
+			references: [...new Set(parts.flatMap((one) => mentions(one)))],
+			calls: parts.flatMap((one) => callEdges(one))
 		});
 
 		const previousName = this.memberName;
@@ -3579,7 +3687,9 @@ class Emitter {
 		this.memberName = name;
 		this.pending = [];
 
-		const obstacles = scanObstacles(node, name);
+		// The node alone when there is no cut, as before it: a setter written
+		// beside its property is scanned where it is emitted, not here.
+		const obstacles = (scope ?? [node]).flatMap((one) => scanObstacles(one, name));
 		if (obstacles.length > 0) {
 			this.refusals.push({ member: name, obstacles });
 			this.memberName = previousName;
@@ -3627,6 +3737,90 @@ class Emitter {
 		}
 	}
 
+	/**
+	 * `member`, with one second chance: an interceptor whose only trouble is in
+	 * the recovery it runs after a pass-through guard.
+	 *
+	 * The shape, from the Voe extractor's `DdosGuardInterceptor`:
+	 *
+	 *     val response = chain.proceed(originalRequest)
+	 *     if (response.code !in ERROR_CODES || response.header("Server") !in SERVER_CHECK) {
+	 *         return response
+	 *     }
+	 *     …read the WebView's cookie store for a clearance cookie…
+	 *
+	 * Refused whole, that one member refused every extension that installs the
+	 * extractor — sixteen in one catalogue that never reach the tail unless the
+	 * hoster answers with a DDoS-Guard challenge — because an interceptor's
+	 * `intercept` is reached the moment the class is (see `reach` in
+	 * `pipeline.ts`) and a refused one cannot be pruned. Dropping it and letting
+	 * the client call through would be the base-class fallback this project does
+	 * not make: a challenged answer handed to the extractor as if it were the
+	 * video page.
+	 *
+	 * So the member is emitted up to and including the guard, and the tail
+	 * becomes `throw __k.recoveryRefused(…)` naming what it needed. Every answer
+	 * the guard passes through behaves exactly as the Kotlin does; the one the
+	 * Kotlin would have recovered from is an error with a name on it, raised
+	 * where the recovery would have started. What the extension does with that
+	 * error is its own business — the same as any other failed request.
+	 *
+	 * Taken only when the first attempt was refused, every obstacle it found
+	 * sits in the tail, and at least one of them is a `RECOVERY_BOUNDARIES`
+	 * name. A tail refused only for an ordinary translator gap stays refused,
+	 * because that is ours to fix and a cut would hide it; a guard or prefix
+	 * that does not translate stays refused, because then the pass-through is
+	 * not what would run. The member is reported in `deferred` either way it
+	 * is cut, so the boundary is still named.
+	 */
+	private memberWithRecovery(
+		name: string,
+		node: KNode,
+		candidate: RecoveryCandidate | null,
+		run: () => string
+	): string | null {
+		const refusalsBefore = this.refusals.length;
+		const graphAt = this.graph.length;
+		const first = this.member(name, node, run);
+		if (first !== null || candidate === null) return first;
+
+		const refusal = this.refusals[this.refusals.length - 1];
+		if (this.refusals.length !== refusalsBefore + 1 || refusal.member !== name) return null;
+		const late = refusal.obstacles.every((one) => one.line >= candidate.tailLine);
+		const kinds = [
+			...new Set(
+				refusal.obstacles
+					.map((one) => RECOVERY_BOUNDARIES.get(one.kind))
+					.filter((one): one is string => one !== undefined)
+			)
+		];
+		if (!late || kinds.length === 0) return null;
+
+		const firstEdges = this.graph[graphAt];
+		this.refusals.pop();
+		this.graph.splice(graphAt, 1);
+		this.cut = { body: candidate.body, keep: candidate.keep, owner: candidate.owner, kinds };
+		const secondAt = this.graph.length;
+		let second: string | null;
+		try {
+			second = this.member(name, node, run, [], candidate.kept);
+		} finally {
+			this.cut = null;
+		}
+		if (second !== null) {
+			this.deferred.push(refusal);
+			return second;
+		}
+		// The pass-through itself did not translate, so the cut buys nothing:
+		// put back what the whole member was refused for, which is the more
+		// useful thing to read.
+		this.graph.splice(secondAt, 1);
+		this.graph.splice(graphAt, 0, firstEdges);
+		this.refusals.pop();
+		this.refusals.push(refusal);
+		return null;
+	}
+
 	private declineMember(name: string, node: KNode, kind: string): null {
 		// Named the way its author would recognise it wherever there is a name;
 		// a bare grammar kind in a message helps nobody read their own source.
@@ -3644,6 +3838,12 @@ class Emitter {
 	): { kind: 'assign' | 'member'; text: string; ctor?: string } | null {
 		const name = this.propertyName(node);
 		if (name === null) return this.declineMember('val', node, 'an unnamed property');
+
+		const receiver = extensionReceiverOf(node);
+		if (receiver === 'SharedPreferences' && this.extensionProperties.has(name)) {
+			const text = this.extensionProperty(node, name, detached);
+			return text === null ? null : { kind: 'member', text };
+		}
 
 		// `protected abstract val isHentaiSite: Boolean` — a property this class
 		// deliberately does not define, because the subclass is required to.
@@ -3770,6 +3970,142 @@ class Emitter {
 		return text === null ? null : { kind: deferred ? 'member' : 'assign', text };
 	}
 
+	/**
+	 * `private val SharedPreferences.quality get() = getString(KEY, DEFAULT)!!`
+	 * — a property of the settings store, declared inside the extension.
+	 *
+	 * This ecosystem keeps every setting behind one of these, and reads it as
+	 * `preferences.quality`. The receiver used to be dropped: the property was
+	 * emitted as the *extension's* own getter, `getString` inside it resolved
+	 * to the extension, and the read went to the store object, which has no
+	 * such field. Every setting read answered `undefined` with nothing refused
+	 * — AniSama sorted its videos by `undefined`, AniList never knew whether
+	 * adult titles were allowed, Subsplease put the string "undefined" in the
+	 * URL where the debrid token goes. The delegated spelling on its own line
+	 * did not parse at all (see `delegateOnNextLine` in `grammar.ts`).
+	 *
+	 * Now it is a method taking its receiver, `__ext_quality(__recv)`, and a
+	 * read through the store calls it (`extensionPropertyRead`). Three bodies:
+	 *
+	 * - a getter, run with `this` meaning the receiver, exactly as an extension
+	 *   function's body is — and a setter beside it becomes
+	 *   `__ext_set_quality(__recv, value)`, which a write through the store
+	 *   calls (`preferences.slugMap += more` reads, adds and writes);
+	 * - `by preferences.delegate(KEY, DEFAULT)`, the store's own delegate, read
+	 *   on every access as Kotlin reads it — the receiver is not consulted,
+	 *   because the delegate was bound to `preferences` where it was declared;
+	 * - `by lazy { … }` / `by LazyMutable { … }`, whose one delegate object
+	 *   lives in the extension instance, so the value is computed once per
+	 *   instance whatever receiver it is read through — memoised on `this`.
+	 *
+	 * Only on `SharedPreferences`, which is the receiver every read can be
+	 * recognised by (`isPreferencesStore`). A write with no setter to call, a
+	 * delegated one, and a bare read through an implicit receiver are refused.
+	 *
+	 * **Not done: any other receiver.** `private val Element.imgSrc get() = …`
+	 * read as `img.imgSrc` still goes out the way it always did — as the
+	 * extension's own getter, read off the element, which answers `undefined`.
+	 * Telling `chapter.id` (the extension property on `SChapter`) from `tag.id`
+	 * (a DTO's field) needs the receiver's type, which this build does not
+	 * have. Refusing them instead would drop the handful of listings that load
+	 * today with one wrong field, and that is a decision, not a fix.
+	 */
+	private extensionProperty(node: KNode, name: string, detached: readonly KNode[]): string | null {
+		const getter =
+			accessorOf(node, undefined, 'getter') ?? detached.find((one) => one.type === 'getter');
+		const setter =
+			accessorOf(node, undefined, 'setter') ?? detached.find((one) => one.type === 'setter');
+		const delegate = kids(node).find((child) => child.type === 'property_delegate');
+		const method = `__ext_${name}`;
+		return this.member(
+			name,
+			node,
+			() => {
+				if (delegate !== undefined) {
+					if (setter !== undefined) this.refuse(setter, 'a setter beside a `by` delegate');
+					const thunk = this.delegateValue(delegate, node, name);
+					const memoised = /^by\s+(?:lazy|LazyMutable)\b/.test(delegate.text);
+					const value = memoised
+						? `${this.helper('lazy')}(this, ${JSON.stringify(method)}, ${thunk})`
+						: `(${thunk})()`;
+					return `${method}(__recv) ${block([`return ${value};`])}`;
+				}
+				if (getter === undefined) this.refuse(node, 'an extension property with no getter');
+				const read = this.extensionAccessor(getter, name, []);
+				if (setter === undefined) return `${method}(__recv) ${read}`;
+				// `set(map) { cache = map; edit().putString(KEY, …).apply() }`: the
+				// setter's own parameter, and the receiver as `this`, as the getter.
+				const parameter = [...walk(setter)].find((one) => one.type === 'simple_identifier')?.text;
+				if (parameter === undefined) this.refuse(setter, 'a setter with no parameter');
+				const write = this.extensionAccessor(setter, name, [parameter]);
+				return `${method}(__recv) ${read}\n__ext_set_${name}(__recv, ${this.safe(parameter)}) ${write}`;
+			},
+			[...(getter === undefined ? [] : [getter]), ...(setter === undefined ? [] : [setter])]
+		);
+	}
+
+	/** A getter or setter body, run with the receiver as `this`. */
+	private extensionAccessor(accessor: KNode, name: string, params: readonly string[]): string {
+		const body = kids(accessor).find((child) => child.type === 'function_body');
+		if (body === undefined) this.refuse(accessor, 'an accessor with no body');
+		const previousReceiver = this.receiverParam;
+		const previousLabel = this.receiverLabel;
+		const previousType = this.receiverType;
+		this.receiverParam = '__recv';
+		this.receiverLabel = name;
+		this.receiverType = 'SharedPreferences';
+		let emitted;
+		try {
+			emitted = this.accessorScope(null, () =>
+				this.functionScope('function', null, ['__recv', ...params], () => this.functionBody(body))
+			);
+		} finally {
+			this.receiverParam = previousReceiver;
+			this.receiverLabel = previousLabel;
+			this.receiverType = previousType;
+		}
+		if (emitted.isAsync) this.refuse(accessor, 'a suspending accessor');
+		return emitted.text;
+	}
+
+	/**
+	 * `preferences.quality`, where `quality` is an extension property this
+	 * class declares on the store: a call of the method it became. Null when
+	 * the read is not one of those.
+	 *
+	 * The receiver has to be the store for the rewrite, and the Kotlin says it
+	 * is: the source compiled, and a `SharedPreferences` has no member of its
+	 * own by these names, so `preferences.quality` resolving to the extension
+	 * is what made it compile. Any other receiver reading the same name is
+	 * some other object's field — `video.quality` — and is left alone, unless
+	 * it looks like a store this build cannot type, which is refused rather
+	 * than read off the wrong object.
+	 */
+	private extensionPropertyRead(node: KNode): string | null {
+		const parts = kids(node);
+		if (parts.length !== 2 || parts[1].type !== 'navigation_suffix') return null;
+		const name = kids(parts[1]).find((child) => child.type === 'simple_identifier')?.text;
+		if (name === undefined || !this.extensionProperties.has(name)) return null;
+		const receiver = parts[0];
+		if (this.isPreferencesStore(receiver)) {
+			// The receiver first: emitting it is what marks a receiver block as
+			// needing `__self`, which `selfReference` then answers with.
+			const store = this.expr(receiver);
+			return `${this.selfReference()}.__ext_${name}(${store})`;
+		}
+		if (/pref/i.test(receiver.text)) {
+			this.refuse(node, `a read of extension property \`${name}\` this build cannot type`);
+		}
+		return null;
+	}
+
+	/** A name in `preferenceStores`, bare or through `this.`, meaning the class's store. */
+	private isPreferencesStore(receiver: KNode): boolean {
+		const text = receiver.text.replace(/\s+/g, '');
+		const named = text.startsWith('this.') ? text.slice(5) : text;
+		if (!this.preferenceStores.has(named)) return false;
+		return text !== named || this.lookup(named) === null;
+	}
 	/**
 	 * A property whose accessors need a backing field, or that has a setter.
 	 *
@@ -4931,6 +5267,17 @@ class Emitter {
 	}
 
 	private functionBody(node: KNode): string {
+		const cut = this.cut;
+		if (cut !== null && node.line === cut.body.line && node.text === cut.body.text) {
+			// See `recoveryCut`: the statements up to and including the
+			// pass-through guard, then the error the tail would have become.
+			this.cut = null;
+			const statements = kids(node).find((child) => child.type === 'statements');
+			return block([
+				...(statements === undefined ? [] : this.statementList(statements, null, cut.keep)),
+				`throw ${this.helper('recoveryRefused')}(${JSON.stringify(cut.owner)}, ${JSON.stringify(cut.kinds)});`
+			]);
+		}
 		if (node.allChildren.some((child) => child.type === '{')) {
 			const statements = kids(node).find((child) => child.type === 'statements');
 			return block(statements === undefined ? [] : this.statementList(statements, null));
@@ -5207,8 +5554,8 @@ class Emitter {
 
 	/* ── statements ──────────────────────────────────────────────────────── */
 
-	private statementList(node: KNode, sink: Sink): string[] {
-		const children = this.rejoinJumps(kids(node));
+	private statementList(node: KNode, sink: Sink, limit?: number): string[] {
+		const children = this.rejoinJumps(kids(node).slice(0, limit));
 		const out: string[] = [];
 		children.forEach((entry, index) => {
 			const tail =
@@ -5729,6 +6076,38 @@ class Emitter {
 		const target = kids(node)[0];
 		const value = kids(node)[kids(node).length - 1];
 		const operator = node.allChildren.find((child) => ASSIGN_OPS.has(child.type))?.type ?? '=';
+		// `preferences.token = value` — a write through an extension property,
+		// which `extensionProperty` does not give a setter. Refused by name:
+		// read as an ordinary assignment it would set a field on the store
+		// object that nothing ever reads back.
+		const written = kids(target);
+		const writtenName = kids(written[written.length - 1])
+			.filter((child) => child.type === 'simple_identifier')
+			.pop()?.text;
+		if (
+			written.length === 2 &&
+			written[1].type === 'navigation_suffix' &&
+			writtenName !== undefined &&
+			this.extensionProperties.has(writtenName)
+		) {
+			if (!this.isPreferencesStore(written[0]) || !this.extensionSetters.has(writtenName)) {
+				this.refuse(target, `a write to extension property \`${writtenName}\``);
+			}
+			const store = this.expr(written[0]);
+			const self = this.selfReference();
+			const given = this.expr(value);
+			// `preferences.slugMap += more` on a read-only `Map` is `slugMap =
+			// slugMap + more`: Kotlin's `+`, read and written through the
+			// accessors, the way a rebound `var` takes it.
+			if (operator !== '=' && operator !== '+=' && operator !== '-=') {
+				this.refuse(node, `\`${operator}\` on extension property \`${writtenName}\``);
+			}
+			const next =
+				operator === '='
+					? given
+					: `${this.helper(operator === '+=' ? 'plus' : 'minus')}(${self}.__ext_${writtenName}(${store}), ${given})`;
+			return `${self}.__ext_set_${writtenName}(${store}, ${next});`;
+		}
 
 		// **The `if` that swallowed its own assignment.**
 		//
@@ -7663,10 +8042,17 @@ class Emitter {
 			const declarative = this.declarativeInterceptor(suffix, receiver, args[0]);
 			if (declarative !== null) return declarative;
 		}
+		// A named argument to `indexOf`/`lastIndexOf` is `ignoreCase` or
+		// `startIndex`, which only Kotlin's own reads: see `KNOWN_SIGNATURES`.
+		const namedSearch =
+			(name === 'indexOf' || name === 'lastIndexOf') &&
+			args.some((arg) => arg.allChildren.some((child) => child.type === '='));
 		const helper = indexed
 			? 'getAt'
 			: scopeFunction && !shadowed
-				? EXTENSION_METHODS.get(name)
+				? namedSearch
+					? name
+					: EXTENSION_METHODS.get(name)
 				: undefined;
 		if (helper !== undefined) {
 			const before = this.asyncLambdas;
@@ -7843,7 +8229,16 @@ class Emitter {
 		if (statics !== undefined && !statics.has(name) && !this.moduleNames.has(receiver.text)) {
 			this.refuse(suffix, `\`${receiver.text}.${name}()\``);
 		}
-		if (!HOST_METHODS.has(name) && !crossFileObject && !declared && scopeFunction) {
+		// java.util.Base64's coders: `Base64.getDecoder().decode(text)`. `decode`
+		// and `withoutPadding` are not on the allowlist — the first is too common
+		// a word to pass through on any receiver — so they pass here only on the
+		// accessor that returns one of the runtime's coders.
+		const javaCoder =
+			(name === 'decode' || name === 'withoutPadding' || name === 'encodeToString') &&
+			/\.get(?:Url|Mime)?(?:Decoder|Encoder)\(\)(?:\.withoutPadding\(\))?$/.test(
+				receiver.text.replace(/\s+/g, '')
+			);
+		if (!HOST_METHODS.has(name) && !crossFileObject && !declared && scopeFunction && !javaCoder) {
 			// Passthrough is an allowlist. See the file header: a fallback turns
 			// an unrecognised Kotlin helper into a call on a shim that has never
 			// heard of it, and the failure then happens inside a sandbox rather
@@ -7852,18 +8247,27 @@ class Emitter {
 		}
 		const argumentLambda = ARGUMENT_LAMBDA_METHODS.has(name);
 		const builderLambda = lambda !== null && (BUILDER_LAMBDA_METHODS.has(name) || argumentLambda);
-		if (lambda !== null && !builderLambda) this.refuse(lambda, `a lambda passed to \`.${name}()\``);
+		const trailing =
+			lambda !== null && !builderLambda && declared
+				? this.trailingLambdaArguments(name, receiver, args, lambda, labelled)
+				: null;
+		if (lambda !== null && !builderLambda && trailing === null) {
+			this.refuse(lambda, `a lambda passed to \`.${name}()\``);
+		}
 
-		const argumentsText = builderLambda
-			? this.callArguments(
-					name,
-					args,
-					lambda,
-					labelled,
-					!argumentLambda,
-					argumentLambda ? null : modelTypeOf(receiver)
-				)
-			: this.plainArguments(name, args, this.receiverTypeOf(receiver));
+		const argumentsText =
+			trailing !== null
+				? trailing
+				: builderLambda
+					? this.callArguments(
+							name,
+							args,
+							lambda,
+							labelled,
+							!argumentLambda,
+							argumentLambda ? null : modelTypeOf(receiver)
+						)
+					: this.plainArguments(name, args, this.receiverTypeOf(receiver));
 		// `element.parent()` is a jsoup call and a runtime field; see
 		// `HOST_PROPERTY_METHODS` for what emitting it as written cost.
 		if (argumentsText.length === 0 && HOST_PROPERTY_METHODS.has(name) && !declared) {
@@ -8370,6 +8774,47 @@ class Emitter {
 			}
 		}
 		return out;
+	}
+
+	/**
+	 * `VidHideExtractor(client, headers).videosFromUrl(url) { quality -> quality }`
+	 * — a trailing lambda to a method this unit declares, on a receiver whose
+	 * class is known. Null when either is not the case, and the caller refuses.
+	 *
+	 * Kotlin binds a trailing lambda to the *last* parameter, whatever sits
+	 * between: `videosFromUrl(url, prefix = "", videoNameGen)` called as
+	 * `videosFromUrl(url) { … }` leaves `prefix` at its default. So the lambda
+	 * goes in the last slot of the declared signature and every slot skipped on
+	 * the way is `undefined`, which is what makes a JavaScript default parameter
+	 * — the emitted declaration's own — apply. The signature is the receiver
+	 * class's own (`qualifiedSignatures`), never the name's across the unit:
+	 * this ecosystem declares `videosFromUrl` in forty extractors, with forty
+	 * parameter lists.
+	 *
+	 * Positional arguments only. A named argument before the block is a
+	 * placement question `plainArguments` answers for plain calls and this does
+	 * not try to.
+	 */
+	private trailingLambdaArguments(
+		name: string,
+		receiver: KNode,
+		args: KNode[],
+		lambda: KNode,
+		labelled: string | null
+	): string[] | null {
+		if (args.some((arg) => arg.allChildren.some((child) => child.type === '='))) return null;
+		const owner = this.receiverTypeOf(receiver);
+		if (owner === null) return null;
+		const signature = this.qualifiedSignatures.get(`${owner}.${name}`);
+		if (signature === undefined || signature.length === 0) return null;
+		if (args.length > signature.length - 1) return null;
+		const out = this.callArguments(name, args, lambda, labelled, false);
+		const given = out.slice(0, -1);
+		if (given.length !== args.length || given.some((one) => one.startsWith('...'))) {
+			this.refuse(lambda, `a lambda passed to \`.${name}()\` after a spread`);
+		}
+		const skipped = signature.length - 1 - given.length;
+		return [...given, ...Array.from({ length: skipped }, () => 'undefined'), out[out.length - 1]];
 	}
 
 	/**
@@ -8914,6 +9359,11 @@ class Emitter {
 		// segment.
 		const qualified = QUALIFIED_GLOBAL.exec(node.text.replace(/\s+/g, ''));
 		if (qualified !== null && GLOBAL_NAMES.has(qualified[1])) return qualified[1];
+		// `java.lang.String.format(…)` is the `String.format(…)` a bare `String`
+		// receiver already reaches: Kotlin's String type, which this runtime
+		// spells as JavaScript's.
+		const spelled = node.text.replace(/\s+/g, '');
+		if (spelled === 'java.lang.String' || spelled === 'kotlin.String') return 'String';
 
 		// The one thing this ecosystem asks the JVM class object for, and the
 		// only reflection in the catalogue that has an answer here.
@@ -8932,6 +9382,9 @@ class Emitter {
 		// simple name. See `SIMPLE_NAME` in `subset.ts` for both halves.
 		const simple = SIMPLE_NAME.exec(node.text.replace(/\s+/g, ''));
 		if (simple !== null) return this.simpleName(node, simple[1] ?? null);
+
+		const extension = this.extensionPropertyRead(node);
+		if (extension !== null) return extension;
 
 		const receiver = kids(node)[0];
 		if (receiver.type === 'super_expression') {
@@ -9739,6 +10192,18 @@ class Emitter {
 	private read(name: string, node: KNode): string {
 		const local = this.lookup(name);
 		if (local !== null) return local;
+		// The root of a package path — `java.lang.Integer.toHexString(…)` — that
+		// nothing above resolved. Read as a member it became `this.java`, and
+		// the call died on `undefined` at run time with nothing refused.
+		if (PACKAGE_ROOTS.has(name) && !this.classMembers.has(name) && !this.moduleNames.has(name)) {
+			this.refuse(node, `a fully qualified \`${name}.…\` name this build does not know`);
+		}
+		// A bare `quality` naming an extension property is a read through an
+		// implicit receiver — `with(preferences) { quality }` — which this
+		// build does not track. Refused, rather than read off the extension.
+		if (this.extensionProperties.has(name) && !this.classMembers.has(name)) {
+			this.refuse(node, `a bare read of extension property \`${name}\``);
+		}
 		// Inside an enum: an entry by its bare name, and the entry list.
 		const inEnum = this.enumMember(name);
 		if (inEnum !== null) return inEnum;
@@ -10273,6 +10738,14 @@ class Emitter {
 		const declared = this.aliased(type);
 		if (this.declaredTypes.has(declared)) {
 			return this.safe(this.localTypes.get(declared) ?? declared);
+		}
+		// `: AnimeStreamFilters.QueryPartFilter(name, LIST)` — a nested type
+		// written through the object holding it. It is hoisted to module scope
+		// under its bare name (see `qualifiedTypes`), and that binding is what
+		// the `extends` names, exactly as for the imported bare spelling.
+		const nested = this.qualifiedTypes.get(declared);
+		if (nested !== undefined && this.declaredTypes.has(nested)) {
+			return this.safe(this.localTypes.get(nested) ?? nested);
 		}
 		// Both spellings of one class: the video ecosystem renamed `Filter` to
 		// `AnimeFilter` when it forked and changed nothing else, so a subclass
@@ -11415,6 +11888,120 @@ function accessorOf(
 	return (
 		kids(node).find((child) => child.type === kind) ?? (next?.type === kind ? next : undefined)
 	);
+}
+
+/**
+ * Where an interceptor's pass-through ends and its recovery begins, if it has
+ * that shape. See `memberWithRecovery` for why, and for when the cut is taken.
+ *
+ * Read off the syntax, narrowly, because the claim it supports is narrow —
+ * "every answer this guard hands back runs exactly as written":
+ *
+ * - `intercept` takes one parameter, the chain;
+ * - a top-level `val r = chain.proceed(…)` binds the answer;
+ * - a later top-level `if (…) return r`, with no `else`, whose condition reads
+ *   `r` — a guard *about the answer*, handing that same answer back.
+ *
+ * A guard that returns `chain.proceed(…)` afresh is deliberately not one: that
+ * decides which *requests* the interceptor handles, and there the tail is the
+ * interceptor's purpose rather than its recovery.
+ */
+function recoveryCandidate(fn: KNode, owner: string): RecoveryCandidate | null {
+	const list = kids(fn).find((child) => child.type === 'function_value_parameters');
+	const params = kids(list).filter((child) => child.type === 'parameter');
+	if (params.length !== 1) return null;
+	const chain = kids(params[0]).find((child) => child.type === 'simple_identifier')?.text;
+	if (chain === undefined) return null;
+	const body = kids(fn).find((child) => child.type === 'function_body');
+	const statements = kids(body).find((child) => child.type === 'statements');
+	if (body === undefined || statements === undefined) return null;
+
+	const answers = new Set<string>();
+	const proceeds = new RegExp(`^${chain}\\s*\\.\\s*proceed\\s*\\(`);
+	const lines = kids(statements);
+	for (const [index, statement] of lines.entries()) {
+		if (statement.type === 'property_declaration') {
+			const parts = kids(statement);
+			const bound = kids(parts.find((part) => part.type === 'variable_declaration'))[0]?.text;
+			const value = parts[parts.length - 1];
+			if (bound !== undefined && value !== undefined && proceeds.test(value.text)) {
+				answers.add(bound);
+			}
+			continue;
+		}
+		const guard = passThrough(statement);
+		if (guard === null || !answers.has(guard.returned)) continue;
+		if (!mentions(guard.condition).includes(guard.returned)) continue;
+		const tail = lines[index + 1];
+		if (tail === undefined) return null;
+		return {
+			body,
+			keep: index + 1,
+			kept: [...params, ...lines.slice(0, index + 1)],
+			tailLine: tail.line,
+			owner
+		};
+	}
+	return null;
+}
+
+/** `if (cond) return x` / `if (cond) { return x }`, no `else`: its parts, or null. */
+function passThrough(node: KNode): { condition: KNode; returned: string } | null {
+	if (node.type !== 'if_expression') return null;
+	if (node.allChildren.some((child) => child.type === 'else')) return null;
+	const parts = kids(node);
+	if (parts.length !== 2 || parts[1].type !== 'control_structure_body') return null;
+	let inner = kids(parts[1]);
+	if (inner.length === 1 && inner[0].type === 'statements') inner = kids(inner[0]);
+	if (inner.length !== 1 || inner[0].type !== 'jump_expression') return null;
+	const jump = inner[0];
+	if (!/^return\s/.test(jump.text)) return null;
+	const value = kids(jump);
+	if (value.length !== 1 || value[0].type !== 'simple_identifier') return null;
+	return { condition: parts[0], returned: value[0].text };
+}
+
+/**
+ * The receiver type of an extension property, `SharedPreferences` in `val
+ * SharedPreferences.quality`, or null for an ordinary property. The grammar
+ * puts the receiver's `user_type` directly under the declaration, where an
+ * ordinary property's type sits inside its `variable_declaration`.
+ */
+function extensionReceiverOf(node: KNode): string | null {
+	const parts = kids(node);
+	const at = parts.findIndex((child) => child.type === 'user_type');
+	const declared = parts.findIndex((child) => child.type === 'variable_declaration');
+	if (at === -1 || declared === -1 || at > declared) return null;
+	return typeName(parts[at]);
+}
+
+/** Whether a class lists okhttp's `Interceptor` among its supertypes. */
+function implementsInterceptor(node: KNode): boolean {
+	return kids(node).some(
+		(child) =>
+			child.type === 'delegation_specifier' && /^(?:okhttp3\.)?Interceptor$/.test(child.text.trim())
+	);
+}
+
+interface RecoveryCandidate {
+	/** The `function_body`, to recognise when it is reached. */
+	readonly body: KNode;
+	/** How many statements (`kids` of `statements`) are kept: through the guard. */
+	readonly keep: number;
+	/** The parameter and the kept statements: what edges and the scan read. */
+	readonly kept: readonly KNode[];
+	/** The first line of the tail; an obstacle on or after it is the tail's. */
+	readonly tailLine: number;
+	/** The class, as the error names it. */
+	readonly owner: string;
+}
+
+interface RecoveryCut {
+	readonly body: KNode;
+	readonly keep: number;
+	readonly owner: string;
+	/** What the tail was refused for, in `RECOVERY_BOUNDARIES`' plain words. */
+	readonly kinds: readonly string[];
 }
 
 /**

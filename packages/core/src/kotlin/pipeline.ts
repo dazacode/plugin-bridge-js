@@ -130,6 +130,14 @@ export interface KotlinConversion {
 	readonly reachable: readonly string[];
 	/** `__k` helper names the emitted code calls, sorted. */
 	readonly usedRuntime: readonly string[];
+	/**
+	 * Members that translated with a boundary-reaching tail cut off, each
+	 * naming what the tail needed. They are in `translated`, not in
+	 * `refusals`: the host calls them and they work on every path but that
+	 * one, which throws an error with the boundary's name on it. See
+	 * `memberWithRecovery` in `emit.ts`.
+	 */
+	readonly deferred: readonly Refusal[];
 	/** Members translated in full, across every file. */
 	readonly translated: readonly string[];
 	/**
@@ -232,6 +240,7 @@ export async function convertKotlin(
 	const entryMembers = new Set<string>();
 	const refusals: Refusal[] = [];
 	const translated: string[] = [];
+	const deferred: Refusal[] = [];
 	const used = new Set<string>();
 	const bodies: string[] = [];
 	let className: string | null = null;
@@ -334,6 +343,7 @@ export async function convertKotlin(
 				blocking: headerRefusal(file.path, emission.fileRefusal),
 				reachable: [],
 				usedRuntime: [],
+				deferred: [],
 				translated: [],
 				abiMembers: [],
 				complete: false,
@@ -355,6 +365,7 @@ export async function convertKotlin(
 		if (emission.js.length > 0) bodies.push(emission.js);
 		translated.push(...emission.translated);
 		refusals.push(...emission.refusals);
+		deferred.push(...emission.deferred);
 		for (const helper of emission.usedRuntime) used.add(helper);
 	}
 
@@ -442,10 +453,29 @@ export async function convertKotlin(
 		if (!refusedNames.has(owner)) extendedBySurvivor.add(base);
 	}
 
+	// A refused `by lazy` property that overrides nothing and that no
+	// translated member names is never read, so it never runs. Reachability
+	// counts every property as construction, which is right for an ordinary
+	// initialiser and too eager for a lazy one: its block runs on the first
+	// read, and a property that overrides nothing can only be read by the
+	// Kotlin, which is all here. `DdosGuardInterceptor`'s `private val
+	// cookieManager by lazy { CookieManager.getInstance() }` is the case — read
+	// only by the recovery `memberWithRecovery` cut off, so no emitted line
+	// reads it. The moment any translated line does name it, it blocks again.
+	const lazyUnread = new Set(
+		graph
+			.filter((edges) => edges.lazy === true && !calledByTranslated.has(edges.member))
+			.map((edges) => edges.member)
+	);
+	// Every declaration of the name has to be an unread lazy one: a collision
+	// with an ordinary member of the same name keeps the refusal.
+	for (const edges of graph) if (edges.lazy !== true) lazyUnread.delete(edges.member);
+
 	const blocking = refusals.filter(
 		(one) =>
 			extendedBySurvivor.has(one.member) ||
-			((!isHostDrawn(one.member) || calledByTranslated.has(one.member)) &&
+			(!lazyUnread.has(one.member) &&
+				(!isHostDrawn(one.member) || calledByTranslated.has(one.member)) &&
 				(!graphed.has(one.member) ||
 					reachable.has(one.member) ||
 					namedAtConstruction.has(one.member)))
@@ -462,6 +492,7 @@ export async function convertKotlin(
 		blocking,
 		reachable: [...reachable].sort(),
 		usedRuntime: [...used].sort(),
+		deferred,
 		translated,
 		abiMembers,
 		complete: blocking.length === 0 && translated.length > 0,
@@ -885,6 +916,7 @@ function empty(constants: KotlinSource, message: string): KotlinConversion {
 		blocking: [],
 		reachable: [],
 		usedRuntime: [],
+		deferred: [],
 		translated: [],
 		abiMembers: [],
 		complete: false,

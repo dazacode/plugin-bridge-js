@@ -420,6 +420,38 @@ const NAMED_OBSTACLES: readonly {
 	{ pattern: /\bCookieManager\b/, name: 'the WebView cookie store' }
 ];
 
+/**
+ * The boundaries an anti-bot *recovery* reaches for, by the names refusals give
+ * them.
+ *
+ * An okhttp interceptor in this ecosystem very often has one shape: send the
+ * request, look at the answer, hand it straight back unless it is a challenge
+ * page, and only then do something about the challenge — read the WebView's
+ * cookie store for a clearance cookie, or open a WebView to earn one. The
+ * challenge half is a boundary and stays one (`docs/adr/0005-network-
+ * boundaries.md` §4). The pass-through half is ordinary Kotlin, and it is what
+ * runs on every request the source does not challenge.
+ *
+ * `emit.ts` (`recoveryCut`) uses this list to tell that shape from an
+ * interceptor that is *about* the boundary: the part of `intercept` after the
+ * pass-through guard may be cut off — replaced by an error naming the
+ * boundary — only when what refused it is one of these. A tail refused for an
+ * ordinary gap is a translator gap and is left refused, where it is counted.
+ *
+ * Every name here is one the scoreboard counts as a native capability
+ * (`host/src/scoreboard.ts`), and `scoreboard.spec.ts` holds the two lists to
+ * that. The passthrough spelling `.getCookie()` is on it because a lower-case
+ * `cookieManager` field read is not something the name table can see: the
+ * emitter meets the call and refuses it by the method's name.
+ */
+export const RECOVERY_BOUNDARIES: ReadonlyMap<string, string> = new Map([
+	// Refusal kind → what the runtime error calls it, in a viewer's words.
+	['WebView', 'a WebView'],
+	['the WebView cookie store', "the WebView's cookie store"],
+	['`.getCookie()`', "the WebView's cookie store"],
+	['reading a cookie jar', 'reading its own cookie jar']
+]);
+
 /* ── algorithms ───────────────────────────────────────────────────────────── */
 
 /**
@@ -839,6 +871,13 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 	['use', 'let'],
 	['orEmpty', 'orEmpty'],
 	['eachText', 'eachText'],
+	// `Int.inc()`/`dec()` — the operator functions behind `++`, called by name:
+	// `calendar.get(Calendar.YEAR).inc()`. A Char steps to its neighbour.
+	['inc', 'inc'],
+	['dec', 'dec'],
+	// `hashes.groupingBy { it.second }.eachCount()`: a Grouping, and the one
+	// terminal this ecosystem asks of it.
+	['groupingBy', 'groupingBy'],
 	['eachAttr', 'eachAttr'],
 	['filterIsInstance', 'filterIsInstance'],
 	['bodyString', 'bodyString'],
@@ -1277,6 +1316,10 @@ export const RUNTIME_STATIC_REFERENCES: ReadonlyMap<string, ReadonlySet<string>>
  * is a deliberate cost rather than an oversight.
  */
 export const HOST_METHODS: ReadonlySet<string> = new Set([
+	// The one terminal of a `groupingBy { }` Grouping this runtime builds.
+	'eachCount',
+	// java.text.CharacterIterator's reads, on the one this runtime builds.
+	'current',
 	// kotlinx's JsonDecoder, as a KSerializer's `deserialize` is handed it by
 	// the typed decoder (`__jsonDecoder` in the runtime). The `encode*` half
 	// is what the same object's `serialize` writes; the runtime never calls
@@ -1771,16 +1814,26 @@ export const HOST_METHODS: ReadonlySet<string> = new Set([
  * `BLOCKING_CALLS` carries that outward to whatever calls *it* — so a member
  * that decrypts becomes `async` and its callers await it, transitively.
  *
- * Only these four, and each is a name javax.crypto and java.security own.
+ * The crypto four are each a name javax.crypto and java.security own.
  * `init`, `initSign` and `update` stay synchronous because the shim keeps them
  * so: a key is recorded rather than imported, and the import happens inside the
  * operation, which is what keeps the asynchronous surface this small.
+ *
+ * `proceed` is okhttp's `Interceptor.Chain.proceed`, and it is on this list for
+ * the same reason: the runtime runs the chain (`__proceed`) and the end of it
+ * is the host's send, so what it hands back is a promise of the response. Not
+ * awaited, `val response = chain.proceed(request)` held that promise, and every
+ * read of it answered `undefined` — `response.code != 403` was true of every
+ * answer, so an interceptor that exists to notice a challenge noticed nothing
+ * and handed the promise back, which the runtime then happened to await. A
+ * returned response survived that by accident; a *read* one never did.
  */
 export const AWAITED_HOST_METHODS: ReadonlySet<string> = new Set([
 	'doFinal',
 	'sign',
 	'verify',
-	'generateKeyPair'
+	'generateKeyPair',
+	'proceed'
 ]);
 
 /**
@@ -1939,6 +1992,13 @@ export const FREE_FUNCTIONS: ReadonlyMap<string, string> = new Map([
 	// `List(n) { at -> … }` BUILDS: it is an episode list as often as not, and
 	// an empty array of that length answers undefined for every entry.
 	['List', 'listOfSize'],
+	// `Array(n) { i -> … }` is the same builder under Array's name — Kotlin's
+	// Array constructor always takes the init block — and arrays are lists
+	// here (see `arrayOf`). Cycity builds its year filter this way.
+	['Array', 'listOfSize'],
+	// java.text's `StringCharacterIterator("kMGTPE")`, which a byte-size
+	// formatter walks with `next()` and reads with `current()`. See the helper.
+	['StringCharacterIterator', 'charIterator'],
 
 	['JSONObject', 'jsonObject'],
 	['JSONArray', 'jsonArray'],
@@ -2521,6 +2581,14 @@ export const KNOWN_SIGNATURES: ReadonlyMap<string, readonly string[]> = new Map(
 	// ecosystem compares a header name, and it is the same trailing-boolean
 	// shape as the four above.
 	['equals', ['other', 'ignoreCase']],
+	// `description.indexOf("English", ignoreCase = true)`. Not the trailing-
+	// boolean shape above — `startIndex` sits between — so a named call is not
+	// left on the passthrough: `emit.ts` sends it to `__k.indexOf`, which takes
+	// a skipped `startIndex` as `undefined` and honours `ignoreCase`. JavaScript's
+	// own `indexOf` would drop the flag without a word. Positional calls, which
+	// mean the same in both languages, stay on the passthrough.
+	['indexOf', ['string', 'startIndex', 'ignoreCase']],
+	['lastIndexOf', ['string', 'startIndex', 'ignoreCase']],
 
 	// `AnimesPage(animes = …, hasNextPage = …)`, which a list parse returns by
 	// hand. Both halves are required, so nothing is filled with `undefined`.

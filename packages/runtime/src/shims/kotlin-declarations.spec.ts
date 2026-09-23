@@ -45,6 +45,9 @@ beforeAll(async () => {
 
 function context() {
 	return {
+		// Nothing chosen, so a setting read answers the default its call site
+		// gives — which is what a fixture asserting defaults wants.
+		settings: { string: () => '', boolean: () => false, list: () => [] as string[] },
 		text: {
 			encode: (value: string) => new TextEncoder().encode(value),
 			decode: (bytes: Uint8Array) => new TextDecoder().decode(bytes)
@@ -888,5 +891,326 @@ describe('a reference to a function a runtime global answers', () => {
 		expect(d.millis('2021-05-17T09:30:15Z')).toBe(Date.UTC(2021, 4, 17, 9, 30, 15));
 		expect(d.millis('not a date')).toBe(0);
 		expect(d.millis(null)).toBe(0);
+	});
+});
+
+describe('an interceptor whose recovery needs the WebView', () => {
+	// The Voe extractor's `DdosGuardInterceptor`, cut to its shape: pass every
+	// answer through unless it is a DDoS-Guard challenge, and only then go to
+	// the WebView's cookie store. Refused whole, it refused every extension
+	// that installs the extractor, although the tail only runs when a hoster
+	// challenges. See `memberWithRecovery` in `emit.ts`.
+	const source = kt(
+		'class Guard(private val client: OkHttpClient) : Interceptor {',
+		'    override fun intercept(chain: Interceptor.Chain): Response {',
+		'        val originalRequest = chain.request()',
+		'        val response = chain.proceed(originalRequest)',
+		'',
+		'        // Check if DDos-GUARD is on',
+		'        if (response.code !in ERROR_CODES || response.header("Server") !in SERVER_CHECK) {',
+		'            return response',
+		'        }',
+		'',
+		'        response.close()',
+		'        val cookies = CookieManager.getInstance().getCookie(originalRequest.url.toString())',
+		'        return chain.proceed(originalRequest.newBuilder().addHeader("cookie", cookies).build())',
+		'    }',
+		'',
+		'    companion object {',
+		'        private val ERROR_CODES = listOf(403)',
+		'        private val SERVER_CHECK = listOf("ddos-guard")',
+		'    }',
+		'}'
+	);
+
+	function chain(code: number, server: string | null) {
+		const answer = {
+			code,
+			header: (name: string) => (name.toLowerCase() === 'server' ? server : null),
+			close: () => undefined
+		};
+		const proceeded: unknown[] = [];
+		return {
+			answer,
+			proceeded,
+			request: () => ({ url: 'https://hoster.invalid/e/1' }),
+			proceed: async (request: unknown) => {
+				proceeded.push(request);
+				return answer;
+			}
+		};
+	}
+
+	it('translates the pass-through and reports the cut, not a refusal', () => {
+		const emission = emitKotlin(parse(source));
+		expect(emission.refusals).toEqual([]);
+		expect(emission.translated).toContain('intercept');
+		// Still named: the member is there, and so is what its tail needed.
+		expect(emission.deferred.map((one) => one.member)).toEqual(['intercept']);
+		expect(emission.deferred[0].obstacles.map((one) => one.kind)).toEqual([
+			'the WebView cookie store'
+		]);
+		// The awaited answer is what the guard reads. Not awaited, every read
+		// of it was `undefined` and every challenge passed as an answer.
+		expect(emission.js).toContain('(await chain.proceed(originalRequest))');
+	});
+
+	it('hands back every answer the guard passes, exactly as the Kotlin does', async () => {
+		const guard = await instantiate('Guard', source);
+		for (const [code, server] of [
+			[200, 'nginx'],
+			[403, 'nginx'],
+			[200, 'ddos-guard'],
+			[404, null]
+		] as const) {
+			const link = chain(code, server);
+			expect(await guard.intercept(link)).toBe(link.answer);
+			expect(link.proceeded).toHaveLength(1);
+		}
+	});
+
+	it('raises an error naming the boundary where the recovery would begin', async () => {
+		const guard = await instantiate('Guard', source);
+		const link = chain(403, 'ddos-guard');
+		await expect(guard.intercept(link)).rejects.toThrow(
+			/Guard got an answer it would only get past through the WebView's cookie store/
+		);
+		// Nothing after the guard ran: no second request went out.
+		expect(link.proceeded).toHaveLength(1);
+	});
+
+	it('leaves a tail refused for an ordinary gap refused', () => {
+		// The cut is for a boundary only. A tail that fails for a translator gap
+		// is ours to fix, and a cut would hide it behind a runtime error.
+		const emission = emitKotlin(
+			parse(
+				source.replace(
+					'CookieManager.getInstance().getCookie(originalRequest.url.toString())',
+					'Injekt.get<Loader>()'
+				)
+			)
+		);
+		expect(emission.refusals.map((one) => one.member)).toEqual(['intercept']);
+		expect(emission.deferred).toEqual([]);
+	});
+
+	it('does not cut after a guard that decides which requests to handle', () => {
+		// `return chain.proceed(…)` afresh, before any answer is read: there
+		// the tail is the interceptor's purpose, not a recovery from an answer.
+		const emission = emitKotlin(
+			parse(
+				kt(
+					'class Gate : Interceptor {',
+					'    override fun intercept(chain: Interceptor.Chain): Response {',
+					'        val request = chain.request()',
+					'        if (!request.url.host.contains("cdn")) return chain.proceed(request)',
+					'        val cookies = CookieManager.getInstance().getCookie(request.url.toString())',
+					'        return chain.proceed(request.newBuilder().addHeader("cookie", cookies).build())',
+					'    }',
+					'}'
+				)
+			)
+		);
+		expect(emission.refusals.map((one) => one.member)).toEqual(['intercept']);
+		expect(emission.deferred).toEqual([]);
+	});
+
+	it('does not cut when the boundary is reached before the guard', () => {
+		const emission = emitKotlin(
+			parse(
+				kt(
+					'class Early : Interceptor {',
+					'    override fun intercept(chain: Interceptor.Chain): Response {',
+					'        val cookies = CookieManager.getInstance().getCookie("https://x.invalid")',
+					'        val response = chain.proceed(chain.request())',
+					'        if (response.code != 403) return response',
+					'        return chain.proceed(chain.request())',
+					'    }',
+					'}'
+				)
+			)
+		);
+		expect(emission.refusals.map((one) => one.member)).toEqual(['intercept']);
+		expect(emission.deferred).toEqual([]);
+	});
+});
+
+describe('an extension property on the settings store', () => {
+	// `private val SharedPreferences.quality get() = getString(KEY, DEFAULT)!!`,
+	// read as `preferences.quality`. Emitted as the extension's own getter, it
+	// read `getString` off the extension and the read went to the store, which
+	// has no such field: every setting answered `undefined`, nothing refused.
+	const source = kt(
+		'class Demo {',
+		'    private val preferences by getPreferencesLazy()',
+		'    private val SharedPreferences.quality get() = getString(PREF_QUALITY_KEY, "1080p")!!',
+		'    private val SharedPreferences.server: String',
+		'        get() = getString(PREF_SERVER_KEY, "alpha")!!',
+		'    private val SharedPreferences.ignorePreview',
+		'        by preferences.delegate(PREF_PREVIEW_KEY, true)',
+		'    private var SharedPreferences.markFiller',
+		'        by LazyMutable { preferences.getBoolean(PREF_FILLER_KEY, false) }',
+		'    fun settings() = listOf(preferences.quality, preferences.server, preferences.ignorePreview, preferences.markFiller)',
+		'    fun label(video: Video) = video.quality',
+		'    fun nested() = buildList { add(preferences.quality) }',
+		'    companion object {',
+		'        private const val PREF_QUALITY_KEY = "quality"',
+		'        private const val PREF_SERVER_KEY = "server"',
+		'        private const val PREF_PREVIEW_KEY = "preview"',
+		'        private const val PREF_FILLER_KEY = "filler"',
+		'    }',
+		'}'
+	);
+
+	it('reads each through the store, with the defaults its declaration gives', async () => {
+		const demo = await instantiate('Demo', source);
+		expect(demo.settings()).toEqual(['1080p', 'alpha', true, false]);
+		// A field of the same name on another object is still that object's.
+		expect(demo.label({ quality: '720p' })).toBe('720p');
+		expect(demo.nested()).toEqual(['1080p']);
+	});
+
+	it('refuses what it cannot read rather than reading it off the wrong object', () => {
+		const refused = (...lines: string[]) =>
+			refusalNames(
+				kt(
+					'class Demo {',
+					'    private val preferences by getPreferencesLazy()',
+					'    private val SharedPreferences.quality get() = getString("q", "1080p")!!',
+					...lines,
+					'}'
+				)
+			);
+		// A write: there is no setter to call, and a field on the store is read
+		// back by nothing.
+		expect(refused('    fun set(v: String) { preferences.quality = v }')).toContain(
+			'a write to extension property `quality`'
+		);
+		// A bare read through an implicit receiver this build does not track.
+		expect(refused('    fun read() = with(preferences) { quality }')).toContain(
+			'a bare read of extension property `quality`'
+		);
+	});
+
+	it('writes through a setter, and `+=` as a read, a plus and a write', async () => {
+		// OlympusScanlation's shape: a cached map behind the store, replaced
+		// wholesale — `slugMap += more` on a read-only Map is `slugMap =
+		// slugMap + more`, through both accessors.
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    private val preference by getPreferencesLazy()',
+				'    private var cache: List<String>? = null',
+				'    private var SharedPreferences.seen: List<String>',
+				'        get() = cache ?: emptyList()',
+				'        set(value) {',
+				'            cache = value',
+				'        }',
+				'    fun add(more: List<String>): List<String> {',
+				'        preference.seen = listOf("a")',
+				'        preference.seen += more',
+				'        return preference.seen',
+				'    }',
+				'}'
+			)
+		);
+		expect(demo.add(['b', 'c'])).toEqual(['a', 'b', 'c']);
+	});
+});
+
+describe('stdlib calls that converted to the wrong thing, or not at all', () => {
+	const source = kt(
+		'import java.util.Base64',
+		'class Demo {',
+		'    private val json = Json { ignoreUnknownKeys = true }',
+		'    fun find(text: String) = text.indexOf("english", ignoreCase = true)',
+		'    fun findFrom(text: String) = text.indexOf("a", startIndex = 2)',
+		'    fun next(year: Int) = year.inc()',
+		'    fun counts(pairs: List<Pair<String, String>>) = pairs.groupingBy { it.second }.eachCount()',
+		'    fun decoded(text: String) = String(Base64.getDecoder().decode(text))',
+		'    fun encoded(text: String) = Base64.getEncoder().encodeToString(text.toByteArray())',
+		'    fun urlSafe(text: String) = Base64.getUrlEncoder().withoutPadding().encodeToString(text.toByteArray())',
+		'    fun variables() = json.encodeToString(buildJsonObject { put("page", 2) })',
+		'    fun named(url: String) = Namer().name(url) { it.uppercase() }',
+		'    fun missing(start: Int, end: Int) = start == -1 || end == -1',
+		'    fun guard(y: Boolean, list: List<Int>) = y && !list.any { it > 1 } || list.isEmpty()',
+		'    fun years(current: Int) = Array(current - 2022) { (current - it).toString() }',
+		'    fun size(bits: Long): String {',
+		'        var left = bits',
+		'        val unit: CharacterIterator = StringCharacterIterator("kMGTPE")',
+		'        while (left <= -999950 || left >= 999950) {',
+		'            left /= 1000',
+		'            unit.next()',
+		'        }',
+		'        return java.lang.String.format("%.0f%cb", left / 1000.0, unit.current())',
+		'    }',
+		'}',
+		'class Namer {',
+		'    fun name(url: String, prefix: String = "p:", gen: (String) -> String = { it }): String = prefix + gen(url)',
+		'}'
+	);
+
+	it('answers each as Kotlin does', async () => {
+		const demo = await instantiate('Demo', source);
+		// JavaScript's indexOf has no third argument and would search
+		// case-sensitively: -1.
+		expect(demo.find('In English')).toBe(3);
+		expect(demo.findFrom('aaa')).toBe(2);
+		expect(demo.next(2025)).toBe(2026);
+		expect([
+			...demo.counts(
+				[
+					['a', 'x'],
+					['b', 'y'],
+					['c', 'x']
+				].map(([first, second]) => ({ first, second }))
+			)
+		]).toEqual([
+			['x', 2],
+			['y', 1]
+		]);
+		expect(demo.decoded('aGVsbG8=')).toBe('hello');
+		// java.util's basic encoder never wraps or ends in a newline, which
+		// android's DEFAULT does.
+		expect(demo.encoded('x'.repeat(80))).toBe(Buffer.from('x'.repeat(80)).toString('base64'));
+		expect(demo.urlSafe('øÿ~')).toBe(Buffer.from('øÿ~').toString('base64url'));
+		// The coder encodes the value, not itself.
+		expect(JSON.parse(demo.variables())).toEqual({ page: 2 });
+		// A trailing lambda to a declared method binds its LAST parameter; the
+		// one skipped on the way keeps its default.
+		expect(demo.named('u')).toBe('p:U');
+		// A prefix operator after a binary one keeps to its own operand.
+		expect(demo.missing(3, -1)).toBe(true);
+		expect(demo.missing(3, 4)).toBe(false);
+		expect(demo.guard(false, [])).toBe(true);
+		expect(demo.guard(true, [5])).toBe(false);
+		expect(demo.years(2025)).toEqual(['2025', '2024', '2023']);
+		expect(demo.size(1500000)).toBe('2Mb');
+	});
+});
+
+describe('a base class written through the object that holds it', () => {
+	it('extends the nested class, as the imported bare spelling already did', async () => {
+		// `class TypeFilter(name) : AnimeStreamFilters.QueryPartFilter(name, LIST)`
+		// refused as "a base class this build has not": the qualified name was
+		// looked up whole, and the nested class is hoisted under its bare one.
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'object Filters {',
+				'    open class QueryPartFilter(val displayName: String, val vals: Array<Pair<String, String>>) {',
+				'        fun toUriPart(at: Int) = vals[at].second',
+				'    }',
+				'}',
+				'class TypeFilter(name: String) : Filters.QueryPartFilter(name, arrayOf("Movie" to "movie", "Series" to "tv"))',
+				'class Demo {',
+				'    fun part() = TypeFilter("Type").toUriPart(1)',
+				'    fun label() = TypeFilter("Type").displayName',
+				'}'
+			)
+		);
+		expect(demo.part()).toBe('tv');
+		expect(demo.label()).toBe('Type');
 	});
 });

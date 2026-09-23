@@ -16,6 +16,7 @@
 
 import { describe, expect, it } from 'vitest';
 
+import { RECOVERY_BOUNDARIES } from '@plugin-bridge/core/kotlin/subset';
 import {
 	bucketMessage,
 	reachOf,
@@ -364,6 +365,17 @@ describe('what stands in the way, as against how far it got', () => {
 	// are ordinary conversions and must stop being counted as a boundary.
 	// Reading a jar, and the WebView's cookie store, stay refused by design —
 	// which is what this column is for.
+	// `emit.ts` cuts an interceptor's recovery off only when what refused it
+	// is one of these. The cut is justified by their being boundaries — the
+	// tail could not be converted by anyone — so a name on that list that this
+	// column calls `widen` would be a translator gap hidden behind a runtime
+	// error. The two lists live in different packages; this holds them level.
+	it('counts every recovery boundary the emitter may cut at as a boundary', () => {
+		for (const obstacle of RECOVERY_BOUNDARIES.keys()) {
+			expect(reachOf(row({ status: 'broken', obstacles: [obstacle] }))).toBe('native');
+		}
+	});
+
 	it('files only the cookie shapes the jar refuses as a boundary', () => {
 		for (const obstacle of [
 			'reading a cookie jar',

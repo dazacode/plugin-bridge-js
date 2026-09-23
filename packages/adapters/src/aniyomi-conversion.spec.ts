@@ -187,7 +187,7 @@ interface Stream {
 	headers?: Record<string, string>;
 }
 
-async function convert(translated = TRANSLATED): Promise<Uint8Array> {
+async function convert(translated = TRANSLATED, className = 'Extension'): Promise<Uint8Array> {
 	return await packageBundle({
 		id: PLUGIN_ID,
 		name: 'Example',
@@ -206,7 +206,7 @@ async function convert(translated = TRANSLATED): Promise<Uint8Array> {
 		entrypointSource: aniyomiEntrypoint({
 			pluginId: PLUGIN_ID,
 			translatedSource: translated,
-			className: 'Extension',
+			className,
 			baseUrl: BASE_URL
 		}),
 		// Exactly as `aniyomi.ts` decides it: the format grants it, and the
@@ -217,8 +217,8 @@ async function convert(translated = TRANSLATED): Promise<Uint8Array> {
 	});
 }
 
-async function load(translated = TRANSLATED): Promise<Loaded> {
-	const bundle = await openPluginArchive(await convert(translated));
+async function load(translated = TRANSLATED, className = 'Extension'): Promise<Loaded> {
+	const bundle = await openPluginArchive(await convert(translated, className));
 	// A file rather than a `data:` URL: this bundle carries a whole runtime and
 	// is far past the length a data URL can be imported at.
 	const { writeFileSync, mkdtempSync } = await import('node:fs');
@@ -234,6 +234,24 @@ describe('the bundle a translated extension becomes', () => {
 		const bundle = await openPluginArchive(await convert());
 		expect(bundle.manifest.id).toBe(PLUGIN_ID);
 		expect((bundle.manifest as Record<string, unknown>).license).toBe('Apache-2.0');
+	});
+
+	it('runs the first source a source factory creates, not the factory', async () => {
+		// `extClass = '.SupJavFactory'`: the class the listing names makes the
+		// sources and is not one. Built as the source, it answered every call
+		// with nothing, and browse came back empty with nothing refused.
+		const factory = `${TRANSLATED}
+class Factory {
+  createSources() { return __k.listOf(new Extension(), null); }
+}
+`;
+		const page = await (await load(factory, 'Factory')).browse('popular', 1, context().ctx);
+		expect(page.entries.map((entry) => entry.title)).toEqual(['One & Only', 'Two']);
+
+		// At load, where the class is built: there is no source to answer with.
+		await expect(
+			load('class Factory { createSources() { return __k.emptyList(); } }', 'Factory')
+		).rejects.toThrow(/source factory that creates no sources/);
 	});
 
 	it('identifies as the id its manifest declares', async () => {
