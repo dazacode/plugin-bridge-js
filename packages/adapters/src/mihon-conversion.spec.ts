@@ -181,6 +181,32 @@ class Extension extends Template {}
 		);
 	});
 
+	it('has the base class’s client, network and headers while the constructor runs', async () => {
+		// `override val client = network.client.newBuilder()…` and `private val
+		// apiHeaders = headers.newBuilder()…` are property initialisers. With
+		// these attached after `new`, the first died at load on
+		// `this.network.client` and the second built from nothing.
+		const module = await load(
+			`
+class Extension {
+  constructor() {
+    this.ownClient = this.network.client.newBuilder().build();
+    this.apiHeaders = this.headers.newBuilder().set('X-Api', '1').build();
+  }
+  fetchPopularManga(page) {
+    const referer = this.apiHeaders.get('Referer');
+    return Observable.just(MangasPage([{ title: referer + ' ' + this.apiHeaders.get('X-Api'), url: '/x' }], false));
+  }
+}
+`,
+			{},
+			true
+		);
+
+		const page = await module.browse('popular', 1, context());
+		expect(page.entries[0].title).toBe(`${BASE_URL}/ 1`);
+	});
+
 	it('leaves a base URL the extension declares itself to win over the generated one', async () => {
 		// A constructor parameter or field lands on the instance and shadows the
 		// prototype; a getter is found in the chain and nothing is put beside it.
