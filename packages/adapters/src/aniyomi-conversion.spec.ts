@@ -237,7 +237,7 @@ describe('the bundle a translated extension becomes', () => {
 	});
 
 	it('runs the first source a source factory creates, not the factory', async () => {
-		// `extClass = '.SupJavFactory'`: the class the listing names makes the
+		// `extClass = '.ExampleFactory'`: the class the listing names makes the
 		// sources and is not one. Built as the source, it answered every call
 		// with nothing, and browse came back empty with nothing refused.
 		const factory = `${TRANSLATED}

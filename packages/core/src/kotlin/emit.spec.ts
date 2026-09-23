@@ -3316,10 +3316,10 @@ describe('a name declared somewhere the emitter had not looked', () => {
 		// was fetched as a url, with no refusal and no error.
 		const source = kt(
 			'class Demo : Source() {',
-			'    fun build(url: String): String = Okru(client).videosFromUrl(url, prefix = "p: ")',
+			'    fun build(url: String): String = HostA(client).videosFromUrl(url, prefix = "p: ")',
 			'}',
 			'',
-			'class Okru(private val client: OkHttpClient) {',
+			'class HostA(private val client: OkHttpClient) {',
 			'    fun videosFromUrl(url: String, prefix: String = ""): String = url + prefix',
 			'}'
 		);
@@ -4997,7 +4997,7 @@ describe('a property whose value the host has to compute', () => {
 describe('the settings store written as a plain call', () => {
 	it('resolves to the store, as the `by` delegate spelling already did', () => {
 		// `protected val preferences = getPreferences()` is what `Keyoapp` and
-		// `Kemono` write. It fell through to `this.getPreferences()` — the right
+		// one measured source's write. It fell through to `this.getPreferences()` — the right
 		// default for a member the base supplies, and wrong here, because the
 		// driver supplies no such member. Four of the measured bundles died at
 		// load on it.
@@ -5431,7 +5431,7 @@ describe('file annotations, and a serializer on a type argument', () => {
 	});
 
 	it('refuses a call to a keiyoushi core function this build did not read', () => {
-		// ViTruyen's `getLocalStorage` (core's WebView.kt) came out as
+		// One source's `getLocalStorage` (core's WebView.kt) came out as
 		// `this.getLocalStorage(…)`: complete, loaded, and broken on the first
 		// chapter. A name the runtime answers, imported the same way, is not.
 		expect(
@@ -5449,17 +5449,17 @@ describe('file annotations, and a serializer on a type argument', () => {
 	});
 
 	it('does not count a returned interceptor as blocking its builder', () => {
-		// Nexus Toons: `NexusDecrypt.createInterceptor()` returns the lambda that
+		// One measured source: `…Decrypt.createInterceptor()` returns the lambda that
 		// proceeds; it does not proceed itself. Counted as blocking across
 		// files, the client initialiser became a suspending one and refused.
 		expect(
 			refusalNames(
 				kt(
-					'object NexusDecrypt {',
+					'object SiteDecrypt {',
 					'    fun createInterceptor(): Interceptor = Interceptor { chain -> chain.proceed(chain.request()) }',
 					'}',
 					'class Demo : HttpSource() {',
-					'    override val client = network.client.newBuilder().addInterceptor(NexusDecrypt.createInterceptor()).build()',
+					'    override val client = network.client.newBuilder().addInterceptor(SiteDecrypt.createInterceptor()).build()',
 					'}'
 				)
 			)

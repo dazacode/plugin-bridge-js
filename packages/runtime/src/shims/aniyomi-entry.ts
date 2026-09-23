@@ -945,11 +945,11 @@ ${options.translatedSource}
  * The source a class named by 'extClass' stands for.
  *
  * Usually the class itself. An AnimeSourceFactory is not a source: it is
- * 'createSources() = listOf(SupJav("en"), SupJav("ja"), SupJav("zh"))', one
+ * 'createSources() = listOf(Example("en"), Example("ja"), Example("zh"))', one
  * source per language. Constructed as though it were one, the driver asked a
  * class with a single member for 'popularAnimeRequest', found nothing, and
- * every browse came back empty with nothing refused - AnimeWorld India and
- * SupJav both loaded that way.
+ * every browse came back empty with nothing refused - two measured sources
+ * both loaded that way.
  *
  * One plugin is one source here, so it is the FIRST one the factory makes: the
  * extension's own ordering, and the same variant the adapter already reads

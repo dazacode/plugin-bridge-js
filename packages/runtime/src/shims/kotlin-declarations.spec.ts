@@ -304,7 +304,7 @@ describe('names a third catalogue pass found, run', () => {
 
 	it('decodes bytes through the charset named, and refuses one it does not implement', async () => {
 		// ISO-8859-1 is decoded exactly (one byte, one character), which the
-		// Voe extractor's own decoder depends on; a multi-byte charset this
+		// shared video-host extractor's own decoder depends on; a multi-byte charset this
 		// runtime has no table for is still refused by name, never guessed.
 		const demo = await instantiate('Demo', source);
 		expect(demo.decoded('aGVsbG8=')).toBe('hello');
@@ -539,9 +539,9 @@ describe('a decode on the implicit receiver', () => {
 describe('a library member that blocks, called from the file next door', () => {
 	// PlaylistUtils' `fixSubtitles` is a plain `fun` that blocks, so it is
 	// async here. Cross-file, only the `suspend` modifier was recorded: a
-	// direct call handed a Promise on as a value, and Voe's
+	// direct call handed a Promise on as a value, and a shared extractor's
 	// `runCatching { … .let(playlistUtils::fixSubtitles) }.getOrDefault(…)`
-	// read `getOrDefault` off a Promise and lost every Voe video.
+	// read `getOrDefault` off a Promise and lost every video it found.
 	const utils = kt(
 		'class Utils {',
 		'    fun fix(list: List<String>): List<String> = runBlocking { async { list.map { it.uppercase() } }.await() }',
@@ -732,7 +732,7 @@ describe('a decode that names a @Serializable class', () => {
 	});
 
 	it('uses a @Contextual default when the key is absent, and refuses it when present', async () => {
-		// MayoTune's `@Contextual private val sdf = SimpleDateFormat(…)`: kotlinx
+		// One source's `@Contextual private val sdf = SimpleDateFormat(…)`: kotlinx
 		// asks the serializersModule only for a key the payload carries.
 		const d = await instantiate(
 			'Demo',
@@ -754,7 +754,7 @@ describe('a decode that names a @Serializable class', () => {
 
 	it("reads the app's Json through Injekt, and binds a reference to it", async () => {
 		// keiyoushi core's `val jsonInstance: Json = Injekt.get()`, and
-		// OneReader's `contentOrNull?.let(jsonInstance::parseToJsonElement)`,
+		// One source's `contentOrNull?.let(jsonInstance::parseToJsonElement)`,
 		// which used to call `parseToJsonElement` on the string itself.
 		const d = await instantiate(
 			'Demo',
@@ -1373,7 +1373,7 @@ describe('a reference to a function a runtime global answers', () => {
 });
 
 describe('an interceptor whose recovery needs the WebView', () => {
-	// The Voe extractor's `DdosGuardInterceptor`, cut to its shape: pass every
+	// A shared video-host extractor's `DdosGuardInterceptor`, cut to its shape: pass every
 	// answer through unless it is a DDoS-Guard challenge, and only then go to
 	// the WebView's cookie store. Refused whole, it refused every extension
 	// that installs the extractor, although the tail only runs when a hoster

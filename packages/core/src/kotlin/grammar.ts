@@ -126,7 +126,7 @@ async function build(loader: WasmLoader): Promise<KotlinParser> {
 			if (!rewritten.hasError) return { root: rewritten, hasError: false };
 			// The rewrite can be right and the file still carry a second, unrelated
 			// gap the retry below exists for. Judged alone, the rewrite then lost
-			// to a source that parses *without error and wrongly* — the Dailymotion
+			// to a source that parses *without error and wrongly* — a shared video-host
 			// extractor's `} ?: emptyList<Track>()` read as `(… ?: emptyList)<Track>()`
 			// and refused as "a call through" its whole left operand, in five
 			// listings. So the rewrite gets the same retry the source would, and is

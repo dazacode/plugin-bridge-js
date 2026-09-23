@@ -1933,7 +1933,7 @@ export const FREE_FUNCTIONS: ReadonlyMap<string, string> = new Map([
 	// through to `this.getPreferences()`, which is the right default for a
 	// member the base supplies and wrong here: the driver supplies no such
 	// member, so the bundle died at load with `this.getPreferences is not a
-	// function`. Four of the measured bundles, and `Keyoapp` and `Kemono` are
+	// function`. Four of the measured bundles, and `Keyoapp` and one other source are
 	// both written this way.
 	['getPreferences', 'prefs'],
 
@@ -2084,7 +2084,7 @@ export const FREE_FUNCTIONS: ReadonlyMap<string, string> = new Map([
 	['List', 'listOfSize'],
 	// `Array(n) { i -> … }` is the same builder under Array's name — Kotlin's
 	// Array constructor always takes the init block — and arrays are lists
-	// here (see `arrayOf`). Cycity builds its year filter this way.
+	// here (see `arrayOf`). One measured source builds its year filter this way.
 	['Array', 'listOfSize'],
 	// java.text's `StringCharacterIterator("kMGTPE")`, which a byte-size
 	// formatter walks with `next()` and reads with `current()`. See the helper.
@@ -2790,8 +2790,8 @@ export const KNOWN_SIGNATURES: ReadonlyMap<string, readonly string[]> = new Map(
 	//
 	// Every one of the 37 extractor declarations in this ecosystem puts `url`
 	// first; none has `prefix` first, and none takes `videoNameGen` third. With
-	// the invented order in hand, `videosFromUrl(url, prefix = "Okru: ")` was
-	// emitted as `videosFromUrl('Okru: ')` — the url dropped into a slot the
+	// the invented order in hand, `videosFromUrl(url, prefix = "Host: ")` was
+	// emitted as `videosFromUrl('Host: ')` — the url dropped into a slot the
 	// table called `prefix`, then overwritten by the named argument, so the
 	// prefix string was fetched as a url. It converted with no refusal.
 	//

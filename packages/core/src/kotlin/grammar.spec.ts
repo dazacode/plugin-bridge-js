@@ -336,7 +336,7 @@ object Filters {
 	});
 
 	it('keeps the generic-operand rewrite when the file also needs a known-gap repair', async () => {
-		// The Dailymotion extractor, in two lines: a dotted receiver type the
+		// A shared video-host extractor, in two lines: a dotted receiver type the
 		// pinned grammar cannot read, and `?: emptyList<Track>()`. The rewrite
 		// alone left the first error in place, so it lost to the source — which
 		// parses the second line *cleanly and wrongly*, as the whole elvis being

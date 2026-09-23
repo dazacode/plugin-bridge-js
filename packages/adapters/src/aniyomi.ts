@@ -471,7 +471,7 @@ export const aniyomiAdapter: ForeignAdapter = {
  * extension declares one. A themed extension does not declare it at all — it
  * hands the theme a language, a name and a url:
  *
- *     class AnimePlayer : DooPlay("pt-BR", "AnimePlayer", "https://…") { … }
+ *     class Example : DooPlay("pt-BR", "Example", "https://…") { … }
  *
  * so the gate below read an empty string and refused an extension that names
  * its host perfectly clearly, one line into the file.

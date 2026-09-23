@@ -646,7 +646,7 @@ async function __page(kind, coroutine, args) {
     return __normalisePage(await __source[override].apply(__source, args));
   }
   const response = await __send(__call(kind + 'Request', args));
-  // Awaited: a parse member that makes a request of its own — Toptoon reads a
+  // Awaited: a parse member that makes a request of its own — one measured source reads a
   // JSON file named in the page it was handed — is emitted 'async', and the
   // Promise it answers has no 'mangas'. Normalised unawaited, every result on
   // the page was dropped and the page came back empty, reporting nothing.

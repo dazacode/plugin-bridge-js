@@ -189,7 +189,7 @@ const ENTRYPOINT = 'source';
  *
  * 58: a plain `fun` that blocks is awaited from another file and through a
  *     `::` reference, and `runCatching` over a suspending block is awaited
- *     before its Result is read. At 57 the Voe extractor, among others,
+ *     before its Result is read. At 57 a shared video-host extractor, among others,
  *     answered no videos. A temporary file handed to the player is a `data:`
  *     uri. Reconvert every bundle made at 57 or earlier.
  * 59: a manga chapter's `memo` travels inside its id, so opening a chapter

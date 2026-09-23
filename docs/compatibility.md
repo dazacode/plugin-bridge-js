@@ -309,7 +309,7 @@ nothing, which is a result rather than a disappointment.
 
 ### One source, two ecosystems
 
-`topcartoons` came back **playable through this ecosystem and through a
+One source came back **playable through this ecosystem and through a
 second, unrelated one** on the same day — the first observed cross-ecosystem
 overlap, and a caution about every count on this page:
 

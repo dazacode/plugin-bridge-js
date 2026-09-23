@@ -924,7 +924,7 @@ export function emitKotlin(
 	 * The class that claims to be the extension is normally the one that
 	 * constructs a base this build does not supply — an Aniyomi source class
 	 * extending `ParsedAnimeHttpSource`. That rule breaks on a multisrc theme:
-	 * `class Wcofun : WcoTheme()` resolves its base, because the theme is a
+	 * `class Example : WcoTheme()` resolves its base, because the theme is a
 	 * neighbouring file this build *does* convert, so the concrete extension
 	 * declined the name and the abstract theme took it. The driver then built
 	 * the theme, and every `baseUrl` the theme reads was the one the subclass
@@ -1452,8 +1452,8 @@ class Emitter {
 	/**
 	 * A property's name and the class it holds, where the declaration says so.
 	 *
-	 * `private val mixdropExtractor by lazy { MixDropExtractor(client) }` is how
-	 * this ecosystem keeps an extractor, and `mixdropExtractor.videoFromUrl(…)`
+	 * `private val hostExtractor by lazy { HostExtractor(client) }` is how
+	 * this ecosystem keeps an extractor, and `hostExtractor.videoFromUrl(…)`
 	 * is how it calls one — so without this the receiver is just a name and the
 	 * declaring class is unknowable at the call site.
 	 */
@@ -2532,7 +2532,7 @@ class Emitter {
 		// something with a constructed base turns up.
 		// `base === null` is the usual test: a class constructing a base this
 		// build does not supply is the extension. It is wrong for an extension
-		// built on a multisrc theme — `class Wcofun : WcoTheme()` resolves,
+		// built on a multisrc theme — `class Example : WcoTheme()` resolves,
 		// because the theme is a neighbouring file this build converts — so the
 		// concrete class declined the name and the abstract theme took it. The
 		// driver then built the theme, whose every `baseUrl` read was the one
@@ -2621,7 +2621,7 @@ class Emitter {
 		// The names the settings store goes by here: `preferences`, which is
 		// also what an inherited one is called, and any property this class
 		// builds from `getPreferencesLazy()`/`getPreferences()` or types as a
-		// `SharedPreferences` — NovelCool's is `preference`.
+		// `SharedPreferences` — one measured source's is `preference`.
 		this.preferenceStores = new Set(['preferences']);
 		for (const child of members) {
 			if (child.type !== 'property_declaration' || extensionReceiverOf(child) !== null) continue;
@@ -3814,7 +3814,7 @@ class Emitter {
 	 * `member`, with one second chance: an interceptor whose only trouble is in
 	 * the recovery it runs after a pass-through guard.
 	 *
-	 * The shape, from the Voe extractor's `DdosGuardInterceptor`:
+	 * The shape, from a shared video-host extractor's `DdosGuardInterceptor`:
 	 *
 	 *     val response = chain.proceed(originalRequest)
 	 *     if (response.code !in ERROR_CODES || response.header("Server") !in SERVER_CHECK) {
@@ -4052,8 +4052,8 @@ class Emitter {
 	 * emitted as the *extension's* own getter, `getString` inside it resolved
 	 * to the extension, and the read went to the store object, which has no
 	 * such field. Every setting read answered `undefined` with nothing refused
-	 * — AniSama sorted its videos by `undefined`, AniList never knew whether
-	 * adult titles were allowed, Subsplease put the string "undefined" in the
+	 * — one source sorted its videos by `undefined`, another never knew whether
+	 * adult titles were allowed, a third put the string "undefined" in the
 	 * URL where the debrid token goes. The delegated spelling on its own line
 	 * did not parse at all (see `delegateOnNextLine` in `grammar.ts`).
 	 *
@@ -4550,15 +4550,15 @@ class Emitter {
 			// only for the `suspend` modifier, PlaylistUtils' `fixSubtitles`
 			// (which blocks inside `parallelMapNotNullBlocking`) was called
 			// unawaited from every extractor file: ChillxExtractor handed a
-			// Promise on as a subtitle list, and Voe's
+			// Promise on as a subtitle list, and a shared extractor's
 			// `.let(playlistUtils::fixSubtitles)` inside `runCatching` threw, so
 			// its hoster answered no videos. The same fixpoint, crossing the file.
 			//
 			// Without `.proceed(`: it is only ever called inside an interceptor,
 			// which the runtime invokes on each request, never a caller in the
-			// next file. Counted, `NexusDecrypt.createInterceptor()` — which
+			// next file. Counted, `SiteDecrypt.createInterceptor()` — which
 			// *returns* the lambda that proceeds — became a suspending call, and
-			// `override val client = …addInterceptor(NexusDecrypt
+			// `override val client = …addInterceptor(SiteDecrypt
 			// .createInterceptor())…` a suspending property initialiser, refused.
 			if (!isEntry) {
 				for (const name of this.blockingMembers(kids(body), CROSS_FILE_BLOCKING_CALLS)) {
@@ -8082,11 +8082,11 @@ class Emitter {
 			//
 			// A block that suspends makes `runCatching` answer a Promise of the
 			// Result, so the Result is awaited *before* the member is read off it.
-			// Awaiting the whole call read `getOrDefault` off the Promise: Voe's
+			// Awaiting the whole call read `getOrDefault` off the Promise: a shared extractor's
 			// `runCatching { … .let(playlistUtils::fixSubtitles) }
 			// .getOrDefault(emptyList())` threw "getOrDefault is not a function"
 			// the moment fixSubtitles converted, and the hoster's own catch
-			// dropped every Voe video with it. The tail's own lambda — a
+			// dropped every video it found with it. The tail's own lambda — a
 			// suspending `getOrElse { }` — is awaited separately.
 			const before = this.asyncLambdas;
 			const receiverText = this.expr(receiver);
@@ -8973,7 +8973,7 @@ class Emitter {
 
 		// A name nothing here declares is taken to be the extension's base
 		// class's, and called on the source. That is wrong for a name the file
-		// *imports*: ViTruyen's `import keiyoushi.utils.getLocalStorage` is a
+		// *imports*: one source's `import keiyoushi.utils.getLocalStorage` is a
 		// top-level function in core's `WebView.kt` — a WebView boundary — which
 		// the conversion never read, so it came out as
 		// `this.getLocalStorage(…)`, converted as complete, loaded, and failed on
@@ -10676,7 +10676,7 @@ class Emitter {
 		if (this.lookup(name) !== null) return true;
 		if (this.classMembers.has(name) || BASE_SOURCE_MEMBERS.has(name)) return true;
 		// A member a translated template declares — DooPlay's `protected open
-		// val episodeNumberRegex`, read by `AnimePlayer : DooPlay` as
+		// val episodeNumberRegex`, read by `Example : DooPlay` as
 		// `.let(episodeNumberRegex::find)`. The subclass inherits it through the
 		// real `extends`, so it is a value here exactly as its own members are.
 		const base = this.owner === null ? undefined : this.classBaseIndex.get(this.owner);
@@ -11433,7 +11433,7 @@ function receiverSlots(node: KNode): ReceiverSlots | null {
 /**
  * `@Contextual` on a property: kotlinx asks the Json's `serializersModule` for
  * the serializer, which this runtime does not have. It asks only when the
- * payload carries the key — MayoTune's `@Contextual private val sdf =
+ * payload carries the key — one source's `@Contextual private val sdf =
  * SimpleDateFormat(…)` never arrives, and its initialiser is what runs — so
  * the field is registered with this marker in its serializer slot, and the
  * runtime refuses by name only if the key is actually there.

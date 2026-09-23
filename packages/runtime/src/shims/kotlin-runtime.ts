@@ -2257,7 +2257,7 @@ var TimeUnit = {
  * are done here, exactly, with the JVM's own answer for a character that has no
  * byte ('?') and a byte that has no character (U+FFFD). ISO-8859-1 is not rare:
  * it is how this ecosystem turns a byte array into a string one char per byte
- * before shifting characters, which is the Voe extractor's whole decoder.
+ * before shifting characters, which is a shared video-host extractor's whole decoder.
  *
  * The UTF-16 family is declared but not honoured: naming one is a named failure
  * rather than a decode that quietly produces mojibake. A byte sequence read as

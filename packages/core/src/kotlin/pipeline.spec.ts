@@ -278,28 +278,28 @@ describe('a file that declares a name the runtime already defines', () => {
 					path: 'Demo.kt',
 					source: kt(
 						'class Demo : Source() {',
-						'    fun build(): String = Dood().go() + MixDrop().go()',
+						'    fun build(): String = HostA().go() + HostB().go()',
 						'}'
 					)
 				},
 				{
-					path: 'lib/Dood.kt',
+					path: 'lib/HostA.kt',
 					source: kt(
-						'package eu.kanade.tachiyomi.lib.dood',
+						'package eu.kanade.tachiyomi.lib.hosta',
 						'',
-						'private const val PACKED_CALL = "dood"',
+						'private const val PACKED_CALL = "hosta"',
 						'',
-						'class Dood { fun go(): String = PACKED_CALL }'
+						'class HostA { fun go(): String = PACKED_CALL }'
 					)
 				},
 				{
-					path: 'lib/MixDrop.kt',
+					path: 'lib/HostB.kt',
 					source: kt(
-						'package eu.kanade.tachiyomi.lib.mixdrop',
+						'package eu.kanade.tachiyomi.lib.hostb',
 						'',
-						'private const val PACKED_CALL = "mixdrop"',
+						'private const val PACKED_CALL = "hostb"',
 						'',
-						'class MixDrop { fun go(): String = PACKED_CALL }'
+						'class HostB { fun go(): String = PACKED_CALL }'
 					)
 				}
 			],
@@ -311,8 +311,8 @@ describe('a file that declares a name the runtime already defines', () => {
 		// caught this: every other check passed while it did not.
 		expect(() => new Function(result.js)).not.toThrow();
 		// And each library still reads its own table rather than the other's.
-		expect(result.js).toContain("'dood'");
-		expect(result.js).toContain("'mixdrop'");
+		expect(result.js).toContain("'hosta'");
+		expect(result.js).toContain("'hostb'");
 	});
 
 	it('calls an extension function its base class declares next door', async () => {
@@ -363,16 +363,16 @@ describe('a file that declares a name the runtime already defines', () => {
 					path: 'Demo.kt',
 					source: kt(
 						'class Demo : Source() {',
-						'    private val mixdrop by lazy { MixDrop(client) }',
+						'    private val hostB by lazy { HostB(client) }',
 						'    fun go(url: String, doc: Document): String =',
-						'        mixdrop.videoFromUrl(url, referer = doc.location())',
+						'        hostB.videoFromUrl(url, referer = doc.location())',
 						'}'
 					)
 				},
 				{
-					path: 'lib/MixDrop.kt',
+					path: 'lib/HostB.kt',
 					source: kt(
-						'class MixDrop(private val client: OkHttpClient) {',
+						'class HostB(private val client: OkHttpClient) {',
 						'    fun videoFromUrl(url: String, lang: String = "", prefix: String = "", referer: String = ""): String = url',
 						'}'
 					)
@@ -380,9 +380,9 @@ describe('a file that declares a name the runtime already defines', () => {
 				{
 					// A second, incompatible declaration of the same name — which
 					// is what makes the bare-name entry useless.
-					path: 'lib/Okru.kt',
+					path: 'lib/HostA.kt',
 					source: kt(
-						'class Okru(private val client: OkHttpClient) {',
+						'class HostA(private val client: OkHttpClient) {',
 						'    fun videoFromUrl(prefix: String, url: String): String = url',
 						'}'
 					)
@@ -1062,7 +1062,7 @@ describe('which refusals stop a build', () => {
 	});
 
 	it('installs an interceptor whose only refused part is a WebView recovery', async () => {
-		// The Voe extractor's shape, whole: the recovery tail is cut (see
+		// A shared video-host extractor's shape, whole: the recovery tail is cut (see
 		// `memberWithRecovery`), and the refused `by lazy` store it read is read
 		// by nothing that survived — so neither blocks, and the cut is reported.
 		const result = await convertKotlin(

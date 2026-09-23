@@ -855,7 +855,7 @@ function requireWasm(loader: WasmLoader | undefined): WasmLoader {
  * The files arrive in the order the adapter reads them, which puts the
  * extension's own sources first *on purpose* (the entry class must be the one
  * found), and its theme after. So an extension that extends its multisrc theme
- * emitted `class Wcofun extends WcoTheme` above the `class WcoTheme` it names
+ * emitted `class Example extends WcoTheme` above the `class WcoTheme` it names
  * and died at load with "Cannot access 'WcoTheme' before initialization".
  *
  * Read off the emitted text rather than the Kotlin, because this is a fact

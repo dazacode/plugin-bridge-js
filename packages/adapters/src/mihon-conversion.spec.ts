@@ -182,7 +182,7 @@ class Extension {
 
 	it('awaits a parse member that suspends, rather than normalising its Promise', async () => {
 		// The request/parse pair had the bug the test above guards on the
-		// fetchX path. A parse that makes a request of its own — Toptoon reads
+		// fetchX path. A parse that makes a request of its own — one measured source reads
 		// the JSON file its search page names — is emitted `async`, and its
 		// Promise has no `mangas`: every result was dropped, nothing reported.
 		const module = await load(`
