@@ -192,8 +192,14 @@ const ENTRYPOINT = 'source';
  *     before its Result is read. At 57 the Voe extractor, among others,
  *     answered no videos. A temporary file handed to the player is a `data:`
  *     uri. Reconvert every bundle made at 57 or earlier.
+ * 59: a manga chapter's `memo` travels inside its id, so opening a chapter
+ *     hands the source back what listing it wrote; and `\p{...}` classes with
+ *     an identical JavaScript spelling translate rather than refuse. At 58
+ *     every Madara chapter list with a relative date threw, and every Madara
+ *     chapter answered "Refresh the chapter list." Reconvert every bundle made
+ *     at 58 or earlier.
  */
-export const CONVERTER_VERSION = 58;
+export const CONVERTER_VERSION = 59;
 
 export interface BundleInput {
 	readonly id: string;

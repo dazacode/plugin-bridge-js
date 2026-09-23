@@ -71,6 +71,11 @@ interface Page {
 interface Loaded {
 	id: string;
 	listChapters(id: string, ctx: unknown): Promise<{ sourceChapterId: string; title?: string }[]>;
+	readChapter(
+		id: string,
+		chapter: { number: number; sourceChapterId?: string },
+		ctx: unknown
+	): Promise<{ pages: { index: number; url: string }[] }>;
 	browse(shelf: string, page: number, ctx: unknown): Promise<Page>;
 	searchCatalog(query: string, page: number, ctx: unknown): Promise<Page>;
 }
@@ -491,5 +496,59 @@ class Extension {
 		expect(chapters).toHaveLength(1);
 		expect(chapters[0].sourceChapterId).toBe('/m/1');
 		expect(chapters[0].title).toBe('details=false chapters=true');
+	});
+
+	it('hands a chapter its memo back when it is opened', async () => {
+		// Upstream persists a chapter's memo with the chapter. Madara keeps the
+		// title's path there and builds the chapter url from it, so a memo lost
+		// between listing and opening made every chapter it listed answer
+		// "Refresh the chapter list." The id is the only thing that survives,
+		// so the memo rides in it — and only when there is one.
+		const module = await load(
+			`
+class Extension {
+  constructor() { this.baseUrl = '${BASE_URL}'; }
+  async fetchMangaUpdate(manga, chapters, fetchDetails, fetchChapters) {
+    const kept = SChapter.create();
+    kept.url = 'chapter-1#top';
+    kept.chapter_number = 1;
+    kept.memo = { mangaPath: '/manga/a b#c' };
+    const plain = SChapter.create();
+    plain.url = '/c/2';
+    plain.chapter_number = 2;
+    return SMangaUpdate(manga, [kept, plain]);
+  }
+  async getPageList(chapter) {
+    const path = chapter.memo.mangaPath === undefined ? '' : chapter.memo.mangaPath;
+    return [{ index: 0, url: '', imageUrl: 'https://cdn.example.invalid' + path + '|' + chapter.url }];
+  }
+}
+`,
+			{},
+			true
+		);
+		const { ctx } = recording();
+		const chapters = await module.listChapters('/m', ctx);
+		// A chapter without a memo keeps its url as its id, exactly as before.
+		expect(chapters[1].sourceChapterId).toBe('/c/2');
+		const kept = await module.readChapter(
+			'/m',
+			{ number: 1, sourceChapterId: chapters[0].sourceChapterId },
+			ctx
+		);
+		expect(kept.pages[0].url).toBe('https://cdn.example.invalid/manga/a b#c|chapter-1#top');
+		const plain = await module.readChapter(
+			'/m',
+			{ number: 2, sourceChapterId: chapters[1].sourceChapterId },
+			ctx
+		);
+		expect(plain.pages[0].url).toBe('https://cdn.example.invalid|/c/2');
+		// An id this driver did not write is read as a url, whatever it holds.
+		const foreign = await module.readChapter(
+			'/m',
+			{ number: 3, sourceChapterId: '/c/3#yorozo-memo=nope' },
+			ctx
+		);
+		expect(foreign.pages[0].url).toBe('https://cdn.example.invalid|/c/3#yorozo-memo=nope');
 	});
 });
