@@ -374,7 +374,7 @@ export async function convertKotlin(
 	}
 
 	const abiMembers = translated.filter((member) => ABI_MEMBERS.has(member));
-	const reachable = reach(graph, entryMembers);
+	const reachable = reach(graph, entryMembers, neighbours.classBases);
 	// Reachability is the whole filter. An earlier version also required a
 	// refusal to name an `ABI_MEMBERS` member *or* to come from outside the
 	// entry file, and the second clause silently exempted every private helper
@@ -737,14 +737,19 @@ function importsOf(source: string): string[] {
  *   so it stays reachable.
  * - Names collide across files; a collision keeps both.
  * - Reaching a *type* reaches its properties, because those run when it is
- *   constructed even if nothing names them.
+ *   constructed even if nothing names them — and reaches the class it
+ *   extends, whose properties run then too.
  *
  * Pruning something that is in fact called does not produce a refusal. It
  * produces `undefined is not a function` inside a sandbox on somebody's
  * phone, which is a worse failure than the one it replaced — so every
  * uncertainty here resolves towards keeping.
  */
-function reach(graph: readonly MemberEdges[], entryMembers: ReadonlySet<string>): Set<string> {
+function reach(
+	graph: readonly MemberEdges[],
+	entryMembers: ReadonlySet<string>,
+	classBases: ReadonlyMap<string, string> = new Map()
+): Set<string> {
 	const byName = new Map<string, MemberEdges[]>();
 	const byOwner = new Map<string, MemberEdges[]>();
 	for (const edges of graph) {
@@ -811,6 +816,18 @@ function reach(graph: readonly MemberEdges[], entryMembers: ReadonlySet<string>)
 				pending.push(edges.member);
 			}
 		}
+
+		// And building a class builds every class above it. A template's
+		// properties are constructor code of the extension that extends it, and
+		// a getter-bodied one is read as `this.apiUrl`, which is a property read
+		// rather than a call and so draws no edge. With the base class never
+		// reached as a type, a template's refused `apiUrl` getter was pruned as
+		// unreachable while the methods reached by calls went on reading it: the
+		// bundle reported complete, loaded, and sent every request to
+		// `undefined/search`. Only the class a reached class really extends is
+		// walked — an unrelated class in the same template stays prunable.
+		const base = classBases.get(name);
+		if (base !== undefined && !reached.has(base)) pending.push(base);
 	}
 
 	return reached;
