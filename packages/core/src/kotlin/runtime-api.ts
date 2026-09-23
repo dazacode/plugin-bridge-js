@@ -1070,7 +1070,10 @@ export const RUNTIME_GLOBALS = [
 	   JsonNull, which is JSON's null — see the typed decoder in the runtime. */
 	'PrimitiveSerialDescriptor',
 	'PrimitiveKind',
-	'JsonNull'
+	'JsonNull',
+
+	/* java.io.File, as far as `File.createTempFile` goes: see `JSOUP_STATICS`. */
+	'File'
 ] as const;
 
 /** Everything the runtime source must define, for the spec that checks it. */

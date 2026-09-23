@@ -536,6 +536,71 @@ describe('a decode on the implicit receiver', () => {
 	});
 });
 
+describe('a library member that blocks, called from the file next door', () => {
+	// PlaylistUtils' `fixSubtitles` is a plain `fun` that blocks, so it is
+	// async here. Cross-file, only the `suspend` modifier was recorded: a
+	// direct call handed a Promise on as a value, and Voe's
+	// `runCatching { … .let(playlistUtils::fixSubtitles) }.getOrDefault(…)`
+	// read `getOrDefault` off a Promise and lost every Voe video.
+	const utils = kt(
+		'class Utils {',
+		'    fun fix(list: List<String>): List<String> = runBlocking { async { list.map { it.uppercase() } }.await() }',
+		'}'
+	);
+	const caller = kt(
+		'class Demo {',
+		'    private val utils = Utils()',
+		'    fun direct(list: List<String>): String = utils.fix(list).joinToString()',
+		'    fun referenced(list: List<String>): String =',
+		'        runCatching { list.let(utils::fix) }.getOrDefault(emptyList()).joinToString()',
+		'}'
+	);
+
+	it('awaits it, called directly and through a reference in runCatching', async () => {
+		const d = await instantiate('Demo', caller, utils);
+		expect(await d.direct(['a', 'b'])).toBe('A, B');
+		expect(await d.referenced(['c'])).toBe('C');
+	});
+});
+
+describe('a temporary file handed to the player', () => {
+	// PlaylistUtils' fixSubtitles repairs a caption file and writes it to
+	// `File.createTempFile("subs", ".vtt")` so the player can load
+	// `Uri.fromFile(file)`. A plugin has no filesystem; the carrier is the
+	// text, and its uri a `data:` uri of the same bytes. The repair itself is
+	// the extension's own code and runs unchanged.
+	const source = kt(
+		'class Demo {',
+		'    fun carry(text: String): String {',
+		'        val file = File.createTempFile("subs", ".vtt").also(File::deleteOnExit)',
+		'        file.writeText(text)',
+		'        return Uri.fromFile(file).toString()',
+		'    }',
+		'}'
+	);
+
+	it('answers a data uri holding exactly the text written, typed by the suffix', async () => {
+		const d = await instantiate('Demo', source);
+		const text = 'WEBVTT\n\n00:00.000 --> 00:01.000\nh\u00e9llo \u2014 \u5b57\u5e55';
+		const uri: string = d.carry(text);
+		expect(uri.startsWith('data:text/vtt;charset=utf-8;base64,')).toBe(true);
+		const decoded = Buffer.from(uri.slice(uri.indexOf(',') + 1), 'base64').toString('utf8');
+		expect(decoded).toBe(text);
+	});
+
+	it('refuses every other use of File by name', () => {
+		expect(
+			refusalNames(
+				kt(
+					'fun a(): String = File("/etc/hosts").readText()',
+					'fun b(): String = File.separator',
+					'fun c(): Boolean = File.createTempFile("a", ".b").setReadable(true)'
+				)
+			)
+		).toEqual(['`File(…)`', '`File.separator`', '`.setReadable()`']);
+	});
+});
+
 describe('a reference to a member the template declares', () => {
 	it('binds it to the inherited value, not to the argument', async () => {
 		// DooPlay's `protected open val episodeNumberRegex`, read by a subclass

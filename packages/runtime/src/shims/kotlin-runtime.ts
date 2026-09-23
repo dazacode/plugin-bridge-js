@@ -9356,7 +9356,78 @@ function __uriQuote(part) {
  * written — a capitalised receiver is not refused — and the bundle dies with
  * 'Uri is not defined' at the first call, which names nothing useful.
  */
+/**
+ * java.io.File, for the one thing a converted extension may do with it: write
+ * a temporary file and hand its uri to the player.
+ *
+ * PlaylistUtils' fixSubtitles fetches a caption file, repairs it (SubRip to
+ * WebVTT, the stray blank lines that break a cue) and writes the result to
+ * 'File.createTempFile("subs", ".vtt")' so the player can load it from
+ * 'Uri.fromFile(file)'. The file is a carrier and nothing else: nothing reads
+ * it back, and it is deleted on exit. A plugin has no filesystem (ABI.md), so
+ * the carrier here is the text itself, and its uri is a 'data:' uri holding
+ * the same bytes, which the sidecar guard already accepts and a player loads
+ * like any caption file. The repair still runs in the extension's own code.
+ *
+ * Only the temporary file exists. 'File(path)', 'File.separator' and every
+ * other member are refused by name in the emitter ('FILE_STATICS'), and a
+ * temp file's methods are the ones this carrier can answer truthfully.
+ */
+function __KTempFile(prefix, suffix) {
+  this.prefix = __str(prefix);
+  this.suffix = suffix === null || suffix === undefined ? '.tmp' : __str(suffix);
+  this.text = '';
+  this.deleted = false;
+}
+__KTempFile.prototype.writeText = function (text, charset) {
+  __utf8Only(charset);
+  this.text = __str(text);
+  this.deleted = false;
+};
+__KTempFile.prototype.readText = function (charset) {
+  __utf8Only(charset);
+  if (this.deleted) throw new Error('This converted extension read a temporary file it had deleted.');
+  return this.text;
+};
+__KTempFile.prototype.deleteOnExit = function () {};
+__KTempFile.prototype.delete = function () {
+  var had = !this.deleted;
+  this.deleted = true;
+  this.text = '';
+  return had;
+};
+__KTempFile.prototype.exists = function () { return !this.deleted; };
+__KTempFile.prototype.length = function () {
+  return this.deleted ? 0 : __host().text.encode(this.text).length;
+};
+
+/* The media type a temporary file's uri carries, read from its suffix. */
+function __tempFileType(suffix) {
+  var s = suffix.toLowerCase();
+  if (s === '.vtt') return 'text/vtt';
+  if (s === '.srt') return 'application/x-subrip';
+  if (s === '.ass' || s === '.ssa') return 'text/x-ssa';
+  return 'text/plain';
+}
+
+var File = {
+  createTempFile: function (prefix, suffix) { return new __KTempFile(prefix, suffix); }
+};
+
 var Uri = {
+  /**
+   * The uri of a temporary file: its bytes, as a 'data:' uri of the type its
+   * suffix names. A file this runtime did not make has no uri here.
+   */
+  fromFile: function (file) {
+    if (!(file instanceof __KTempFile)) {
+      throw new Error('This converted extension asked for the uri of a file this runtime did not make.');
+    }
+    if (file.deleted) throw new Error('This converted extension asked for the uri of a deleted file.');
+    var encoded = __host().bytes.toBase64(__host().text.encode(file.text));
+    var uri = 'data:' + __tempFileType(file.suffix) + ';charset=utf-8;base64,' + encoded;
+    return { toString: function () { return uri; } };
+  },
   parse: function (value) { return __httpUrlOf(__str(value)); },
   encode: function (value) { return encodeURIComponent(__str(value)); },
   decode: function (value) {

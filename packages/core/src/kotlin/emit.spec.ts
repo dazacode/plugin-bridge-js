@@ -5448,6 +5448,24 @@ describe('file annotations, and a serializer on a type argument', () => {
 		).toEqual(['`getLocalStorage` from `keiyoushi.utils`, which this build did not read']);
 	});
 
+	it('does not count a returned interceptor as blocking its builder', () => {
+		// Nexus Toons: `NexusDecrypt.createInterceptor()` returns the lambda that
+		// proceeds; it does not proceed itself. Counted as blocking across
+		// files, the client initialiser became a suspending one and refused.
+		expect(
+			refusalNames(
+				kt(
+					'object NexusDecrypt {',
+					'    fun createInterceptor(): Interceptor = Interceptor { chain -> chain.proceed(chain.request()) }',
+					'}',
+					'class Demo : HttpSource() {',
+					'    override val client = network.client.newBuilder().addInterceptor(NexusDecrypt.createInterceptor()).build()',
+					'}'
+				)
+			)
+		).toEqual([]);
+	});
+
 	it('refuses a transforming serializer whose base is not a default one', () => {
 		// "Decode the reshaped element as T" is only what kotlinx does when the
 		// base serializer is T's own. A hand-written base is its own decoder.

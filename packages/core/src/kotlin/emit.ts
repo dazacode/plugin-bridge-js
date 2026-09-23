@@ -461,6 +461,19 @@ const LOG_CALL = /^Log\.(?:v|d|i|w|e|wtf)$/;
 const BLOCKING_CALLS =
 	/\.(?:execute|awaitSuccess|await|doFinal|generateKeyPair|verify|proceed)\s*\(|(?<!\bMath)\.sign\s*\(|\bThread\s*\.\s*sleep\s*\(|\b(?:client|[a-z]\w*Client)\s*\.\s*(?:get|post|put|head)\s*\(/;
 
+/** `BLOCKING_CALLS` less `.proceed(`, for a member called from another file. */
+const CROSS_FILE_BLOCKING_CALLS = new RegExp(
+	BLOCKING_CALLS.source.replace('|verify|proceed)', '|verify)'),
+	BLOCKING_CALLS.flags
+);
+// Derived from the text above, so an edit there must not silently keep
+// `proceed` in: fail at load, where it is seen, rather than refuse listings.
+if (CROSS_FILE_BLOCKING_CALLS.source === BLOCKING_CALLS.source) {
+	throw new Error(
+		'CROSS_FILE_BLOCKING_CALLS no longer removes `.proceed(`; update it with BLOCKING_CALLS.'
+	);
+}
+
 /**
  * keiyoushi's suspend verbs on an okhttp client, and what they are called on.
  *
@@ -3071,7 +3084,10 @@ class Emitter {
 	 * value that was never a Promise costs nothing, and the failure this
 	 * replaces is silent.
 	 */
-	private blockingMembers(members: readonly KNode[]): Set<string> {
+	private blockingMembers(
+		members: readonly KNode[],
+		pattern: RegExp = BLOCKING_CALLS
+	): Set<string> {
 		const bodies = new Map<string, string>();
 		for (const child of members) {
 			if (child.type !== 'function_declaration') continue;
@@ -3081,7 +3097,7 @@ class Emitter {
 
 		const blocking = new Set<string>();
 		for (const [name, text] of bodies) {
-			if (BLOCKING_CALLS.test(text)) blocking.add(name);
+			if (pattern.test(text)) blocking.add(name);
 		}
 
 		for (let grew = true; grew;) {
@@ -4529,6 +4545,26 @@ class Emitter {
 			const body = kids(child).find(
 				(part) => part.type === 'class_body' || part.type === 'enum_class_body'
 			);
+			// A plain `fun` that blocks on a request is async in JavaScript — see
+			// `blockingMembers` — and a class next door calls it too. Recorded
+			// only for the `suspend` modifier, PlaylistUtils' `fixSubtitles`
+			// (which blocks inside `parallelMapNotNullBlocking`) was called
+			// unawaited from every extractor file: ChillxExtractor handed a
+			// Promise on as a subtitle list, and Voe's
+			// `.let(playlistUtils::fixSubtitles)` inside `runCatching` threw, so
+			// its hoster answered no videos. The same fixpoint, crossing the file.
+			//
+			// Without `.proceed(`: it is only ever called inside an interceptor,
+			// which the runtime invokes on each request, never a caller in the
+			// next file. Counted, `NexusDecrypt.createInterceptor()` — which
+			// *returns* the lambda that proceeds — became a suspending call, and
+			// `override val client = …addInterceptor(NexusDecrypt
+			// .createInterceptor())…` a suspending property initialiser, refused.
+			if (!isEntry) {
+				for (const name of this.blockingMembers(kids(body), CROSS_FILE_BLOCKING_CALLS)) {
+					this.declaredSuspends.add(name);
+				}
+			}
 			for (const member of kids(body)) {
 				if (member.type === 'function_declaration') {
 					const method = this.nameOf(member);
@@ -7429,6 +7465,14 @@ class Emitter {
 		) {
 			return `(__recv) => __recv.${member.text}`;
 		}
+		// `File::deleteOnExit` — a type the runtime defines by name, referenced
+		// unbound: the argument is the receiver. Read through `isValueName`, a
+		// global is a value, and the member was called on the type itself.
+		const partial = named ? JSOUP_STATICS.get(owner.text) : undefined;
+		if (partial !== undefined && !partial.has(member.text) && !this.moduleNames.has(owner.text)) {
+			if (!HOST_METHODS.has(member.text)) this.refuse(node, `\`${owner.text}::${member.text}\``);
+			return `(__recv, ...__a) => __recv.${member.text}(...__a)`;
+		}
 		if (named && this.isValueName(owner.text)) {
 			const receiver = this.read(owner.text, owner);
 			const helper = EXTENSION_METHODS.get(member.text);
@@ -7448,6 +7492,18 @@ class Emitter {
 			// format.
 			if (RUNTIME_STATIC_REFERENCES.get(owner.text)?.has(member.text) === true) {
 				return `(__a) => ${receiver}.${member.text}(__a)`;
+			}
+			// A member that suspends here — PlaylistUtils' `fixSubtitles` blocks on
+			// the network in Kotlin and is async in JavaScript — answers a Promise.
+			// The written call `playlistUtils.fixSubtitles(x)` is awaited; the
+			// reference was not, so `.let(playlistUtils::fixSubtitles)` handed a
+			// Promise on, and a surrounding `runCatching { }.getOrDefault(…)` read
+			// its member off the Promise. The reference is an async function, and
+			// the block it sits in is counted as suspending, as a lambda that
+			// awaits is.
+			if (this.declaredSuspends.has(member.text)) {
+				this.asyncLambdas += 1;
+				return `async (...__a) => (await ${receiver}.${member.text}(...__a))`;
 			}
 			return `(...__a) => ${receiver}.${member.text}(...__a)`;
 		}
@@ -8023,11 +8079,24 @@ class Emitter {
 			// in 145 places across one catalogue, with nothing anywhere saying
 			// so. The runtime's own `Result` declares these five; they are
 			// emitted on it directly.
+			//
+			// A block that suspends makes `runCatching` answer a Promise of the
+			// Result, so the Result is awaited *before* the member is read off it.
+			// Awaiting the whole call read `getOrDefault` off the Promise: Voe's
+			// `runCatching { … .let(playlistUtils::fixSubtitles) }
+			// .getOrDefault(emptyList())` threw "getOrDefault is not a function"
+			// the moment fixSubtitles converted, and the hoster's own catch
+			// dropped every Voe video with it. The tail's own lambda — a
+			// suspending `getOrElse { }` — is awaited separately.
 			const before = this.asyncLambdas;
 			const receiverText = this.expr(receiver);
+			const receiverSuspends = this.asyncLambdas > before;
+			const middle = this.asyncLambdas;
 			const tail = this.callArguments(name, args, lambda, labelled, false);
-			const call = `${receiverText}.${name}(${tail.join(', ')})`;
-			return this.asyncLambdas > before ? this.awaited(call) : call;
+			const tailSuspends = this.asyncLambdas > middle;
+			const target = receiverSuspends ? this.awaited(receiverText) : receiverText;
+			const call = `${target}.${name}(${tail.join(', ')})`;
+			return tailSuspends ? this.awaited(call) : call;
 		}
 
 		const qualified = this.qualifiedTypes.get(`${receiver.text.trim()}.${name}`);
@@ -8489,6 +8558,11 @@ class Emitter {
 		expected: string | null = null
 	): string {
 		const name = callee.text;
+		// `File(path)`: a path on a filesystem a plugin does not have. The one
+		// `File` the runtime makes is `File.createTempFile` — see `JSOUP_STATICS`.
+		if (name === 'File' && !this.moduleNames.has(name) && this.lookup(name) === null) {
+			this.refuse(callee, '`File(…)`');
+		}
 
 		// `withContext(dispatcher) { … }` is a thread hop, and the sandbox has
 		// one thread. The dispatcher is dropped and the block is awaited.
@@ -9690,6 +9764,14 @@ class Emitter {
 		if (helper !== undefined) {
 			if (!safe) return `${this.helper(helper)}(${this.expr(receiver)})`;
 			return `${this.helper('sc')}(${this.expr(receiver)}, (__r) => ${this.helper(helper)}(__r))`;
+		}
+
+		// `File.separator` — a static read off a type the runtime defines only
+		// in part (`JSOUP_STATICS`). Passed through, it answered undefined.
+		const partial =
+			receiver.type === 'simple_identifier' ? JSOUP_STATICS.get(receiver.text) : undefined;
+		if (partial !== undefined && !partial.has(name) && !this.moduleNames.has(receiver.text)) {
+			this.refuse(node, `\`${receiver.text}.${name}\``);
 		}
 
 		// Property *reads* are passthrough where method calls are not: a DTO's

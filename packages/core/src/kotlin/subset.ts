@@ -1397,6 +1397,10 @@ export const HOST_METHODS: ReadonlySet<string> = new Set([
 	// the typed decoder (`__jsonDecoder` in the runtime). The `encode*` half
 	// is what the same object's `serialize` writes; the runtime never calls
 	// one, and refuses to encode a record whose class names a serializer.
+	// A temporary file's own members (`__KTempFile` in the runtime).
+	'writeText',
+	'readText',
+	'deleteOnExit',
 	'decodeJsonElement',
 	'decodeString',
 	'decodeInt',
@@ -2149,7 +2153,12 @@ export const JSOUP_STATICS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
 	['Parser', new Set(['unescapeEntities', 'htmlParser'])],
 	['Entities', new Set(['unescape'])],
 	['Evaluator', new Set(['Tag', 'Class', 'Id'])],
-	['TextNode', new Set<string>()]
+	['TextNode', new Set<string>()],
+	// java.io.File, whose only member a plugin can honour is a temporary file
+	// handed to the player as a `data:` uri — see `__KTempFile` in the runtime.
+	// Not jsoup, but the same question: a capitalised receiver the runtime
+	// defines only in part. `File(path)` is refused in the emitter.
+	['File', new Set(['createTempFile'])]
 ]);
 
 /**
@@ -2339,7 +2348,10 @@ export const GLOBAL_NAMES: ReadonlySet<string> = new Set([
 	   JsonNull, which is JSON's null — see the typed decoder in the runtime. */
 	'PrimitiveSerialDescriptor',
 	'PrimitiveKind',
-	'JsonNull'
+	'JsonNull',
+
+	/* java.io.File, as far as `File.createTempFile` goes: see `JSOUP_STATICS`. */
+	'File'
 ]);
 
 /**
