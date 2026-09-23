@@ -826,6 +826,9 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 	// rather than methods, so the conversions between them are identities.
 	['toMutableList', 'toList'],
 	['toMutableSet', 'toSet'],
+	// java.util's HashSet is a Set to Kotlin like any other; only its
+	// iteration order is unpromised, and insertion order is one it may have.
+	['toHashSet', 'toSet'],
 	['toMutableMap', 'toMutableMap'],
 	['asIterable', 'toList'],
 	['forEach', 'forEach'],
@@ -1190,6 +1193,11 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 	['toDoubleOrNull', 'toFloatOrNull'],
 	['filterNotNull', 'filterNotNull'],
 	['maxOf', 'maxOf'],
+	['minOf', 'minOf'],
+	// Index first, then the accumulator: see the helper for why the order is
+	// the whole of it.
+	['reduceIndexed', 'reduceIndexed'],
+	['prependIndent', 'prependIndent'],
 	['replaceAll', 'replaceAll'],
 	['mapNotNullTo', 'mapNotNullTo'],
 	['toMap', 'toMap']
@@ -1908,7 +1916,13 @@ export const HOST_METHODS: ReadonlySet<string> = new Set([
 	'getAndSet',
 	'compareAndSet',
 	'updateAndGet',
-	'getAndUpdate'
+	'getAndUpdate',
+
+	// kotlin.Result's reader of the failure, on a Result that did not come
+	// straight off a `runCatching` the emitter can see — one element of a list
+	// of them, say. The runtime's Result declares it (see `__success`), and a
+	// value that is not one fails at the call rather than answering null.
+	'exceptionOrNull'
 ]);
 
 /**
@@ -2150,10 +2164,16 @@ export const FREE_FUNCTIONS: ReadonlyMap<string, string> = new Map([
 
 	// `java.net.URI(url)`, which is NOT the `HttpUrl` this runtime already has:
 	// that one refuses a scheme it does not model, and an extractor reads
-	// `.scheme` precisely to decide whether it wants the value. `java.net.URL`
-	// is deliberately absent: nothing in the catalogue constructs one, and a
-	// name here shadows a declaration of the same name in the converted source.
-	['URI', 'uri']
+	// `.scheme` precisely to decide whether it wants the value.
+	['URI', 'uri'],
+	// `java.net.URL(url)`, which two sources construct to read `.host` or
+	// `.path` off a base-url setting. Its readers are not URI's — see
+	// `__k.javaUrl` — so it is a helper of its own. It used to be left out
+	// because a name here shadowed a source's own declaration of it; a bare
+	// call now looks at the source's own names first — locals, members, and
+	// what its files declare at the top level — so a class of its own called
+	// URL still wins.
+	['URL', 'javaUrl']
 ]);
 
 /**

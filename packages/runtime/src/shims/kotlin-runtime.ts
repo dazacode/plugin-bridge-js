@@ -2944,6 +2944,24 @@ var __k = {
   },
 
   /**
+   * prependIndent(indent): the indent in front of every line, four spaces when
+   * none is given.
+   *
+   * On a one-line string it is a plain prefix, which is how a template builds
+   * a url from a slug with it. A blank line is Kotlin's special case: it
+   * becomes exactly the indent, or stays as it is if it is already longer —
+   * not the indent followed by its own whitespace. Lines split on all three
+   * line ends, as lineSequence() does, and are joined with a newline.
+   */
+  prependIndent: function (value, indent) {
+    var prefix = indent === undefined ? '    ' : __str(indent);
+    return __str(value).split(/\\r\\n|\\n|\\r/).map(function (line) {
+      if (line.trim().length === 0) return line.length < prefix.length ? prefix : line;
+      return prefix + line;
+    }).join('\\n');
+  },
+
+  /**
    * Kotlin's ifEmpty, over both kinds of absence.
    *
    * jsoup's attr() returns '' where the Kotlin writes attr("x").ifEmpty { null },
@@ -3744,6 +3762,20 @@ var __k = {
     return __then(__each(items, selector), function (values) {
       var best = values[0];
       for (var i = 1; i < values.length; i += 1) if (__cmp(values[i], best) > 0) best = values[i];
+      return best;
+    });
+  },
+
+  /**
+   * minOf, maxOf's mirror: it throws on an empty collection where
+   * minOfOrNull answers null, and a selector's first smallest key wins.
+   */
+  minOf: function (list, selector) {
+    var items = __arr(list);
+    if (items.length === 0) throw new Error('This converted extension took minOf an empty collection.');
+    return __then(__each(items, selector), function (values) {
+      var best = values[0];
+      for (var i = 1; i < values.length; i += 1) if (__cmp(values[i], best) < 0) best = values[i];
       return best;
     });
   },
@@ -6254,6 +6286,36 @@ var __k = {
     function step() {
       while (index < items.length) {
         var next = operation(accumulator, items[index]);
+        index += 1;
+        if (__thenable(next)) {
+          return next.then(function (value) { accumulator = value; return step(); });
+        }
+        accumulator = next;
+      }
+      return accumulator;
+    }
+    return step();
+  },
+
+  /**
+   * reduceIndexed { index, acc, item -> … }, reduce with the index of the item
+   * being folded in — 1 for the second element, since the first is the
+   * starting accumulator and is never handed to the operation.
+   *
+   * Arguments in Kotlin's order, index FIRST: a hash that shifts each item by
+   * its position and received them as (acc, item, index) would compute a
+   * different number with nothing to say so. Chained like 'reduce' above.
+   */
+  reduceIndexed: function (list, operation) {
+    var items = __arr(list);
+    if (items.length === 0) {
+      throw new Error('This converted extension reduced an empty list.');
+    }
+    var accumulator = items[0];
+    var index = 1;
+    function step() {
+      while (index < items.length) {
+        var next = operation(index, accumulator, items[index]);
         index += 1;
         if (__thenable(next)) {
           return next.then(function (value) { accumulator = value; return step(); });
@@ -9996,6 +10058,64 @@ __k.resolve = function (base, reference) {
   var scheme = resolved.scheme === null ? '' : resolved.scheme.toLowerCase();
   if (scheme !== 'http' && scheme !== 'https') return null;
   return __httpUrlOf(resolved.toString());
+};
+
+/** The protocols a JDK's URL has a handler for, with each one's default port. */
+var __URL_HANDLERS = { http: 80, https: 443, ftp: 21, file: -1, jar: -1 };
+
+/**
+ * URL(text), java.net's, which is neither URI nor okhttp's HttpUrl.
+ *
+ * What a source asks of one is a part — 'URL(baseUrl).host' to key its
+ * preferences by server, 'URL(baseUrl).path' for the sub-path a self-hosted
+ * server is mounted under — so the parse is URI's (RFC 3986, see __KUri) and
+ * the readers are URL's, which differ from URI's in three ways that each
+ * change a value: a missing host is '' rather than null, the path and query
+ * are the RAW text with no escape decoded, and 'file' is the path and query
+ * together. Text with no scheme, or a scheme java has no handler for, throws
+ * MalformedURLException at construction as java's does — the one place a
+ * source finds out its base url setting is not a url.
+ */
+__k.javaUrl = function (text) {
+  var written = __str(text);
+  var parsed = new __KUri(written);
+  var protocol = parsed.scheme === null ? null : parsed.scheme.toLowerCase();
+  if (protocol === null || !__URL_HANDLERS.hasOwnProperty(protocol)) {
+    var failure = new Error((protocol === null ? 'no protocol: ' : 'unknown protocol: ' + protocol + ': ') + written);
+    failure.name = 'MalformedURLException';
+    throw failure;
+  }
+  var query = parsed.rawQuery;
+  var url = {
+    protocol: protocol,
+    host: parsed.host === null ? '' : parsed.host,
+    port: parsed.port,
+    defaultPort: __URL_HANDLERS[protocol],
+    authority: parsed.rawAuthority,
+    userInfo: parsed.userInfo,
+    path: parsed.rawPath,
+    query: query,
+    file: parsed.rawPath + (query === null ? '' : '?' + query),
+    ref: parsed.rawFragment
+  };
+  url.getProtocol = function () { return url.protocol; };
+  url.getHost = function () { return url.host; };
+  url.getPort = function () { return url.port; };
+  url.getDefaultPort = function () { return url.defaultPort; };
+  url.getAuthority = function () { return url.authority; };
+  url.getUserInfo = function () { return url.userInfo; };
+  url.getPath = function () { return url.path; };
+  url.getQuery = function () { return url.query; };
+  url.getFile = function () { return url.file; };
+  url.getRef = function () { return url.ref; };
+  url.toURI = function () { return parsed; };
+  // Rebuilt from the parts, as java's is, so the protocol comes back lower-cased.
+  var external = protocol + ':' +
+    (url.authority === null || url.authority.length === 0 ? '' : '//' + url.authority) +
+    url.file + (url.ref === null ? '' : '#' + url.ref);
+  url.toString = function () { return external; };
+  url.toExternalForm = function () { return external; };
+  return url;
 };
 
 __k.getQueryParameter = function (value, name) {

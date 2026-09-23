@@ -4062,6 +4062,33 @@ describe('java.net.URI', () => {
 	});
 });
 
+/* ── java.net.URL, whose readers are not URI's ────────────────────────────── */
+
+describe('java.net.URL', () => {
+	it('answers the raw parts, with file as path and query together', () => {
+		const url = k.javaUrl('HTTPS://user@example.invalid/a%20b/c?q=1%202#top');
+		expect(url.protocol).toBe('https');
+		expect(url.host).toBe('example.invalid');
+		expect(url.userInfo).toBe('user');
+		// No port written is -1, as java's; the default is a separate reader.
+		expect(url.port).toBe(-1);
+		expect(url.getDefaultPort()).toBe(443);
+		expect(url.getPath()).toBe('/a%20b/c');
+		expect(url.query).toBe('q=1%202');
+		expect(url.file).toBe('/a%20b/c?q=1%202');
+		expect(url.ref).toBe('top');
+		expect(String(url)).toBe('https://user@example.invalid/a%20b/c?q=1%202#top');
+	});
+
+	it('throws MalformedURLException where java has no handler, rather than parsing', () => {
+		// URI accepts both of these; a base url setting that is not a url has to
+		// fail here, where the source can report it, and not at a request.
+		expect(() => k.javaUrl('example.invalid/x')).toThrow(/no protocol/);
+		expect(() => k.javaUrl('blob:https://example.invalid/9f')).toThrow(/unknown protocol: blob/);
+		expect(k.javaUrl('file:/tmp/x').host).toBe('');
+	});
+});
+
 /* ── the ends of a string, and the ranges Kotlin builds ───────────────────── */
 
 describe('trimStart and trimEnd, whose vararg JavaScript lacks', () => {
