@@ -2835,7 +2835,17 @@ class Emitter {
 					this.pushScope();
 					let emitted;
 					try {
-						for (const param of initialiserOnly) this.declare(param.name);
+						// A plain constructor parameter is in scope in an initialiser
+						// and nowhere else. A getter is a member body, where the same
+						// name means the class's property — `state` in a filter group
+						// is the inherited `Filter.Group.state` — and declared here it
+						// read the parameter, which does not exist once the constructor
+						// has returned: "state is not defined" on the first search.
+						const getterOnly =
+							accessorOf(child, detached[0], 'getter') !== undefined &&
+							!child.allChildren.some((part) => part.type === '=') &&
+							!kids(child).some((part) => part.type === 'property_delegate');
+						if (!getterOnly) for (const param of initialiserOnly) this.declare(param.name);
 						emitted = this.classProperty(child, detached);
 					} finally {
 						this.popScope();

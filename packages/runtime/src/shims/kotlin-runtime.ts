@@ -11256,6 +11256,24 @@ function __nextInferred(type) {
   var text = __str(type).trim().replace(/\\?$/, '');
   var list = /^(?:[\\w.]*\\.)?(?:List|MutableList|ArrayList)\\s*<(.*)>$/.exec(text);
   var element = (list === null ? text : list[1]).trim().replace(/\\?$/, '').replace(/^.*\\./, '');
+  var required = [];
+  // The registration every '@Serializable' class now carries is kotlinx's own
+  // descriptor, so it is read first and exactly as upstream reads one: an
+  // element is required unless it has a default or a nullable type, and it is
+  // present under its '@SerialName' or any of its '@JsonNames'. The shapes
+  // below are registered only for a class with a rename or a computed field,
+  // so a plain DTO had none and was refused for a predicate it plainly has.
+  var registration = Object.prototype.hasOwnProperty.call(__SERIAL, element) ? __SERIAL[element] : null;
+  if (registration !== null && registration.meta.with === null) {
+    var elements = registration.meta.fields.concat(registration.meta.body);
+    for (var e = 0; e < elements.length; e += 1) {
+      var described = elements[e];
+      if (described[5] === true || described[3] === true) continue;
+      if (/\\?$/.test(__str(described[2]).replace(/\\s+/g, ''))) continue;
+      required.push(described[1].slice());
+    }
+    return __nextRequired(element, required, list !== null);
+  }
   var shape = null;
   for (var s = 0; s < __SHAPES.length; s += 1) {
     var ctor = __SHAPES[s].ctor;
@@ -11266,7 +11284,6 @@ function __nextInferred(type) {
   if (shape === null) {
     throw new Error('Cannot infer a predicate for ' + element + ': this conversion has no @Serializable declaration of it.');
   }
-  var required = [];
   for (var f = 0; f < shape.fields.length; f += 1) {
     var field = shape.fields[f];
     if (shape.optional.indexOf(field) !== -1) continue;
@@ -11276,6 +11293,11 @@ function __nextInferred(type) {
     }
     required.push(names);
   }
+  return __nextRequired(element, required, list !== null);
+}
+
+/** The predicate over a set of required keys, each present under one of its names. */
+function __nextRequired(element, required, isList) {
   if (required.length === 0) {
     throw new Error(
       'Cannot infer a predicate for ' + element +
@@ -11288,7 +11310,7 @@ function __nextInferred(type) {
       return names.some(function (name) { return __nextHas(value, name); });
     });
   };
-  return list === null
+  return !isList
     ? fits
     : function (value) { return Array.isArray(value) && value.length > 0 && fits(value[0]); };
 }

@@ -690,6 +690,25 @@ describe('a constructor reference, and a local mutated inside a receiver block',
 		expect(d.boxes()).toEqual(['a', 'b']);
 		expect(d.collected()).toEqual(['n1']);
 	});
+
+	it('reads the inherited property in a getter, not the constructor parameter of that name', async () => {
+		// `abstract class G(name, state: List<T>) : Filter.Group<T>(name, state)
+		// { val values get() = state.filter { it.state } … }` — in the getter,
+		// `state` is the group's property; the parameter is gone by then.
+		const d = await instantiate(
+			'Demo',
+			kt(
+				'open class Base(val state: List<String>)',
+				'class Grouped(state: List<String>) : Base(state) {',
+				'    val joined: String',
+				'        get() = state.joinToString(",")',
+				'    val first = state.first()',
+				'}',
+				'class Demo { fun g(): String { val g = Grouped(listOf("a", "b")); return g.joined + "|" + g.first } }'
+			)
+		);
+		expect(d.g()).toBe('a,b|a');
+	});
 });
 
 describe('a lazy property whose block blocks', () => {

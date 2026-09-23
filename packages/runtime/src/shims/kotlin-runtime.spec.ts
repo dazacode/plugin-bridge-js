@@ -4578,6 +4578,38 @@ describe('Next.js data extraction', () => {
 		expect(() => k.extractNextJs(document, 'UnknownDto')).toThrow(/Cannot infer a predicate/);
 	});
 
+	it('infers the required fields of a plain @Serializable class from its registration', () => {
+		// A DTO with no rename registers no shape — only its serial
+		// registration, which is kotlinx's descriptor: required unless it has a
+		// default or a nullable type, present under its wire name.
+		class DetailsDto {
+			constructor(
+				public manga: unknown,
+				public note: unknown = null
+			) {}
+		}
+		k.serial(
+			'DetailsDto',
+			(a: unknown[]) => new DetailsDto(a[0], a[1]),
+			{
+				params: [],
+				fields: [
+					['manga', ['m'], 'Manga', false, null, false, null],
+					['note', ['note'], 'String?', false, null, false, null]
+				],
+				body: [],
+				with: null
+			},
+			null,
+			DetailsDto
+		);
+		const document = runtime.globals.Jsoup.parse(
+			'<script id="__NEXT_DATA__" type="application/json">{"props":{"pageProps":{"x":{"other":1},"y":{"m":{"id":"7"}}}}}</script>',
+			'https://example.invalid/'
+		);
+		expect(k.extractNextJs(document, 'DetailsDto').manga).toEqual({ id: '7' });
+	});
+
 	it('reads a raw Flight body as a typed list', () => {
 		class RscItemDto {}
 		k.shape(RscItemDto, ['slug'], [], {});
