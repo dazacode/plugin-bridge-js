@@ -1035,3 +1035,28 @@ describe('stdlib calls that converted to the wrong thing, or not at all', () => 
 		expect(demo.size(1500000)).toBe('2Mb');
 	});
 });
+
+describe('a base class written through the object that holds it', () => {
+	it('extends the nested class, as the imported bare spelling already did', async () => {
+		// `class TypeFilter(name) : AnimeStreamFilters.QueryPartFilter(name, LIST)`
+		// refused as "a base class this build has not": the qualified name was
+		// looked up whole, and the nested class is hoisted under its bare one.
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'object Filters {',
+				'    open class QueryPartFilter(val displayName: String, val vals: Array<Pair<String, String>>) {',
+				'        fun toUriPart(at: Int) = vals[at].second',
+				'    }',
+				'}',
+				'class TypeFilter(name: String) : Filters.QueryPartFilter(name, arrayOf("Movie" to "movie", "Series" to "tv"))',
+				'class Demo {',
+				'    fun part() = TypeFilter("Type").toUriPart(1)',
+				'    fun label() = TypeFilter("Type").displayName',
+				'}'
+			)
+		);
+		expect(demo.part()).toBe('tv');
+		expect(demo.label()).toBe('Type');
+	});
+});

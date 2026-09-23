@@ -10525,6 +10525,14 @@ class Emitter {
 		if (this.declaredTypes.has(declared)) {
 			return this.safe(this.localTypes.get(declared) ?? declared);
 		}
+		// `: AnimeStreamFilters.QueryPartFilter(name, LIST)` — a nested type
+		// written through the object holding it. It is hoisted to module scope
+		// under its bare name (see `qualifiedTypes`), and that binding is what
+		// the `extends` names, exactly as for the imported bare spelling.
+		const nested = this.qualifiedTypes.get(declared);
+		if (nested !== undefined && this.declaredTypes.has(nested)) {
+			return this.safe(this.localTypes.get(nested) ?? nested);
+		}
 		// Both spellings of one class: the video ecosystem renamed `Filter` to
 		// `AnimeFilter` when it forked and changed nothing else, so a subclass
 		// of either resolves and the runtime aliases the two together.
