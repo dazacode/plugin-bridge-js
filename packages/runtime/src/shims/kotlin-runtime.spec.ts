@@ -1093,6 +1093,21 @@ describe('the parts of Kotlin that have no JavaScript spelling', () => {
 		expect(k.range(1, 0)).toEqual([]);
 	});
 
+	it('strides a progression with `step`, and refuses a step that is not positive', () => {
+		expect(k.step(k.until(0, 7), 2)).toEqual([0, 2, 4, 6]);
+		expect(k.step(k.range(1, 10), 3)).toEqual([1, 4, 7, 10]);
+		expect(k.step(k.downTo(10, 1), 3)).toEqual([10, 7, 4, 1]);
+		expect(k.step(k.until(0, 0), 2)).toEqual([]);
+		expect(() => k.step(k.until(0, 4), 0)).toThrow(/positive/);
+	});
+
+	it('reads the infix `matches` from whichever side holds the Regex', () => {
+		expect(k.regexMatches(k.regex('a+'), 'aaa')).toBe(true);
+		expect(k.regexMatches('aaa', k.regex('a+'))).toBe(true);
+		// Whole-input, not a search.
+		expect(k.regexMatches(k.regex('a+'), 'baaa')).toBe(false);
+	});
+
 	it('keeps named integer bitwise operations explicit', () => {
 		expect(k.bitwiseAnd(6, 3)).toBe(2);
 	});

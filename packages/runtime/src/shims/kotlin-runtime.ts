@@ -3717,6 +3717,39 @@ var __k = {
   },
 
   /**
+   * 'progression step n' — every n-th element, starting with the first.
+   *
+   * The three builders above answer the whole progression as an array whose
+   * neighbours differ by exactly one, so every n-th element of it is exactly
+   * the progression Kotlin's step builds: '0 until 7 step 2' is 0, 2, 4, 6 and
+   * '10 downTo 1 step 3' is 10, 7, 4, 1. Kotlin throws for a step that is not
+   * positive rather than looping forever or answering nothing, and so does
+   * this.
+   */
+  step: function (progression, n) {
+    var by = Number(n);
+    if (!(by > 0)) throw new Error('Step must be positive, was: ' + n + '.');
+    var all = __arr(progression);
+    var out = [];
+    for (var i = 0; i < all.length; i += by) out.push(all[i]);
+    return out;
+  },
+
+  /**
+   * The infix 'matches': 'REGEX matches text', or 'text matches REGEX'.
+   *
+   * Kotlin declares it on Regex and on CharSequence, and both are the
+   * whole-input test. Which side is the pattern is only knowable at run time
+   * here, and a Regex is always one of this runtime's own, so that is what is
+   * asked. Neither side a Regex is not something Kotlin can compile.
+   */
+  regexMatches: function (left, right) {
+    if (left instanceof __KRegex) return left.matches(right);
+    if (right instanceof __KRegex) return right.matches(left);
+    throw new Error('This converted extension used matches without a Regex on either side.');
+  },
+
+  /**
    * Kotlin's error(), which is a throw and not a log.
    *
    * It reaches the host as an ordinary plugin failure, which is what the

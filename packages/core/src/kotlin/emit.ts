@@ -4401,7 +4401,24 @@ class Emitter {
 					? this.lookupLocal(inner.text)
 					: null;
 			if (local !== null && !local.mutable) {
-				return `${this.helper(rebound)}(${this.assignable(target)}, ${this.expr(value)});`;
+				const receiver = this.assignable(target);
+				// `all += page.entries ?: throw Exception("…")` — the elvis guard
+				// below, on the one path that returned before reaching it. The
+				// guard is a statement in front of the mutation, which is where
+				// Kotlin evaluates it: the right-hand side is read in full before
+				// `plusAssign` runs, so a throw leaves the list untouched either
+				// way. Left out, this refused a multisrc template's chapter list
+				// and every one of the 33 listings built on it.
+				const guarded = this.elvisJump(value);
+				if (guarded !== null) {
+					const temporary = this.temporary();
+					return [
+						`const ${temporary} = ${this.expr(guarded.value)};`,
+						`if (${temporary} == null) ${this.stmt(guarded.jump, this.jumpValues.get(guarded.jump))}`,
+						`${this.helper(rebound)}(${receiver}, ${temporary});`
+					].join('\n');
+				}
+				return `${this.helper(rebound)}(${receiver}, ${this.expr(value)});`;
 			}
 		}
 
@@ -5030,6 +5047,16 @@ class Emitter {
 		}
 		if (name.text === 'downTo') {
 			return `${this.helper('downTo')}(${this.expr(left)}, ${this.expr(right)})`;
+		}
+		// `for (i in 0 until len step 2)` — left-associative, so the left side is
+		// already the progression, whichever of the three built it. `step` is
+		// Kotlin's only way to stride a loop, and a decrypt routine walking a
+		// byte array two at a time is where this ecosystem writes it.
+		if (name.text === 'step') {
+			return `${this.helper('step')}(${this.expr(left)}, ${this.expr(right)})`;
+		}
+		if (name.text === 'matches') {
+			return `${this.helper('regexMatches')}(${this.expr(left)}, ${this.expr(right)})`;
 		}
 		if (name.text === 'and') {
 			return `${this.helper('bitwiseAnd')}(${this.expr(left)}, ${this.expr(right)})`;

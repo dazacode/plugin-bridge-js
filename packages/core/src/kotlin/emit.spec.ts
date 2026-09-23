@@ -330,6 +330,15 @@ const helpers: Record<string, (...args: never[]) => unknown> = {
 		Array.from({ length: to - from }, (_, index) => from + index),
 	downTo: (from: number, to: number) =>
 		Array.from({ length: Math.max(0, from - to + 1) }, (_, index) => from - index),
+	step: (progression: Any[], by: number) => progression.filter((_, index) => index % by === 0),
+	regexMatches: (left: Any, right: Any) =>
+		left instanceof RegExp
+			? new RegExp(`^(?:${left.source})$`).test(String(right))
+			: new RegExp(`^(?:${(right as RegExp).source})$`).test(String(left)),
+	plusAssign: (list: Any[], more: Any) => {
+		if (Array.isArray(more)) list.push(...more);
+		else list.push(more);
+	},
 	bitwiseAnd: (left: number, right: number) => left & right,
 	bitwiseOr: (left: number, right: number) => left | right,
 	bitwiseXor: (left: number, right: number) => left ^ right,
@@ -4560,5 +4569,51 @@ describe('the order module-scope declarations are emitted in', () => {
 		);
 
 		expect(found).toBe('https://example.invalid');
+	});
+});
+
+describe('control flow written in the middle of an expression', () => {
+	it('guards a `+=` onto a list with the elvis `throw` on its right', () => {
+		// `all += page.entries ?: throw …` — the guard runs before the list is
+		// touched, and a null throws rather than appending nothing.
+		const demo = instantiate(
+			inClass(
+				'    fun collect(entries: List<String>?): List<String> {',
+				'        val all = mutableListOf("a")',
+				'        all += entries ?: throw Exception("no entries")',
+				'        return all',
+				'    }'
+			)
+		);
+
+		expect(demo.collect(['b', 'c'])).toEqual(['a', 'b', 'c']);
+		expect(() => demo.collect(null)).toThrow('no entries');
+	});
+
+	it('strides a loop with `step`', () => {
+		const demo = instantiate(
+			inClass(
+				'    fun evens(n: Int): List<Int> {',
+				'        val out = mutableListOf<Int>()',
+				'        for (i in 0 until n step 2) out.add(i)',
+				'        return out',
+				'    }'
+			)
+		);
+
+		expect(demo.evens(7)).toEqual([0, 2, 4, 6]);
+	});
+
+	it('reads an infix `matches` with the Regex on either side', () => {
+		const demo = instantiate(
+			inClass(
+				'    fun left(text: String) = ID matches text',
+				'    fun right(text: String) = text matches ID',
+				'    companion object { private val ID = Regex("[0-9]+") }'
+			)
+		);
+
+		expect(demo.left('123')).toBe(true);
+		expect(demo.right('12a')).toBe(false);
 	});
 });

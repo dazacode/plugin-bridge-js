@@ -269,6 +269,11 @@ export const RUNTIME_HELPERS = [
 	'range',
 	'until',
 	'downTo',
+	/* `0 until n step 2`, over the array the three above answer. */
+	'step',
+	/* The infix `matches`, which Kotlin declares on both sides: `regex
+	   matches text` and `text matches regex` mean the same whole-string test. */
+	'regexMatches',
 
 	/* The environment the host supplies, reached through extension functions
 	   rather than through methods: `"…".toHttpUrl()`, `response.asJsoup()`,
