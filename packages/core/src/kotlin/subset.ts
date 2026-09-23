@@ -450,7 +450,14 @@ const MAC_SPEC = /^Hmac(MD5|SHA-?\d+)$/i;
 const SUPPORTED_TRANSFORMS: ReadonlySet<string> = new Set([
 	'AES/CBC/PKCS5PADDING',
 	'AES/CBC/PKCS7PADDING',
-	'AES/GCM/NOPADDING'
+	'AES/GCM/NOPADDING',
+	// Not WebCrypto's: the runtime computes RC4 itself (see `__rc4`), because it
+	// is a short, fully specified stream cipher with published test vectors.
+	// It also names the key, `SecretKeySpec(key, "RC4")`, in the same spelling.
+	'RC4',
+	'ARCFOUR',
+	'RC4/ECB/NOPADDING',
+	'ARCFOUR/ECB/NOPADDING'
 ]);
 
 /** The digests WebCrypto signs and MACs over. */
@@ -501,8 +508,11 @@ export function factoryTransformation(text: string): string | null {
  * - **No ECB anywhere.** WebCrypto does not implement it, and a bare `"AES"`
  *   means ECB in the JCE's own defaults, so both refuse. Answering either with
  *   CBC produces a plugin that decrypts to rubbish and reports nothing.
- * - **No DES, DESede, RC2, RC4, Blowfish or ChaCha20.** None exist in
- *   WebCrypto, and a cipher is not something to reimplement here.
+ * - **No DES, DESede, RC2, Blowfish or ChaCha20.** None exist in WebCrypto,
+ *   and a block cipher is not something to reimplement here. RC4 is the one
+ *   exception, computed in the runtime: a stream cipher of a dozen lines with
+ *   RFC 6229's vectors to check it against, and no mode or padding to get
+ *   wrong.
  * - **No RSA.** WebCrypto's RSA is RSASSA-PKCS1-v1_5, PSS and OAEP — padded
  *   schemes — where the JCE's `"RSA"` is raw modular exponentiation with the
  *   padding named separately. They are not interchangeable.
@@ -1285,6 +1295,10 @@ export const HOST_METHODS: ReadonlySet<string> = new Set([
 	'getPrivate',
 	'getEncoded',
 	'getIV',
+	// `cipher.init(mode, key, cipher.getParameters())` — how an RC4 key is set
+	// up, with the parameters RC4 does not have. The shim answers null, as the
+	// JCE does; the property spelling `cipher.parameters` reads the same field.
+	'getParameters',
 	// `BigInteger.toByteArray()` on an affine coordinate, which is how the
 	// Kotlin this replaces assembles a JWK by hand. `toByteArray` is a String
 	// method in `EXTENSION_METHODS` too; the helper tells the two apart by what

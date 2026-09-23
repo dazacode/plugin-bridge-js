@@ -8184,7 +8184,7 @@ function __sha256(bytes) {
  *
  * ## What refuses, and why each one has to
  *
- * WebCrypto has no ECB, no DES, no RC4 and no raw RSA, so an extension naming
+ * WebCrypto has no ECB, no DES and no raw RSA, so an extension naming
  * one is refused at CONVERSION time by the algorithm string it wrote (see
  * 'cryptoObstacle' in subset.ts). That is the refusal that matters, and it is
  * why the scanner also reads the argument of a getInstance call rather than
@@ -8330,6 +8330,17 @@ function __cipherSpec(transformation) {
   var mode = parts.length > 1 ? __str(parts[1]).toUpperCase() : '';
   var padding = parts.length > 2 ? __str(parts[2]).toUpperCase() : '';
 
+  // RC4 is a stream cipher with no mode, no padding and no IV, and it is
+  // computed here rather than by the host: WebCrypto does not have it, and it
+  // is a few lines of arithmetic with published test vectors (RFC 6229), which
+  // is the one kind of cipher it is honest to carry. SunJCE spells it both
+  // ways, and accepts the ECB/NoPadding suffix as a no-op for either.
+  if (algorithm === 'RC4' || algorithm === 'ARCFOUR') {
+    if ((mode === '' || mode === 'ECB' || mode === 'NONE') && (padding === '' || padding === 'NOPADDING')) {
+      return { mode: 'RC4' };
+    }
+    __cryptoRefuse('the ' + text + ' cipher');
+  }
   if (algorithm !== 'AES' || mode === '') __cryptoRefuse('the ' + text + ' cipher');
   if (mode === 'CBC') {
     if (padding !== 'PKCS5PADDING' && padding !== 'PKCS7PADDING') {
@@ -8344,7 +8355,36 @@ function __cipherSpec(transformation) {
   __cryptoRefuse('the ' + text + ' cipher');
 }
 
-/** javax.crypto.Cipher, over the two AES modes WebCrypto has. */
+/**
+ * RC4 over a key and a message, both byte arrays: the key schedule, then the
+ * keystream XORed over the input. Checked against RFC 6229 in the spec.
+ */
+function __rc4(key, data) {
+  var state = new Array(256);
+  var i;
+  var j = 0;
+  for (i = 0; i < 256; i += 1) state[i] = i;
+  for (i = 0; i < 256; i += 1) {
+    j = (j + state[i] + (key[i % key.length] & 0xff)) & 0xff;
+    var swap = state[i];
+    state[i] = state[j];
+    state[j] = swap;
+  }
+  var out = new Uint8Array(data.length);
+  i = 0;
+  j = 0;
+  for (var n = 0; n < data.length; n += 1) {
+    i = (i + 1) & 0xff;
+    j = (j + state[i]) & 0xff;
+    var held = state[i];
+    state[i] = state[j];
+    state[j] = held;
+    out[n] = (data[n] & 0xff) ^ state[(state[i] + state[j]) & 0xff];
+  }
+  return out;
+}
+
+/** javax.crypto.Cipher, over the two AES modes WebCrypto has and RC4. */
 var Cipher = {
   ENCRYPT_MODE: 1,
   DECRYPT_MODE: 2,
@@ -8355,12 +8395,24 @@ var Cipher = {
     var iv = null;
     var tagBits = null;
     return {
+      // RC4 has no algorithm parameters; the JCE answers null, and the idiom
+      // passes that straight back into init.
+      parameters: null,
+      getParameters: function () { return null; },
       init: function (mode, secret, parameters) {
         direction = Number(mode) === 2 ? 'decrypt' : 'encrypt';
         if (secret === null || secret === undefined || secret.__secretKey !== true) {
           __cryptoRefuse('a cipher key this build cannot read');
         }
         key = secret.bytes;
+        if (spec.mode === 'RC4') {
+          // SunJCE's bounds: 40 to 1024 bits. It throws InvalidKeyException
+          // outside them, and so does this.
+          if (key.length < 5 || key.length > 128) {
+            throw new Error('This converted extension gave RC4 a ' + key.length + '-byte key.');
+          }
+          return this;
+        }
         iv = parameters === null || parameters === undefined ? null : parameters.__iv;
         tagBits =
           parameters === null || parameters === undefined || parameters.__tagBits === null
@@ -8383,6 +8435,9 @@ var Cipher = {
       },
       doFinal: async function (data) {
         if (direction === null) __cryptoRefuse('a cipher used before init()');
+        // Each doFinal starts from the key's initial state, as the JCE resets a
+        // cipher to its last init; encryption and decryption are one XOR.
+        if (spec.mode === 'RC4') return __cryptoArray(__rc4(key, __bytesOf(data)));
         var out = await __host().crypto.aes(
           direction,
           spec.mode,
