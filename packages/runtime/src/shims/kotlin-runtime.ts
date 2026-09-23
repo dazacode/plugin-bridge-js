@@ -13742,6 +13742,38 @@ Unpacker.prototype.unpack = function () {
 var JsUnpacker = Unpacker;
 
 /**
+ * The synchrony deobfuscator that a shared library module ships as a fixed
+ * script beside its Kotlin ('lib/synchrony/assets/synchrony-<version>.js').
+ *
+ * Upstream runs that script in an embedded QuickJS, and QuickJS is a boundary
+ * here — but only because an embedded engine is usually asked to run what a
+ * *site* sent. This one runs a file from the extension's own repository, read
+ * at conversion time and carried in the bundle like the rest of its code; the
+ * site's script is its input, parsed and rewritten as data, never run. That is
+ * the "narrow, named unpacker" the capability map allows, and it needs no
+ * engine because the bundle already is one.
+ *
+ * '__synchronyFactory' is null unless the adapter embedded the script, which
+ * it does only when the conversion included the module (see
+ * 'synchronyPrelude'). With no script, or one whose export line is not the
+ * shape the upstream wrapper rewrites, 'deobfuscate' answers null — exactly
+ * what the upstream 'deobfuscateScript' returns in both cases, and what every
+ * caller already checks for.
+ */
+var __synchronyFactory = null;
+var __synchronyModule = null;
+var SynchronyEngine = {
+  deobfuscate: function (source) {
+    if (__synchronyModule === null) {
+      if (__synchronyFactory === null) return null;
+      __synchronyModule = __synchronyFactory();
+    }
+    var result = new __synchronyModule.Deobfuscator().deobfuscateSource(__str(source));
+    return typeof result === 'string' ? result : null;
+  }
+};
+
+/**
  * Radix decoder used by generic packed-script unpackers. This is deliberately
  * a value primitive rather than a source-specific extractor: it only converts
  * a token into its numeric index and never fetches, decrypts, or evaluates.

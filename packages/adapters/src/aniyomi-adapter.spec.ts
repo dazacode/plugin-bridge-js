@@ -911,3 +911,86 @@ describe('what a repository costs to check', () => {
 		expect(later.filter((url) => url.includes('/master/')).length).toBe(0);
 	});
 });
+
+/* ── lib/synchrony, embedded from the repository ──────────────────────────── */
+
+/** The module's Kotlin wrapper, in the shape upstream writes it: QuickJS. */
+const SYNCHRONY_KT = `
+package keiyoushi.lib.synchrony
+
+import app.cash.quickjs.QuickJs
+
+object Deobfuscator {
+    fun deobfuscateScript(source: String): String? {
+        val script = javaClass.getResource("/assets/synchrony-v0.0.0.js")?.readText() ?: return null
+        return QuickJs.create().use { engine ->
+            engine.evaluate(script)
+            engine.evaluate("new Deobfuscator().deobfuscateSource(" + source + ")") as? String
+        }
+    }
+}
+`;
+
+/** A stand-in for the prebuilt script: see `shims/synchrony.spec.ts`. */
+const SYNCHRONY_JS =
+	'var Hf = class { deobfuscateSource(e) { return "clean:" + e; } };var me = class {};export{Hf as Deobfuscator,me as Transformer};';
+
+function repositoryWithSynchrony(): Map<string, string> {
+	return new Map([
+		['LICENSE', LICENCE],
+		[
+			'src/en/example/build.gradle',
+			BUILD_GRADLE.replace(
+				'ext {',
+				"dependencies {\n    implementation(project(':lib:synchrony'))\n}\n\next {"
+			)
+		],
+		[
+			'src/en/example/ExampleAnime.kt',
+			EXTENSION_KT.replace(
+				'override fun popularAnimeSelector() = "li.card"',
+				'override fun popularAnimeSelector() = Deobfuscator.deobfuscateScript("li.card") ?: "li.card"'
+			).replace(
+				`package ${PACKAGE}`,
+				`package ${PACKAGE}\n\nimport keiyoushi.lib.synchrony.Deobfuscator`
+			)
+		],
+		['lib/synchrony/src/keiyoushi/lib/synchrony/Deobfuscator.kt', SYNCHRONY_KT],
+		['lib/synchrony/assets/synchrony-v0.0.0.js', SYNCHRONY_JS]
+	]);
+}
+
+describe("an extension that calls lib/synchrony's deobfuscator", () => {
+	it('converts, and carries the repository script in place of QuickJS', async () => {
+		const bundle = await openPluginArchive(
+			await aniyomiAdapter.convert(await listing(), services(repositoryWithSynchrony()))
+		);
+
+		// The QuickJS wrapper was read as the runtime's engine, not refused…
+		expect(bundle.entrypointSource).toContain('SynchronyEngine.deobfuscate');
+		// …and the script it runs is the repository's, embedded, not fetched.
+		expect(bundle.entrypointSource).toContain('__synchronyFactory = function () {');
+		expect(bundle.entrypointSource).toContain('deobfuscateSource(e) { return "clean:" + e; }');
+	}, 60_000);
+
+	it('says what it embedded, and asserts no terms for it', async () => {
+		const bundle = await openPluginArchive(
+			await aniyomiAdapter.convert(await listing(), services(repositoryWithSynchrony()))
+		);
+
+		const notice = bundle.files.get('licenses/EMBEDDED.txt');
+		expect(notice).toBeDefined();
+		const text = new TextDecoder().decode(notice!);
+		expect(text).toContain('lib/synchrony/assets/synchrony-v0.0.0.js');
+		expect(text).toContain('neither restates nor asserts');
+	}, 60_000);
+
+	it('embeds nothing for an extension built without the module', async () => {
+		const bundle = await openPluginArchive(
+			await aniyomiAdapter.convert(await listing(), services(repositoryFiles(EXTENSION_KT)))
+		);
+
+		expect(bundle.entrypointSource).not.toContain('__synchronyFactory = function');
+		expect(bundle.files.has('licenses/EMBEDDED.txt')).toBe(false);
+	}, 60_000);
+});

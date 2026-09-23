@@ -48,6 +48,7 @@ import { DOM_RUNTIME_SOURCE } from './generated/dom-source';
 import { JS_RUNTIME } from './js-runtime';
 import { kotlinRuntime } from './kotlin-runtime';
 import { STREAM_GUARDS } from './stream-guards';
+import { synchronyPrelude } from './synchrony';
 
 export interface MihonEntrypointOptions {
 	/** Must equal the manifest id, or the sandbox refuses to load the bundle. */
@@ -79,6 +80,12 @@ export interface MihonEntrypointOptions {
 	 * none, which the runtime reads as an empty classpath.
 	 */
 	readonly resources?: Readonly<Record<string, string>>;
+	/**
+	 * `lib/synchrony`'s prebuilt script, when the conversion calls the
+	 * deobfuscator (`adapters/src/library-shims.ts`). Absent otherwise, and
+	 * the bundle is then byte-identical to one built before it existed.
+	 */
+	readonly synchronyScript?: string;
 	/**
 	 * Whether the class descends from keiyoushi's `KeiSource`, the repository's
 	 * own base between the extension and `HttpSource`.
@@ -728,6 +735,7 @@ ${settingIds}
 ${resources}
 ${kotlinRuntime()}
 ${constants}
+${synchronyPrelude(options.synchronyScript)}
 ${MIHON_BASE}
 
 /* --- the translated extension ---------------------------------------------- */

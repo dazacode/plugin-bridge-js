@@ -2329,6 +2329,9 @@ export const GLOBAL_NAMES: ReadonlySet<string> = new Set([
 	'Protocol',
 	'Unpacker',
 	'JsUnpacker',
+	// `lib/synchrony`'s deobfuscator, answered by the script the bundle embeds
+	// from the extension's own repository (`shims/synchrony.ts`).
+	'SynchronyEngine',
 	'Unbaser',
 
 	// The boxed numeric limits. `Float.MAX_VALUE` is how this ecosystem says

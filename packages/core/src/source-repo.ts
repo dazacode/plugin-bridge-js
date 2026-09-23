@@ -184,8 +184,14 @@ export const MAX_RESOURCE_FILES = 12;
  * Anchored at the start so it is `assets/i18n/` *of this directory*, not any
  * path that happens to contain those segments, and the filename is matched
  * whole so a `.properties.bak` beside it is not fetched.
+ *
+ * The second alternative is `lib/synchrony`'s prebuilt deobfuscator, which
+ * its Kotlin wrapper reads through the classloader exactly as `Intl` reads a
+ * message file. It is one file of about 400 KB in one shared module, read
+ * once per repository through the shared-module cache, and embedded only in
+ * the bundles whose conversion calls it (`adapters/src/library-shims.ts`).
  */
-const RESOURCE_PATHS = /^assets\/i18n\/[\w.-]+\.properties$/;
+const RESOURCE_PATHS = /^assets\/(?:i18n\/[\w.-]+\.properties|synchrony-[\w.-]+\.js)$/;
 
 /**
  * The per-group caps, and the shared budget that stops them multiplying.
@@ -695,8 +701,8 @@ async function fetchKotlinDirectory(
 /**
  * The files a directory holds that are not Kotlin and are still part of it.
  *
- * One pattern, `assets/i18n/*.properties`, and it is deliberately not "every
- * asset". An extension's `assets/` may hold anything its author put there, and
+ * Two patterns, `assets/i18n/*.properties` and one named script (see
+ * `RESOURCE_PATHS`), and it is deliberately not "every asset". An extension's `assets/` may hold anything its author put there, and
  * an unbounded read of somebody else's directory is the multiplication the
  * header of this file exists to close. What earns its place is the one group
  * the translator can actually use: `keiyoushi.lib.i18n.Intl` reads
