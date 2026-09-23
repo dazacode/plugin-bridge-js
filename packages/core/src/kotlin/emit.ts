@@ -831,6 +831,50 @@ export interface Declared {
 	readonly qualifiedSignatures: ReadonlyMap<string, readonly string[]>;
 	/** Of `types`, the ones declared `object` — see `declaredObjects`. */
 	readonly objects: ReadonlySet<string>;
+	/**
+	 * Every signature a class member function is declared with, by name.
+	 *
+	 * Kotlin resolves a call among same-named functions by the arguments'
+	 * count and *static* types; a JavaScript class has one slot per name, and
+	 * the second declaration simply replaces the first. So a template writing
+	 * `searchMangaUrl(page, query)` beside `searchMangaUrl(page, query,
+	 * filters)` emitted a three-argument method that called itself for ever,
+	 * and `mangaDetailsParse(response)` beside `mangaDetailsParse(document)` —
+	 * the shape of Madara, the largest template in the catalogue — kept
+	 * whichever came second and handed it the other one's argument. Measured
+	 * over two real catalogues: 109 loaded listings carried the first shape
+	 * and 328 the second, all converting and importing cleanly, all wrong.
+	 *
+	 * Collected across every file, because an override and the declaration it
+	 * overrides are usually in two of them. See `overloadsOf` for what is done
+	 * with it.
+	 */
+	readonly overloads: ReadonlyMap<string, readonly OverloadSignature[]>;
+	/**
+	 * The *functions* each class declares — `classMembers` less its
+	 * properties, except that a name which is both stays here as well, which
+	 * is the one case `classMembers` minus `classFields` loses and the one
+	 * `overloadsOf` needs.
+	 */
+	readonly classFunctions: ReadonlyMap<string, ReadonlySet<string>>;
+}
+
+/**
+ * One declared parameter list, as the overload dispatcher needs it.
+ *
+ * `key` is the parameter types' simple names, and it is what the method is
+ * emitted under (`mangaDetailsParse$Response`): an override in a subclass has
+ * the same parameter types by Kotlin's own rule, so it lands on the same
+ * JavaScript name and JavaScript's prototype chain does the virtual dispatch.
+ * `total` is -1 for a `vararg`. A receiver, for `fun Element.x()`, is the
+ * first parameter here exactly as it is in the emitted function.
+ */
+export interface OverloadSignature {
+	readonly key: string;
+	readonly required: number;
+	readonly total: number;
+	readonly types: readonly string[];
+	readonly nullable: readonly boolean[];
 }
 
 const EMPTY_DECLARED: Declared = {
@@ -849,7 +893,9 @@ const EMPTY_DECLARED: Declared = {
 	extensions: new Set(),
 	moduleExtensions: new Set(),
 	qualifiedSignatures: new Map(),
-	objects: new Set()
+	objects: new Set(),
+	overloads: new Map(),
+	classFunctions: new Map()
 };
 
 /** What one parsed file declares, without translating any of it. */
@@ -875,8 +921,20 @@ export function mergeDeclared(parts: readonly Declared[]): Declared {
 	const classMembers = new Map<string, Set<string>>();
 	const classFields = new Map<string, Set<string>>();
 	const classBases = new Map<string, string>();
+	const overloads = new Map<string, Map<string, OverloadSignature>>();
+	const classFunctions = new Map<string, Set<string>>();
 	const ambiguous = new Set<string>();
 	for (const part of parts) {
+		for (const [owner, names] of part.classFunctions) {
+			const into = classFunctions.get(owner) ?? new Set<string>();
+			for (const name of names) into.add(name);
+			classFunctions.set(owner, into);
+		}
+		for (const [name, shapes] of part.overloads) {
+			const into = overloads.get(name) ?? new Map<string, OverloadSignature>();
+			for (const shape of shapes) if (!into.has(shape.key)) into.set(shape.key, shape);
+			overloads.set(name, into);
+		}
 		for (const [owner, members] of part.classMembers) {
 			// Unioned rather than replaced: the same class name in two files is
 			// two classes, and a `super.` that finds either is better than one
@@ -933,7 +991,9 @@ export function mergeDeclared(parts: readonly Declared[]): Declared {
 		extensions,
 		moduleExtensions,
 		qualifiedSignatures,
-		objects
+		objects,
+		overloads: new Map([...overloads].map(([name, shapes]) => [name, [...shapes.values()]])),
+		classFunctions
 	};
 }
 
@@ -985,6 +1045,14 @@ class Emitter {
 			this.classFieldIndex.set(owner, into);
 		}
 		for (const [owner, base] of neighbours.classBases) this.classBaseIndex.set(owner, base);
+		for (const [name, shapes] of neighbours.overloads) {
+			for (const shape of shapes) this.rememberOverload(name, shape);
+		}
+		for (const [owner, names] of neighbours.classFunctions) {
+			const into = this.classFunctionIndex.get(owner) ?? new Set<string>();
+			for (const name of names) into.add(name);
+			this.classFunctionIndex.set(owner, into);
+		}
 	}
 
 	private used = new Set<string>();
@@ -1253,14 +1321,27 @@ class Emitter {
 			objects: this.declaredObjects,
 			classMembers: this.classMemberIndex,
 			classFields: this.classFieldIndex,
-			classBases: this.classBaseIndex
+			classBases: this.classBaseIndex,
+			overloads: new Map(
+				[...this.overloadIndex].map(([name, shapes]) => [name, [...shapes.values()]])
+			),
+			classFunctions: this.classFunctionIndex
 		};
 	}
 
-	private registerSignatures(declarations: readonly KNode[], owner: string | null = null): void {
+	private registerSignatures(
+		declarations: readonly KNode[],
+		owner: string | null = null,
+		ownerIsClass = false
+	): void {
 		for (const child of declarations) {
 			if (child.type === 'function_declaration') {
 				const name = this.nameOf(child);
+				// Only a plain class's members: those are the ones
+				// `classDeclaration` emits as methods and can give a dispatcher.
+				// An `object`'s members, a data class's and an enum's are
+				// emitted elsewhere and keep one name each.
+				if (name !== null && ownerIsClass) this.rememberOverload(name, this.signatureOf(child));
 				if (name !== null && receiverOf(child) === null) {
 					this.rememberSignature(name, this.parameterNames(child));
 					// Also under the class that declares it.
@@ -1300,6 +1381,7 @@ class Emitter {
 				if (base !== null) this.classBaseIndex.set(name, base);
 				const members = this.classMemberIndex.get(name) ?? new Set<string>();
 				const fields = this.classFieldIndex.get(name) ?? new Set<string>();
+				const functions = this.classFunctionIndex.get(name) ?? new Set<string>();
 				// A `val` in the primary constructor is a property of the class
 				// exactly as one in the body is, and for the DTOs this ecosystem
 				// writes it is the *only* place they are declared.
@@ -1310,20 +1392,171 @@ class Emitter {
 					}
 				}
 				for (const member of kids(body)) {
-					const memberName = this.nameOf(member);
+					// A property's name sits one level down, in its
+					// `variable_declaration`, where `nameOf` does not look — so
+					// until this read it, a class's `val`s written in the body
+					// were missing from both tables and only its constructor
+					// `val`s were recorded. `overloadsOf` is what noticed: a
+					// `val` and a `fun` sharing a name cannot share a JavaScript
+					// slot, and the `val` half was invisible.
+					const memberName =
+						member.type === 'property_declaration'
+							? this.propertyName(member)
+							: this.nameOf(member);
 					if (
 						memberName !== null &&
 						(member.type === 'function_declaration' || member.type === 'property_declaration')
 					) {
 						members.add(memberName);
 						if (member.type === 'property_declaration') fields.add(memberName);
+						else functions.add(memberName);
 					}
 				}
 				this.classMemberIndex.set(name, members);
 				this.classFieldIndex.set(name, fields);
+				this.classFunctionIndex.set(name, functions);
 			}
-			this.registerSignatures(kids(body), name);
+			this.registerSignatures(kids(body), name, isPlainClass(child));
 		}
+	}
+
+	/** See `Declared.overloads`: name, then signature key. */
+	private readonly overloadIndex = new Map<string, Map<string, OverloadSignature>>();
+	/** See `Declared.classFunctions`. */
+	private readonly classFunctionIndex = new Map<string, Set<string>>();
+	private fieldNameCache: Set<string> | null = null;
+
+	private rememberOverload(name: string, shape: OverloadSignature): void {
+		const into = this.overloadIndex.get(name) ?? new Map<string, OverloadSignature>();
+		if (!into.has(shape.key)) into.set(shape.key, shape);
+		this.overloadIndex.set(name, into);
+	}
+
+	/**
+	 * A declared parameter list, read off the Kotlin.
+	 *
+	 * Types by simple name — `okhttp3.Response` and `Response` are one type
+	 * written two ways, and an override may spell it either — with generics
+	 * and nullability dropped from the key and nullability kept beside it, so
+	 * the dispatcher can let a `null` through to the parameter that takes one.
+	 */
+	private signatureOf(node: KNode): OverloadSignature {
+		const types: string[] = [];
+		const nullable: boolean[] = [];
+		let required = 0;
+		let total = 0;
+		let spread = false;
+		const receiver = receiverOf(node);
+		if (receiver !== null) {
+			types.push(simpleTypeName(receiver));
+			nullable.push(false);
+			required += 1;
+			total += 1;
+		}
+		const list = kids(node).find((child) => child.type === 'function_value_parameters');
+		const parts = (list?.allChildren ?? []).filter((child) => !COMMENT_KINDS.has(child.type));
+		let vararg = false;
+		for (const [index, part] of parts.entries()) {
+			if (part.type === 'parameter_modifiers' && /\bvararg\b/.test(part.text)) vararg = true;
+			if (part.type !== 'parameter') continue;
+			const written = kids(part).find((child) => child.type.endsWith('type'));
+			types.push(simpleTypeName(typeName(written)));
+			nullable.push(written !== undefined && written.text.trim().endsWith('?'));
+			total += 1;
+			if (vararg) {
+				spread = true;
+				vararg = false;
+			} else if (parts[index + 1]?.type !== '=') required += 1;
+		}
+		return {
+			key: types.map((type) => type.replace(/\W/g, '_')).join('_'),
+			required,
+			total: spread ? -1 : total,
+			types,
+			nullable
+		};
+	}
+
+	/**
+	 * Every name that is a property in one class and a function in the same
+	 * class or one related to it by inheritance — the only place Kotlin lets
+	 * the two share a name *and* JavaScript cannot.
+	 *
+	 * Unrelated classes are left alone on purpose: a DTO's `val tag` and some
+	 * other class's `fun tag()` never meet on one prototype chain, and moving
+	 * the function behind a dispatcher there would change nothing but its
+	 * spelling.
+	 */
+	private fieldNames(): Set<string> {
+		if (this.fieldNameCache !== null) return this.fieldNameCache;
+		const found = new Set<string>();
+		const chain = (owner: string): string[] => {
+			const seen: string[] = [];
+			let at: string | undefined = owner;
+			while (at !== undefined && !seen.includes(at)) {
+				seen.push(at);
+				at = this.classBaseIndex.get(at);
+			}
+			return seen;
+		};
+		for (const [owner, functions] of this.classFunctionIndex) {
+			for (const name of functions) {
+				// A function here, and a property on this class, on an ancestor,
+				// or on a class that has this one as an ancestor.
+				const related = [...this.classFieldIndex].some(
+					([other, otherFields]) =>
+						otherFields.has(name) && (chain(owner).includes(other) || chain(other).includes(owner))
+				);
+				if (related) found.add(name);
+			}
+		}
+		this.fieldNameCache = found;
+		return found;
+	}
+
+	/**
+	 * The signatures of `name` when it cannot keep one JavaScript name, and
+	 * null when it can.
+	 *
+	 * Two reasons it cannot. Two parameter lists — see `Declared.overloads`.
+	 * Or one, beside a *property* of the same name: Kotlin keeps a `val` and a
+	 * `fun` apart and JavaScript does not, so Madara's `val useLoadMoreRequest
+	 * = LoadMoreStrategy.AutoDetect` next to its `fun useLoadMoreRequest():
+	 * Boolean` left the instance holding the strategy where the method was
+	 * meant to be, and `this.useLoadMoreRequest()` threw on every page of 47
+	 * listings.
+	 *
+	 * Either way each declaration is emitted under `name$key` and the plain
+	 * name becomes a dispatcher — unless a property holds it, in which case
+	 * calls go through `__k.overload` directly (`overloadCall`).
+	 */
+	private overloadsOf(name: string): readonly OverloadSignature[] | null {
+		const shapes = this.overloadIndex.get(name);
+		if (shapes === undefined || shapes.size === 0) return null;
+		if (shapes.size === 1 && !this.fieldNames().has(name)) return null;
+		return [...shapes.values()];
+	}
+
+	/**
+	 * A call routed through the runtime's overload resolution.
+	 *
+	 * `target` is where the candidates are looked up and `self` is what they
+	 * run on. They differ for exactly one caller: a `super.` call looks them up
+	 * on the *parent's* prototype, because looking them up on the instance
+	 * would find the subclass's own override — the one making the call — and
+	 * recurse. The last argument lets a call that matches none of the
+	 * translated declarations reach the driver's base class, which is where
+	 * Kotlin would have found `mangaDetailsParse(response)` for an extension
+	 * that declared only the `Document` half.
+	 */
+	private overloadCall(
+		target: string,
+		self: string,
+		name: string,
+		args: readonly string[],
+		shapes: readonly OverloadSignature[]
+	): string {
+		return `${this.helper('overload')}(${target}, ${self}, ${JSON.stringify(name)}, [${args.join(', ')}], ${overloadTable(name, shapes)}, () => __super)`;
 	}
 
 	/**
@@ -1727,6 +1960,7 @@ class Emitter {
 			.filter((param) => param.isProperty)
 			.map((param) => `this.${param.name} = ${this.safe(param.name)};`);
 		const memberLines: string[] = [];
+		const dispatched = new Set<string>();
 
 		for (const [index, child] of members.entries()) {
 			switch (child.type) {
@@ -1767,10 +2001,18 @@ class Emitter {
 					// *template* over the one member that was never meant to have
 					// one, and with it every extension built on that template.
 					if (this.hasModifier(child, 'abstract')) break;
+					// See `overloadsOf`: a name that cannot keep one JavaScript
+					// slot is emitted under its signature, and gets a dispatcher
+					// below.
+					const mangled =
+						this.overloadsOf(fnName) === null ? null : `${fnName}$${this.signatureOf(child).key}`;
 					const emitted = this.member(fnName, child, () =>
-						this.functionDeclaration(child, 'method')
+						this.functionDeclaration(child, 'method', mangled)
 					);
-					if (emitted !== null) memberLines.push(emitted);
+					if (emitted !== null) {
+						memberLines.push(emitted);
+						if (mangled !== null) dispatched.add(fnName);
+					}
 					break;
 				}
 				case 'type_alias':
@@ -1818,6 +2060,22 @@ class Emitter {
 				default:
 					this.declineMember(`${name}.${child.type}`, child, child.type);
 			}
+		}
+
+		// The plain name of an overloaded method, for everything that calls it
+		// by that name — this file's own `this.x(…)`, the files next door, and
+		// the driver. It resolves against the *instance*, so an override a
+		// subclass wrote under the same signature is the one that runs, which
+		// is Kotlin's virtual dispatch. Not written where this class's own
+		// property holds the name: the property is what a read of it means, and
+		// calls to the function go through `overloadCall` instead.
+		const ownFields = this.classFieldIndex.get(name) ?? new Set<string>();
+		for (const fnName of dispatched) {
+			if (ownFields.has(fnName)) continue;
+			const shapes = this.overloadsOf(fnName) ?? [];
+			memberLines.push(
+				`${fnName}(...__a) { return ${this.helper('overload')}(this, this, ${JSON.stringify(fnName)}, __a, ${overloadTable(fnName, shapes)}, () => __super); }`
+			);
 		}
 
 		// The super call is emitted with the constructor's parameters in scope
@@ -3125,7 +3383,8 @@ class Emitter {
 
 	private functionDeclaration(
 		node: KNode,
-		shape: 'method' | 'module' | 'anonymous' | 'local'
+		shape: 'method' | 'module' | 'anonymous' | 'local',
+		emittedName: string | null = null
 	): string {
 		const name = this.nameOf(node) ?? 'fun';
 
@@ -3174,7 +3433,7 @@ class Emitter {
 		const prefix = emitted.isAsync || this.hasModifier(node, 'suspend') ? 'async ' : '';
 		const signature = `(${text.join(', ')})`;
 
-		if (shape === 'method') return `${prefix}${name}${signature} ${emitted.text}`;
+		if (shape === 'method') return `${prefix}${emittedName ?? name}${signature} ${emitted.text}`;
 		if (shape === 'anonymous') return `${prefix}function ${signature} ${emitted.text}`;
 		// A local function is an arrow so that `this` keeps meaning the source:
 		// a `function` here would rebind it and every member the body reads
@@ -5054,7 +5313,17 @@ class Emitter {
 			// for — no error, just the wrong behaviour.
 			if (this.ownerBase !== null && this.baseDeclares(this.ownerBase, name)) {
 				if (lambda !== null) this.refuse(lambda, `a lambda passed to \`super.${name}()\``);
-				const inherited = `super.${name}(${this.plainArguments(name, args).join(', ')})`;
+				const shapes = this.overloadsOf(name);
+				const inherited =
+					shapes === null || this.owner === null
+						? `super.${name}(${this.plainArguments(name, args).join(', ')})`
+						: this.overloadCall(
+								`Object.getPrototypeOf(${this.safe(this.owner)}.prototype)`,
+								this.selfReference(),
+								name,
+								this.plainArguments(name, args),
+								shapes
+							);
 				// Awaited on the same rule the driver's half uses: the emitter
 				// marks a translated member `async` when it suspends, so a call
 				// to one is a promise and a promise that is filtered rather
@@ -5381,7 +5650,12 @@ class Emitter {
 		if (argumentsText.length === 0 && HOST_PROPERTY_METHODS.has(name) && !declared) {
 			return `${receiverText}${safe ? '?.' : '.'}${name}`;
 		}
-		const call = `${receiverText}${safe ? '?.' : '.'}${name}(${argumentsText.join(', ')})`;
+		// A property of the same name holds the plain slot; see `overloadsOf`.
+		const collided = ownMember && this.fieldNames().has(name) ? this.overloadsOf(name) : null;
+		const call =
+			collided !== null
+				? this.overloadCall(receiverText, receiverText, name, argumentsText, collided)
+				: `${receiverText}${safe ? '?.' : '.'}${name}(${argumentsText.join(', ')})`;
 		// A runtime method that returns a promise where the Kotlin returned a
 		// value. Asked before `declaredSuspends`, because a file that declares
 		// its own `sign` has already taken the `declared` branch above.
@@ -5661,7 +5935,11 @@ class Emitter {
 		// Written as a literal `this`, a call to a member of the extension made
 		// from inside an `apply {}` landed on the record being built.
 		const self = this.selfReference();
-		const call = `${self}.${name}(${tail.join(', ')})`;
+		const collided = this.fieldNames().has(name) ? this.overloadsOf(name) : null;
+		const call =
+			collided === null
+				? `${self}.${name}(${tail.join(', ')})`
+				: this.overloadCall(self, self, name, tail, collided);
 		if (lambda !== null && this.isSourceMember(name)) {
 			const withLambda = `${this.callArguments(name, args, lambda, labelled, false).join(', ')}`;
 			return `${self}.${name}(${withLambda})`;
@@ -8004,6 +8282,34 @@ function receiverOf(node: KNode): string | null {
 		if (child.type.endsWith('type')) return typeName(child);
 	}
 	return null;
+}
+
+/** `okhttp3.Response` as `Response` — the part an override might not spell the same. */
+function simpleTypeName(written: string): string {
+	const dot = written.lastIndexOf('.');
+	return dot === -1 ? written : written.slice(dot + 1);
+}
+
+/** The literal a dispatcher hands `__k.overload`: mangled name, arity bounds, types. */
+function overloadTable(name: string, shapes: readonly OverloadSignature[]): string {
+	return JSON.stringify(
+		shapes.map((shape) => [
+			`${name}$${shape.key}`,
+			shape.required,
+			shape.total,
+			shape.types,
+			shape.nullable
+		])
+	);
+}
+
+/** A `class` this emitter writes as a JavaScript class: not an interface, enum or data class. */
+function isPlainClass(node: KNode): boolean {
+	if (node.type !== 'class_declaration') return false;
+	const kinds = new Set(node.allChildren.map((child) => child.type));
+	if (kinds.has('interface') || kinds.has('enum_class_body')) return false;
+	const modifiers = kids(node).find((child) => child.type === 'modifiers');
+	return !kids(modifiers).some((modifier) => modifier.text === 'data');
 }
 
 /** The name a type node carries, without its arguments or its nullability. */

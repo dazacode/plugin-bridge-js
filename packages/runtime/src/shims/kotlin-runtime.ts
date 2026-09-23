@@ -582,13 +582,35 @@ var __TYPES = {
   MutableSet: function (v) { return v instanceof Set; },
   Map: function (v) { return v instanceof Map; },
   MutableMap: function (v) { return v instanceof Map; },
-  Element: function (v) { return v !== null && typeof v === 'object' && typeof v.select === 'function'; },
-  Document: function (v) { return v !== null && typeof v === 'object' && typeof v.select === 'function'; },
+  // Not an array: the shim's Elements is one, and carries jsoup's list methods
+  // (select among them), but in Kotlin an Elements is never an Element.
+  Element: function (v) {
+    return v !== null && typeof v === 'object' && !Array.isArray(v) && typeof v.select === 'function';
+  },
+  // A Document is an Element with a location; the jsoup shim gives one only to
+  // the document. Told apart because Madara declares mangaDetailsParse over
+  // both a Response and a Document, and the overload dispatcher has to know
+  // which it was handed.
+  Document: function (v) {
+    return v !== null && typeof v === 'object' && !Array.isArray(v) && typeof v.select === 'function' &&
+      typeof v.location === 'function';
+  },
+  // jsoup's Elements, which the shim's select answers as a plain array — so
+  // an Element (which has select) and an Elements (which does not) are never
+  // both, which is what MangaThemesia's Element.imgAttr / Elements.imgAttr pair
+  // needs told apart.
+  Elements: function (v) { return Array.isArray(v); },
+  // okhttp's Response, by the shape __responseOf builds.
+  Response: function (v) {
+    return v !== null && typeof v === 'object' && typeof v.code === 'number' &&
+      v.body !== null && typeof v.body === 'object' && v.request !== undefined;
+  },
 
   // The model types, recognised by shape rather than by constructor: they are
   // built in a later section, and a type table that reached forward into it
   // would break the moment a conversion left that section out.
   SAnime: function (v) { return __has(v, 'thumbnail_url') && __has(v, 'title'); },
+  SManga: function (v) { return __has(v, 'thumbnail_url') && __has(v, 'title'); },
   SEpisode: function (v) { return __has(v, 'episode_number'); },
   Video: function (v) { return __has(v, 'videoUrl') && __has(v, 'quality'); },
   Track: function (v) { return __has(v, 'lang') && __has(v, 'url') && !__has(v, 'quality'); },
@@ -600,6 +622,36 @@ var __TYPES = {
   JSONObject: function (v) { return typeof v === 'object' && !Array.isArray(v) && !(v instanceof Map); },
   JSONArray: function (v) { return Array.isArray(v); }
 };
+
+/** Whether each argument fits its parameter, where this runtime can decide the type. */
+function __overloadAccepts(entry, args) {
+  var types = entry[3];
+  var nullable = entry[4];
+  for (var i = 0; i < args.length && i < types.length; i += 1) {
+    var value = args[i];
+    if (value === null || value === undefined) {
+      if (nullable[i] !== true && __knownType(types[i])) return false;
+      continue;
+    }
+    if (__knownType(types[i]) && !__isType(value, types[i])) return false;
+  }
+  return true;
+}
+
+/**
+ * How specifically a declaration fits: a decided type beats an undecided one,
+ * a Document beats the Element it also is, and an exact count beats a default.
+ */
+function __overloadRank(entry, args) {
+  var score = entry[2] === args.length ? 1 : 0;
+  var types = entry[3];
+  for (var i = 0; i < args.length && i < types.length; i += 1) {
+    if (types[i] === 'Any') continue;
+    if (__knownType(types[i])) score += 4;
+    if (types[i] === 'Document') score += 2;
+  }
+  return score;
+}
 
 function __has(value, name) {
   return value !== null && value !== undefined && typeof value === 'object' &&
@@ -3076,6 +3128,53 @@ var __k = {
   },
 
   isType: function (value, type) { return __isType(value, type); },
+
+  /**
+   * A call among same-named Kotlin declarations, resolved as it is made.
+   *
+   * Kotlin picks an overload at compile time by argument count and static
+   * type; a JavaScript class has one slot per name. The emitter therefore
+   * writes each declaration under 'name$key' and calls this, which picks the
+   * way Kotlin would have from what it can see at run time: first the count,
+   * then each argument against its parameter's type where this runtime can
+   * decide that type (see __TYPES — a type it cannot decide rules nothing
+   * out), then the most specific survivor.
+   *
+   * 'target' is where the candidates are looked up and 'self' what they run
+   * on; they differ only for super., which looks on the parent's prototype so
+   * that the override making the call does not find itself. A call no
+   * translated declaration accepts goes to the driver's base class, which is
+   * where Kotlin would have found an API member the extension only declared
+   * one half of; and to the receiver's own plain method when the receiver has
+   * no translated declarations at all (a runtime object answering a name a
+   * class of this extension also uses).
+   */
+  overload: function (target, self, name, args, table, fallback) {
+    var fits = [];
+    var declares = false;
+    for (var i = 0; i < table.length; i += 1) {
+      var entry = table[i];
+      if (target === null || target === undefined || typeof target[entry[0]] !== 'function') continue;
+      declares = true;
+      if (args.length < entry[1]) continue;
+      if (entry[2] !== -1 && args.length > entry[2]) continue;
+      if (!__overloadAccepts(entry, args)) continue;
+      fits.push(entry);
+    }
+    if (fits.length > 1) fits.sort(function (a, b) { return __overloadRank(b, args) - __overloadRank(a, args); });
+    if (fits.length > 0) return target[fits[0][0]].apply(self, args);
+    if (!declares && target !== null && target !== undefined && typeof target[name] === 'function') {
+      return target[name].apply(self, args);
+    }
+    var base = null;
+    try { base = typeof fallback === 'function' ? fallback() : null; } catch (error) { base = null; }
+    if (base !== null && base !== undefined && typeof base[name] === 'function') {
+      return base[name].apply(base, args);
+    }
+    throw new Error(
+      'This converted extension called ' + name + ' with arguments none of its declarations takes.'
+    );
+  },
 
   /**
    * Kotlin's 'as', which throws, and 'as?', which does not.

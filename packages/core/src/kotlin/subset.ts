@@ -2692,7 +2692,8 @@ export const SYNTAX_HELPERS: readonly string[] = [
 	'destructured',
 	'synchronized',
 	'index',
-	'setIndex'
+	'setIndex',
+	'overload'
 ];
 
 /** Helper names referenced by the tables, for the spec that checks the contract. */

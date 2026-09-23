@@ -121,6 +121,10 @@ export const RUNTIME_HELPERS = [
 	'toHexString',
 	/* `delay(…)`, which suspends — see AWAITING_HELPERS. */
 	'delay',
+	/* A call among same-named declarations, resolved when it is made: Kotlin
+	   overloads by count and type and a JavaScript class has one slot per
+	   name. See `Declared.overloads` in emit.ts. */
+	'overload',
 	/* `String.format(…)` and `"%s".format(…)`, one formatter either way. */
 	'format',
 
