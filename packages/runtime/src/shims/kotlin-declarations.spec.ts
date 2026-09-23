@@ -192,3 +192,76 @@ describe('a reified function whose type parameter is read off the call', () => {
 		expect(demo.run('7')).toBe(1);
 	});
 });
+
+describe('extension functions overloaded on their receiver', () => {
+	const template = kt(
+		'open class Template {',
+		'    protected open fun Element.label(): String = attr("data-label")',
+		'    protected open fun Elements.label(): String = firstOrNull()?.label().orEmpty()',
+		'    fun fromList(html: String): String = Jsoup.parse(html).select("span").label()',
+		'    fun fromOne(html: String): String = Jsoup.parse(html).selectFirst("span")!!.label()',
+		'}'
+	);
+
+	it('dispatches each receiver to its own overload rather than the last', async () => {
+		// Collapsed onto the last declaration, the list overload called itself
+		// with an element, which it again read as a list of one — until the
+		// stack ran out. That was every cover in the largest template measured.
+		const demo = await instantiate('Template', template);
+		expect(demo.fromList('<span data-label="first"></span><span data-label="second"></span>')).toBe(
+			'first'
+		);
+		expect(demo.fromOne('<span data-label="only"></span>')).toBe('only');
+		expect(demo.fromList('<p></p>')).toBe('');
+	});
+
+	it('lets a subclass override one overload without replacing the dispatch', async () => {
+		const demo = await instantiate(
+			'Child',
+			template,
+			kt(
+				'class Child : Template() {',
+				'    override fun Element.label(): String = attr("data-other")',
+				'}'
+			)
+		);
+		// The list overload is the template's and calls the element overload,
+		// which is now the child's — the answer Kotlin's virtual dispatch gives.
+		expect(demo.fromList('<span data-label="a" data-other="b"></span>')).toBe('b');
+		expect(demo.fromOne('<span data-label="a" data-other="c"></span>')).toBe('c');
+	});
+
+	it('dispatches on a class this module declares', async () => {
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class Box(val inner: String)',
+				'class Demo {',
+				'    private fun Box.describe(): String = "box of " + inner.describe()',
+				'    private fun String.describe(): String = "text " + this',
+				'    fun run(): String = Box("a").describe()',
+				'}'
+			)
+		);
+		expect(demo.run()).toBe('box of text a');
+	});
+
+	it('sends a Document to its own overload rather than the Element one', async () => {
+		// A Document *is* an Element, in jsoup and here; Kotlin picks the most
+		// specific overload for the static type, and a document is only ever
+		// handed over typed as one.
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    private fun Element.pick(): String = "element " + tagName()',
+				'    private fun Document.pick(): String = "document"',
+				'    fun onDocument(html: String): String = Jsoup.parse(html).pick()',
+				'    fun onElement(html: String): String = Jsoup.parse(html).selectFirst("p")!!.pick()',
+				'}'
+			)
+		);
+		expect(demo.onDocument('<p></p>')).toBe('document');
+		expect(demo.onElement('<p></p>')).toBe('element p');
+	});
+});
