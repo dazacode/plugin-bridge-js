@@ -4528,6 +4528,22 @@ describe('the shared playlist module’s signatures', () => {
 		expect(emitted.js).toContain('this.max(4)');
 	});
 
+	it('reads the video API’s names that are values: the catching map and the update hint', () => {
+		// `parallelCatchingMapNotNull` skips an element that threw and drops the
+		// nulls, which is `catchingMap`; `AnimeUpdateStrategy` is the enum the
+		// image ecosystem calls `UpdateStrategy`.
+		const emitted = translate(
+			inClass(
+				'    suspend fun lengths(xs: List<String>): List<Int> = xs.parallelCatchingMapNotNull { it.length }',
+				'    fun hint() = AnimeUpdateStrategy.ONLY_FETCH_ONCE'
+			)
+		);
+
+		expect(emitted.refusals).toEqual([]);
+		expect(emitted.js).toContain('__k.catchingMap(xs,');
+		expect(emitted.js).toContain('AnimeUpdateStrategy.ONLY_FETCH_ONCE');
+	});
+
 	it('calls an object’s own member over the runtime function of that name', () => {
 		const shown = evaluate(
 			kt(

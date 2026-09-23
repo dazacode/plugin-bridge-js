@@ -9593,6 +9593,13 @@ var UpdateStrategy = {
 };
 
 /**
+ * Aniyomi's spelling of the same enum, set on 'SAnime.update_strategy' with
+ * the same two members and the same meaning. One object, so the two names
+ * cannot drift apart.
+ */
+var AnimeUpdateStrategy = UpdateStrategy;
+
+/**
  * Details and chapters together, from one request.
  *
  * 'fetchMangaUpdate' is upstream's answer to a source that can serve both in a

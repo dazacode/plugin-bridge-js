@@ -818,6 +818,11 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 	['parallelForEachBlocking', 'forEach'],
 	['parallelCatchingMap', 'catchingMap'],
 	['parallelCatchingMapBlocking', 'catchingMap'],
+	// keiyoushi's `Coroutines.kt` defines this one as `async { try { f(it) }
+	// catch (e: Throwable) { null } }` then `awaitAll().filterNotNull()` —
+	// skip the element that threw, drop the nulls — which is `catchingMap`
+	// exactly, concurrency dropped.
+	['parallelCatchingMapNotNull', 'catchingMap'],
 	['parallelCatchingFlatMap', 'catchingFlatMap'],
 	['parallelCatchingFlatMapBlocking', 'catchingFlatMap'],
 	// The same three functions again without the `parallel` prefix. The
@@ -1753,6 +1758,7 @@ export const GLOBAL_NAMES: ReadonlySet<string> = new Set([
 	'RegexOption',
 	'Observable',
 	'UpdateStrategy',
+	'AnimeUpdateStrategy',
 	'SMangaUpdate',
 	'SimpleDateFormat',
 	'DateTimeFormatter',

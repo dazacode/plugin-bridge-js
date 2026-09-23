@@ -669,6 +669,8 @@ export const RUNTIME_GLOBALS = [
 	/* RxJava's one type, as this ecosystem uses it. */
 	'Observable',
 	'UpdateStrategy',
+	/* The video ecosystem's name for the same hint, on `SAnime.update_strategy`. */
+	'AnimeUpdateStrategy',
 	'SMangaUpdate',
 	'SimpleDateFormat',
 	/* The `java.time` formatter the same helpers are called on —
