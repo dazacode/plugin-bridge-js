@@ -2625,7 +2625,8 @@ class Emitter {
 		for (const child of members) {
 			if (child.type !== 'companion_object') continue;
 			const inner = kids(child).find((part) => part.type === 'class_body');
-			for (const part of kids(inner)) {
+			const parts = kids(inner);
+			for (const [index, part] of parts.entries()) {
 				const declared =
 					part.type === 'property_declaration'
 						? this.propertyName(part)
@@ -2633,6 +2634,15 @@ class Emitter {
 							? this.nameOf(part)
 							: null;
 				if (declared === null) continue;
+				// A computed companion property is a function at module scope,
+				// and a member *above* the companion reads it before `companion`
+				// has said so — as the function itself, not its value.
+				if (
+					part.type === 'property_declaration' &&
+					accessorOf(part, parts[index + 1], 'getter') !== undefined
+				) {
+					this.moduleGetters.add(declared);
+				}
 				if (this.emittedNames.has(declared) || this.companionClaims.has(declared)) {
 					let binding = `${plainName(owner)}_${plainName(declared)}`;
 					while (this.emittedNames.has(binding) || this.moduleNames.has(binding)) binding += '_';
@@ -2717,7 +2727,11 @@ class Emitter {
 				this.companionRenames = this.registerCompanionNames(kids(body), name);
 				this.companionMembers = [];
 				const nested: string[] = [];
-				for (const child of kids(body)) {
+				const bodyMembers = kids(body);
+				for (const [index, child] of bodyMembers.entries()) {
+					// A getter on the line below its property is that property's
+					// sibling here, read with it below.
+					if (child.type === 'getter' || child.type === 'setter') continue;
 					if (child.type === 'function_declaration') {
 						fields.push(this.functionDeclaration(child, 'method'));
 						continue;
@@ -2744,7 +2758,10 @@ class Emitter {
 					}
 					const member = this.propertyName(child);
 					if (member === null) this.refuse(child, 'an unnamed property');
-					const getter = kids(child).find((part) => part.type === 'getter');
+					// `val genres: String` with `get() = "$gender, $target"` on the
+					// next line: the grammar makes the getter a sibling, and read
+					// alone the property had no value at all.
+					const getter = accessorOf(child, bodyMembers[index + 1], 'getter');
 					if (getter === undefined) {
 						fields.push(`${JSON.stringify(member)}: ${this.propertyValue(child, member)}`);
 						continue;
@@ -3004,8 +3021,11 @@ class Emitter {
 	private companion(node: KNode): string[] {
 		const body = kids(node).find((child) => child.type === 'class_body');
 		const out: string[] = [];
+		const members = kids(body);
 
-		for (const child of kids(body)) {
+		for (const [index, child] of members.entries()) {
+			// Read with the property above it; see `accessorOf`.
+			if (child.type === 'getter' || child.type === 'setter') continue;
 			if (child.type === 'property_declaration') {
 				const name = this.propertyName(child) ?? 'val';
 				const binding = this.companionRenames.get(name) ?? name;
@@ -3019,7 +3039,7 @@ class Emitter {
 					// and the companion refused for a member the class computes
 					// on every read. `moduleGetters` is what makes the call sites
 					// add the parentheses back.
-					const getter = accessorOf(child, undefined, 'getter');
+					const getter = accessorOf(child, members[index + 1], 'getter');
 					if (getter !== undefined) {
 						const body = kids(getter).find((part) => part.type === 'function_body');
 						if (body === undefined) this.refuse(getter, 'a getter with no body');
@@ -3226,7 +3246,9 @@ class Emitter {
 		const getter = accessorOf(node, detached, 'getter');
 		const setter = accessorOf(node, detached, 'setter');
 
-		if (setter !== undefined) return this.declineMember(name, setter, 'a custom property setter');
+		if (setter !== undefined && !visibilityOnly(setter)) {
+			return this.declineMember(name, setter, 'a custom property setter');
+		}
 
 		// `private lateinit var filterList: AnimeFilterList` — declared here,
 		// assigned before anything reads it. There is no value to emit, and in
@@ -3382,9 +3404,15 @@ class Emitter {
 		const call = kids(delegate)[0];
 		const called = call === undefined ? null : this.nameOf(call);
 
-		if (called === 'lazy') {
+		// `LazyMutable { … }` is keiyoushi's settable `lazy`: computed on first
+		// read, replaced by a write. That is exactly what every delegate here
+		// already is — `__k.lazy` memoises, and the setter beside the getter
+		// (see `overridable`) replaces the memo — so the two are one emission.
+		// `override var baseUrl by LazyMutable { preferences.hostUrl }` is how
+		// an extension lets a viewer choose a mirror.
+		if (called === 'lazy' || called === 'LazyMutable') {
 			const lambda = this.lambdaOf(call);
-			if (lambda === null) this.refuse(delegate, 'a `lazy` without a block');
+			if (lambda === null) this.refuse(delegate, `a \`${called}\` without a block`);
 			const body = this.functionScope('lambda', called, [], () => block(this.lambdaLines(lambda)));
 			return `${body.isAsync ? 'async ' : ''}() => ${body.text}`;
 		}
@@ -4079,7 +4107,9 @@ class Emitter {
 	 */
 	private moduleGetter(node: KNode, next: KNode | undefined, name: string): string | null {
 		const setter = accessorOf(node, next, 'setter');
-		if (setter !== undefined) this.refuse(setter, 'a custom property setter');
+		if (setter !== undefined && !visibilityOnly(setter)) {
+			this.refuse(setter, 'a custom property setter');
+		}
 		const getter = accessorOf(node, next, 'getter');
 		if (getter === undefined) return null;
 		const body = kids(getter).find((child) => child.type === 'function_body');
@@ -5911,6 +5941,17 @@ class Emitter {
 	private objectLiteral(node: KNode): string {
 		const invoked = this.baseInvocation(node);
 		if (invoked !== null) {
+			// `object : Filter.CheckBox(name, false) {}` — a subclass that adds
+			// nothing, written because the base is abstract in Kotlin. Its
+			// value is an instance of the base, which is exactly what `new`
+			// makes of one this build resolves. A body is another matter: its
+			// members read the *base's* state bare (`size`, `state`), and this
+			// emitter would resolve those names against the class around it.
+			const base = this.resolvedBase(invoked.type);
+			const members = kids(kids(node).find((child) => child.type === 'class_body'));
+			if (base !== null && members.length === 0) {
+				return `new ${base}(${this.plainArguments(invoked.type, [...invoked.args]).join(', ')})`;
+			}
 			this.refuse(node, `an anonymous \`object : ${invoked.type}(…)\` over a constructed base`);
 		}
 		const body = kids(node).find((child) => child.type === 'class_body');
@@ -9420,6 +9461,20 @@ function enumMethods(declared: ReadonlySet<string>): string[] {
 		"[Symbol.toPrimitive](hint) { return hint === 'number' ? this.ordinal : this.toString(); }"
 	);
 	return out;
+}
+
+/**
+ * `private set` — a setter that only narrows who may write, with no body.
+ *
+ * Visibility is the compiler's business and has no JavaScript counterpart, so
+ * the property is the plain one it would be without the line; refusing it as
+ * a custom setter refused `var accessToken: String? = null / private set`,
+ * the commonest way to write a field only its own class assigns.
+ */
+function visibilityOnly(setter: KNode): boolean {
+	return !kids(setter).some(
+		(child) => child.type === 'function_body' || child.type === 'parameter_with_optional_type'
+	);
 }
 
 /** What `enumTail` puts on every enum class, reachable bare inside one. */

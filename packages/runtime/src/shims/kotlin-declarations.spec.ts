@@ -467,3 +467,73 @@ describe('a data class copy', () => {
 		expect(demo.pageByPosition()).toBe(1);
 	});
 });
+
+describe('properties declared the long way round', () => {
+	const source = kt(
+		'data class Series(val gender: String, val target: String) {',
+		'    val genres: String',
+		'        get() = "$gender, $target"',
+		'}',
+		'class Demo {',
+		'    private var built = 0',
+		'    var host by LazyMutable { built += 1; "mirror$built" }',
+		'    var token: String? = null',
+		'        private set',
+		'    fun hosts(): String { val first = host; val again = host; host = "chosen"; return "$first $again $host $built" }',
+		'    fun login(): String? { token = "t"; return token }',
+		'    fun genres() = Series("action", "adult").genres',
+		'    fun year() = currentYear',
+		'    companion object {',
+		'        private val currentYear: Int',
+		'            get() = 2000 + 26',
+		'    }',
+		'}'
+	);
+
+	it('computes a LazyMutable once, and lets a write replace it', async () => {
+		const demo = await instantiate('Demo', source);
+		expect(demo.hosts()).toBe('mirror1 mirror1 chosen 1');
+	});
+
+	it('reads a property whose setter only narrows who may write', async () => {
+		const demo = await instantiate('Demo', source);
+		expect(demo.login()).toBe('t');
+	});
+
+	it('reads a getter written on the line below its property', async () => {
+		// In a data class and in a companion, read alone the property had no
+		// value this build could read.
+		const demo = await instantiate('Demo', source);
+		expect(demo.genres()).toBe('action, adult');
+		expect(demo.year()).toBe(2026);
+	});
+});
+
+describe('an anonymous object that only names its base', () => {
+	it('is an instance of that base', async () => {
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    fun filters(names: List<String>) = names.map { object : Filter.CheckBox(it, true) {} }',
+				'    fun run() = filters(listOf("a", "b")).map { it.name + "=" + it.state }',
+				'}'
+			)
+		);
+		expect(demo.run()).toEqual(['a=true', 'b=true']);
+	});
+
+	it('still refuses one with a body, whose members read the base bare', () => {
+		expect(
+			refusalNames(
+				kt(
+					'class Demo {',
+					'    val cache = object : LinkedHashMap<String, String>() {',
+					'        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?) = size > 10',
+					'    }',
+					'}'
+				)
+			)
+		).toEqual(['an anonymous `object : LinkedHashMap(…)` over a constructed base']);
+	});
+});
