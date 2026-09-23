@@ -482,6 +482,17 @@ const DURATION_UNITS: ReadonlyMap<string, number> = new Map([
 	['days', 86_400_000]
 ]);
 
+/** `Duration.inWholeSeconds` and its siblings — see `__k.inWhole`. */
+const DURATION_READERS: ReadonlySet<string> = new Set([
+	'inWholeNanoseconds',
+	'inWholeMicroseconds',
+	'inWholeMilliseconds',
+	'inWholeSeconds',
+	'inWholeMinutes',
+	'inWholeHours',
+	'inWholeDays'
+]);
+
 /**
  * `java.util.concurrent.TimeUnit`, as milliseconds.
  *
@@ -1296,6 +1307,13 @@ class Emitter {
 	 * a call on any *other* receiver that happens to share a name into a
 	 * passthrough, which is the guess this table exists to avoid.
 	 */
+	/**
+	 * The `kotlin.time` unit properties this file imports —
+	 * `import kotlin.time.Duration.Companion.days` — which make `n.days` on a
+	 * NUMBER mean a Duration. See `navigation` for the read, and
+	 * `__k.durationOf` for why the receiver still decides.
+	 */
+	private readonly durationImports = new Set<string>();
 	private readonly declaredMethods = new Set<string>();
 	private readonly declaredSuspends = new Set<string>();
 	/**
@@ -1797,6 +1815,13 @@ class Emitter {
 
 	file(root: KNode): Emission {
 		const parts: string[] = [];
+		for (const list of kids(root).filter((child) => child.type === 'import_list')) {
+			for (const found of list.text.matchAll(/kotlin\.time\.Duration\.Companion\.(\w+|\*)/g)) {
+				if (found[1] === '*')
+					for (const unit of DURATION_UNITS.keys()) this.durationImports.add(unit);
+				else this.durationImports.add(found[1]);
+			}
+		}
 		// Registered before anything is emitted: an extension function is
 		// usually declared below the members that call it, and so is the nested
 		// filter class the members above it construct.
@@ -6715,6 +6740,22 @@ class Emitter {
 		const unit = DURATION_UNITS.get(name);
 		if (unit !== undefined && /^[0-9][0-9_]*$/.test(receiver.text.trim())) {
 			return String(Number(receiver.text.trim().replace(/_/g, '')) * unit);
+		}
+		// The same unit on anything that is not a literal — `(amount * 7).days`,
+		// `number.seconds` — which read as a plain property was `undefined` on a
+		// number, and the relative upload date built from it was NaN. Only where
+		// the file imports that unit, because only there can the Kotlin mean it;
+		// and through the runtime even then, because Kotlin resolves a member
+		// before an extension and a DTO field called `seconds` is still a field.
+		if (unit !== undefined && this.durationImports.has(name) && !safe) {
+			return `${this.helper('durationOf')}(${this.expr(receiver)}, ${jsString(name)}, ${unit})`;
+		}
+		// A Duration's `inWhole…` readers, over the milliseconds a Duration is
+		// here. Truncated toward zero, as Kotlin's are.
+		if (DURATION_READERS.has(name)) {
+			const target = safe ? '__r' : this.expr(receiver);
+			const read = `${this.helper('inWhole')}(${target}, ${jsString(name)})`;
+			return safe ? `${this.helper('sc')}(${this.expr(receiver)}, (__r) => ${read})` : read;
 		}
 
 		return this.propertyAccess(this.expr(receiver), name, safe);

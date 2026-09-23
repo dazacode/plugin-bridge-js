@@ -4238,3 +4238,282 @@ describe('what cannot run before a plugin call has entered', () => {
 		expect(() => clean.toByteArray('Salted__', 'UTF-8')).toThrow(/before any plugin call/);
 	});
 });
+
+/* ── java.time and kotlin.time ────────────────────────────────────────────── */
+
+describe('java.time, as the catalogue writes it', () => {
+	const g = () => runtime.globals;
+	const at = (text: string) => Date.parse(text);
+
+	it('keeps calendar maths honest at the edges a relative date hits', () => {
+		const { LocalDate } = g();
+		// `now.minusYears(1)` on the 29th of February is the 28th, not March 1st.
+		expect(String(LocalDate.of(2024, 2, 29).minusYears(1))).toBe('2023-02-28');
+		expect(String(LocalDate.of(2024, 1, 31).plusMonths(1))).toBe('2024-02-29');
+		expect(String(LocalDate.of(2024, 3, 31).minusMonths(1))).toBe('2024-02-29');
+		expect(String(LocalDate.of(1900, 3, 1).minusDays(1))).toBe('1900-02-28');
+		expect(String(LocalDate.of(2000, 3, 1).minusDays(1))).toBe('2000-02-29');
+		expect(String(LocalDate.of(2023, 12, 31).plusWeeks(1))).toBe('2024-01-07');
+		// A two-digit year is that year, not 19xx — `Date.UTC(99, …)` is 1999.
+		expect(LocalDate.of(99, 1, 1).toEpochDay()).toBe(-683368);
+		expect(() => LocalDate.of(2023, 2, 29)).toThrow(/Invalid date/);
+	});
+
+	it('answers the weekday a schedule page is keyed on', () => {
+		const { LocalDate } = g();
+		const monday = LocalDate.of(2024, 5, 20);
+		expect(monday.dayOfWeek.name).toBe('MONDAY');
+		expect(monday.dayOfWeek.value).toBe(1);
+		expect(LocalDate.of(2024, 5, 26).dayOfWeek.value).toBe(7);
+		expect(monday.dayOfWeek.getDisplayName(g().TextStyle.SHORT, g().Locale.US)).toBe('Mon');
+		// Another language's names live in Intl, which the bundle does not have.
+		expect(() => monday.dayOfWeek.getDisplayName(g().TextStyle.FULL, g().Locale('ja'))).toThrow(
+			/English/
+		);
+	});
+
+	it('starts a day in the zone it was asked for', () => {
+		const { LocalDate, ZoneId, ZoneOffset, DateTimeFormatter } = g();
+		const day = LocalDate.parse('20/05/2024', DateTimeFormatter.ofPattern('dd/MM/yyyy'));
+		// Seven hours off if the zone is dropped, which is a chapter dated the
+		// day before it came out.
+		expect(day.atStartOfDay(ZoneId.of('Asia/Ho_Chi_Minh')).toInstant().toEpochMilli()).toBe(
+			at('2024-05-19T17:00:00Z')
+		);
+		expect(day.atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli()).toBe(
+			at('2024-05-20T00:00:00Z')
+		);
+		expect(String(day.atStartOfDay())).toBe('2024-05-20T00:00');
+		expect(day.atStartOfDay().toInstant(ZoneOffset.UTC).toEpochMilli()).toBe(
+			at('2024-05-20T00:00:00Z')
+		);
+	});
+
+	it('follows a zone across its clock changes', () => {
+		const { LocalDateTime, ZonedDateTime, ZoneId } = g();
+		const paris = ZoneId.of('Europe/Paris');
+		expect(String(LocalDateTime.of(2024, 7, 1, 12, 0).atZone(paris).toInstant())).toBe(
+			'2024-07-01T10:00:00Z'
+		);
+		expect(String(LocalDateTime.of(2024, 1, 1, 12, 0).atZone(paris).toInstant())).toBe(
+			'2024-01-01T11:00:00Z'
+		);
+		// A time the spring change skips moves on by the gap; one the autumn
+		// change repeats takes the earlier offset — java.time's rules.
+		expect(String(LocalDateTime.of(2024, 3, 31, 2, 30).atZone(paris))).toBe(
+			'2024-03-31T03:30+02:00[Europe/Paris]'
+		);
+		expect(String(LocalDateTime.of(2024, 10, 27, 2, 30).atZone(paris))).toBe(
+			'2024-10-27T02:30+02:00[Europe/Paris]'
+		);
+		// Date units keep the wall clock; time units are real hours.
+		const chicago = ZoneId.of('America/Chicago');
+		const before = ZonedDateTime.of(2024, 3, 9, 12, 0, 0, 0, chicago);
+		expect(String(before.plusDays(1))).toBe('2024-03-10T12:00-05:00[America/Chicago]');
+		expect(before.plusDays(1).toEpochSecond() - before.toEpochSecond()).toBe(23 * 3600);
+		expect(before.plusHours(24).toEpochSecond() - before.toEpochSecond()).toBe(24 * 3600);
+	});
+
+	it('refuses a zone it carries no rules for, rather than reading it as UTC', () => {
+		const { ZoneId } = g();
+		expect(() => ZoneId.of('Mars/Olympus')).toThrow(/no rules/);
+		// java.time refuses an abbreviation as an id too.
+		expect(() => ZoneId.of('JST')).toThrow(/no rules/);
+		expect(ZoneId.of('GMT+7').getRules().getOffset(g().Instant.now()).totalSeconds).toBe(25200);
+		expect(ZoneId.systemDefault().id).toBe('UTC');
+	});
+
+	it('reads ISO instants strictly, as kotlin.time does', () => {
+		const { Instant, OffsetDateTime, ZonedDateTime } = g();
+		expect(Instant.parse('2024-05-20T10:15:30Z').toEpochMilli()).toBe(at('2024-05-20T10:15:30Z'));
+		expect(String(Instant.parse('2024-05-20T10:15:30.5+02:00'))).toBe('2024-05-20T08:15:30.500Z');
+		expect(OffsetDateTime.parse('2024-05-20T10:15:30.123+07:00').toInstant().toEpochMilli()).toBe(
+			at('2024-05-20T03:15:30.123Z')
+		);
+		expect(String(ZonedDateTime.parse('2024-05-20T10:15:30+09:00[Asia/Tokyo]').toInstant())).toBe(
+			'2024-05-20T01:15:30Z'
+		);
+		// No offset is not an instant. Date.parse would read it in the DEVICE's
+		// zone, which is two different answers on two phones.
+		expect(Instant.parseOrNull('2024-05-20 10:15:30')).toBeNull();
+		expect(Instant.tryParse('2024-05-20T10:15:30')).toBe(0);
+		expect(() => Instant.parse('yesterday')).toThrow(/ISO-8601/);
+	});
+
+	it("gives keiyoushi's three date readers their three meanings", () => {
+		const { DateTimeFormatter, ZoneId } = g();
+		const tokyo = ZoneId.of('Asia/Tokyo');
+		const stamped = DateTimeFormatter.ofPattern('yyyy-MM-dd HH:mm:ss');
+		expect(k.tryParseDateTime(stamped, '2024-05-20 10:00:00', tokyo)).toBe(
+			at('2024-05-20T01:00:00Z')
+		);
+		expect(k.tryParseDate(DateTimeFormatter.ofPattern('dd/MM/yyyy'), '20/05/2024')).toBe(
+			at('2024-05-20T00:00:00Z')
+		);
+		// The formatter's own zone, when the call names none.
+		expect(
+			k.tryParseDate(DateTimeFormatter.ofPattern('dd/MM/yyyy').withZone(tokyo), '20/05/2024')
+		).toBe(at('2024-05-19T15:00:00Z'));
+		// The zoned reader FAILS on a text with no offset, so the `?:` chain after
+		// it runs — the reason the three are not one helper.
+		const zoned = DateTimeFormatter.ofPattern('HH:mm - dd/MM/yyyy Z');
+		expect(k.tryParseZonedDateTime(zoned, '10:00 - 20/05/2024')).toBe(0);
+		expect(k.tryParseZonedDateTime(zoned, '10:00 - 20/05/2024 +0700')).toBe(
+			at('2024-05-20T03:00:00Z')
+		);
+		// A date-time reader needs a time, and a date reader needs a year.
+		expect(k.tryParseDateTime(DateTimeFormatter.ofPattern('yyyy-MM-dd'), '2024-01-15')).toBe(0);
+		expect(k.tryParseDate(DateTimeFormatter.ofPattern('MM/dd'), '01/15')).toBe(0);
+		expect(k.tryParseDate(DateTimeFormatter.ofPattern('yyyyMMdd'), '20240115')).toBe(
+			at('2024-01-15T00:00:00Z')
+		);
+		expect(k.tryParseDate(DateTimeFormatter.ofPattern('MMMM d, yyyy'), null)).toBe(0);
+	});
+
+	it('formats through a pattern, and an instant only in a zone', () => {
+		const { LocalDate, DateTimeFormatter, ZoneId, Instant } = g();
+		expect(
+			LocalDate.of(2024, 5, 20).format(DateTimeFormatter.ofPattern('EEEE, MMMM d, yyyy'))
+		).toBe('Monday, May 20, 2024');
+		const tokyo = DateTimeFormatter.ofPattern('yyyy/MM/dd HH:mm').withZone(ZoneId.of('Asia/Tokyo'));
+		expect(tokyo.format(Instant.ofEpochMilli(at('2024-05-20T20:00:00Z')))).toBe('2024/05/21 05:00');
+		expect(() => DateTimeFormatter.ofPattern('yyyy').format(Instant.now())).toThrow(/no zone/);
+		expect(DateTimeFormatter.ISO_LOCAL_DATE.format(LocalDate.of(2024, 5, 2))).toBe('2024-05-02');
+	});
+
+	it('answers `X.now()` from X, not as a bare millisecond count', () => {
+		const { LocalDateTime, Instant, Clock, ZoneId } = g();
+		expect(k.now(LocalDateTime).year).toBe(new Date().getUTCFullYear());
+		expect(typeof k.now(Instant).toEpochMilli()).toBe('number');
+		expect(typeof k.now(Clock.System).toEpochMilliseconds()).toBe('number');
+		expect(k.now(g().LocalDate, ZoneId.of('Asia/Tokyo')).dayOfWeek.value).toBeGreaterThan(0);
+		expect(typeof k.now(g().System)).toBe('number');
+	});
+
+	it('does kotlin.time arithmetic through valueOf, with a Duration in milliseconds', () => {
+		const { Clock, Instant } = g();
+		// `(Clock.System.now() - 5.days).toEpochMilliseconds()`: the subtraction
+		// is JavaScript's, on the Instant's valueOf, and answers a number.
+		const ago = Clock.System.now() - 5 * 86_400_000;
+		expect(Math.abs(k.toEpochMilliseconds(ago) - (Date.now() - 5 * 86_400_000))).toBeLessThan(1000);
+		expect(k.toEpochMilliseconds(Instant.ofEpochMilli(5))).toBe(5);
+		expect(k.durationOf(3, 'days', 86_400_000)).toBe(3 * 86_400_000);
+		expect(k.durationOf({ days: 'field' }, 'days', 86_400_000)).toBe('field');
+		expect(k.inWhole(90_500, 'inWholeSeconds')).toBe(90);
+		expect(k.inWhole(-1500, 'inWholeSeconds')).toBe(-1);
+		expect(String(k.toJavaInstant(0))).toBe('1970-01-01T00:00:00Z');
+		// minus(Instant) is the Duration between.
+		expect(Instant.ofEpochMilli(5000).minus(Instant.ofEpochMilli(2000))).toBe(3000);
+	});
+
+	it('moves a date by a ChronoUnit through the collection-shaped helpers', () => {
+		const { ZonedDateTime, ZoneId, ChronoUnit, LocalDate } = g();
+		const now = ZonedDateTime.of(2024, 5, 20, 10, 0, 0, 0, ZoneId.of('Asia/Tokyo'));
+		// `now.minus(value, ChronoUnit.WEEKS)` reaches `__k.minus`, which had read
+		// the date as a list and answered an array.
+		expect(String(k.minus(now, 3, ChronoUnit.WEEKS))).toBe('2024-04-29T10:00+09:00[Asia/Tokyo]');
+		expect(String(k.plus(now, 1, ChronoUnit.MONTHS))).toBe('2024-06-20T10:00+09:00[Asia/Tokyo]');
+		expect(ChronoUnit.DAYS.between(LocalDate.of(2024, 1, 1), LocalDate.of(2024, 3, 1))).toBe(60);
+		expect(
+			k
+				.sortedBy([LocalDate.of(2024, 10, 1), LocalDate.of(2024, 9, 30)], (d: unknown) => d)
+				.map(String)
+		).toEqual(['2024-09-30', '2024-10-01']);
+	});
+
+	it('reads a SimpleDateFormat in the zone it was given, and an offset in the text first', () => {
+		const { SimpleDateFormat, TimeZone, Locale } = g();
+		const format = SimpleDateFormat('yyyy-MM-dd HH:mm', Locale.ENGLISH);
+		expect(format.parse('2024-05-20 10:00').time).toBe(at('2024-05-20T10:00:00Z'));
+		format.timeZone = TimeZone.getTimeZone('Asia/Tokyo');
+		expect(format.parse('2024-05-20 10:00').time).toBe(at('2024-05-20T01:00:00Z'));
+		expect(format.format(at('2024-05-20T01:00:00Z'))).toBe('2024-05-20 10:00');
+		const offset = SimpleDateFormat('yyyy-MM-dd HH:mm Z', Locale.ENGLISH);
+		expect(offset.parse('2024-05-20 10:00 +0700').time).toBe(at('2024-05-20T03:00:00Z'));
+		// java.util answers GMT for an id it cannot read, and never throws.
+		expect(TimeZone.getTimeZone('Nowhere/Special').getID()).toBe('GMT');
+		expect(TimeZone.getTimeZone('GMT+8').getRawOffset()).toBe(8 * 3600_000);
+	});
+
+	it('gives a Calendar its zone, and the name of today', () => {
+		const { Calendar, TimeZone, Locale } = g();
+		const tokyo = Calendar.getInstance(TimeZone.getTimeZone('Asia/Tokyo'));
+		tokyo.timeInMillis = at('2024-05-19T20:00:00Z');
+		// Sunday evening in UTC is Monday morning in Tokyo.
+		expect(tokyo.get(Calendar.DAY_OF_MONTH)).toBe(20);
+		expect(tokyo.getDisplayName(Calendar.DAY_OF_WEEK, Calendar.LONG, Locale.US)).toBe('Monday');
+		expect(tokyo.getDisplayName(Calendar.MONTH, Calendar.SHORT, Locale.US)).toBe('May');
+		const utc = Calendar.getInstance();
+		utc.timeInMillis = at('2024-01-31T00:00:00Z');
+		utc.add(Calendar.MONTH, 1);
+		// January 31st plus a month is the last of February, not March 2nd.
+		expect(utc.get(Calendar.DAY_OF_MONTH)).toBe(29);
+		expect(utc.get(Calendar.MONTH)).toBe(1);
+	});
+
+	it('answers `Year.now().value`, the top of a year filter', () => {
+		expect(g().Year.now().value).toBe(new Date().getUTCFullYear());
+		expect(g().Year.isLeap(2024)).toBe(true);
+	});
+});
+
+/* ── the Kotlin and okhttp calls a catalogue pass named ──────────────────── */
+
+describe('toCollection and the response an interceptor rebuilds', () => {
+	it('appends into the collection it was handed, and answers that collection', () => {
+		const chapters = k.mutableListOf('a');
+		const answered = k.toCollection(['b', 'c'], chapters);
+		expect(answered).toBe(chapters);
+		expect([...chapters]).toEqual(['a', 'b', 'c']);
+		// A Set destination keeps its own de-duplication.
+		const seen = k.toSet(['x']);
+		k.toCollection(['x', 'y'], seen);
+		expect([...seen]).toEqual(['x', 'y']);
+	});
+
+	it('waits for a list whose lambda suspended', async () => {
+		const into: string[] = [];
+		expect(await k.toCollection(Promise.resolve(['z']), into)).toEqual(['z']);
+	});
+
+	it('turns a 404 into an empty page the way an interceptor writes it', async () => {
+		const { ctx } = context({ 'https://example.invalid/search': { status: 404, body: 'gone' } });
+		runtime.enter(ctx);
+		const client = runtime.client
+			.newBuilder()
+			.addInterceptor(async function (chain: {
+				request(): unknown;
+				proceed(r: unknown): Promise<{ code: number; newBuilder(): any }>;
+			}) {
+				const response = await chain.proceed(chain.request());
+				if (response.code !== 404) return response;
+				return response
+					.newBuilder()
+					.code(200)
+					.message('OK')
+					.body(k.toResponseBody('', k.toMediaType('text/html')))
+					.build();
+			})
+			.build();
+		const response = await client
+			.newCall(runtime.globals.GET('https://example.invalid/search'))
+			.execute();
+		expect(response.code).toBe(200);
+		expect(response.message).toBe('OK');
+		// The body object, not '[object Object]'.
+		expect(response.body.string()).toBe('');
+		expect(response.body.contentType()).toBe('text/html');
+	});
+
+	it('takes a UTF-8 byte body and refuses one that is not text', () => {
+		const { ctx } = context();
+		runtime.enter(ctx);
+		const text = k.toResponseBody(new TextEncoder().encode('{"a":1}'), 'application/json');
+		expect(text.text).toBe('{"a":1}');
+		// An image an interceptor descrambled: decoding it would hand bytes()
+		// something that only looks like the image.
+		expect(() => k.toResponseBody(new Uint8Array([0xff, 0xd8, 0xff]), 'image/jpeg')).toThrow(
+			/not text/
+		);
+	});
+});

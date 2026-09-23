@@ -91,6 +91,7 @@
  */
 
 import { DOM_RUNTIME_SOURCE } from './generated/dom-source';
+import { KOTLIN_TIME } from './kotlin-time';
 
 /**
  * The Kotlin standard library, as much of it as a scraper reaches for.
@@ -384,6 +385,12 @@ function __present(value) {
 /** Kotlin's natural ordering, for the two types a scraper ever sorts by. */
 function __cmp(a, b) {
   if (typeof a === 'number' && typeof b === 'number') return a < b ? -1 : (a > b ? 1 : 0);
+  // A java.time value orders by its own compareTo — by instant, or by date —
+  // where the string fallback below would order '2024-10-01' after '2024-9-…'.
+  if (a !== null && a !== undefined && a.__kTime === true && typeof a.compareTo === 'function') {
+    var order = a.compareTo(b);
+    return order < 0 ? -1 : (order > 0 ? 1 : 0);
+  }
   // Kotlin's Boolean is Comparable and false sorts before true, which is the
   // whole point of 'compareBy { it.title.contains(quality) }' — the falses go
   // first and the caller reverses. Spelled out rather than left to the string
@@ -1410,8 +1417,11 @@ function __unescapeProperty(text) {
  * '?.time ?: 0L' and a throw there would lose the whole episode list over a
  * date nobody displays.
  *
- * Fields are read as UTC. The alternative is the host's timezone, which would
- * make the same page produce different values on two devices.
+ * Fields are read in the format's own zone — 'timeZone = …' or
+ * 'setTimeZone(…)' — and UTC when it names none. UTC rather than the host's
+ * zone, which would make the same page produce different values on two
+ * devices. An offset in the TEXT ('+0700', 'GMT+9') outranks both, as it does
+ * in java.text. The pattern reader is java.time's, in 'kotlin-time.ts'.
  */
 function SimpleDateFormat(pattern, locale) {
   if (!(this instanceof SimpleDateFormat)) return new SimpleDateFormat(pattern, locale);
@@ -1420,101 +1430,13 @@ function SimpleDateFormat(pattern, locale) {
   this.__parts = __datePattern(this.pattern);
 }
 
-/**
- * java.time's formatter, over the pattern reader SimpleDateFormat already has.
- *
- * Extensions reach it one way — 'DateTimeFormatter.ofPattern("yyyy-MM-dd")',
- * usually straight into 'tryParseDate' — and the two pattern languages agree
- * on every letter that appears in one of those. Where they differ is in
- * fields a scraper does not write, so a second pattern reader would be a
- * second thing to keep correct for no case anybody has.
- */
-var DateTimeFormatter = {
-  ofPattern: function (pattern, locale) {
-    return new SimpleDateFormat(pattern, locale);
-  },
-  /* The constants upstream exposes for the shapes with no pattern of their
-     own. ISO dates are what a JSON API sends. */
-  ISO_LOCAL_DATE: null,
-  ISO_LOCAL_DATE_TIME: null,
-  ISO_INSTANT: null,
-  ISO_OFFSET_DATE_TIME: null,
-  ISO_ZONED_DATE_TIME: null
-};
-DateTimeFormatter.ISO_LOCAL_DATE = DateTimeFormatter.ofPattern('yyyy-MM-dd');
-DateTimeFormatter.ISO_LOCAL_DATE_TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss");
-DateTimeFormatter.ISO_INSTANT = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'");
-DateTimeFormatter.ISO_OFFSET_DATE_TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ssXXX");
-DateTimeFormatter.ISO_ZONED_DATE_TIME = DateTimeFormatter.ISO_OFFSET_DATE_TIME;
-
-function __datePattern(pattern) {
-  var source = '';
-  var fields = [];
-  var i = 0;
-
-  while (i < pattern.length) {
-    var ch = pattern.charAt(i);
-
-    if (ch === "'") {
-      var close = pattern.indexOf("'", i + 1);
-      var literal = close === -1 ? pattern.slice(i + 1) : pattern.slice(i + 1, close);
-      source += literal.length === 0 ? "'" : __regexQuote(literal);
-      i = close === -1 ? pattern.length : close + 1;
-      continue;
-    }
-
-    if (/[A-Za-z]/.test(ch)) {
-      var run = 1;
-      while (i + run < pattern.length && pattern.charAt(i + run) === ch) run += 1;
-      if (ch === 'y') { source += '([0-9]{2,4})'; fields.push(run <= 2 ? 'year2' : 'year'); }
-      else if (ch === 'M') {
-        if (run >= 3) { source += '([A-Za-z\\\\u00c0-\\\\u024f.]+)'; fields.push('monthName'); }
-        else { source += '([0-9]{1,2})'; fields.push('month'); }
-      } else if (ch === 'd') { source += '([0-9]{1,2})'; fields.push('day'); }
-      else if (ch === 'H') { source += '([0-9]{1,2})'; fields.push('hour'); }
-      else if (ch === 'h') { source += '([0-9]{1,2})'; fields.push('hour12'); }
-      else if (ch === 'm') { source += '([0-9]{1,2})'; fields.push('minute'); }
-      else if (ch === 's') { source += '([0-9]{1,2})'; fields.push('second'); }
-      else if (ch === 'a') { source += '([AaPp][Mm])'; fields.push('meridiem'); }
-      else if (ch === 'E') { source += '[A-Za-z.]+'; }
-      else if (ch === 'z' || ch === 'Z' || ch === 'X') { source += '[A-Za-z0-9:+-]*'; }
-      else source += '.{' + run + '}';
-      i += run;
-      continue;
-    }
-
-    if (/\\s/.test(ch)) { source += '\\\\s+'; i += 1; continue; }
-    source += __regexQuote(ch);
-    i += 1;
-  }
-
-  return { source: '^\\\\s*' + source + '\\\\s*$', fields: fields };
-}
-
 SimpleDateFormat.prototype.parse = function (text) {
-  var found = new RegExp(this.__parts.source).exec(__str(text));
-  if (found === null) return null;
-
-  var read = { year: 1970, month: 0, day: 1, hour: 0, minute: 0, second: 0, meridiem: '' };
-  for (var i = 0; i < this.__parts.fields.length; i += 1) {
-    var value = found[i + 1];
-    var field = this.__parts.fields[i];
-    if (field === 'year') read.year = Number(value);
-    else if (field === 'year2') read.year = 2000 + Number(value);
-    else if (field === 'month') read.month = Number(value) - 1;
-    else if (field === 'monthName') read.month = __monthIndex(value);
-    else if (field === 'day') read.day = Number(value);
-    else if (field === 'hour' || field === 'hour12') read.hour = Number(value);
-    else if (field === 'minute') read.minute = Number(value);
-    else if (field === 'second') read.second = Number(value);
-    else if (field === 'meridiem') read.meridiem = __str(value).toLowerCase();
-  }
-
-  if (read.month < 0) return null;
-  if (read.meridiem === 'pm' && read.hour < 12) read.hour += 12;
-  if (read.meridiem === 'am' && read.hour === 12) read.hour = 0;
-
-  var millis = Date.UTC(read.year, read.month, read.day, read.hour, read.minute, read.second);
+  var read = __readDate(this.__parts, text);
+  if (read === null) return null;
+  var local = __epochDayOf(read.year, read.month, read.day) * __MS_PER_DAY +
+    read.hour * 3600000 + read.minute * 60000 + read.second * 1000 + __fdiv(read.nano, 1000000);
+  var zone = read.zone !== null ? read.zone : __timeZoneRules(this.timeZone);
+  var millis = zone.__instantOf(local, null);
   if (!Number.isFinite(millis)) return null;
   return { time: millis, getTime: function () { return millis; } };
 };
@@ -1523,43 +1445,69 @@ SimpleDateFormat.prototype.format = function (value) {
   var millis = value === null || value === undefined
     ? 0
     : (typeof value === 'number' ? value : Number(value.time === undefined ? value.getTime() : value.time));
-  var when = new Date(millis);
-  var pad = function (number, width) { return __k.padStart(String(number), width, '0'); };
-  var self = this;
-  return self.pattern.replace(/y+|M+|d+|H+|m+|s+/g, function (token) {
-    var head = token.charAt(0);
-    if (head === 'y') return token.length <= 2 ? pad(when.getUTCFullYear() % 100, 2) : String(when.getUTCFullYear());
-    if (head === 'M') {
-      if (token.length >= 3) return __MONTHS_SHORT[when.getUTCMonth()].charAt(0).toUpperCase() + __MONTHS_SHORT[when.getUTCMonth()].slice(1);
-      return pad(when.getUTCMonth() + 1, token.length);
-    }
-    if (head === 'd') return pad(when.getUTCDate(), token.length);
-    if (head === 'H') return pad(when.getUTCHours(), token.length);
-    if (head === 'm') return pad(when.getUTCMinutes(), token.length);
-    return pad(when.getUTCSeconds(), token.length);
-  });
+  var fields = __zoned(millis, __timeZoneRules(this.timeZone)).__fields();
+  return __formatFields(__patternTokens(this.pattern), fields, this.locale);
 };
 
-/** Set by extensions that care; the parser above is UTC either way. */
-SimpleDateFormat.prototype.setTimeZone = function () {};
+/** The zone parse and format read fields in; see the constructor. */
+SimpleDateFormat.prototype.setTimeZone = function (zone) { this.timeZone = zone; };
+SimpleDateFormat.prototype.getTimeZone = function () {
+  return this.timeZone === undefined || this.timeZone === null ? TimeZone.getDefault() : this.timeZone;
+};
+
+/** A java.util.TimeZone, a java.time ZoneId, or nothing — as the rules it carries. */
+function __timeZoneRules(value) {
+  if (value === null || value === undefined) return __systemZone();
+  if (value instanceof __Zone) return value;
+  if (value.__zone instanceof __Zone) return value.__zone;
+  return __systemZone();
+}
 
 /**
- * java.util.TimeZone, as the one thing it is used for here.
+ * java.util.TimeZone, over the zone table 'kotlin-time.ts' keeps.
  *
- * 115 sources in this catalogue write
- * 'dateFormat.timeZone = TimeZone.getTimeZone("UTC")' and nothing else with
- * it. The parser above reads every field as UTC already, so the zone it
- * carries is a label the formatter never consults — which is what makes
- * answering one honest rather than a stub: the behaviour it asks for is
- * already the behaviour.
+ * 115 sources in this catalogue write 'dateFormat.timeZone =
+ * TimeZone.getTimeZone("UTC")', and a good share of the rest name the zone the
+ * site publishes in — Asia/Tokyo, Asia/Ho_Chi_Minh. That zone is honoured: a
+ * format carrying one reads its fields there, which is the difference between
+ * a chapter dated today and one dated yesterday.
+ *
+ * An id java.util cannot read answers GMT — java.util's own rule, and why it
+ * never throws. An id java.util WOULD read but this table does not carry is the
+ * one place that rule costs something; the table is where to add it.
  *
  * Named so the bundle *loads*. A capitalised receiver is passed through by the
  * emitter, so an absent name is 'TimeZone is not defined' at load, inside a
  * sandbox, rather than a refusal here with a sentence attached.
  */
+function __timeZone(id, zone) {
+  return {
+    id: id,
+    __zone: zone,
+    rawOffset: zone.__std * 1000,
+    getID: function () { return id; },
+    getRawOffset: function () { return zone.__std * 1000; },
+    getOffset: function (millis) { return zone.__offsetAt(Number(millis)) * 1000; },
+    useDaylightTime: function () { return zone.__rule !== null; },
+    inDaylightTime: function (date) { return zone.__offsetAt(__millisOf(date)) !== zone.__std; },
+    toZoneId: function () { return zone; },
+    hasSameRules: function (other) {
+      return other !== null && other !== undefined && other.__zone !== undefined &&
+        other.__zone.__std === zone.__std && other.__zone.__rule === zone.__rule;
+    },
+    toString: function () { return id; }
+  };
+}
+
 var TimeZone = {
-  getTimeZone: function (id) { return { id: __str(id), getID: function () { return __str(id); } }; },
-  getDefault: function () { return TimeZone.getTimeZone('UTC'); }
+  getTimeZone: function (value) {
+    if (value instanceof __Zone) return __timeZone(value.id, value);
+    var id = __str(value);
+    var zone = __zoneFromText(id);
+    return zone === null ? __timeZone('GMT', __systemZone()) : __timeZone(id, zone);
+  },
+  getDefault: function () { return __timeZone('UTC', __systemZone()); },
+  getAvailableIDs: function () { return Object.keys(__ZONE_TABLE); }
 };
 
 /**
@@ -1595,9 +1543,23 @@ var Regex = {
  * DAY_OF_WEEK counts from Sunday = 1. Reading MONTH as 1-based is the classic
  * off-by-one here, and it is a wrong value rather than an error.
  */
-function __KCalendar(millis) {
+function __KCalendar(millis, zone) {
   this.millis = millis;
+  this.__zone = zone === undefined || zone === null ? __systemZone() : zone;
 }
+
+/*
+ * The wall clock in this calendar's zone, as a Date whose UTC fields ARE that
+ * wall clock — the one trick every field reader below relies on — and the way
+ * back: a wall-clock reading resolved to an instant the way java.util does,
+ * keeping the offset it had where the clocks allow.
+ */
+__KCalendar.prototype.__local = function () {
+  return new Date(this.millis + this.__zone.__offsetAt(this.millis) * 1000);
+};
+__KCalendar.prototype.__resolve = function (local) {
+  this.millis = this.__zone.__instantOf(local.getTime(), this.__zone.__offsetAt(this.millis));
+};
 
 var __CALENDAR_FIELDS = {
   1: function (d) { return d.getUTCFullYear(); },
@@ -1607,6 +1569,7 @@ var __CALENDAR_FIELDS = {
     return Math.floor((d.getTime() - Date.UTC(d.getUTCFullYear(), 0, 1)) / 86400000) + 1;
   },
   7: function (d) { return d.getUTCDay() + 1; },
+  9: function (d) { return d.getUTCHours() < 12 ? 0 : 1; },
   10: function (d) { return d.getUTCHours() % 12; },
   11: function (d) { return d.getUTCHours(); },
   12: function (d) { return d.getUTCMinutes(); },
@@ -1614,19 +1577,23 @@ var __CALENDAR_FIELDS = {
   14: function (d) { return d.getUTCMilliseconds(); }
 };
 
-/** Milliseconds per unit, for the fields 'add' can move by a fixed amount. */
-var __CALENDAR_STEPS = { 5: 86400000, 6: 86400000, 7: 86400000, 10: 3600000, 11: 3600000, 12: 60000, 13: 1000, 14: 1 };
+/**
+ * Milliseconds per unit, for the fields 'add' moves along the timeline. The
+ * day fields are not here: a day is a calendar day, which across a clock
+ * change is 23 or 25 hours, so those move the wall clock instead.
+ */
+var __CALENDAR_STEPS = { 10: 3600000, 11: 3600000, 12: 60000, 13: 1000, 14: 1 };
 
 __KCalendar.prototype.get = function (field) {
   var read = __CALENDAR_FIELDS[Number(field)];
   if (read === undefined) {
     throw new Error('This converted extension read Calendar field ' + __str(field) + ', which Yorozo does not model.');
   }
-  return read(new Date(this.millis));
+  return read(this.__local());
 };
 
 __KCalendar.prototype.set = function (field, value) {
-  var when = new Date(this.millis);
+  var when = this.__local();
   var number = Number(field);
   if (number === 1) when.setUTCFullYear(Number(value));
   else if (number === 2) when.setUTCMonth(Number(value));
@@ -1638,7 +1605,7 @@ __KCalendar.prototype.set = function (field, value) {
   else {
     throw new Error('This converted extension set Calendar field ' + __str(field) + ', which Yorozo does not model.');
   }
-  this.millis = when.getTime();
+  this.__resolve(when);
 };
 
 __KCalendar.prototype.add = function (field, amount) {
@@ -1648,24 +1615,52 @@ __KCalendar.prototype.add = function (field, amount) {
     this.millis += step * Number(amount);
     return;
   }
-  // Years and months are not a fixed number of milliseconds, so they move the
-  // calendar field itself and let the Date normalise the overflow — which is
-  // what java.util.Calendar.add does.
-  var when = new Date(this.millis);
-  if (number === 1) when.setUTCFullYear(when.getUTCFullYear() + Number(amount));
-  else if (number === 2) when.setUTCMonth(when.getUTCMonth() + Number(amount));
-  else {
+  // Days, months and years are not a fixed number of milliseconds, so they move
+  // the wall clock. A month or a year CLAMPS the day — January 31st plus a
+  // month is February 29th in a leap year, as java.util.Calendar.add has it —
+  // where letting a Date normalise the overflow would answer March 2nd.
+  var when = this.__local();
+  var step = Math.trunc(Number(amount));
+  if (number === 5 || number === 6 || number === 7) {
+    when.setUTCDate(when.getUTCDate() + step);
+  } else if (number === 1 || number === 2) {
+    var moved = __addMonths(when.getUTCFullYear(), when.getUTCMonth() + 1, when.getUTCDate(),
+      number === 1 ? step * 12 : step);
+    var wall = when.getTime() - __fdiv(when.getTime(), __MS_PER_DAY) * __MS_PER_DAY;
+    when = new Date(__epochDayOf(moved[0], moved[1], moved[2]) * __MS_PER_DAY + wall);
+  } else {
     throw new Error('This converted extension moved Calendar field ' + __str(field) + ', which Yorozo does not model.');
   }
-  this.millis = when.getTime();
+  this.__resolve(when);
+};
+
+/*
+ * 'getDisplayName(Calendar.DAY_OF_WEEK, Calendar.LONG, Locale.US)' — the name
+ * of today, which a weekly-schedule source builds its url from. English, and a
+ * named refusal for another language (see __requireEnglish); null for a field
+ * with no names, as java.util answers.
+ */
+__KCalendar.prototype.getDisplayName = function (field, style, locale) {
+  var local = this.__local();
+  var form = Number(style) === 1 || Number(style) === 32769 ? 'SHORT' : 'FULL';
+  if (Number(field) === 7) return __englishName(__DAY_NAMES[(local.getUTCDay() + 6) % 7], form, locale);
+  if (Number(field) === 2) return __englishName(__MONTH_NAMES[local.getUTCMonth()], form, locale);
+  return null;
 };
 
 __KCalendar.prototype.getTime = function () { return __kDate(this.millis); };
 __KCalendar.prototype.setTime = function (value) { this.millis = __millisOf(value); };
 __KCalendar.prototype.getTimeInMillis = function () { return this.millis; };
 __KCalendar.prototype.setTimeInMillis = function (value) { this.millis = Number(value); };
-__KCalendar.prototype.clone = function () { return new __KCalendar(this.millis); };
-__KCalendar.prototype.setTimeZone = function () {};
+__KCalendar.prototype.clone = function () { return new __KCalendar(this.millis, this.__zone); };
+/* The instant stays; the fields read differently from here on — java.util's. */
+__KCalendar.prototype.setTimeZone = function (zone) { this.__zone = __timeZoneRules(zone); };
+__KCalendar.prototype.getTimeZone = function () { return __timeZone(this.__zone.id, this.__zone); };
+
+Object.defineProperty(__KCalendar.prototype, 'timeZone', {
+  get: function () { return this.getTimeZone(); },
+  set: function (value) { this.setTimeZone(value); }
+});
 
 Object.defineProperty(__KCalendar.prototype, 'time', {
   get: function () { return __kDate(this.millis); },
@@ -1684,7 +1679,15 @@ var Calendar = {
   JANUARY: 0, FEBRUARY: 1, MARCH: 2, APRIL: 3, MAY: 4, JUNE: 5,
   JULY: 6, AUGUST: 7, SEPTEMBER: 8, OCTOBER: 9, NOVEMBER: 10, DECEMBER: 11,
   SUNDAY: 1, MONDAY: 2, TUESDAY: 3, WEDNESDAY: 4, THURSDAY: 5, FRIDAY: 6, SATURDAY: 7,
-  getInstance: function () { return new __KCalendar(Date.now()); }
+  AM_PM: 9, AM: 0, PM: 1, ALL_STYLES: 0, SHORT: 1, LONG: 2, SHORT_FORMAT: 1, LONG_FORMAT: 2,
+  // 'getInstance()', '(zone)', '(locale)' or '(zone, locale)'; the locale
+  // changes nothing a field reader answers, so only a zone is looked for.
+  getInstance: function (a, b) {
+    var zone = null;
+    if (a !== null && a !== undefined && !(a instanceof Locale)) zone = __timeZoneRules(a);
+    else if (b !== null && b !== undefined && !(b instanceof Locale)) zone = __timeZoneRules(b);
+    return new __KCalendar(Date.now(), zone);
+  }
 };
 
 /**
@@ -2355,8 +2358,23 @@ var __k = {
     return sign + magnitude.toFixed(digits) + ' ' + units[unit];
   },
 
-  /** Wall-clock milliseconds, matching System.currentTimeMillis(). */
-  now: function () { return Date.now(); },
+  /**
+   * 'X.now(…)', dispatched on X.
+   *
+   * 'now' is a member of every java.time type and of kotlin.time's Clock, and
+   * each answers its own kind of value: 'LocalDate.now(zone)' is a date,
+   * 'Instant.now()' an instant, 'Clock.System.now()' an instant again. The
+   * emitter reaches this helper by name for all of them, so the receiver
+   * decides; answering a bare millisecond count for each made
+   * 'LocalDateTime.now().year' undefined and 'Instant.now().toEpochMilli()' a
+   * call on a number. Wall-clock milliseconds only for a receiver with no 'now'.
+   */
+  now: function (receiver) {
+    if (receiver !== null && receiver !== undefined && typeof receiver.now === 'function') {
+      return receiver.now.apply(receiver, Array.prototype.slice.call(arguments, 1));
+    }
+    return Date.now();
+  },
 
   /**
    * '.rateLimit(permits, period)' on an okhttp client builder.
@@ -2736,6 +2754,24 @@ var __k = {
     );
   },
 
+  /**
+   * 'toCollection(destination)': every element added, in order, to a
+   * collection the caller already holds — and that collection answered, not a
+   * copy, because the idiom is a loop appending page after page onto one list.
+   *
+   * Through '__k.add', so a Set destination keeps its own de-duplication and a
+   * Map destination takes pairs, exactly as Kotlin's MutableCollection.add
+   * would. A suspended upstream (a sequence whose 'map' was handed a suspending
+   * lambda) is awaited first.
+   */
+  toCollection: function (list, destination) {
+    return __then(list, function (items) {
+      var incoming = __arr(items);
+      for (var at = 0; at < incoming.length; at += 1) __k.add(destination, incoming[at]);
+      return destination;
+    });
+  },
+
   joinTo: function (list, buffer) {
     var rest = Array.prototype.slice.call(arguments, 2);
     var text = __k.joinToString.apply(null, [list].concat(rest));
@@ -2966,7 +3002,9 @@ var __k = {
   },
 
   /** Kotlin's list + x, where x may be a list or a single element. */
-  plus: function (list, other) {
+  plus: function (list, other, unit) {
+    // A date moved by an amount: 'zoned.plus(3, ChronoUnit.DAYS)'.
+    if (list !== null && list !== undefined && list.__kTime === true) return list.plus(other, unit);
     var items = __arr(list).slice();
     if (Array.isArray(other) || (other !== null && other !== undefined && typeof other !== 'string' &&
         typeof other[Symbol.iterator] === 'function')) {
@@ -4124,8 +4162,10 @@ var __k = {
    * emitter has no types, so the receiver decides — reading a list subtraction
    * as arithmetic would answer NaN.
    */
-  minus: function (value, other) {
+  minus: function (value, other, unit) {
     if (typeof value === 'number') return value - Number(other);
+    // And the same for a date: 'ZonedDateTime.now(zone).minus(n, unit)'.
+    if (value !== null && value !== undefined && value.__kTime === true) return value.minus(other, unit);
     if (value instanceof Set) {
       var removing = other instanceof Set || Array.isArray(other) ? __arr(other) : [other];
       var kept = new Set(value);
@@ -5388,24 +5428,8 @@ var __k = {
     }
   },
 
-  /**
-   * The name that replaced 'tryParse'.
-   *
-   * keiyoushi deprecated 'SimpleDateFormat.tryParse' in favour of
-   * 'tryParseDate' / 'tryParseDateTime' / 'tryParseZonedDateTime' on
-   * DateTimeFormatter, and the catalogue followed: MangaThemesia and Keyoapp
-   * both call it, which is 130 extensions between them.
-   *
-   * One helper for all three spellings. Upstream separates them by which
-   * fields the pattern carries — a date, a date and a time, or either plus a
-   * zone — and the reader below takes that from the pattern rather than from
-   * the method name, so the distinction is already made where it matters. All
-   * three answer epoch millis, and 0 for anything unreadable, which is what
-   * 'tryParse' already promised and what this ecosystem stores for 'no date'.
-   */
-  tryParseDate: function (format, text) {
-    return __k.tryParse(format, text);
-  },
+  /* 'tryParseDate' and its two siblings are java.time's, and live with it in
+     'kotlin-time.ts': each has its own meaning there, which is the point. */
 
   /**
    * keiyoushi's 'Element?.textOrNull()' — the element's text, with blank read
@@ -5539,46 +5563,7 @@ var Html = {
   }
 };
 
-/**
- * java.time's OffsetDateTime and Instant, for the one chain this ecosystem uses.
- *
- * 'OffsetDateTime.parse(x).toInstant().toEpochMilli()' is an upload date. An
- * unparseable value answers the epoch rather than NaN: 0 is what this ecosystem
- * stores for "no date", and the host renders it as no date at all — whereas NaN
- * reaches a date formatter and takes the episode list with it.
- */
-var Instant = {
-  ofEpochMilli: function (millis) { return __instant(Number(millis)); },
-  now: function () { return __instant(Date.now()); },
-  /*
-   * kotlinx-datetime's three readers of an ISO-8601 string, which this
-   * catalogue uses for an upload date more than any other spelling: 12 sources
-   * write 'Instant.tryParse(publishedAt)' and 6 more the 'parseOrNull' form.
-   *
-   * They differ only in what an unreadable string does. 'parse' throws — the
-   * caller wrapped it in a try or meant to — 'parseOrNull' answers null, and
-   * keiyoushi's own 'tryParse' answers 0L, because its callers assign it
-   * straight to 'date_upload' where 0 means "no date".
-   */
-  parse: function (text) {
-    var at = Date.parse(__str(text));
-    if (!Number.isFinite(at)) {
-      throw new Error('This converted extension could not read ' + __str(text) + ' as a date.');
-    }
-    return __instant(at);
-  },
-  parseOrNull: function (text) {
-    var at = Date.parse(__str(text));
-    return Number.isFinite(at) ? __instant(at) : null;
-  },
-  tryParse: function (text) {
-    var at = Date.parse(__str(text));
-    return Number.isFinite(at) ? at : 0;
-  },
-  fromEpochMilliseconds: function (millis) { return __instant(Number(millis)); },
-  fromEpochSeconds: function (seconds) { return __instant(Number(seconds) * 1000); }
-};
-
+${KOTLIN_TIME}
 /**
  * okhttp's CacheControl, which the host's transport decides for itself.
  *
@@ -5606,28 +5591,6 @@ var CacheControl = {
     return builder;
   }
 };
-
-var OffsetDateTime = {
-  parse: function (text) {
-    var at = Date.parse(__str(text));
-    return __instant(Number.isFinite(at) ? at : 0);
-  }
-};
-
-var ZonedDateTime = OffsetDateTime;
-var LocalDateTime = OffsetDateTime;
-
-function __instant(millis) {
-  var value = {
-    toInstant: function () { return value; },
-    toEpochMilli: function () { return millis; },
-    toEpochMilliseconds: function () { return millis; },
-    epochSeconds: Math.floor(millis / 1000),
-    toEpochSeconds: function () { return Math.floor(millis / 1000); },
-    toString: function () { return new Date(millis).toISOString(); }
-  };
-  return value;
-}
 
 /* --- the shapes a '@Serializable' class registers -------------------------- */
 
@@ -6213,6 +6176,9 @@ function __responseOf(raw, text, request) {
 
   var response = {
     code: raw.status,
+    /* okhttp's reason phrase. HTTP/2 has none and okhttp answers '' there,
+       which is also what a host that does not report one answers here. */
+    message: __str(raw.message),
     isSuccessful: raw.status >= 200 && raw.status < 300,
     request: finalRequest,
     url: finalUrl,
@@ -6232,6 +6198,9 @@ function __responseOf(raw, text, request) {
        * charset away would answer a question the extension did not ask.
        */
       contentType: function () {
+        // A body an interceptor built with 'toResponseBody(type)' carries its
+        // own, as okhttp's does; the header is what it falls back on.
+        if (raw.bodyType !== null && raw.bodyType !== undefined) return raw.bodyType;
         var headers = raw.headers || {};
         for (var key in headers) {
           if (Object.prototype.hasOwnProperty.call(headers, key) && key.toLowerCase() === 'content-type') {
@@ -6269,11 +6238,13 @@ function __responseOf(raw, text, request) {
      */
     newBuilder: function () {
       var nextCode = raw.status;
+      var nextMessage = raw.message;
       var nextHeaders = raw.headers;
       var nextText = null;
+      var nextType = raw.bodyType;
       var made = {
         code: function (value) { nextCode = Number(value); return made; },
-        message: function () { return made; },
+        message: function (value) { nextMessage = __str(value); return made; },
         request: function () { return made; },
         protocol: function () { return made; },
         header: function (name, value) {
@@ -6302,12 +6273,24 @@ function __responseOf(raw, text, request) {
           return made;
         },
         headers: function (value) { nextHeaders = value || {}; return made; },
+        /* What 'toResponseBody' built, another response's 'body', or text. A
+           body object stringified would be '[object Object]' on the page. */
         body: function (value) {
-          nextText = value === null || value === undefined ? '' : __str(value);
+          if (value === null || value === undefined) nextText = '';
+          else if (value.__kBody === true) {
+            nextText = __str(value.text);
+            if (value.contentType !== null && value.contentType !== undefined) nextType = __str(value.contentType);
+          } else if (typeof value.string === 'function') nextText = __str(value.string());
+          else nextText = __str(value);
           return made;
         },
         build: function () {
-          var next = Object.assign({}, raw, { status: nextCode, headers: nextHeaders });
+          var next = Object.assign({}, raw, {
+            status: nextCode,
+            message: nextMessage,
+            headers: nextHeaders,
+            bodyType: nextType
+          });
           return __responseOf(next, nextText === null ? text : nextText, request);
         }
       };
@@ -6770,6 +6753,37 @@ __k.toRequestBody = function (value, contentType) {
   throw new Error(
     'This converted extension built a request body out of something Yorozo cannot send as text. ' +
     'The host transport carries a string, so a binary body has no faithful spelling here.'
+  );
+};
+
+/**
+ * String.toResponseBody(contentType) and ByteArray.toResponseBody(…), which is
+ * what an interceptor hands 'response.newBuilder().body(…)' when it replaces
+ * what came back — an empty page for a search that answered 404, or a payload
+ * it decrypted.
+ *
+ * A response here is text: the host read the whole body before the plugin saw
+ * it, and every reader downstream ('string()', 'asJsoup()', 'parseAs()') reads
+ * text. So bytes are decoded as UTF-8, and only when they ARE UTF-8 — checked
+ * by encoding them back. An image an interceptor descrambled is not text, and
+ * decoding it would hand 'bytes()' something that merely looks like the image;
+ * that is refused at the point it happens rather than corrupted quietly.
+ */
+__k.toResponseBody = function (value, contentType) {
+  var type = contentType === undefined || contentType === null ? null : __str(contentType);
+  if (typeof value === 'string' || value === null || value === undefined) {
+    return { __kBody: true, contentType: type, text: __str(value) };
+  }
+  if (typeof Uint8Array !== 'undefined' && value instanceof Uint8Array) {
+    var text = __host().text.decode(value);
+    var back = __host().text.encode(text);
+    var same = back.length === value.length;
+    for (var at = 0; same && at < value.length; at += 1) same = back[at] === value[at];
+    if (same) return { __kBody: true, contentType: type, text: text };
+  }
+  throw new Error(
+    'This converted extension replaced a response with a body that is not text. Yorozo keeps a ' +
+    'response as the text the host read, so a binary body has no faithful spelling here.'
   );
 };
 

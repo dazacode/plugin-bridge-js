@@ -436,7 +436,14 @@ const helpers: Record<string, (...args: never[]) => unknown> = {
 	rateLimitHost: (receiver: Any, url: Any, permits: Any, periodMs: Any) => {
 		declared.push({ host: String(url), permits: permits as number, periodMs: periodMs as number });
 		return receiver;
-	}
+	},
+
+	// kotlin.time on a non-literal: the receiver decides, as in the runtime.
+	durationOf: (value: Any, name: Any, factor: Any) =>
+		typeof value === 'number'
+			? value * (factor as number)
+			: (value as Record<string, unknown>)[name as string],
+	inWhole: (value: Any) => Math.trunc((value as number) / 1000)
 };
 
 /** What the fixtures above declared, most recent last. */
@@ -3459,6 +3466,43 @@ describe('the receiver a member is actually called on', () => {
 
 		expect(demo.build('//host.example.invalid/a')).toBe('https://host.example.invalid/a');
 		expect(demo.build('/a')).toBe('/a');
+	});
+});
+
+/* ── kotlin.time units on a value ─────────────────────────────────── */
+
+describe('a kotlin.time unit read off something that is not a literal', () => {
+	const withImports = (...lines: string[]) =>
+		kt(
+			'import kotlin.time.Duration.Companion.days',
+			'import kotlin.time.Duration.Companion.seconds',
+			'',
+			'class Demo : Source() {',
+			...lines,
+			'}'
+		);
+
+	it('reads `(n * 7).days` as a Duration, where it was a field read on a number', () => {
+		// Emitted as a property read it was `undefined`, and the relative upload
+		// date built from it — `now - (amount * 7).days` — was NaN.
+		const demo = instantiate(withImports('    fun ago(n: Int) = (n * 7).days'));
+		expect(demo.ago(2)).toBe(14 * 86_400_000);
+	});
+
+	it('still reads a field of that name off an object, as Kotlin resolves a member first', () => {
+		const demo = instantiate(withImports('    fun read(row: Row) = row.seconds'));
+		expect(demo.read({ seconds: 42 })).toBe(42);
+	});
+
+	it('leaves the name alone in a file that does not import the unit', () => {
+		const demo = instantiate(inClass('    fun read(row: Row) = row.days'));
+		expect(demo.read({ days: 3 })).toBe(3);
+		expect(translate(inClass('    fun read(row: Row) = row.days')).js).not.toContain('durationOf');
+	});
+
+	it("reads a Duration's `inWhole…` through the runtime", () => {
+		const demo = instantiate(withImports('    fun whole(n: Int) = n.seconds.inWholeSeconds'));
+		expect(demo.whole(90)).toBe(90);
 	});
 });
 

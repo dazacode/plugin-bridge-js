@@ -685,6 +685,10 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 	['joinToString', 'joinToString'],
 	['joinTo', 'joinTo'],
 	['mapTo', 'mapTo'],
+	// `sequence.toCollection(chapters)`, which is how a paginated chapter walk
+	// appends each page onto the list it returns. The destination is a
+	// `mutableListOf()` or a set the caller declared, and it is the answer.
+	['toCollection', 'toCollection'],
 	// The reified argument is the constructor, so these are an `instanceof`
 	// — see the helpers for why a type-blind fallback would be worse than
 	// a refusal.
@@ -897,8 +901,14 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 	// between them are about which fields the *pattern* carries, and the
 	// runtime reads the pattern either way.
 	['tryParseDate', 'tryParseDate'],
-	['tryParseDateTime', 'tryParseDate'],
-	['tryParseZonedDateTime', 'tryParseDate'],
+	['tryParseDateTime', 'tryParseDateTime'],
+	['tryParseZonedDateTime', 'tryParseZonedDateTime'],
+	// An Instant read as milliseconds — a helper rather than a passthrough
+	// because `(Clock.System.now() - duration)` is JavaScript subtraction on
+	// the two values' `valueOf`, and answers the number the Instant held.
+	['toEpochMilliseconds', 'toEpochMilliseconds'],
+	['toJavaInstant', 'toJavaInstant'],
+	['toKotlinInstant', 'toJavaInstant'],
 
 	// keiyoushi's two "…or null" readers over jsoup, where blank means absent.
 	['textOrNull', 'textOrNull'],
@@ -910,6 +920,10 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 	['toRequestBody', 'toRequestBody'],
 	['toJsonBody', 'toJsonBody'],
 	['toJsonRequestBody', 'toJsonRequestBody'],
+	// …and the body an interceptor puts on a response it rewrote. okio's
+	// `asResponseBody` is deliberately absent: it reads a `Buffer`, and there
+	// are no okio streams here to read.
+	['toResponseBody', 'toResponseBody'],
 
 	// jsoup's two upward calls
 	['closest', 'closest'],
@@ -1188,10 +1202,78 @@ export const HOST_METHODS: ReadonlySet<string> = new Set([
 	// java.time, for the one chain this ecosystem writes.
 	'toInstant',
 	'toEpochMilli',
-	// kotlinx-datetime's spelling of the same reading, and the one the modern
-	// half of this catalogue writes.
-	'toEpochMilliseconds',
+	// kotlinx-datetime's reading in seconds. The milliseconds one is a helper
+	// (`EXTENSION_METHODS`), because its receiver may already be a number.
 	'toEpochSeconds',
+	// The rest of java.time as `kotlin-time.ts` implements it: moving a date,
+	// putting it in a zone, reading it back. Every one is a method the
+	// runtime's temporals define; the names are java.time's own and nothing
+	// else in the catalogue spells them.
+	'atStartOfDay',
+	'atZone',
+	'atOffset',
+	'atTime',
+	'withZone',
+	'withLocale',
+	'withZoneSameInstant',
+	'withZoneSameLocal',
+	'withOffsetSameInstant',
+	'plusYears',
+	'plusMonths',
+	'plusWeeks',
+	'plusDays',
+	'plusHours',
+	'plusMinutes',
+	'plusSeconds',
+	'plusNanos',
+	'plusMillis',
+	'minusYears',
+	'minusMonths',
+	'minusWeeks',
+	'minusDays',
+	'minusHours',
+	'minusMinutes',
+	'minusSeconds',
+	'minusNanos',
+	'minusMillis',
+	'truncatedTo',
+	'isBefore',
+	'isAfter',
+	'isEqual',
+	'toLocalDate',
+	'toLocalDateTime',
+	'toOffsetDateTime',
+	'toZonedDateTime',
+	'toEpochSecond',
+	'toEpochDay',
+	'getEpochSecond',
+	'lengthOfMonth',
+	'lengthOfYear',
+	'isLeapYear',
+	'withDayOfMonth',
+	'withDayOfYear',
+	'withMonth',
+	'withYear',
+	'withHour',
+	'withMinute',
+	'withSecond',
+	'withNano',
+	'getRules',
+	'getOffset',
+	'getTotalSeconds',
+	'getZone',
+	'getDayOfWeek',
+	'getDayOfMonth',
+	'getMonthValue',
+	'getYear',
+	'normalized',
+	// `ChronoUnit.DAYS.between(a, b)`: a navigation receiver, which is not the
+	// capitalised-name passthrough, so the name has to be listed.
+	'between',
+	// `TimeZone.getTimeZone(id).toZoneId()` and the SimpleDateFormat pair.
+	'toZoneId',
+	'setTimeZone',
+	'getTimeZone',
 	// okhttp's CacheControl.Builder, whose every setting the host decides.
 	'maxStale',
 	'minFresh',
@@ -1261,6 +1343,10 @@ export const HOST_METHODS: ReadonlySet<string> = new Set([
 	'string',
 	'bytes',
 	'code',
+	// `response.newBuilder().code(200).message("OK")` — the reason phrase an
+	// interceptor writes when it turns a 404 into an empty page. The builder
+	// records it and the built response carries it as `message`.
+	'message',
 	'headers',
 	'header',
 	'request',
@@ -1769,6 +1855,19 @@ export const GLOBAL_NAMES: ReadonlySet<string> = new Set([
 	'OffsetDateTime',
 	'ZonedDateTime',
 	'LocalDateTime',
+	// The rest of the java.time subset, and kotlin.time's Clock and Duration —
+	// see `RUNTIME_GLOBALS` for why each has to be a name.
+	'LocalDate',
+	'ZoneId',
+	'ZoneOffset',
+	'ChronoUnit',
+	'ChronoField',
+	'DayOfWeek',
+	'Month',
+	'TextStyle',
+	'Year',
+	'Clock',
+	'Duration',
 
 	/* `keiyoushi.lib.i18n.Intl`, which is one small Kotlin file in the shared
 	   `lib/` directory and the largest single blocker the manga half had: 95 of
