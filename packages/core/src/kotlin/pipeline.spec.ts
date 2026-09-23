@@ -475,10 +475,11 @@ describe('a file that declares a name the runtime already defines', () => {
 		expect(dto.js).toContain('(__recv, ...__a) => __recv.toSAnime(...__a)');
 	});
 
-	it('still refuses `Obj::method`, where the object is already the receiver', async () => {
+	it('reads `Obj::method` as bound, where the object is already the receiver', async () => {
 		// For an `object`, Kotlin's `Obj::member` is the BOUND form. Reading it
 		// as unbound would consume the first argument as a receiver and drop it
-		// silently — which is worse than the refusal it replaces.
+		// silently — which is worse than the refusal it replaced. It is now the
+		// bound call, the argument passed on and the object as the receiver.
 		const object = await convertKotlin(
 			[
 				{
@@ -497,7 +498,9 @@ describe('a file that declares a name the runtime already defines', () => {
 			{ parser }
 		);
 
-		expect(object.complete).toBe(false);
+		expect(object.complete).toBe(true);
+		expect(object.js).toContain('(__a) => Obj.wrap(__a)');
+		expect(object.js).not.toContain('__recv.wrap');
 	});
 
 	it('does not borrow a same-named extension from an unrelated class', async () => {
@@ -928,6 +931,70 @@ describe('a conversion that refuses', () => {
 });
 
 describe('which refusals stop a build', () => {
+	it('blocks on a refused helper called with nothing but a trailing lambda', async () => {
+		// `observableSeries { series -> series.search(q) }`: no parenthesis, and
+		// a `.search(` inside the lambda. Neither text scan drew the edge, the
+		// helper was pruned, and its callers survived calling nothing.
+		const result = await convertKotlin(
+			[
+				{
+					path: 'Demo.kt',
+					source: kt(
+						'class Demo : Theme() {',
+						'    override val baseUrl = "https://example.invalid"',
+						'}'
+					)
+				},
+				{
+					path: 'Theme.kt',
+					source: kt(
+						'abstract class Theme : HttpSource() {',
+						'    private fun <R> cached(block: (List<String>) -> R): R = block(listOf(Build.MODEL))',
+						'    override fun popularMangaRequest(page: Int): Request = cached { all ->',
+						'        GET(all.first().trim(), headers)',
+						'    }',
+						'}'
+					)
+				}
+			],
+			{ parser }
+		);
+		expect(result.blocking.map((one) => one.member)).toEqual(['cached']);
+	});
+
+	it('does not block on a private helper only the settings screen calls', async () => {
+		// A `private fun` is not the host's to call, so it is a root no longer;
+		// it is reached when a reachable member names it — by a call, or by a
+		// `::name` reference — and here only the never-run screen does.
+		const source = (caller: string) =>
+			kt(
+				'class Demo : Source() {',
+				'    override val baseUrl = "https://example.invalid"',
+				'    override fun setupPreferenceScreen(screen: PreferenceScreen) {',
+				'        checkLogin("a")',
+				'    }',
+				'    private fun checkLogin(email: String) {',
+				'        Thread { println(email) }.start()',
+				'    }',
+				'    override fun popularMangaRequest(page: Int): Request {',
+				`        ${caller}`,
+				'        return GET(baseUrl, headers)',
+				'    }',
+				'}'
+			);
+		const unused = await convertKotlin([{ path: 'Demo.kt', source: source('') }], { parser });
+		expect(unused.refusals.map((one) => one.member)).toEqual(['checkLogin']);
+		expect(unused.blocking).toEqual([]);
+		expect(unused.complete).toBe(true);
+
+		// Called from a member the host runs, it blocks — and so does a
+		// reference to it, which is no call at all.
+		for (const caller of ['checkLogin("b")', 'listOf("b").forEach(::checkLogin)']) {
+			const used = await convertKotlin([{ path: 'Demo.kt', source: source(caller) }], { parser });
+			expect(used.blocking.map((one) => one.member)).toEqual(['checkLogin']);
+		}
+	});
+
 	it('does not block on a member the host draws itself', async () => {
 		// A converted bundle declares no settings, so nothing ever calls
 		// `setupPreferenceScreen` — the same line `themes/convert.ts` draws.

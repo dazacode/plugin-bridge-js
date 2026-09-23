@@ -443,13 +443,15 @@ describe('a Kotlin Iterable, declared or delegated', () => {
 			refusalNames(kt('class P(items: List<Int>) : Iterable<Int> by items', 'class Demo'))
 		).toEqual(['an `Iterable` delegate reading a parameter that is not a property']);
 		// With a body, the grammar reads `by pages { … }` as a call passing the
-		// body as a lambda; refused as the delegation, not emitted as a call.
+		// body as a lambda. Over a constructor `val` that is rewritten into the
+		// `iterator()` it means (see below); over anything else it is still
+		// refused as the delegation, not emitted as a call.
 		expect(
 			refusalNames(
 				kt(
-					'data class Q(val pages: List<String>) : Iterable<String> by pages {',
+					'class Q(pages: List<String>) : Iterable<String> by pages {',
 					'    val n: Int',
-					'        get() = pages.size',
+					'        get() = 1',
 					'}'
 				)
 			)
@@ -1690,5 +1692,339 @@ describe('a base class written through the object that holds it', () => {
 		);
 		expect(demo.part()).toBe('tv');
 		expect(demo.label()).toBe('Type');
+	});
+});
+
+describe('a helper class calling back into the source object it was handed', () => {
+	// A multisrc template's shape: `class Extractor(private val theme: Theme)`,
+	// built with `Extractor(this)`, calling `theme.displayName(…)`. The entry
+	// class's methods are never passthroughs, so the call was refused as a
+	// method nothing declares — while the method sat translated one file over.
+	const THEME = kt(
+		'abstract class Theme : AnimeHttpSource() {',
+		"    open fun displayName(name: String): String = name.trimEnd('-', ' ')",
+		'    suspend fun slow(name: String): String {',
+		'        delay(1)',
+		'        return name + "?"',
+		'    }',
+		'    fun viaOther(): String = Other().load()',
+		'    fun label(name: String): String = Helper(this).label(name)',
+		'    suspend fun late(name: String): String = Helper(this).late(name)',
+		'    fun loud(): String = Helper(this).loud()',
+		'}'
+	);
+	const HELPER = kt(
+		'class Helper(private val theme: Theme) {',
+		'    fun label(name: String): String = theme.displayName(name) + "!"',
+		'    suspend fun late(name: String): String = theme.slow(name) + "!"',
+		'    fun loud(): String = theme.viaOther() + "!"',
+		'}',
+		'class Other {',
+		'    fun load(): String = client.get("https://example.invalid/x").body.string()',
+		'}'
+	);
+	const ENTRY = kt(
+		'class Demo : Theme() {',
+		'    override fun displayName(name: String): String = "[" + super.displayName(name) + "]"',
+		'}'
+	);
+
+	it('resolves the member on the declared type, and dispatches to the override', async () => {
+		const demo = await instantiate('Demo', THEME, HELPER, ENTRY);
+		expect(demo.label('one -')).toBe('[one]!');
+	});
+
+	it('awaits a member the source class declares `suspend`', async () => {
+		const demo = await instantiate('Demo', THEME, HELPER, ENTRY);
+		await expect(demo.late('two')).resolves.toBe('two?!');
+	});
+
+	it('fails loudly when the member turned out to be async after all', async () => {
+		// `viaOther` is not `suspend` and reads as no request, so the survey
+		// calls it plain; its emitter made it async for the request inside
+		// `Other.load`. Handed on, the promise would have been "[object
+		// Promise]!" — so the call throws, naming the member, instead.
+		const demo = await instantiate('Demo', THEME, HELPER, ENTRY);
+		expect(() => demo.loud()).toThrow(/Theme\.viaOther as a plain function/);
+	});
+
+	it('leaves a parameter that shadows the property alone', async () => {
+		// Only the property read counts: a local named `theme` of some other
+		// type is not the source object, and stays the refusal it was.
+		const emission = emitKotlin(
+			parse(
+				kt(
+					'abstract class Theme : AnimeHttpSource() {',
+					'    fun displayName(name: String): String = name',
+					'}',
+					'class Helper(private val theme: Theme) {',
+					'    fun label(theme: Any, name: String): String = theme.displayName(name)',
+					'}'
+				)
+			)
+		);
+		expect(emission.refusals.flatMap((one) => one.obstacles.map((o) => o.kind))).toEqual([
+			'`.displayName()`'
+		]);
+	});
+});
+
+describe('skip markers on a video', () => {
+	it('builds TimeStamp values and carries them through a Video copy', async () => {
+		// ext-lib 16's `TimeStamp(start, end, name, type)`. The ABI has no field
+		// for them, so what matters is that building them is ordinary Kotlin:
+		// numbers compared, a default type, a `copy(timestamps = …)`.
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    fun marks(s: Int, e: Int): List<TimeStamp> = buildList {',
+				'        if (e > s) add(TimeStamp(s.toDouble(), e.toDouble(), name = "Intro", type = ChapterType.Opening))',
+				'        add(TimeStamp(90.0, 120.5, "Outro"))',
+				'    }',
+				'    fun video(s: Int, e: Int): Video =',
+				'        Video("https://example.invalid/a.m3u8", "720p", "https://example.invalid/a.m3u8")',
+				'            .copy(timestamps = marks(s, e))',
+				'    fun parsed(t: String): Double = t.toDouble() + 1.toDouble()',
+				'}'
+			)
+		);
+		const [intro, outro] = demo.marks(0, 85);
+		expect([intro.start, intro.end, intro.name, intro.type]).toEqual([0, 85, 'Intro', 'Opening']);
+		expect([outro.start, outro.end, outro.type]).toEqual([90, 120.5, 'Other']);
+		expect(demo.marks(5, 5)).toHaveLength(1);
+		const video = demo.video(0, 85);
+		expect(video.videoUrl).toBe('https://example.invalid/a.m3u8');
+		expect(video.timestamps.map((one: { name: string }) => one.name)).toEqual(['Intro', 'Outro']);
+		// `toDouble` was a passthrough onto a method no number or string has.
+		expect(demo.parsed(' 2.5')).toBe(3.5);
+		expect(() => demo.parsed('two')).toThrow(/as a number/);
+	});
+});
+
+describe('a prefix increment', () => {
+	it('increments before reading, over a local and over a property', async () => {
+		// The grammar hangs `++` over the whole `++i > 3`, as it does `-` and
+		// `!`; applied to the comparison it would not be JavaScript at all.
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    private var n = 0',
+				'    fun loop(): Int {',
+				'        var i = 0',
+				'        while (true) { if (++i > 3) break }',
+				'        return i',
+				'    }',
+				'    fun both(): Int { --n; return ++n + n }',
+				'}'
+			)
+		);
+		expect(demo.loop()).toBe(4);
+		expect(demo.both()).toBe(0);
+	});
+});
+
+describe('a bare call inside an object', () => {
+	it('refuses a name the object does not declare, rather than calling it on `this`', () => {
+		// A Kotlin `object` has no outer instance, so the "a base class supplies
+		// it" fallback cannot apply. Written as `this.name(…)` it was undefined
+		// at module scope — the bundle died at load — or a TypeError at the call.
+		expect(
+			refusalNames(
+				kt(
+					'object Serializer {',
+					'    val descriptor = somethingUnread("X")',
+					'    fun read(): Int = alsoUnread(2)',
+					'}'
+				)
+			)
+		).toEqual([
+			'`somethingUnread(…)`, which nothing this build read declares',
+			'`alsoUnread(…)`, which nothing this build read declares'
+		]);
+	});
+
+	it('still calls its own members, and answers an empty sequence', async () => {
+		// The shared unpacker's `if (!detect(s)) emptySequence() else …` —
+		// which came out `this.emptySequence()` and threw on every plain script.
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'object ScriptPacker {',
+				'    fun detect(s: String): Boolean = s.startsWith("eval")',
+				'    fun unpack(s: String): Sequence<String> = if (!detect(s)) emptySequence() else sequenceOf(s)',
+				'}',
+				'class Demo {',
+				'    fun plain(): List<String> = ScriptPacker.unpack("var a").toList()',
+				'    fun packed(): List<String> = ScriptPacker.unpack("eval(x)").toList()',
+				'}'
+			)
+		);
+		expect(demo.plain()).toEqual([]);
+		expect(demo.packed()).toEqual(['eval(x)']);
+	});
+});
+
+describe('a reference to a member of a declared object', () => {
+	it('is bound to the object, forwarding one argument to an overloaded name', async () => {
+		// `hls.let(UrlUtils::fixUrl)`. The object is the receiver; with two
+		// overloads, `(url)` and `(url, baseUrl)`, the index a collection
+		// helper passes must not reach the second.
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'object Urls {',
+				'    fun fix(url: String): String = if (url.startsWith("//")) "https:$url" else url',
+				'    fun fix(url: String, base: String): String = base + url',
+				'}',
+				'class Demo {',
+				'    fun one(u: String): String = u.let(Urls::fix)',
+				'    fun many(us: List<String>): List<String> = us.map(Urls::fix)',
+				'}'
+			)
+		);
+		expect(demo.one('//a.example.invalid/x')).toBe('https://a.example.invalid/x');
+		expect(demo.many(['//b.example.invalid', 'c'])).toEqual(['https://b.example.invalid', 'c']);
+	});
+});
+
+describe('a write through a preference-delegated extension property', () => {
+	it('lands on the delegate’s key, and the next read answers it', async () => {
+		// `private var SharedPreferences.latestId by preferences.delegate(KEY,
+		// 0)`, then `preferences.latestId = id` — refused as a write to an
+		// extension property, while the delegate names the key to write.
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    private val preferences by getPreferencesLazy()',
+				'    private var SharedPreferences.latestId by preferences.delegate(PREF_LATEST_KEY, 0)',
+				'    fun bump(): Int {',
+				'        val before = preferences.latestId',
+				'        preferences.latestId = before + 3',
+				'        return preferences.latestId * 10 + preferences.getInt(PREF_LATEST_KEY, -1)',
+				'    }',
+				'    companion object {',
+				'        private const val PREF_LATEST_KEY = "latest_id"',
+				'    }',
+				'}'
+			)
+		);
+		expect(demo.bump()).toBe(33);
+	});
+});
+
+describe('java.math.BigDecimal', () => {
+	const source = kt(
+		'class Demo {',
+		'    fun stars(score: String?): String {',
+		'        if (score.isNullOrBlank()) return ""',
+		'        return try {',
+		'            val big = score.toBigDecimal()',
+		'            if (big.signum() <= 0) return ""',
+		'            val stars = big.divide(BigDecimal(2), 0, RoundingMode.HALF_UP).toInt().coerceIn(0, 5)',
+		'            "★".repeat(stars) + "☆".repeat(5 - stars) + " " + big.stripTrailingZeros().toPlainString()',
+		'        } catch (_: Exception) {',
+		'            ""',
+		'        }',
+		'    }',
+		'    fun half(t: String): String = t.toBigDecimal().div(BigDecimal(2)).toPlainString()',
+		'    fun exact(t: String): String = BigDecimal(t).divide(BigDecimal("8")).toString()',
+		'    fun scaled(t: String): String = t.toBigDecimal().setScale(1, RoundingMode.HALF_EVEN).toPlainString()',
+		'    fun bigger(a: String, b: String): Boolean = a.toBigDecimal().compareTo(b.toBigDecimal()) > 0',
+		'    fun raw(a: String, b: String) = a.toBigDecimal() / b.toBigDecimal()',
+		'}'
+	);
+
+	it('divides, rounds and prints the way Java does, scale included', async () => {
+		const demo = await instantiate('Demo', source);
+		expect(demo.stars('8.40')).toBe('★★★★☆ 8.4');
+		expect(demo.stars('9')).toBe('★★★★★ 9');
+		expect(demo.stars('0')).toBe('');
+		expect(demo.stars('n/a')).toBe('');
+		// Kotlin's `div` is HALF_EVEN at the dividend's scale: 7/2 is 4, not 3.5.
+		expect(demo.half('7')).toBe('4');
+		expect(demo.half('7.0')).toBe('3.5');
+		expect(demo.exact('1')).toBe('0.125');
+		expect(demo.scaled('2.25')).toBe('2.2');
+		expect(demo.bigger('2.50', '2.5')).toBe(false);
+		expect(demo.bigger('2.51', '2.5')).toBe(true);
+	});
+
+	it('refuses to be read as a double by an operator, rather than dividing like one', async () => {
+		const demo = await instantiate('Demo', source);
+		expect(() => demo.raw('7', '2')).toThrow(/arithmetic operator on a BigDecimal/);
+	});
+});
+
+describe('a request tag keyed by a class', () => {
+	it('reads back what was set under the same class, and nothing under another', async () => {
+		// `.tag(SearchParams::class.java, params)` in the request builder and
+		// `response.request.tag(SearchParams::class.java)` in the parser — how a
+		// source carries its filter state across without an instance field.
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class SearchParams(val query: String = "")',
+				'class Other(val x: Int = 0)',
+				'class Demo {',
+				'    fun build(q: String): Request = GET("https://example.invalid/s").newBuilder()',
+				'        .tag(SearchParams::class.java, SearchParams(q))',
+				'        .build()',
+				'    fun query(r: Request): String = r.tag(SearchParams::class.java)?.query ?: "none"',
+				'    fun other(r: Request): String = if (r.tag(Other::class.java) == null) "absent" else "present"',
+				'}'
+			)
+		);
+		const request = demo.build('one');
+		expect(demo.query(request)).toBe('one');
+		expect(demo.other(request)).toBe('absent');
+	});
+});
+
+describe('okhttp Credentials', () => {
+	it('builds a Basic header value, ISO-8859-1 unless told otherwise', async () => {
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    fun plain(): String = Credentials.basic("user", "pass")',
+				'    fun latin(): String = Credentials.basic("é", "x")',
+				'    fun utf8(): String = Credentials.basic("é", "x", Charsets.UTF_8)',
+				'}'
+			)
+		);
+		expect(demo.plain()).toBe('Basic dXNlcjpwYXNz');
+		expect(demo.latin()).toBe(`Basic ${Buffer.from('é:x', 'latin1').toString('base64')}`);
+		expect(demo.utf8()).toBe(`Basic ${Buffer.from('é:x', 'utf8').toString('base64')}`);
+	});
+});
+
+describe('an Iterable delegation followed by a class body', () => {
+	it('iterates the delegate, and keeps the members the grammar hid in a lambda', async () => {
+		// `: Iterable<String> by pages { … }` reads, in this grammar, as a
+		// lambda passed to `pages`: no members, a call for a delegate. It is
+		// rewritten into the `iterator()` the delegation means.
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'data class Chapter(val dir: String, val name: String, val pages: List<String>) : Iterable<String> by pages {',
+				"    val number: Float get() = dir.substringAfterLast('c').toFloatOrNull() ?: -1f",
+				'    override fun toString() = name.ifEmpty { dir }',
+				'}',
+				'class Demo {',
+				'    fun make(): Chapter = Chapter("v1c7", "", listOf("a", "b"))',
+				'    fun loud(c: Chapter): String {',
+				'        val all = c.map { it + "!" }',
+				'        return all.joinToString() + " " + c.number + " " + c.toString()',
+				'    }',
+				'    fun counted(c: Chapter): Int { var n = 0; for (p in c) n += p.length; return n }',
+				'}'
+			)
+		);
+		const chapter = demo.make();
+		expect(demo.loud(chapter)).toBe('a!, b! 7 v1c7');
+		expect(demo.counted(chapter)).toBe(2);
 	});
 });

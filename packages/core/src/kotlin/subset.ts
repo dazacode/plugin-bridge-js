@@ -728,6 +728,14 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 	['toInt', 'toInt'],
 	['toFloatOrNull', 'toFloatOrNull'],
 	['toFloat', 'toFloat'],
+	// `it.start.toDouble()` over a number, or `"1.5".toDouble()` over text.
+	// It was a passthrough, and neither a JavaScript number nor a string has a
+	// `toDouble` — every call died with "is not a function", nothing refused.
+	['toDouble', 'toDouble'],
+	// java.math.BigDecimal, which the runtime keeps exactly (an unscaled BigInt
+	// and a scale): `score.toBigDecimal().divide(BigDecimal(2), 0, HALF_UP)`.
+	['toBigDecimal', 'toBigDecimal'],
+	['toBigDecimalOrNull', 'toBigDecimalOrNull'],
 	['toLongOrNull', 'toLongOrNull'],
 	['toLong', 'toLong'],
 	['countLeadingZeroBits', 'countLeadingZeroBits'],
@@ -1826,8 +1834,13 @@ export const HOST_METHODS: ReadonlySet<string> = new Set([
 	'indexOf',
 	'lastIndexOf',
 	'substring',
-	'toDouble',
 	'toBoolean',
+	// BigDecimal's own, on the runtime's value: see `toBigDecimal`.
+	'signum',
+	'divide',
+	'setScale',
+	'stripTrailingZeros',
+	'toPlainString',
 	'format',
 	'parseLong',
 	'time',
@@ -1991,6 +2004,12 @@ export const FREE_FUNCTIONS: ReadonlyMap<string, string> = new Map([
 	['booleanArrayOf', 'listOf'],
 	['charArrayOf', 'listOf'],
 	['emptyArray', 'emptyList'],
+	// A Sequence is an array here (`asSequence` is the identity), so an empty
+	// one is an empty list. The shared JS unpacker returns one for a script
+	// that is not packed; it came out `this.emptySequence()` on an `object`,
+	// and every unpack of a plain script threw.
+	['emptySequence', 'emptyList'],
+	['sequenceOf', 'listOf'],
 	['hashMapOf', 'mapOf'],
 	['linkedMapOf', 'mapOf'],
 	['sortedMapOf', 'mapOf'],
@@ -2201,6 +2220,8 @@ export const GLOBAL_NAMES: ReadonlySet<string> = new Set([
 	'SEpisode',
 	'Video',
 	'Track',
+	'TimeStamp',
+	'ChapterType',
 	'AnimeFilter',
 	'Json',
 	'Hoster',
@@ -2343,6 +2364,12 @@ export const GLOBAL_NAMES: ReadonlySet<string> = new Set([
 	'PropertyResourceBundle',
 	'InputStreamReader',
 	'Collator',
+
+	/* okhttp's Credentials, and java.math.BigDecimal with its rounding modes —
+	   see RUNTIME_GLOBALS. */
+	'Credentials',
+	'BigDecimal',
+	'RoundingMode',
 
 	/* kotlinx.serialization's names a hand-written KSerializer declares, and
 	   JsonNull, which is JSON's null — see the typed decoder in the runtime. */
@@ -2641,6 +2668,9 @@ export const KNOWN_SIGNATURES: ReadonlyMap<string, readonly string[]> = new Map(
 	// reached only when a call names something that can only be its.
 	['Video', ['url', 'quality', 'videoUrl', 'headers', 'subtitleTracks', 'audioTracks']],
 	['Track', ['url', 'lang']],
+	// `TimeStamp(start, end, name = "Intro", type = ChapterType.Opening)`: the
+	// last two are named at every construction site in the catalogue.
+	['TimeStamp', ['start', 'end', 'name', 'type']],
 
 	// **`Page(index, url = "", imageUrl = null)`**, and the reason it is here
 	// rather than left to positional calls: `Page(index, imageUrl = it)` is how
