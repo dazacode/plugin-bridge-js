@@ -171,21 +171,50 @@ class Client {
   }
 }
 
-/* String helpers the format adds to every string. */
-String.prototype.substringAfter = function (d) {
-  const i = this.indexOf(d); return i === -1 ? '' : this.slice(i + String(d).length);
+/*
+ * String helpers the format adds to every string, copied from the format's own
+ * host rather than written from their names.
+ *
+ * The names are Kotlin's, and so is the rule they follow: **a delimiter that is
+ * not there leaves the whole string**, not an empty one. The upstream runtime's
+ * bodies (its JavaScript utils, evaluated into every source) say so line by
+ * line — \`if (startIndex === -1) return this.substring(0);\` — and an earlier
+ * copy here returned '' instead. That is silent in the worst way: a source
+ * reading \`url.substringAfter("?id=")\` on a url with no query got an empty id,
+ * built a request from it, and reported an empty page.
+ *
+ * Two of them are not the obvious composition and are kept as upstream wrote
+ * them. \`substringAfterLast\` is \`split(pattern).pop()\`, which is the same
+ * answer for every delimiter a source actually passes and a different one for
+ * an empty delimiter (the last character, where lastIndexOf would give '').
+ * \`substringBetween\` answers '' when *either* side is missing, which is
+ * exactly what composing the other two no longer does.
+ */
+String.prototype.substringAfter = function (pattern) {
+  const startIndex = this.indexOf(pattern);
+  if (startIndex === -1) return this.substring(0);
+  return this.substring(startIndex + pattern.length);
 };
-String.prototype.substringAfterLast = function (d) {
-  const i = this.lastIndexOf(d); return i === -1 ? '' : this.slice(i + String(d).length);
+String.prototype.substringAfterLast = function (pattern) {
+  return this.split(pattern).pop();
 };
-String.prototype.substringBefore = function (d) {
-  const i = this.indexOf(d); return i === -1 ? '' : this.slice(0, i);
+String.prototype.substringBefore = function (pattern) {
+  const endIndex = this.indexOf(pattern);
+  if (endIndex === -1) return this.substring(0);
+  return this.substring(0, endIndex);
 };
-String.prototype.substringBeforeLast = function (d) {
-  const i = this.lastIndexOf(d); return i === -1 ? '' : this.slice(0, i);
+String.prototype.substringBeforeLast = function (pattern) {
+  const endIndex = this.lastIndexOf(pattern);
+  if (endIndex === -1) return this.substring(0);
+  return this.substring(0, endIndex);
 };
-String.prototype.substringBetween = function (a, b) {
-  return String(this).substringAfter(a).substringBefore(b);
+String.prototype.substringBetween = function (left, right) {
+  const index = this.indexOf(left);
+  if (index === -1) return '';
+  const leftIndex = index + left.length;
+  const rightIndex = this.indexOf(right, leftIndex);
+  if (rightIndex === -1) return '';
+  return this.substring(leftIndex, rightIndex);
 };
 
 function unpackJs(source) { return __rt.unpackDeanEdwards(String(source)); }
