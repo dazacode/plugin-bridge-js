@@ -2834,12 +2834,6 @@ var __k = {
     return wrapped >= 128 ? wrapped - 256 : wrapped;
   },
 
-  /**
-   * Kotlin's 'toUByte()': the low eight bits, read as 0–255. A UByte here is
-   * the plain number, so 'toInt()' after it is the same value, which is the
-   * whole idiom ('it.toUByte().toInt()'). Only the conversion into a UByte is
-   * here; the UInt/ULong arithmetic that wraps at 2^32 is not modelled.
-   */
   /** Kotlin's 'String?.toBoolean()': "true" ignoring case; null and anything else false. */
   toBoolean: function (value) {
     if (value === null || value === undefined) return false;
@@ -2862,6 +2856,12 @@ var __k = {
     return text === 'true' ? true : text === 'false' ? false : null;
   },
 
+  /**
+   * Kotlin's 'toUByte()': the low eight bits, read as 0–255. A UByte here is
+   * the plain number, so 'toInt()' after it is the same value, which is the
+   * whole idiom ('it.toUByte().toInt()'). Only the conversion into a UByte is
+   * here; the UInt/ULong arithmetic that wraps at 2^32 is not modelled.
+   */
   toUByte: function (value) {
     var number = Number(value);
     if (!Number.isFinite(number)) throw new Error('This converted extension read a non-finite UByte.');
