@@ -529,7 +529,13 @@ export function cryptoObstacle(text: string, asTransformation = false): string |
 	}
 	// A curve is named as a bare string too, and `secp256k1` is one character
 	// from a curve WebCrypto has and is not one it has.
-	if (/^(?:secp|prime|brainpool|sect)[a-z0-9]+$/.test(text)) {
+	//
+	// Matched on the shape a curve name actually has — a family, a bit length,
+	// then its variant — and not on the family prefix alone. `sect` followed by
+	// anything was a curve here, so every `"section"` and `"sections"` a scraper
+	// passes as a query parameter or a CSS selector refused its extension as
+	// asking for an elliptic curve: fourteen listings, over an English word.
+	if (/^(?:secp\d+[kr]\d|prime\d+v\d|brainpoolP\d+[rt]\d|sect\d+[kr]\d)$/.test(text)) {
 		return /^(?:secp256r1|prime256v1|secp384r1|secp521r1)$/.test(text)
 			? null
 			: `the \`${text}\` curve`;

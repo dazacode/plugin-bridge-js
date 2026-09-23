@@ -4664,3 +4664,59 @@ describe('SMangaUpdate and getMangaUpdate', () => {
 		expect(calls).toEqual([['M', [], true, false]]);
 	});
 });
+
+/**
+ * `super.x` where `x` is a property of a template this build translated.
+ *
+ * `override val seriesStatusSelector = ".status, ${super.seriesStatusSelector}"`
+ * is how an extension extends a template's selector rather than replacing it,
+ * and it was refused outright: `__super` holds the driver's methods and no
+ * template state at all.
+ */
+describe('reading a template property through super', () => {
+	const template = [
+		'abstract class Base : Source() {',
+		'    open val sel = "div.x"',
+		'    open val count by lazy { 41 }',
+		'    open val other = "o"',
+		'}',
+		''
+	];
+
+	it('reads the base value while the override is being initialised', () => {
+		const emission = translate(
+			kt(
+				...template,
+				'class Child : Base() {',
+				'    override val sel = ".a, ${super.sel}"',
+				'    override val count = super.count + 1',
+				'    fun both() = sel + "|" + count + "|" + super.other',
+				'}'
+			)
+		);
+		expect(emission.refusals).toEqual([]);
+		const make = new Function(
+			'__k',
+			...Object.keys(defaults),
+			`${emission.js}\nreturn new Child();`
+		) as (...args: unknown[]) => Instance;
+		const child = make(runtime, ...Object.values(defaults));
+		expect(child.both()).toBe('.a, div.x|42|o');
+	});
+
+	it('still refuses a sibling property the subclass also overrides', () => {
+		// By the time `sel` is initialised, `other` holds the subclass's value,
+		// not the template's, so there is no base value left to read.
+		expect(
+			refusalNames(
+				kt(
+					...template,
+					'class Child : Base() {',
+					'    override val other = "mine"',
+					'    override val sel = super.other',
+					'}'
+				)
+			)
+		).toContain('`super.` used as a property');
+	});
+});

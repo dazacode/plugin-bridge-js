@@ -1080,6 +1080,13 @@ class Emitter {
 	private readonly translated: string[] = [];
 	private pending: Untranslatable[] = [];
 	private memberName = '';
+	/**
+	 * The property whose initialiser is being emitted as a constructor
+	 * assignment, and whether it read its own base value through `super.`.
+	 * See the `super_expression` branch of `navigation`.
+	 */
+	private initialising: string | null = null;
+	private superSelfRead = false;
 
 	private readonly scopes: Map<string, Local>[] = [];
 	private readonly frames: Frame[] = [];
@@ -2847,7 +2854,19 @@ class Emitter {
 		let deferred = readsBase;
 		const text = this.member(name, node, () => {
 			const before = new Set(this.used);
-			const value = this.propertyValue(node, name);
+			const outerInitialising = this.initialising;
+			const outerSelfRead = this.superSelfRead;
+			this.initialising = name;
+			this.superSelfRead = false;
+			let value: string;
+			let readItsBase: boolean;
+			try {
+				value = this.propertyValue(node, name);
+				readItsBase = this.superSelfRead;
+			} finally {
+				this.initialising = outerInitialising;
+				this.superSelfRead = outerSelfRead;
+			}
 			if (!mutable && !deferred) {
 				for (const helper of this.used) {
 					if (before.has(helper)) continue;
@@ -2856,6 +2875,10 @@ class Emitter {
 					break;
 				}
 			}
+			// A getter runs after the template's constructor assignment has
+			// already been replaced by this one's setter, so `this.name` there
+			// is not the base value any more. See `navigation`.
+			if (deferred && readItsBase) this.refuse(node, '`super.` used as a property');
 			return deferred
 				? this.overridable(
 						name,
@@ -6486,6 +6509,34 @@ class Emitter {
 			const base = kids(node)[kids(node).length - 1];
 			const property = kids(base).find((child) => child.type === 'simple_identifier')?.text;
 			if (property !== undefined && SUPER_BASE_PROPERTIES.has(property)) return property;
+			// **A property a translated template declares is on the instance**,
+			// and there are exactly two moments at which reading it there is
+			// reading the base's value:
+			//
+			// - the subclass does not declare it at all, so nothing has replaced
+			//   what the template put there;
+			// - it is the very property being initialised, in the constructor,
+			//   after `super()` — `override val genres = super.genres + "yaoi"`.
+			//   The template's assignment has run and the subclass's has not, so
+			//   the instance still holds the base value, which is what Kotlin's
+			//   `super.genres` reads. `classProperty` refuses it after all if it
+			//   turns out to be emitted as a deferred getter instead, where that
+			//   stops being true.
+			//
+			// Anything else — a sibling property the subclass also overrides —
+			// has lost its base value by the time it could be read, and stays
+			// refused.
+			if (
+				property !== undefined &&
+				this.ownerBase !== null &&
+				this.baseDeclares(this.ownerBase, property)
+			) {
+				if (this.initialising === property) {
+					this.superSelfRead = true;
+					return `${this.selfReference()}.${property}`;
+				}
+				if (!this.classMembers.has(property)) return `${this.selfReference()}.${property}`;
+			}
 			// Everything else: `__super` holds methods, not fields, and the rest
 			// of the base's state lives on the source object, which `this`
 			// already reaches.
