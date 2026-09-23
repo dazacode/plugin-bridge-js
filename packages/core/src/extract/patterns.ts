@@ -528,6 +528,32 @@ const MIN_DICTIONARY = 8;
 const MAX_SUBSTITUTIONS = 100_000;
 
 /**
+ * An identifier as this obfuscator writes one: `_0x` and hex, optionally behind
+ * a prefix (its `identifiersPrefix` option, `a0_0x51fb` by default in some
+ * builds). Top-level names carry the prefix and locals do not, so every reader
+ * below accepts both — a pattern that only knew the bare form declined every
+ * prefixed build outright, returning null for a source it could read.
+ */
+const OBFUSCATED_NAME = '[A-Za-z_$][\\w$]*?_0x[0-9a-fA-F]+|_0x[0-9a-fA-F]+';
+
+/** A name as a literal inside a larger regular expression. */
+function literalName(name: string): string {
+	return name.replace(/[$]/g, '\\$');
+}
+
+/**
+ * The rotation loop's own statement: the array's first entry moved to its end.
+ *
+ * Asked separately from the call that closes the loop, because the two answer
+ * different questions. The call supplies the target; this says a rotation
+ * *exists*. A source that rotates but whose call this cannot read must not be
+ * read as though it did not rotate — that is how every string came out shifted
+ * by a few places, confidently, with nothing to say so.
+ */
+const ROTATES =
+	/\[\s*(['"])push\1\s*\]\s*\(\s*[\w$]+\s*\[\s*(['"])shift\2\s*\]\s*\(\s*\)\s*\)|\.push\(\s*[\w$]+\.shift\(\s*\)\s*\)/;
+
+/**
  * A radix-64 alphabet written out in full, as this obfuscator's decoder does.
  *
  * Matched by *shape* rather than compared against a constant, because the
@@ -582,7 +608,7 @@ function readInteger(text: string): number | null {
  * and the ordering are all there is to it.
  */
 function readDictionary(source: string): { name: string; items: string[] } | null {
-	const declaration = /function\s+(_0x[0-9a-fA-F]+)\s*\(\s*\)\s*\{/g;
+	const declaration = new RegExp('function\\s+(' + OBFUSCATED_NAME + ')\\s*\\(\\s*\\)\\s*\\{', 'g');
 	for (let found = declaration.exec(source); found !== null; found = declaration.exec(source)) {
 		const body = balancedBraces(source, found.index + found[0].length - 1);
 		if (body === null) continue;
@@ -612,8 +638,11 @@ function readDictionary(source: string): { name: string; items: string[] } | nul
 function readDecoder(
 	source: string,
 	dictionary: string
-): { name: string; offset: number; alphabet: string | null } | null {
-	const declaration = /function\s+(_0x[0-9a-fA-F]+)\s*\(([^)]*)\)\s*\{/g;
+): { name: string; offset: number; alphabet: string | null; keyed: boolean } | null {
+	const declaration = new RegExp(
+		'function\\s+(' + OBFUSCATED_NAME + ')\\s*\\(([^)]*)\\)\\s*\\{',
+		'g'
+	);
 	for (let found = declaration.exec(source); found !== null; found = declaration.exec(source)) {
 		if (found[1] === dictionary || found[2].trim().length === 0) continue;
 
@@ -623,9 +652,28 @@ function readDecoder(
 		const shift = /=\s*\w+\s*-\s*(0[xX][0-9a-fA-F]+|\d+)/.exec(body.body);
 		const offset = shift === null ? 0 : (readInteger(shift[1]) ?? 0);
 		const table = RADIX_64_ALPHABET.exec(body.body);
-		return { name: found[1], offset, alphabet: table === null ? null : table[1] };
+		return {
+			name: found[1],
+			offset,
+			alphabet: table === null ? null : table[1],
+			keyed: usesKey(body.body)
+		};
 	}
 	return null;
+}
+
+/**
+ * Whether a decoder decrypts with a key, as the RC4 build does.
+ *
+ * That build radix-64 decodes an entry and then runs RC4 over it, keyed by the
+ * call site's second argument. This file has no RC4 and the key is per call, so
+ * decoding the radix-64 layer alone would answer every string as ciphertext
+ * that happens to be printable — a wrong string in the one place a reader looks
+ * for hosts. The key schedule's `% 0x100` over a 256-entry state is the shape
+ * that gives it away, and a decoder carrying it is declined.
+ */
+function usesKey(body: string): boolean {
+	return /%\s*(?:0x100|256)\b/.test(body) && /(?:0x100|256)\s*;/.test(body);
 }
 
 /**
@@ -640,7 +688,10 @@ function readDecoder(
  */
 function decoderNames(source: string, decoder: string): Set<string> {
 	const direct = new Map<string, string>();
-	const assignment = /(_0x[0-9a-fA-F]+)\s*=\s*(_0x[0-9a-fA-F]+)\s*[;,)]/g;
+	const assignment = new RegExp(
+		'(?<![\\w$])(' + OBFUSCATED_NAME + ')\\s*=\\s*(' + OBFUSCATED_NAME + ')\\s*[;,)]',
+		'g'
+	);
 	for (let one = assignment.exec(source); one !== null; one = assignment.exec(source)) {
 		direct.set(one[1], one[2]);
 	}
@@ -669,7 +720,7 @@ function decoderNames(source: string, decoder: string): Set<string> {
  */
 function numericTables(source: string): Map<string, number> {
 	const tables = new Map<string, number>();
-	const table = /(_0x[0-9a-fA-F]+)\s*=\s*\{([^{}]*)\}/g;
+	const table = new RegExp('(?<![\\w$])(' + OBFUSCATED_NAME + ')\\s*=\\s*\\{([^{}]*)\\}', 'g');
 	for (let one = table.exec(source); one !== null; one = table.exec(source)) {
 		const field = /(_0x[0-9a-fA-F]+)\s*:\s*(0[xX][0-9a-fA-F]+|\d+)/g;
 		for (let f = field.exec(one[2]); f !== null; f = field.exec(one[2])) {
@@ -761,10 +812,13 @@ function evaluateChecksum(
 			const index = readInteger(literal[1]);
 			return index === null ? null : read(index);
 		}
-		const indirect =
-			/^parseInt\(\s*[A-Za-z_$][\w$]*\(\s*(_0x[0-9a-fA-F]+)\.(_0x[0-9a-fA-F]+)\s*\)\s*\)/.exec(
-				rest
-			);
+		const indirect = new RegExp(
+			'^parseInt\\(\\s*[A-Za-z_$][\\w$]*\\(\\s*(' +
+				OBFUSCATED_NAME +
+				')\\.(' +
+				OBFUSCATED_NAME +
+				')\\s*\\)\\s*\\)'
+		).exec(rest);
 		if (indirect !== null) {
 			const index = tables.get(indirect[1] + '.' + indirect[2]);
 			if (index === undefined) return null;
@@ -820,10 +874,20 @@ function evaluateChecksum(
  * who ran it, and it is worth defeating once here rather than per ecosystem.
  *
  * Nothing is executed. The dictionary and the index offset are read as data,
- * the radix-64 layer is `base64Decode`, and the rotation is driven from outside
- * by parsing its checksum. Returns `null` when the input is not in this form,
- * when the rotation does not converge within its bound, or when it is too large
- * to look at.
+ * the radix-64 layer is `decodeRadix64` over the decoder's own alphabet, and
+ * the rotation is driven from outside by parsing its checksum, exactly as the
+ * loop drives itself. Calls are rewritten only after the rotation's closing
+ * call, so the checksum still reads the dictionary as it turns and the output
+ * still runs. `fixtures/string-array/` holds the obfuscator's own output with
+ * expected text produced by executing it, and the spec holds this to that.
+ *
+ * Returns `null` — which a caller reads as "not in this form", and then uses
+ * the source as it is — whenever the answer would not be certain: the input is
+ * not in this form or too large; the source rotates and the rotation's call or
+ * checksum cannot be read, or does not converge within its bound; or the
+ * decoder decrypts with a per-call key (the RC4 build), which this file cannot.
+ * A checksum reached only through the obfuscator's offset-shifting wrapper
+ * functions is one it cannot read, and so declines as well.
  *
  * ## Why a caller should care
  *
@@ -840,13 +904,13 @@ export function unpackStringArray(source: string): string | null {
 	if (dictionary === null) return null;
 
 	const decoder = readDecoder(source, dictionary.name);
-	if (decoder === null) return null;
+	if (decoder === null || decoder.keyed) return null;
 
 	const items = dictionary.items.slice();
 	let cache = new Map<number, string>();
-	const decode = (index: number): string => {
+	const decode = (index: number): string | undefined => {
 		const at = index - decoder.offset;
-		if (at < 0 || at >= items.length) return '';
+		if (at < 0 || at >= items.length) return undefined;
 		const hit = cache.get(at);
 		if (hit !== undefined) return hit;
 		const value =
@@ -857,55 +921,107 @@ export function unpackStringArray(source: string): string | null {
 
 	const tables = numericTables(source);
 
-	// The rotation, when there is one. `}(dictionary, target))` is the call
-	// that closes the self-checking loop, and the `const … = -parseInt(…` just
-	// above it is the checksum whose value that target is.
+	// The rotation, when there is one. `}(dictionary, target)` is the call that
+	// closes the self-checking loop, and the `var … = -parseInt(…` inside it is
+	// the checksum whose value that target is.
+	//
+	// What follows the call is not part of it. The obfuscator usually writes the
+	// program after it with a comma — `}(dict, 0xd9f3b), (function () {…}())` —
+	// and a pattern that demanded a closing parenthesis there found no rotation
+	// at all, then read the dictionary unrotated: every string shifted by the
+	// same few places, output that parsed and ran and was wrong.
 	const closing = new RegExp(
-		'\\}\\s*\\(\\s*' + dictionary.name + '\\s*,\\s*(0[xX][0-9a-fA-F]+|\\d+)\\s*\\)\\s*\\)'
+		'\\}\\s*\\(\\s*' + literalName(dictionary.name) + '\\s*,\\s*(0[xX][0-9a-fA-F]+|\\d+)\\s*\\)'
 	);
 	const rotation = closing.exec(source);
-	if (rotation !== null) {
+
+	// Where rewriting may start. Everything before the end of the rotation call
+	// is left exactly as written: the checksum reads the dictionary *while* it
+	// is being rotated, and a call rewritten there to its settled value turns the
+	// loop's test into a constant, and the loop into one that never ends.
+	let rewriteFrom = 0;
+
+	if (rotation !== null || ROTATES.test(source)) {
+		// A source that rotates and whose rotation cannot be read is declined,
+		// never read as though it did not rotate.
+		if (rotation === null) return null;
 		const target = readInteger(rotation[1]);
-		const checksum =
-			/(?:const|let|var)\s+_0x[0-9a-fA-F]+\s*=\s*(-?\s*parseInt[\s\S]*?);\s*if\s*\(/.exec(source);
-		if (target !== null && checksum !== null) {
-			let shifted = 0;
-			for (; shifted < MAX_ROTATIONS; shifted++) {
-				cache = new Map<number, string>();
-				const value = evaluateChecksum(checksum[1], (i) => parseInt(decode(i), 10), tables);
-				if (value === target) break;
-				const first = items.shift();
-				if (first === undefined) return null;
-				items.push(first);
-			}
-			if (shifted >= MAX_ROTATIONS) return null;
-			cache = new Map<number, string>();
+		const checksumPattern = new RegExp(
+			'(?:const|let|var)\\s+(?:' +
+				OBFUSCATED_NAME +
+				')\\s*=\\s*(-?\\s*parseInt[\\s\\S]*?);\\s*if\\s*\\(',
+			'g'
+		);
+		// The checksum is the one *inside* this loop: the last before its call.
+		let checksum: string | null = null;
+		for (
+			let one = checksumPattern.exec(source);
+			one !== null && one.index < rotation.index;
+			one = checksumPattern.exec(source)
+		) {
+			checksum = one[1];
 		}
+		if (target === null || checksum === null) return null;
+
+		// Driven exactly as the loop drives itself: from no shift, one entry at a
+		// time, stopping at the first arrangement whose checksum is the target.
+		// `parseInt` with no radix, as the loop calls it — a radix of ten reads
+		// an entry beginning `0x` differently from the code being imitated.
+		let shifted = 0;
+		for (; shifted < MAX_ROTATIONS; shifted++) {
+			cache = new Map<number, string>();
+			const value = evaluateChecksum(
+				checksum,
+				(i) => {
+					const entry = decode(i);
+					return entry === undefined ? Number.NaN : parseInt(entry);
+				},
+				tables
+			);
+			if (value === target) break;
+			const first = items.shift();
+			if (first === undefined) return null;
+			items.push(first);
+		}
+		if (shifted >= MAX_ROTATIONS) return null;
+		cache = new Map<number, string>();
+		rewriteFrom = rotation.index + rotation[0].length;
 	}
 
 	const names = decoderNames(source, decoder.name);
 	const group: string[] = [];
-	names.forEach((one) => group.push(one));
+	names.forEach((one) => group.push(literalName(one)));
 	const alternation = group.join('|');
 
 	let substitutions = 0;
 	const replaceCall = (whole: string, index: number | undefined): string => {
 		if (index === undefined || substitutions >= MAX_SUBSTITUTIONS) return whole;
 		const value = decode(index);
-		if (value === '') return whole;
+		if (value === undefined || value === '') return whole;
 		substitutions++;
 		return JSON.stringify(value);
 	};
 
-	let out = source.replace(
-		new RegExp('(?:' + alternation + ')\\((0[xX][0-9a-fA-F]+|\\d+)\\)', 'g'),
-		(whole, digits: string) => replaceCall(whole, readInteger(digits) ?? undefined)
-	);
-	out = out.replace(
-		new RegExp('(?:' + alternation + ')\\((_0x[0-9a-fA-F]+)\\.(_0x[0-9a-fA-F]+)\\)', 'g'),
+	let rest = source
+		.slice(rewriteFrom)
+		.replace(
+			new RegExp('(?<![\\w$])(?:' + alternation + ')\\((0[xX][0-9a-fA-F]+|\\d+)\\)', 'g'),
+			(whole, digits: string) => replaceCall(whole, readInteger(digits) ?? undefined)
+		);
+	rest = rest.replace(
+		new RegExp(
+			'(?<![\\w$])(?:' +
+				alternation +
+				')\\((' +
+				OBFUSCATED_NAME +
+				')\\.(' +
+				OBFUSCATED_NAME +
+				')\\)',
+			'g'
+		),
 		(whole, owner: string, key: string) => replaceCall(whole, tables.get(owner + '.' + key))
 	);
-	return out;
+	return source.slice(0, rewriteFrom) + rest;
 }
 
 /* -------------------------------------------------------------------------

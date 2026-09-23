@@ -900,3 +900,72 @@ describe('the transforms together', () => {
 		expect(findManifestUrls(base64Decode((match as RegExpExecArray)[1]))).toEqual([url]);
 	});
 });
+
+/* -------------------------------------------------------------------------
+ * unpackStringArray, against the source it reads, executed
+ *
+ * The synthetic fixtures above are built the way the reader reads, which makes
+ * them good at telling when it stops understanding the scheme and blind to the
+ * scheme being something else. These are the obfuscator's own output — one
+ * small program put through its string-array options one at a time — and the
+ * expected text was produced by *running* each sample and asking its own
+ * decoder, after its own rotation, what every call answers
+ * (`fixtures/string-array/generate.mjs`, the only place anything runs). This
+ * spec executes nothing.
+ *
+ * Before this: every rotated sample came out with every string shifted by the
+ * same few places — the rotation was never found, because the obfuscator
+ * follows its closing call with a comma and the reader demanded a parenthesis —
+ * and output that ran looped forever, its checksum rewritten into a constant.
+ * Every prefixed sample (`a0_0x…`) came back null.
+ * ---------------------------------------------------------------------- */
+
+describe('unpackStringArray, against its execution oracle', () => {
+	const directory = fileURLToPath(new URL('../../../../fixtures/string-array/', import.meta.url));
+	const expected = JSON.parse(readFileSync(`${directory}expected.json`, 'utf8')) as Record<
+		string,
+		string | null
+	>;
+
+	it('has the whole set of samples to check', () => {
+		// So that a sample dropped from the directory is a failure, not a pass.
+		expect(Object.keys(expected).sort()).toEqual([
+			'base64',
+			'base64-flattened',
+			'base64-prefixed',
+			'calls-transform',
+			'prefixed',
+			'rc4',
+			'rotated',
+			'rotated-comma',
+			'rotated-comma-prefixed',
+			'self-rebinding',
+			'shuffled-index-shift',
+			'unrotated',
+			'unrotated-prefixed',
+			'wrappers'
+		]);
+	});
+
+	for (const [name, output] of Object.entries(expected)) {
+		it(
+			output === null
+				? `declines ${name}, which it cannot read with certainty`
+				: `reads ${name} exactly as running it does`,
+			() => {
+				const source = readFileSync(`${directory}samples/${name}.js`, 'utf8');
+				expect(unpackStringArray(source)).toBe(output);
+			}
+		);
+	}
+
+	it('declines a rotated source whose rotation it cannot find, rather than reading it unrotated', () => {
+		const source = readFileSync(`${directory}samples/rotated-comma.js`, 'utf8');
+		// The closing call's target, made unreadable. The loop is still there,
+		// so the dictionary still rotates when it runs; reading it as though it
+		// did not is exactly the silent shift this used to produce.
+		const broken = source.replace(/\}\(_0x5a4a,0xd9f3b\)/, '}(_0x5a4a,target)');
+		expect(broken).not.toBe(source);
+		expect(unpackStringArray(broken)).toBeNull();
+	});
+});

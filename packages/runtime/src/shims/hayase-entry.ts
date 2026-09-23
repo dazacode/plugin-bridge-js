@@ -58,6 +58,7 @@
  */
 
 import { JS_RUNTIME } from './js-runtime';
+import { STREAM_GUARDS } from './stream-guards';
 
 export interface HayaseEntrypointOptions {
 	readonly pluginId: string;
@@ -118,6 +119,7 @@ export function hayaseEntrypoint(options: HayaseEntrypointOptions): string {
 	const constants = [`const __PLUGIN_ID = ${JSON.stringify(options.pluginId)};`].join('\n');
 
 	return `${JS_RUNTIME}
+${STREAM_GUARDS}
 ${constants}
 
 /**
@@ -219,79 +221,20 @@ function __method(name) {
   return typeof fn === 'function' ? fn.bind(source) : null;
 }
 
-/** Base32, for the info hashes a magnet may carry instead of hex. */
-function __base32(value) {
-  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
-  let bits = 0;
-  let acc = 0;
-  const out = [];
-  const text = String(value).toUpperCase().replace(/=+$/, '');
-  for (let i = 0; i < text.length; i += 1) {
-    const index = alphabet.indexOf(text.charAt(i));
-    if (index < 0) return null;
-    acc = (acc << 5) | index;
-    bits += 5;
-    if (bits >= 8) {
-      bits -= 8;
-      out.push((acc >> bits) & 0xff);
-    }
-  }
-  if (out.length !== 20) return null;
-  let hex = '';
-  for (let i = 0; i < out.length; i += 1) hex += ('0' + out[i].toString(16)).slice(-2);
-  return hex;
-}
-
-function __hex40(value) {
-  const text = String(value == null ? '' : value).trim();
-  return /^[0-9a-fA-F]{40}$/.test(text) ? text.toLowerCase() : null;
-}
-
-/**
- * One row's info hash, from whichever field carries it.
- *
- * Three real spellings, in the order they are trusted: the declared 'hash';
- * the 'xt=urn:btih:' of a magnet, hex or base32; and a 'link' that is itself a
- * bare hash, which is what the ecosystem's public-domain example publishes.
- * A '.torrent' URL carries its hash only inside bencode behind a SHA-1 of the
- * info dictionary — that is a parser this build does not have, and it refuses
- * by returning nothing rather than by guessing.
- */
-function __infoHash(row) {
-  const declared = __hex40(row.hash) || __base32(String(row.hash || ''));
-  if (declared !== null) return declared;
-  const link = String(row.link || row.magnet || '');
-  const found = /xt=urn:btih:([0-9a-zA-Z]+)/i.exec(link);
-  if (found !== null) {
-    const hex = __hex40(found[1]) || __base32(found[1]);
-    if (hex !== null) return hex;
-  }
-  return __hex40(link);
-}
-
-/** The trackers a magnet names, which a swarm can be joined faster with. */
-function __trackers(row) {
-  const link = String(row.link || row.magnet || '');
-  const out = [];
-  const pattern = /[?&]tr=([^&]+)/g;
-  let match = pattern.exec(link);
-  while (match !== null) {
-    try { out.push(decodeURIComponent(match[1])); } catch (error) { /* skip */ }
-    match = pattern.exec(link);
-  }
-  return out;
-}
-
 /** One row as a playback source, or null when it carries no torrent. */
 function __playable(row) {
   if (!row || typeof row !== 'object') return null;
-  const infoHash = __infoHash(row);
-  if (infoHash === null) return null;
-  const trackers = __trackers(row);
+  // The declared 'hash', a magnet's 'xt=urn:btih:' (hex or base32) and a
+  // 'link' that is itself a bare hash, in that order of trust — read by the
+  // helper every torrent-carrying shim shares, so one row is one torrent in
+  // all of them. A '.torrent' url is refused there rather than guessed at.
+  const found = __torrentOf({ hash: row.hash, magnet: row.magnet, link: row.link });
+  if (found === null) return null;
+  const trackers = found.trackers;
   const label = String(row.title || row.name || '').trim();
   return {
     torrent: {
-      infoHash: infoHash,
+      infoHash: found.infoHash,
       ...(trackers.length > 0 ? { sources: trackers } : {})
     },
     label: label.length > 0 ? label : 'Torrent'
