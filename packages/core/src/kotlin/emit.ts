@@ -7885,10 +7885,17 @@ class Emitter {
 			const declarative = this.declarativeInterceptor(suffix, receiver, args[0]);
 			if (declarative !== null) return declarative;
 		}
+		// A named argument to `indexOf`/`lastIndexOf` is `ignoreCase` or
+		// `startIndex`, which only Kotlin's own reads: see `KNOWN_SIGNATURES`.
+		const namedSearch =
+			(name === 'indexOf' || name === 'lastIndexOf') &&
+			args.some((arg) => arg.allChildren.some((child) => child.type === '='));
 		const helper = indexed
 			? 'getAt'
 			: scopeFunction && !shadowed
-				? EXTENSION_METHODS.get(name)
+				? namedSearch
+					? name
+					: EXTENSION_METHODS.get(name)
 				: undefined;
 		if (helper !== undefined) {
 			const before = this.asyncLambdas;
@@ -8057,7 +8064,16 @@ class Emitter {
 			(receiverText === 'this' || receiverText === this.selfReference());
 		const ownMember = ownReceiver && this.isSourceMember(name);
 		const declared = this.declaredMethods.has(name) || ownMember;
-		if (!HOST_METHODS.has(name) && !crossFileObject && !declared && scopeFunction) {
+		// java.util.Base64's coders: `Base64.getDecoder().decode(text)`. `decode`
+		// and `withoutPadding` are not on the allowlist — the first is too common
+		// a word to pass through on any receiver — so they pass here only on the
+		// accessor that returns one of the runtime's coders.
+		const javaCoder =
+			(name === 'decode' || name === 'withoutPadding' || name === 'encodeToString') &&
+			/\.get(?:Url|Mime)?(?:Decoder|Encoder)\(\)(?:\.withoutPadding\(\))?$/.test(
+				receiver.text.replace(/\s+/g, '')
+			);
+		if (!HOST_METHODS.has(name) && !crossFileObject && !declared && scopeFunction && !javaCoder) {
 			// Passthrough is an allowlist. See the file header: a fallback turns
 			// an unrecognised Kotlin helper into a call on a shim that has never
 			// heard of it, and the failure then happens inside a sandbox rather
@@ -8066,18 +8082,27 @@ class Emitter {
 		}
 		const argumentLambda = ARGUMENT_LAMBDA_METHODS.has(name);
 		const builderLambda = lambda !== null && (BUILDER_LAMBDA_METHODS.has(name) || argumentLambda);
-		if (lambda !== null && !builderLambda) this.refuse(lambda, `a lambda passed to \`.${name}()\``);
+		const trailing =
+			lambda !== null && !builderLambda && declared
+				? this.trailingLambdaArguments(name, receiver, args, lambda, labelled)
+				: null;
+		if (lambda !== null && !builderLambda && trailing === null) {
+			this.refuse(lambda, `a lambda passed to \`.${name}()\``);
+		}
 
-		const argumentsText = builderLambda
-			? this.callArguments(
-					name,
-					args,
-					lambda,
-					labelled,
-					!argumentLambda,
-					argumentLambda ? null : modelTypeOf(receiver)
-				)
-			: this.plainArguments(name, args, this.receiverTypeOf(receiver));
+		const argumentsText =
+			trailing !== null
+				? trailing
+				: builderLambda
+					? this.callArguments(
+							name,
+							args,
+							lambda,
+							labelled,
+							!argumentLambda,
+							argumentLambda ? null : modelTypeOf(receiver)
+						)
+					: this.plainArguments(name, args, this.receiverTypeOf(receiver));
 		// `element.parent()` is a jsoup call and a runtime field; see
 		// `HOST_PROPERTY_METHODS` for what emitting it as written cost.
 		if (argumentsText.length === 0 && HOST_PROPERTY_METHODS.has(name) && !declared) {
@@ -8545,6 +8570,47 @@ class Emitter {
 			}
 		}
 		return out;
+	}
+
+	/**
+	 * `VidHideExtractor(client, headers).videosFromUrl(url) { quality -> quality }`
+	 * — a trailing lambda to a method this unit declares, on a receiver whose
+	 * class is known. Null when either is not the case, and the caller refuses.
+	 *
+	 * Kotlin binds a trailing lambda to the *last* parameter, whatever sits
+	 * between: `videosFromUrl(url, prefix = "", videoNameGen)` called as
+	 * `videosFromUrl(url) { … }` leaves `prefix` at its default. So the lambda
+	 * goes in the last slot of the declared signature and every slot skipped on
+	 * the way is `undefined`, which is what makes a JavaScript default parameter
+	 * — the emitted declaration's own — apply. The signature is the receiver
+	 * class's own (`qualifiedSignatures`), never the name's across the unit:
+	 * this ecosystem declares `videosFromUrl` in forty extractors, with forty
+	 * parameter lists.
+	 *
+	 * Positional arguments only. A named argument before the block is a
+	 * placement question `plainArguments` answers for plain calls and this does
+	 * not try to.
+	 */
+	private trailingLambdaArguments(
+		name: string,
+		receiver: KNode,
+		args: KNode[],
+		lambda: KNode,
+		labelled: string | null
+	): string[] | null {
+		if (args.some((arg) => arg.allChildren.some((child) => child.type === '='))) return null;
+		const owner = this.receiverTypeOf(receiver);
+		if (owner === null) return null;
+		const signature = this.qualifiedSignatures.get(`${owner}.${name}`);
+		if (signature === undefined || signature.length === 0) return null;
+		if (args.length > signature.length - 1) return null;
+		const out = this.callArguments(name, args, lambda, labelled, false);
+		const given = out.slice(0, -1);
+		if (given.length !== args.length || given.some((one) => one.startsWith('...'))) {
+			this.refuse(lambda, `a lambda passed to \`.${name}()\` after a spread`);
+		}
+		const skipped = signature.length - 1 - given.length;
+		return [...given, ...Array.from({ length: skipped }, () => 'undefined'), out[out.length - 1]];
 	}
 
 	/**

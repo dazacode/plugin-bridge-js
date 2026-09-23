@@ -2174,19 +2174,36 @@ var Base64 = {
    * java.util.Base64's getDecoder()/getEncoder(), which android's Base64 is not.
    *
    * Two different classes with the same name: android's is all statics, and
-   * java.util's hands back a coder first. Both spell the work 'decode', so the
-   * accessor can answer this same object and every call site is satisfied.
+   * java.util's hands back a coder first. The decoders can be this same object
+   * - both spell the work 'decode(value)', and a flag argument never arrives.
+   * The encoders cannot: java.util's basic encoder never wraps and never ends
+   * in a newline, and answering with this object made 'encodeToString(bytes)'
+   * android's DEFAULT, which wraps at 76 and appends one. See '__javaEncoder'.
    */
   getDecoder: function () { return Base64; },
-  getEncoder: function () { return Base64; },
+  getMimeDecoder: function () { return Base64; },
+  getEncoder: function () { return __javaEncoder(2); },
   getUrlDecoder: function () { return Base64; },
-  getUrlEncoder: function () { return Base64; },
+  getUrlEncoder: function () { return __javaEncoder(2 | 8); },
 
   /** Android's encode() answers bytes; the text is the same either way. */
   encode: function (bytes, flags) {
     return __host().text.encode(Base64.encodeToString(bytes, flags));
   }
 };
+
+/**
+ * A java.util.Base64.Encoder, as the android flags that produce the same text:
+ * NO_WRAP always, URL_SAFE for the url encoder, NO_PADDING once
+ * 'withoutPadding()' asked for it.
+ */
+function __javaEncoder(flags) {
+  return {
+    encodeToString: function (bytes) { return Base64.encodeToString(bytes, flags); },
+    encode: function (bytes) { return __host().text.encode(Base64.encodeToString(bytes, flags)); },
+    withoutPadding: function () { return __javaEncoder(flags | 1); }
+  };
+}
 
 function __bytesOf(value) {
   if (value === null || value === undefined) return __host().text.encode('');
@@ -2552,6 +2569,30 @@ var __k = {
     var items = __arr(haystack);
     for (var i = 0; i < items.length; i += 1) if (items[i] === needle) return true;
     return false;
+  },
+
+  /**
+   * Kotlin's CharSequence.indexOf(other, startIndex, ignoreCase), reached only
+   * when the call named an argument - 'indexOf("English", ignoreCase = true)'
+   * - because JavaScript's indexOf has no third argument and would search
+   * case-sensitively without a word. A skipped startIndex arrives undefined.
+   * Anything that is not a string keeps its own indexOf.
+   */
+  indexOf: function (value, other, startIndex, ignoreCase) {
+    if (typeof value !== 'string') return value.indexOf(other, startIndex === undefined ? 0 : startIndex);
+    var from = startIndex === undefined || startIndex === null ? 0 : Math.max(0, Number(startIndex));
+    var text = ignoreCase === true ? value.toLowerCase() : value;
+    var needle = ignoreCase === true ? __str(other).toLowerCase() : __str(other);
+    return text.indexOf(needle, from);
+  },
+
+  /* The same, searching backwards from startIndex (the end, when skipped). */
+  lastIndexOf: function (value, other, startIndex, ignoreCase) {
+    if (typeof value !== 'string') return value.lastIndexOf(other);
+    var from = startIndex === undefined || startIndex === null ? value.length : Number(startIndex);
+    var text = ignoreCase === true ? value.toLowerCase() : value;
+    var needle = ignoreCase === true ? __str(other).toLowerCase() : __str(other);
+    return from < 0 ? -1 : text.lastIndexOf(needle, from);
   },
 
   startsWith: function (value, prefix, ignoreCase) {
@@ -3007,6 +3048,34 @@ var __k = {
    * error. A String reversed is a String; reading it as a list would hand the
    * caller '["cba"]' spelled forwards.
    */
+  /** Int.inc()/dec(), and Char's, which step to the neighbouring character. */
+  inc: function (value) {
+    return __isChar(value) ? String.fromCharCode(value.charCodeAt(0) + 1) : value + 1;
+  },
+  dec: function (value) {
+    return __isChar(value) ? String.fromCharCode(value.charCodeAt(0) - 1) : value - 1;
+  },
+
+  /**
+   * groupingBy { key }: Kotlin's lazy Grouping, which does nothing until a
+   * terminal runs. eachCount() is the one this ecosystem writes - a Map from
+   * each key to how many elements had it, in first-seen order, as the
+   * LinkedHashMap Kotlin answers.
+   */
+  groupingBy: function (list, keyOf) {
+    var items = __arr(list);
+    return {
+      eachCount: function () {
+        var counts = new Map();
+        for (var i = 0; i < items.length; i += 1) {
+          var key = keyOf(items[i]);
+          counts.set(key, (counts.get(key) || 0) + 1);
+        }
+        return counts;
+      }
+    };
+  },
+
   reversed: function (list) {
     if (__isComparator(list)) {
       return __comparator(function (a, b) { return -list(a, b); });
@@ -4787,8 +4856,24 @@ var __k = {
     }).join('\\n');
   },
 
-  /** Base64 text encoding for the common no-wrap byte-array extension. */
-  encodeToString: function (value) { return Base64.encodeToString(value, Base64.NO_WRAP); },
+  /**
+   * encodeToString, which three different Kotlin APIs spell the same way.
+   *
+   * With one argument it is the byte-array extension this helper was written
+   * for: Base64 text, unwrapped. With a receiver AND a value it is a coder
+   * being asked to encode something - kotlinx's 'json.encodeToString(value)',
+   * or java.util's 'Base64.getEncoder().encodeToString(bytes)' - and the coder
+   * does the work. Treated as the first, both encoded the CODER: AniList's
+   * GraphQL variables went out as the Base64 of the Json object, and the
+   * source answered every search with an error.
+   */
+  encodeToString: function (value, other) {
+    if (arguments.length >= 2 && value !== null && value !== undefined &&
+        typeof value.encodeToString === 'function') {
+      return value.encodeToString.apply(value, Array.prototype.slice.call(arguments, 1));
+    }
+    return Base64.encodeToString(value, Base64.NO_WRAP);
+  },
 
   /** A CharArray, which this runtime models as an array of one-char strings. */
   toCharArray: function (value) { return __str(value).split(''); },
@@ -9912,7 +9997,17 @@ __k.extractNextJs = function (receiver, type, predicate) {
  */
 function Json() { return Json; }
 Json.decodeFromString = function (descriptor, text) { return __k.decode(descriptor, text); };
-Json.encodeToString = function (value) { return JSON.stringify(value); };
+Json.encodeToString = function (value) {
+  // kotlinx's two-argument form names the serializer to encode with, and this
+  // runtime runs serializers only for decoding. Stringifying the serializer
+  // object instead would post it.
+  if (arguments.length > 1) {
+    throw new Error(
+      'This converted extension encoded a value with an explicit serializer, which this runtime only runs for decoding.'
+    );
+  }
+  return JSON.stringify(value);
+};
 Json.parseToJsonElement = function (text) { return __k.decode('any', text); };
 `;
 

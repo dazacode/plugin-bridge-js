@@ -74,6 +74,10 @@ export const RUNTIME_HELPERS = [
 	'contains',
 	'startsWith',
 	'endsWith',
+	/* `indexOf`/`lastIndexOf` called with a named argument — `ignoreCase` —
+	   which JavaScript's own would drop. See `KNOWN_SIGNATURES`. */
+	'indexOf',
+	'lastIndexOf',
 	'isNotBlank',
 	'isBlank',
 	'isNotEmpty',
@@ -360,6 +364,11 @@ export const RUNTIME_HELPERS = [
 	/* jsoup's `Elements.eachText()` / `eachAttr()`, which return every match's
 	   text at once — the shortcut scraper code reaches for instead of a `map`. */
 	'eachText',
+
+	/* `Int.inc()`/`dec()` by name, and `groupingBy { }` with `eachCount()`. */
+	'inc',
+	'dec',
+	'groupingBy',
 	'eachAttr',
 
 	/* `filterIsInstance<T>()`, which is `filter` plus the type test `isType`

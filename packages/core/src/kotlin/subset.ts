@@ -867,6 +867,13 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 	['use', 'let'],
 	['orEmpty', 'orEmpty'],
 	['eachText', 'eachText'],
+	// `Int.inc()`/`dec()` — the operator functions behind `++`, called by name:
+	// `calendar.get(Calendar.YEAR).inc()`. A Char steps to its neighbour.
+	['inc', 'inc'],
+	['dec', 'dec'],
+	// `hashes.groupingBy { it.second }.eachCount()`: a Grouping, and the one
+	// terminal this ecosystem asks of it.
+	['groupingBy', 'groupingBy'],
 	['eachAttr', 'eachAttr'],
 	['filterIsInstance', 'filterIsInstance'],
 	['bodyString', 'bodyString'],
@@ -1286,6 +1293,8 @@ export const HOST_PROPERTY_METHODS: ReadonlySet<string> = new Set([
  * is a deliberate cost rather than an oversight.
  */
 export const HOST_METHODS: ReadonlySet<string> = new Set([
+	// The one terminal of a `groupingBy { }` Grouping this runtime builds.
+	'eachCount',
 	// kotlinx's JsonDecoder, as a KSerializer's `deserialize` is handed it by
 	// the typed decoder (`__jsonDecoder` in the runtime). The `encode*` half
 	// is what the same object's `serialize` writes; the runtime never calls
@@ -2483,6 +2492,14 @@ export const KNOWN_SIGNATURES: ReadonlyMap<string, readonly string[]> = new Map(
 	// ecosystem compares a header name, and it is the same trailing-boolean
 	// shape as the four above.
 	['equals', ['other', 'ignoreCase']],
+	// `description.indexOf("English", ignoreCase = true)`. Not the trailing-
+	// boolean shape above — `startIndex` sits between — so a named call is not
+	// left on the passthrough: `emit.ts` sends it to `__k.indexOf`, which takes
+	// a skipped `startIndex` as `undefined` and honours `ignoreCase`. JavaScript's
+	// own `indexOf` would drop the flag without a word. Positional calls, which
+	// mean the same in both languages, stay on the passthrough.
+	['indexOf', ['string', 'startIndex', 'ignoreCase']],
+	['lastIndexOf', ['string', 'startIndex', 'ignoreCase']],
 
 	// `AnimesPage(animes = …, hasNextPage = …)`, which a list parse returns by
 	// hand. Both halves are required, so nothing is filled with `undefined`.

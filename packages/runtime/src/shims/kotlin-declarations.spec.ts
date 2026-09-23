@@ -964,3 +964,55 @@ describe('an extension property on the settings store', () => {
 		expect(demo.add(['b', 'c'])).toEqual(['a', 'b', 'c']);
 	});
 });
+
+describe('stdlib calls that converted to the wrong thing, or not at all', () => {
+	const source = kt(
+		'import java.util.Base64',
+		'class Demo {',
+		'    private val json = Json { ignoreUnknownKeys = true }',
+		'    fun find(text: String) = text.indexOf("english", ignoreCase = true)',
+		'    fun findFrom(text: String) = text.indexOf("a", startIndex = 2)',
+		'    fun next(year: Int) = year.inc()',
+		'    fun counts(pairs: List<Pair<String, String>>) = pairs.groupingBy { it.second }.eachCount()',
+		'    fun decoded(text: String) = String(Base64.getDecoder().decode(text))',
+		'    fun encoded(text: String) = Base64.getEncoder().encodeToString(text.toByteArray())',
+		'    fun urlSafe(text: String) = Base64.getUrlEncoder().withoutPadding().encodeToString(text.toByteArray())',
+		'    fun variables() = json.encodeToString(buildJsonObject { put("page", 2) })',
+		'    fun named(url: String) = Namer().name(url) { it.uppercase() }',
+		'}',
+		'class Namer {',
+		'    fun name(url: String, prefix: String = "p:", gen: (String) -> String = { it }): String = prefix + gen(url)',
+		'}'
+	);
+
+	it('answers each as Kotlin does', async () => {
+		const demo = await instantiate('Demo', source);
+		// JavaScript's indexOf has no third argument and would search
+		// case-sensitively: -1.
+		expect(demo.find('In English')).toBe(3);
+		expect(demo.findFrom('aaa')).toBe(2);
+		expect(demo.next(2025)).toBe(2026);
+		expect([
+			...demo.counts(
+				[
+					['a', 'x'],
+					['b', 'y'],
+					['c', 'x']
+				].map(([first, second]) => ({ first, second }))
+			)
+		]).toEqual([
+			['x', 2],
+			['y', 1]
+		]);
+		expect(demo.decoded('aGVsbG8=')).toBe('hello');
+		// java.util's basic encoder never wraps or ends in a newline, which
+		// android's DEFAULT does.
+		expect(demo.encoded('x'.repeat(80))).toBe(Buffer.from('x'.repeat(80)).toString('base64'));
+		expect(demo.urlSafe('øÿ~')).toBe(Buffer.from('øÿ~').toString('base64url'));
+		// The coder encodes the value, not itself.
+		expect(JSON.parse(demo.variables())).toEqual({ page: 2 });
+		// A trailing lambda to a declared method binds its LAST parameter; the
+		// one skipped on the way keeps its default.
+		expect(demo.named('u')).toBe('p:U');
+	});
+});
