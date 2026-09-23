@@ -1133,6 +1133,38 @@ describe('a decode whose type is written where the value goes', () => {
 		expect(demo.w()).toBe('42');
 	});
 
+	it('reads the type off a generated serializer, through core’s jsonInstance', async () => {
+		// `jsonInstance.decodeFromString(Payload.serializer(), text)`: the
+		// serializer names the type, and `jsonInstance` is the injected Json —
+		// read as a member of the source it was undefined, and the decode threw
+		// into the `runCatching` and answered null.
+		const d = await instantiate(
+			'Demo',
+			kt(
+				'import keiyoushi.utils.jsonInstance',
+				'@Serializable',
+				'class Payload(@SerialName("n") val name: String)',
+				'class Demo {',
+				'    fun one(t: String): String? = runCatching { jsonInstance.decodeFromString(Payload.serializer(), t) }.getOrNull()?.name',
+				'    fun many(t: String): List<String> = jsonInstance.decodeFromString(ListSerializer(Payload.serializer()), t).map { it.name }',
+				'}'
+			)
+		);
+		expect(d.one('{"n":"x"}')).toBe('x');
+		expect(d.many('[{"n":"a"},{"n":"b"}]')).toEqual(['a', 'b']);
+		expect(
+			refusalNames(
+				kt(
+					'object Own : KSerializer<String> { }',
+					'class Demo {',
+					'    private val json = Json { ignoreUnknownKeys = true }',
+					'    fun own(t: String) = json.decodeFromString(Own, t)',
+					'}'
+				)
+			)
+		).toContain('`.decodeFromString()` with no type argument');
+	});
+
 	it('still refuses a decode with nowhere to read its type from', () => {
 		expect(
 			refusalNames(

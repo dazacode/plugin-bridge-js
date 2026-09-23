@@ -8151,7 +8151,21 @@ class Emitter {
 			// `val list: List<Foo> = response.parseAs()` — and so does this,
 			// through `expectedTypes`, which only answers where the type is
 			// written down. Nowhere to read it from is still a refusal.
-			const shape = typeArgument ?? expected;
+			//
+			// kotlinx's other spelling names the shape by its serializer instead:
+			// `json.decodeFromString(Payload.serializer(), text)`. A generated
+			// serializer — `X.serializer()`, `ListSerializer(…)` over them — IS
+			// the type, so it is read as one and dropped from the arguments; an
+			// extension's own KSerializer object is not, and stays refused.
+			const serializerForm =
+				typeArgument === null &&
+				(name === 'decodeFromString' || name === 'decodeFromJsonElement') &&
+				args.length === 2 &&
+				this.argumentName(args[0]) === null
+					? defaultSerializerType(this.argumentValue(args[0]).text.replace(/\s+/g, ''))
+					: null;
+			if (serializerForm !== null) args = args.slice(1);
+			const shape = typeArgument ?? serializerForm ?? expected;
 			if (shape === null) this.refuse(suffix, `\`.${name}()\` with no type argument`);
 			// keiyoushi core's `parseGraphQLAs<T>()`: the envelope's `data` decoded
 			// as T, its `errors` thrown — the runtime's reader, over the same type.
@@ -10686,6 +10700,18 @@ class Emitter {
 		// it is a call. Emitting the bare name hands out the function itself.
 		if (this.moduleGetters.has(name)) return `${this.safe(name)}()`;
 		if (this.moduleNames.has(name)) return this.safe(name);
+		// keiyoushi core's `jsonInstance` — the injected Json, imported by name.
+		// This runtime has one parser, so it is `Json`; read as a member of the
+		// source it was undefined, and `jsonInstance.decodeFromString(…)` threw
+		// into the `runCatching` around it and answered null. After the module's
+		// own names, so a file that declares one keeps it.
+		if (
+			name === 'jsonInstance' &&
+			this.keiyoushiImports.get(name) === 'keiyoushi.utils' &&
+			!this.classMembers.has(name)
+		) {
+			return 'Json';
+		}
 		const hoisted = this.localTypes.get(name);
 		if (hoisted !== undefined) return this.safe(hoisted);
 		// A member of the `object` this code is being emitted into, reached the
