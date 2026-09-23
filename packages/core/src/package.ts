@@ -199,8 +199,15 @@ const ENTRYPOINT = 'source';
  *     every Madara chapter list with a relative date threw, and every Madara
  *     chapter answered "Refresh the chapter list." Reconvert every bundle made
  *     at 58 or earlier.
+ * 60: interceptors on an implicit builder and network interceptors run;
+ *     `lib/synchrony`'s deobfuscator runs from the script its repository
+ *     ships; a file-scope `var` keeps its writes; four keiyoushi JSON
+ *     accessors read the value rather than undefined; a template property
+ *     is reached with the class that extends it, so six bundles that loaded
+ *     and sent every request to `undefined/…` are now refused by name.
+ *     Reconvert every bundle made at 59 or earlier.
  */
-export const CONVERTER_VERSION = 59;
+export const CONVERTER_VERSION = 60;
 
 export interface BundleInput {
 	readonly id: string;

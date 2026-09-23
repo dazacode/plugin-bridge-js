@@ -12,6 +12,103 @@ to exhaustion and deliberately closed it. `v0.1.x` is for fixes to what has
 already been promised; a minor bump whose case is "the number went up" is not a
 minor bump.
 
+## v0.6.0 — interceptors and a named deobfuscator run, and measuring a boundary is an instrument
+
+The same two whole catalogues as v0.5.0, a Mihon-family repository of 1,396
+manga listings and an Aniyomi-family repository of 256 anime listings. **1,123
+of 1,652 now load (was 1,050) and 772 reach all three probe stages (was
+691).** The manga count is net of seven listings refused on purpose (below).
+`CONVERTER_VERSION` moves from 59 to 60, so every bundle converted earlier is
+reconverted. [`docs/measurements.md`](docs/measurements.md) attributes each
+gain to the change that made it.
+
+### Capabilities
+
+- **okhttp network interceptors run.** They are kept in their own list and
+  run after every application interceptor, in okhttp's order, and
+  `newBuilder()` keeps the two lists apart. A network interceptor runs once
+  around the exchange rather than once per redirect hop, and the runtime says
+  where that differs. `addInterceptor { … }` on the implicit builder
+  `configureClient` receives now translates too. The interceptor's block is
+  async, but installing it no longer makes the installer async. _Manga: +31
+  loaded._ An interceptor never sees a page image or a stream segment,
+  because those are the host's requests. The census tags 4 of the 33
+  listings that interceptors unblocked as having one written for images.
+- **`lib/synchrony`'s deobfuscator runs.** The shared library ships a fixed,
+  prebuilt copy of synchrony and a wrapper that runs it in QuickJS. The
+  wrapper is replaced by name, one file in one module, with Kotlin that
+  keeps its signature and both of its null answers. The script is embedded
+  from the extension's own repository, and the site's script is only its
+  input, parsed and never run. That makes it the "narrow, named unpacker"
+  the capability map allows, not an embedded engine. _Anime: +19 loaded,
+  +18 through all three stages._
+- **A bundle says what it embeds.** A bundle that carries a non-Kotlin file
+  from its source repository lists it in `licenses/EMBEDDED.txt` and
+  asserts no terms for it. Today that is only the synchrony script, which
+  states no licence of its own.
+
+### Measuring a boundary
+
+- **`bridge catalogue --grant webview,js-engine,cookie-store,image`.** This
+  re-measures what each deliberate boundary costs. `docs/phase-2-capability-map.md`
+  did this by hand with throwaway patches; it is now repeatable. A grant
+  implements nothing. A construct that needs it becomes a call that throws
+  naming it, and the image group's Android classes become stand-ins that
+  throw on first use.
+- **A granted bundle cannot become a plugin.** It carries a hashed
+  `measurement.json`, and `openPluginArchive` rejects it
+  (`measurementBuild`) in any process that is not itself measuring, which
+  includes every host. A measuring run reads and writes no remembered verdicts.
+- **A grant only adds listings.** The anti-bot recovery cut is decided with
+  what the grant set aside put back. Without that, granting the cookie store
+  lost 25 anime listings that load without it.
+
+### Translated with the source's semantics
+
+- A template's properties are reached along with the class that extends it.
+- `do … while` whose condition reads a variable declared in the body.
+- `String?.toBoolean()` and its strict forms.
+- A write to a member of `it` inside `apply`.
+- okhttp's `CacheControl.Builder().maxAge()`.
+- An annotation on an expression.
+- Iterable delegation with a class body.
+- `BigDecimal` kept exact.
+- A prefix increment inside a comparison.
+- A preference-delegated extension property.
+- A request tag keyed by class.
+- okhttp's `Credentials.basic`.
+- `java.net.URL`, `reduceIndexed`, `prependIndent`, `minOf` and `toHashSet`.
+- Aniyomi's `parallelCatchingMapNotNull` and `AnimeUpdateStrategy`, the latter
+  pinned by a spec.
+
+### Silent wrong answers fixed
+
+- **A file-scope `var` was emitted as `const`.** A write from its own file
+  threw, and a write from another file went to a field nothing read, so a
+  fetched filter list never replaced the empty one it started as.
+- **keiyoushi's `.string`, `.obj`, `.array` and `.stringOrNull` read as plain
+  properties.** They were undefined, so a chapter URL could be built
+  containing the word "undefined". They are rewritten only in a file that
+  imports them, because the same names are common data-class fields.
+- **JavaScript shims.** A rotated obfuscator string array decoded every string
+  shifted, and looped forever when run. A stream's container is now read one
+  way in the Sora, Stremio, Mangayomi, Aniyomi and Nuvio shims; before, 6 of
+  16 verified streams were labelled wrongly. A torrent hash is read one way in
+  three shims. Mangayomi's substring helpers returned `''` where upstream
+  returns the whole string. Sora gains a `crypto.subtle` façade over
+  `ctx.crypto`, and `fetchv2` now honours `redirect`.
+
+### Refused on purpose, and why the count dropped by seven
+
+Each of these loaded in v0.5.0 and could not work:
+
+- Four listings sent every request to `undefined/search`, because a template
+  getter needing the public-suffix list had been pruned.
+- Two sent an undefined User-Agent read from `android.os.Build`.
+- One sent a header whose value was an unawaited Promise.
+
+All seven are now refused by name.
+
 ## v0.5.0 — a converted extension decodes, awaits and remembers what upstream does
 
 A pass over two whole published catalogues — a Mihon-family repository of 1,396

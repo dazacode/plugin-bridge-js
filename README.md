@@ -93,19 +93,23 @@ argument, every time. See [`docs/security.md`](docs/security.md) for why.
 
 ## Status
 
-**v0.5.0 runs 1,050 of 1,652 Kotlin extensions from two whole published
-repositories — up from 902 — and 691 of them now drive their code through
-browse, list and read, up from 474.** Every one of those gains came from fixing
-a _semantic_ once, not from patching a source.
+**v0.6.0 runs 1,123 of 1,652 Kotlin extensions from two whole published
+repositories — up from 1,050 in v0.5.0 and 902 before it — and 772 of them
+drive their code through browse, list and read, up from 691.** Every one of
+those gains came from fixing a _semantic_ once, not from patching a source.
 
-|                                | before v0.5.0 | **v0.5.0**      | change   |
-| ------------------------------ | ------------- | --------------- | -------- |
-| Mihon manga, loaded (of 1,396) | 828           | **949 (68%)**   | **+121** |
-| Mihon manga, all three stages  | 412           | **609 (44%)**   | **+197** |
-| Aniyomi anime, loaded (of 256) | 74            | **101 (39%)**   | **+27**  |
-| Aniyomi anime, all three       | 62            | **82 (32%)**    | **+20**  |
-| **Combined, loaded**           | 902           | **1,050 (64%)** | **+148** |
-| **Combined, all three stages** | 474           | **691 (42%)**   | **+217** |
+|                                | v0.5.0 | **v0.6.0**      | change  |
+| ------------------------------ | ------ | --------------- | ------- |
+| Mihon manga, loaded (of 1,396) | 949    | **993 (71%)**   | **+44** |
+| Mihon manga, all three stages  | 609    | **657 (47%)**   | **+48** |
+| Aniyomi anime, loaded (of 256) | 101    | **130 (51%)**   | **+29** |
+| Aniyomi anime, all three       | 82     | **115 (45%)**   | **+33** |
+| **Combined, loaded**           | 1,050  | **1,123 (68%)** | **+73** |
+| **Combined, all three stages** | 691    | **772 (47%)**   | **+81** |
+
+The manga figure is net of seven listings that loaded in v0.5.0 and are now
+refused by name, because each was sending its requests somewhere broken — see
+[`CHANGELOG.md`](CHANGELOG.md).
 
 And one the broad probe cannot see: in the most widely shared site template in
 the manga repository, **0 of 176** loaded listings could list _and open_ a
@@ -124,7 +128,7 @@ smaller corpora (2026-09-11):
 | Return a stream URL              | 6                               | 39                         |
 | **Verified playable end to end** | **3**                           | **16–18**                  |
 
-Playback over the v0.5.0 catalogues has not been measured yet, and it is the
+Playback over the v0.6.0 catalogues has not been measured yet, and it is the
 next number worth having. [`docs/measurements.md`](docs/measurements.md) has
 every figure, dated, with what each does and does not show.
 
@@ -236,7 +240,7 @@ not the purpose.
 
 ## Roadmap
 
-- **Measure playback over the whole catalogues.** v0.5.0 says how much of two
+- **Measure playback over the whole catalogues.** v0.6.0 says how much of two
   repositories this can run. How much of it plays, verified in the same call
   that resolved it, is the number that decides what a viewer gets.
 - **Authoring, not only translating.** A plugin written for this runtime

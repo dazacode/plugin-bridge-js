@@ -25,34 +25,59 @@ Loaded and three-stage counts are the broad, cheap measurements: they cover a
 whole catalogue in minutes, and they move when this software improves. Chain
 replay and verified playback are the strong ones, and they cover a subset.
 
-## Current — v0.5.0 (2026-09-22)
+## Current — v0.6.0 (2026-09-23)
 
 Measured over two whole published indexes of the Kotlin extension family,
 translated from source: a Mihon-family manga repository and an Aniyomi-family
-anime repository.
+anime repository. Counts are of distinct listings, on the merged commit.
 
-|                          | before v0.5.0 | **v0.5.0**      | change   |
-| ------------------------ | ------------- | --------------- | -------- |
-| manga, loaded (of 1,396) | 828           | **949 (68%)**   | **+121** |
-| manga, all three stages  | 412           | **609 (44%)**   | **+197** |
-| anime, loaded (of 256)   | 74            | **101 (39%)**   | **+27**  |
-| anime, all three stages  | 62            | **82 (32%)**    | **+20**  |
-| **combined, loaded**     | 902 of 1,652  | **1,050 (64%)** | **+148** |
-| **combined, all three**  | 474           | **691 (42%)**   | **+217** |
+|                          | v0.5.0 | **v0.6.0**      | change  |
+| ------------------------ | ------ | --------------- | ------- |
+| manga, loaded (of 1,396) | 949    | **993 (71%)**   | **+44** |
+| manga, all three stages  | 609    | **657 (47%)**   | **+48** |
+| anime, loaded (of 256)   | 101    | **130 (51%)**   | **+29** |
+| anime, all three stages  | 82     | **115 (45%)**   | **+33** |
+| **combined, loaded**     | 1,050  | **1,123 (68%)** | **+73** |
+| **combined, all three**  | 691    | **772 (47%)**   | **+81** |
 
-Re-measured on the released commit: identical, nothing lost, and all counts are
-of distinct listings.
+Where it came from, each measured on its own against what was merged before it:
 
-"Before" is engine `9048d76` for the loaded counts. The stage counts were first
-taken a few commits later, when loading stood at 829 and 74.
+| Change                                                                   | anime loaded / all three | manga loaded / all three |
+| ------------------------------------------------------------------------ | ------------------------ | ------------------------ |
+| Kotlin widening (Iterable delegation, BigDecimal, prefix increment, …)   | 101 → 111 / 82 → 99      | 949 → 951 / 609 → 611    |
+| Manga widening, and a template's properties reached with its extension   | 111 / 99 → 97 ¹          | 951 → 959 / 611 → 626 ²  |
+| `lib/synchrony`'s deobfuscator, run from the script its repository ships | 111 → 130 / 97 → 115     | 959 → 961 / 626 → 628    |
+| Network interceptors, and interceptors on an implicit builder            | 130 / 115                | 961 → 992 / 628 → 656    |
+| Older work-in-progress branches, ported (`java.net.URL` and four more)   | 130 / 115                | 992 → 993 / 656 → 657    |
 
-**Every one of those gains came from a class-level fix, not a per-source one** —
-decoding by type, Map semantics, awaiting what blocks, a shared regex class,
-state carried from one call to the next. That is the result that matters more
-than any single percentage: a semantic fixed once fanned out across hundreds of
-listings in two ecosystems, and the rule that refusals are named rather than
-approximated held throughout — a fix that would have needed guessing was left
-refused.
+¹ Two anime listings now make a request a lazy value needs before they list,
+and the probe answers that request with an empty HTML page, so they stop on
+"expected JSON" one step earlier. Before, the lazy value was a Promise nobody
+awaited and execution ran on past it. The probe cannot tell the difference;
+the code is more correct.
+
+² **Net of seven listings refused on purpose.** Each loaded in v0.5.0 and
+could not work: four read a template's `apiUrl`, which needs the public-suffix
+list and had been pruned, so every request went to `undefined/search`; two sent
+an undefined User-Agent read from an Android API; one sent a header whose value
+was an unawaited Promise. Each is now refused by name. Refusing a bundle that
+was loaded but broken lowers the number and is the right result, because a
+loaded bundle that cannot work is the outcome this project exists to avoid.
+
+**Two caveats on the interceptor row.** An interceptor runs on every request
+the plugin makes. Page images and stream segments are fetched by the host, so
+an interceptor written for _those_ installs and is never called. Of the 33
+listings that interceptors unblocked, a census of their interceptor bodies tags
+4 as rewriting image requests: those load, and may still fail to show a page.
+24 rewrite the request the plugin itself makes (a header, a token, a retry),
+which is the case that runs exactly. The second caveat: a network interceptor
+runs once around the exchange rather than once per redirect hop.
+
+The JavaScript ecosystems' shims (Sora, Mangayomi, Stremio, Nuvio) had
+correctness fixes in this release, so a stream's container and a torrent's
+hash are now read one way, and a rotated string array no longer decodes
+shifted. Those are proved by specs against upstream's own output. They are not
+catalogue counts, so they appear in the changelog rather than here.
 
 ### Opening a chapter, measured as a chain
 
@@ -73,10 +98,20 @@ keeps the title's path — was lost between listing and opening. The remaining
 
 ### With deliberate boundaries set aside
 
-115 manga and 114 anime listings are refused on a deliberate native boundary
-(WebView, an embedded JavaScript engine, reading a cookie jar, arbitrary
-interceptors, threads, a local server, `android.*` — decisions, not backlog).
-Setting those aside, 949 of 1,281 (74%) and 101 of 142 (71%) load.
+112 manga and 87 anime listings are refused on a deliberate native boundary
+(WebView, an embedded JavaScript engine asked to run a site's code, reading a
+cookie jar, threads, a local server, `android.*`, page images, which only the
+host fetches — decisions, not backlog). Setting those aside, 993 of 1,284
+(77%) and 130 of 169 (77%) load. Interceptors and `lib/synchrony` came off
+this list in v0.6.0: both now run for real.
+
+What each boundary still costs can be re-measured at any time with
+`bridge catalogue <index> --grant webview,js-engine,cookie-store,image`
+(`packages/core/src/kotlin/grants.ts`). A grant sets the refusals that name its
+boundary aside, so the rest of the extension is counted. The bundles it builds
+throw where the boundary was, and no host will open them. A grant only adds
+listings. That property had to be fixed before the instrument could be
+trusted: an anti-bot recovery path once lost 25 listings under a grant.
 
 That is the **load rate among listings not behind a deliberate native
 boundary**. It is not a compatibility rate: removing the boundaries changes the
@@ -99,7 +134,7 @@ sites move between runs, so both are given. Classifying the Kotlin corpus's
 failures by hand found none that was this software's: 26 were site drift, 20
 anti-bot or IP-bound CDNs, 14 dead or without https, and 2 refused on purpose.
 
-**Playback has not yet been measured over the v0.5.0 catalogues.** That is the
+**Playback has not yet been measured over the v0.6.0 catalogues.** That is the
 next number worth having, and until it exists the figures above say how much
 of a catalogue this can run, not how much of it plays.
 
@@ -116,6 +151,7 @@ was overturned and the way it was overturned is the lesson.
 | 2026-09-11 | Sora, with core and host frozen                            | 57 of 57 anime modules load; 16–18 verified playable — a second ecosystem with no core change |
 | 2026-09-19 | a second JavaScript ecosystem, measured as a no            | 16 of 101 verified playable, about 2 relevant — see [`compatibility.md`](compatibility.md)    |
 | 2026-09-22 | v0.5.0: two whole Kotlin-family indexes                    | 1,050 of 1,652 load (+148), 691 reach all three stages (+217); Madara chapters 0 → 164 of 176 |
+| 2026-09-23 | v0.6.0: the same two indexes                               | 1,123 load (+73, net of 7 refused on purpose), 772 reach all three stages (+81)               |
 
 ### Why "diminishing returns" was wrong
 
