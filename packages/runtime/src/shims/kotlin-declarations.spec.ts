@@ -155,6 +155,64 @@ describe('the collection members a catalogue pass named, run', () => {
 	});
 });
 
+describe('the rest of the stdlib a catalogue pass named, run', () => {
+	// Each was refused by name. Run end to end because every one of them has a
+	// JavaScript near-namesake, or an obvious guess, that answers a different
+	// value with nothing thrown: a reduce handed (acc, item, index), a URL
+	// read as URI (decoded path, null host), a prefix added to a blank line.
+	const source = kt(
+		'class Demo {',
+		'    fun seed(xs: List<Int>): Int =',
+		'        xs.reduceIndexed { index, acc, i -> acc + (i shl index % 16) } and 2147483647',
+		'    fun slug(slug: String): String = slug.prependIndent("/c/")',
+		'    fun quoted(text: String): String = text.prependIndent("> ")',
+		'    fun shortest(xs: List<List<Int>>): Int = xs.minOf { it.size }',
+		'    fun langs(xs: List<String>): Boolean = xs.toHashSet().let { it.size == 2 && "b" in it }',
+		'    fun key(base: String): String = "_".plus(URL(base).host)',
+		'    fun mount(base: String): String = java.net.URL(base).path',
+		'    fun rethrow(ok: Boolean): String {',
+		'        val results = listOf(runCatching { if (ok) "fine" else throw Exception("broke") })',
+		'        results.first().exceptionOrNull()?.let { throw it }',
+		'        return results.first().getOrNull() ?: "none"',
+		'    }',
+		'}'
+	);
+
+	it('hands reduceIndexed the index first, from 1', async () => {
+		const demo = await instantiate('Demo', source);
+		// 5 + (7 shl 1) + (9 shl 2): with (acc, item, index) it would be garbage.
+		expect(demo.seed([5, 7, 9])).toBe(5 + 14 + 36);
+		expect(() => demo.seed([])).toThrow(/empty/);
+	});
+
+	it('prepends an indent the way Kotlin treats a blank line', async () => {
+		const demo = await instantiate('Demo', source);
+		expect(demo.slug('title')).toBe('/c/title');
+		expect(demo.quoted('a\n\nb')).toBe('> a\n> \n> b');
+	});
+
+	it('takes a minOf that must exist, and a HashSet of the list', async () => {
+		const demo = await instantiate('Demo', source);
+		expect(demo.shortest([[1, 2], [3], [4, 5, 6]])).toBe(1);
+		expect(() => demo.shortest([])).toThrow(/empty/);
+		expect(demo.langs(['a', 'b', 'a'])).toBe(true);
+	});
+
+	it('reads java.net.URL parts raw, and refuses text with no protocol', async () => {
+		const demo = await instantiate('Demo', source);
+		expect(demo.key('https://example.invalid:8080/x')).toBe('_example.invalid');
+		expect(demo.mount('http://example.invalid/sub%20dir/api?k=1')).toBe('/sub%20dir/api');
+		expect(demo.mount('http://example.invalid')).toBe('');
+		expect(() => demo.key('example.invalid')).toThrow(/no protocol/);
+	});
+
+	it('rethrows a Result’s failure read off a list of them', async () => {
+		const demo = await instantiate('Demo', source);
+		expect(demo.rethrow(true)).toBe('fine');
+		expect(() => demo.rethrow(false)).toThrow(/broke/);
+	});
+});
+
 describe('the framework filters a filter class names in its supertype call', () => {
 	it('slots named arguments by upstream parameter order, sort selection included', async () => {
 		// `: Filter.Group<X>(name = …, state = …)` and friends were refused

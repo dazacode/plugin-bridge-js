@@ -661,6 +661,11 @@ export const RUNTIME_HELPERS = [
 	   strings is not this: `../b` pops a segment and `?q` keeps the path. */
 	'resolve',
 
+	/* `java.net.URL`, for its parts: URI's parse with URL's readers, which
+	   answer the raw path and '' for a missing host. Assigned in the http
+	   section beside `uri`. */
+	'javaUrl',
+
 	/* Kotlin's `trimStart`/`trimEnd` take a vararg of Chars and JavaScript's
 	   take none, so a passthrough trims whitespace where the source asked for a
 	   delimiter — the same latent bug `trim` had. */
@@ -729,6 +734,9 @@ export const RUNTIME_HELPERS = [
 	'classLoader',
 	'filterNotNull',
 	'maxOf',
+	'minOf',
+	'reduceIndexed',
+	'prependIndent',
 	'replaceAll',
 	'mapNotNullTo',
 	'toMap',
