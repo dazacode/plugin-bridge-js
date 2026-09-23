@@ -731,6 +731,13 @@ interface Frame {
 	jumpId?: number;
 	/** Set when a non-local jump actually named this frame, so the catch is emitted. */
 	catchesJump?: boolean;
+	/**
+	 * On a `receiver` frame: the `const` its `this` is captured in, set when a
+	 * `this@label` from inside a *nested* receiver block named it. The inner
+	 * `function () {}` has rebound `this`, so the outer one's has to be held
+	 * the way `__self` holds the source's. See `labelledThis`.
+	 */
+	capture?: string;
 }
 
 interface Emitted {
@@ -1179,6 +1186,8 @@ class Emitter {
 	private readonly scopes: Map<string, Local>[] = [];
 	private readonly frames: Frame[] = [];
 	private temporaries = 0;
+	/** Bumped per captured receiver; see `Frame.capture`. */
+	private captures = 0;
 	/** Bumped per inlined Kotlin block, for the label a `return@x` leaves by. */
 	private exits = 0;
 	/** The statement being emitted, and where a hoisted `?: return` guard goes. */
@@ -1379,6 +1388,24 @@ class Emitter {
 	private reifiedTypes: ReadonlyMap<string, string> | null = null;
 	/** The receiver parameter of the extension function being emitted. */
 	private receiverParam: string | null = null;
+	/**
+	 * That function's own name, which is the label Kotlin gives its receiver:
+	 * `this@toSManga` inside `fun Dto.toSManga() = SManga.create().apply { … }`
+	 * is the DTO, reached past the `apply` whose own `this` is the model.
+	 */
+	private receiverLabel: string | null = null;
+	/**
+	 * And the type it extends, as the class index spells it, for the one
+	 * question only the declaration can answer: does a bare name inside the
+	 * function belong to the extension receiver? See `receiverDeclares`.
+	 */
+	private receiverType: string | null = null;
+	/**
+	 * The Kotlin name of the class `owner` is emitting, which `owner` is not
+	 * once a nested type has been renamed apart from a namesake — see
+	 * `scopeNestedTypes`. `this@Book` names the class as it was written.
+	 */
+	private ownerLabel: string | null = null;
 	private classMembers = new Set<string>();
 	private suspendMembers = new Set<string>();
 	private readonly signatures = new Map<string, readonly string[]>(KNOWN_SIGNATURES);
@@ -2059,7 +2086,9 @@ class Emitter {
 		// forty lines further down.
 		const outerMembers = this.classMembers;
 		const outerSuspends = this.suspendMembers;
+		const outerLabel = this.ownerLabel;
 		this.owner = name;
+		this.ownerLabel = this.nameOf(node) ?? name;
 		this.ownerBase = base;
 
 		this.classMembers = new Set(
@@ -2276,6 +2305,7 @@ class Emitter {
 
 		nested.restore();
 		this.owner = outerOwner;
+		this.ownerLabel = outerLabel;
 		this.ownerBase = outerBase;
 		this.classMembers = outerMembers;
 		this.suspendMembers = outerSuspends;
@@ -2495,7 +2525,9 @@ class Emitter {
 			// here, and without it the member was refused for saying which of
 			// two receivers it meant, which is the one thing that made it clear.
 			const outerOwner = this.owner;
+			const outerLabel = this.ownerLabel;
 			this.owner = name;
+			this.ownerLabel = this.nameOf(node) ?? name;
 			this.pushScope();
 			// Declared out here because `finally` has to give the nested-type
 			// names back, and a `const` inside the `try` is not in its scope.
@@ -2564,6 +2596,7 @@ class Emitter {
 				scoped?.restore();
 				this.popScope();
 				this.owner = outerOwner;
+				this.ownerLabel = outerLabel;
 			}
 		});
 	}
@@ -3610,8 +3643,14 @@ class Emitter {
 		];
 
 		const previousReceiver = this.receiverParam;
+		const previousLabel = this.receiverLabel;
+		const previousType = this.receiverType;
 		const previousReified = this.reifiedTypes;
-		if (receiverType !== null) this.receiverParam = '__recv';
+		if (receiverType !== null) {
+			this.receiverParam = '__recv';
+			this.receiverLabel = name;
+			this.receiverType = receiverType.split('.').pop() ?? receiverType;
+		}
 		if (reified.length > 0) {
 			this.reifiedTypes = new Map(reified.map((one) => [one, reifiedBinding(one)]));
 		}
@@ -3620,6 +3659,8 @@ class Emitter {
 			emitted = this.functionScope('function', null, names, () => this.functionBody(body));
 		} finally {
 			this.receiverParam = previousReceiver;
+			this.receiverLabel = previousLabel;
+			this.receiverType = previousType;
 			this.reifiedTypes = previousReified;
 		}
 		if (receiverType !== null) {
@@ -4909,10 +4950,7 @@ class Emitter {
 					// out as the class rather than the string it was prefixing.
 					return this.receiverAlias() ?? this.receiverParam ?? 'this';
 				}
-				if (label !== this.owner && label !== this.className) {
-					this.refuse(node, `\`${node.text}\``);
-				}
-				return this.selfReference();
+				return this.labelledThis(label, node);
 			}
 			case 'parenthesized_expression': {
 				const inner = kids(node)[0];
@@ -6151,6 +6189,23 @@ class Emitter {
 			const types = this.reifiedArguments(callee, name, typeArgument);
 			const call = `${target}(${[...types, implicit, ...tail].join(', ')})`;
 			return this.suspendMembers.has(name) ? this.awaited(call) : call;
+		}
+
+		// A method the extension receiver's own class declares, called bare —
+		// `url = getUrl()` inside `fun Dto.toSManga() = SManga.create().apply
+		// { … }`. The model built by the `apply` has no such method and the
+		// source does not either, so Kotlin resolved it to the DTO; read as a
+		// member of the source it was `this.getUrl is not a function` at the
+		// first browse. A name a framework shim also answers is left to the
+		// paths below, because then the innermost receiver may well be the one.
+		if (
+			this.receiverParam !== null &&
+			lambda === null &&
+			this.receiverDeclares(name) &&
+			!(implicit !== this.receiverParam && HOST_METHODS.has(name))
+		) {
+			const call = `${this.receiverParam}.${name}(${tail.join(', ')})`;
+			return this.declaredSuspends.has(name) ? this.awaited(call) : call;
 		}
 
 		if (implicit !== null && lambda !== null && BUILDER_LAMBDA_METHODS.has(name)) {
@@ -7533,12 +7588,34 @@ class Emitter {
 		if (receiver !== null && MODEL_FIELDS.get(this.receiverModel() ?? '')?.has(name) === true) {
 			return `${receiver}.${name}`;
 		}
+		// `fun Dto.toSManga() = SManga.create().apply { genre = tags.join… }`
+		// has three implicit receivers, and `tags` is the DTO's: the model does
+		// not have one, and Kotlin tries the extension receiver before the
+		// class. Read off the model instead it is `undefined`, and the genre
+		// list is empty with nothing thrown. A model field the DTO *also*
+		// declares stays with the model — that is the innermost receiver, and
+		// it is why the source had to write `this@toSManga.title` to mean the
+		// other one. Where the model is not written, every model's fields stay
+		// with the receiver, which is the old rule.
+		if (
+			receiver !== null &&
+			this.receiverParam !== null &&
+			!(MODEL_FIELDS.get(this.receiverModel() ?? '') ?? ANY_MODEL_FIELD).has(name) &&
+			this.receiverDeclares(name)
+		) {
+			return `${this.receiverParam}.${name}`;
+		}
 		if (
 			receiver !== null &&
 			!this.isSourceMember(name) &&
 			MODEL_LACKS.get(this.receiverModel() ?? '')?.has(name) !== true
 		) {
 			return `${receiver}.${name}`;
+		}
+		// Kotlin tries the extension receiver before the class it is declared
+		// in, so a name both declare is the receiver's.
+		if (this.receiverParam !== null && this.receiverDeclares(name)) {
+			return `${this.receiverParam}.${name}`;
 		}
 		// Inside `fun Element.getInfo()`, a bare name is the receiver's unless
 		// the enclosing class declares it — the same rule, and the same residual
@@ -7547,6 +7624,12 @@ class Emitter {
 			return `${this.receiverParam}.${name}`;
 		}
 		return `${this.selfReference()}.${name}`;
+	}
+
+	/** Whether the extension function being emitted extends a type declaring `name`. */
+	private receiverDeclares(name: string): boolean {
+		if (this.receiverType === null) return false;
+		return this.classMemberIndex.get(this.receiverType)?.has(name) === true;
 	}
 
 	private isSourceMember(name: string): boolean {
@@ -7623,6 +7706,50 @@ class Emitter {
 			if (frame.kind === 'function') return null;
 		}
 		return null;
+	}
+
+	/**
+	 * `this@label`: the receiver the label names, or a refusal.
+	 *
+	 * Kotlin gives a receiver a label three ways, and each already has a
+	 * spelling here, so this only has to find the right one:
+	 *
+	 * - **A scope block** — `this@apply`, `this@run`, `this@buildString` —
+	 *   whose receiver is `this` inside a block emitted as `function () {}` and
+	 *   a `const` inside one that was inlined. An outer *callback's* `this` is
+	 *   out of reach once an inner one has rebound it, and that one refuses.
+	 * - **An extension function** — `this@toSManga` — whose receiver this
+	 *   emitter moved into its first parameter, which every closure inside the
+	 *   function can still see.
+	 * - **The class** being emitted, which is the source object wherever this
+	 *   code runs: `selfReference` is already how that is reached past a block.
+	 *
+	 * Innermost first, which is the order Kotlin resolves them in. A label
+	 * naming anything else is a receiver this build no longer has, and guessing
+	 * which one it was is how a scraper reads a selector off the wrong object.
+	 */
+	private labelledThis(label: string, node: KNode): string {
+		let rebound = false;
+		for (let index = this.frames.length - 1; index >= 0; index -= 1) {
+			const frame = this.frames[index];
+			if (frame.kind === 'function') break;
+			if (frame.label === label) {
+				if (frame.kind === 'inline' && frame.alias != null) return frame.alias;
+				if (frame.kind === 'receiver') {
+					if (!rebound) return 'this';
+					this.captures += 1;
+					frame.capture ??= `__this${this.captures}`;
+					return frame.capture;
+				}
+				this.refuse(node, `\`${node.text}\``);
+			}
+			if (frame.kind === 'receiver') rebound = true;
+		}
+		if (label === this.receiverLabel && this.receiverParam !== null) return this.receiverParam;
+		if (label === this.owner || label === this.ownerLabel || label === this.className) {
+			return this.selfReference();
+		}
+		this.refuse(node, `\`${node.text}\``);
 	}
 
 	/** True when the nearest `this`-rebinding frame is an `apply`/`run` block. */
@@ -7702,10 +7829,15 @@ class Emitter {
 					: body;
 			// `__self` is declared once per real function, so an `apply {}` nested
 			// anywhere inside it can still reach the source's own members.
-			const text =
+			const self =
 				frame.usesSelf && kind === 'function' && raw.startsWith('{')
 					? `{\n\tconst __self = this;${raw.slice(1)}`
 					: raw;
+			// A receiver block an inner one reached past with `this@label`.
+			const text =
+				frame.capture !== undefined && self.startsWith('{')
+					? `{\n\tconst ${frame.capture} = this;${self.slice(1)}`
+					: self;
 			return { text, isAsync: frame.usesAwait, usesSelf: frame.usesSelf };
 		} finally {
 			this.popScope();
@@ -7851,6 +7983,18 @@ function sameNames(left: readonly string[], right: readonly string[]): boolean {
 }
 
 /** Parts of a `property_declaration` that are not its initialiser. */
+/**
+ * Every model's fields at once, for the one question asked where the model
+ * an `apply {}` builds is not written: is a bare name possibly the model's?
+ * Inside `fun Dto.toSManga() = …apply { … }` a name listed here stays with the
+ * receiver, as it always has; everything else the DTO declares is the DTO's.
+ * `memo` is keiyoushi's extra field on all four.
+ */
+const ANY_MODEL_FIELD: ReadonlySet<string> = new Set([
+	...[...MODEL_FIELDS.values()].flatMap((fields) => [...fields]),
+	'memo'
+]);
+
 const PROPERTY_PARTS: ReadonlySet<string> = new Set([
 	'modifiers',
 	'binding_pattern_kind',

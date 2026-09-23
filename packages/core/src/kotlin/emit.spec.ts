@@ -4648,3 +4648,53 @@ describe('control flow written in the middle of an expression', () => {
 		expect(demo.right('12a')).toBe(false);
 	});
 });
+
+describe('a receiver named by its label', () => {
+	it('reads `this@fn` as the extension receiver, past the `apply` that shadows it', () => {
+		// Inside the `apply`, a bare `title` is the model's; `this@toModel` is
+		// the DTO's. The DTO's own `tags` and `link()` are the DTO's too, since
+		// the model has neither and Kotlin tries the extension receiver before
+		// the class.
+		const demo = instantiate(
+			kt(
+				'class Dto(val title: String, val tags: List<String>) {',
+				'    fun link(): String = "/x/" + title',
+				'}',
+				'class Demo : Source() {',
+				'    private fun Dto.toModel() = SAnime.create().apply {',
+				'        title = this@toModel.title',
+				'        url = link()',
+				'        genre = tags.joinToString(", ")',
+				'    }',
+				'    fun make(title: String) = Dto(title, listOf("a", "b")).toModel()',
+				'}'
+			)
+		);
+
+		expect(demo.make('One')).toEqual({ title: 'One', url: '/x/One', genre: 'a, b' });
+	});
+
+	it('reaches an outer `apply` receiver from inside a nested receiver block', () => {
+		const demo = instantiate(
+			inClass(
+				'    fun make(): Any = SAnime.create().apply {',
+				'        url = "/a"',
+				'        memo = buildJsonObject { put("slug", slug(this@apply)) }',
+				'    }',
+				'    private fun slug(model: SAnime): String = model.url + "!"'
+			),
+			{},
+			{ SAnime: { create: () => ({}) } }
+		);
+
+		// `this@apply` is the model, not the JSON builder whose `this` the inner
+		// block has rebound.
+		expect(demo.make()).toEqual({ url: '/a', memo: { slug: '/a!' } });
+	});
+
+	it('refuses a label that names no receiver in reach', () => {
+		expect(
+			refusalNames(inClass('    fun go(x: String) = listOf(1).map { this@nowhere.size }'))
+		).toContain('`this@nowhere`');
+	});
+});
