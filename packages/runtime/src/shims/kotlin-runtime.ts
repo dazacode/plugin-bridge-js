@@ -5371,6 +5371,75 @@ var __k = {
   },
 
   /**
+   * A data class's record, told how to copy itself.
+   *
+   * 'data class Item(val name, val count)' is a factory returning a literal,
+   * and a computed property on it closes over the factory's parameters — so a
+   * copy made field by field would keep answering from the old values. The
+   * record carries its own factory and field order instead, non-enumerable so
+   * that serialising it or comparing it sees only its fields.
+   */
+  dataRecord: function (record, factory, names) {
+    Object.defineProperty(record, '__kCopy', {
+      value: function (named, positional) {
+        var args = [];
+        for (var i = 0; i < names.length; i += 1) {
+          if (i < positional.length) args.push(positional[i]);
+          else if (Object.prototype.hasOwnProperty.call(named, names[i])) args.push(named[names[i]]);
+          else args.push(record[names[i]]);
+        }
+        return factory.apply(null, args);
+      },
+      enumerable: false
+    });
+    return record;
+  },
+
+  /**
+   * Kotlin's data-class copy(field = value), over whatever record it is.
+   *
+   * A record this build emitted rebuilds itself (see 'dataRecord'). The
+   * framework's list pages and Video are data classes upstream and are known
+   * here: a page by its two fields in order, a Video by name only, since its
+   * two constructors disagree about what comes first. Anything else — a
+   * decoded DTO, a plain record — is copied field by field with its prototype
+   * kept, which is exact for a value with no computed members, and a
+   * positional argument there is refused: nothing says which field it is.
+   */
+  copy: function (value, named, positional) {
+    if (value === null || value === undefined) {
+      throw new Error('This converted extension copied a value that was null.');
+    }
+    var byName = named || {};
+    var byPosition = positional || [];
+    if (typeof value.__kCopy === 'function') return value.__kCopy(byName, byPosition);
+    var order = null;
+    if (typeof MangasPage === 'function' && value instanceof MangasPage) order = ['mangas', 'hasNextPage'];
+    if (typeof AnimesPage === 'function' && value instanceof AnimesPage) order = ['animes', 'hasNextPage'];
+    if (byPosition.length > 0 && (order === null || byPosition.length > order.length)) {
+      throw new Error(
+        'This converted extension copied a record by position, and this runtime does not know its field order.'
+      );
+    }
+    var out = Object.create(Object.getPrototypeOf(value));
+    var keys = Object.keys(value);
+    for (var k = 0; k < keys.length; k += 1) out[keys[k]] = value[keys[k]];
+    for (var p = 0; p < byPosition.length; p += 1) out[order[p]] = byPosition[p];
+    for (var name in byName) {
+      if (Object.prototype.hasOwnProperty.call(byName, name)) out[name] = byName[name];
+    }
+    // Video's title has two spellings here (see Video); a copy renaming it
+    // has to rename both, or the host reads the old one.
+    if (typeof Video === 'function' && value instanceof Video &&
+        Object.prototype.hasOwnProperty.call(byName, 'videoTitle')) {
+      out.quality = __str(byName.videoTitle);
+    }
+    if (out.mangas !== undefined && order !== null) out.mangas = __arr(out.mangas);
+    if (out.animes !== undefined && order !== null) out.animes = __arr(out.animes);
+    return out;
+  },
+
+  /**
    * A reified type argument, as the text '__k.decode' reads a container from.
    *
    * 'inline fun <reified T> Response.parseAs(): T = json.decodeFromString(…)'

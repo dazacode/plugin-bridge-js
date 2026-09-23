@@ -2756,7 +2756,12 @@ class Emitter {
 					fields.push(`get ${member}() ${emitted.text}`);
 				}
 
-				const factory = `function ${this.safe(name)}(${args.join(', ')}) ${block([`return ${block(fields.map(comma))};`])}`;
+				// Handed to `dataRecord` with its own factory and field order, so
+				// `copy(count = 3)` can rebuild it: a computed property here
+				// closes over the *parameters*, and a record copied field by
+				// field would keep answering from the old ones.
+				const record = `${this.helper('dataRecord')}(${block(fields.map(comma))}, ${this.safe(name)}, ${JSON.stringify(params.map((param) => fieldName(param.name)))})`;
+				const factory = `function ${this.safe(name)}(${args.join(', ')}) ${block([`return ${record};`])}`;
 				const statics = this.companionStatics(name, this.companionMembers);
 				return [...nested, statics.length > 0 ? `${factory}\n${statics}` : factory].join('\n\n');
 			} finally {
@@ -6114,6 +6119,31 @@ class Emitter {
 			// indexed — so handing back an unawaited promise would not fail, it
 			// would produce an empty list.
 			return SUPER_SUSPEND_MEMBERS.has(name) ? this.awaited(call) : call;
+		}
+
+		if (name === 'copy' && lambda === null && !this.declaredMethods.has('copy')) {
+			// A data class's `copy(field = value)`: a new record with the fields
+			// named replaced and the rest carried over. The receiver's class is
+			// not knowable here, so the record answers for itself — a data
+			// class this build emitted rebuilds through its own factory (see
+			// `dataRecord`), and the framework's `MangasPage`, `AnimesPage` and
+			// `Video` are known to the runtime.
+			const positional: string[] = [];
+			const named: string[] = [];
+			for (const arg of args) {
+				const argName = this.argumentName(arg);
+				const value = this.expr(this.argumentValue(arg));
+				if (argName === null) {
+					if (named.length > 0) this.refuse(arg, 'a positional argument after a named one');
+					positional.push(value);
+				} else {
+					named.push(`${JSON.stringify(fieldName(argName))}: ${value}`);
+				}
+			}
+			const tail = `{ ${named.join(', ')} }, [${positional.join(', ')}]`;
+			const receiverText = this.expr(receiver);
+			if (!safe) return `${this.helper('copy')}(${receiverText}, ${tail})`;
+			return `${this.helper('sc')}(${receiverText}, (__r) => ${this.helper('copy')}(__r, ${tail}))`;
 		}
 
 		if (name === 'not' && args.length === 0 && lambda === null && !safe) {

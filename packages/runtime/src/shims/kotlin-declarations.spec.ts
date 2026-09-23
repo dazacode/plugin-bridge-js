@@ -436,3 +436,34 @@ describe('an enum class, which is a class with fixed instances', () => {
 		).not.toEqual([]);
 	});
 });
+
+describe('a data class copy', () => {
+	const source = kt(
+		'data class Item(val name: String, val count: Int = 1) {',
+		'    val label get() = "$name x$count"',
+		'}',
+		'class Demo {',
+		'    fun renamed() = Item("a", 2).copy(name = "b").label',
+		'    fun positional() = Item("a", 2).copy("c").label',
+		'    fun original(): String { val one = Item("a"); one.copy(count = 9); return one.label }',
+		'    fun nullable(item: Item?) = item?.copy(count = 5)?.label',
+		'    fun page() = MangasPage(listOf(), true).copy(hasNextPage = false).hasNextPage',
+		'    fun pageByPosition() = MangasPage(listOf(), true).copy(listOf(SManga.create())).mangas.size',
+		'}'
+	);
+
+	it('rebuilds the record, so what it computes follows the copy', async () => {
+		// Copied field by field, `label` kept closing over the old parameters.
+		const demo = await instantiate('Demo', source);
+		expect(demo.renamed()).toBe('b x2');
+		expect(demo.positional()).toBe('c x2');
+		expect(demo.original()).toBe('a x1');
+		expect(demo.nullable(null) ?? null).toBeNull();
+	});
+
+	it('copies the framework’s own list page, by name or position', async () => {
+		const demo = await instantiate('Demo', source);
+		expect(demo.page()).toBe(false);
+		expect(demo.pageByPosition()).toBe(1);
+	});
+});
