@@ -1702,6 +1702,24 @@ class Emitter {
 		return `${this.helper('overload')}(${target}, ${self}, ${JSON.stringify(name)}, [${args.join(', ')}], ${overloadTable(name, shapes)}, () => __super)`;
 	}
 
+	/**
+	 * Whether a capitalised name is declared anywhere this module can see it:
+	 * a local, a member, any file in the unit, or the runtime.
+	 */
+	private knownCapital(name: string): boolean {
+		return (
+			this.lookup(name) !== null ||
+			this.classMembers.has(name) ||
+			this.declaredTypes.has(name) ||
+			this.moduleNames.has(name) ||
+			this.declaredObjects.has(name) ||
+			this.qualifiedTypes.has(name) ||
+			GLOBAL_NAMES.has(name) ||
+			BASE_CONSTANTS.has(name) ||
+			this.aliased(name) !== name
+		);
+	}
+
 	/** A class and every base above it, nearest first. */
 	private lineage(owner: string): string[] {
 		const seen: string[] = [];
@@ -5734,6 +5752,22 @@ class Emitter {
 		// source file. The pipeline resolves its member through the call graph;
 		// refusing the receiver here would erase a valid cross-file call before
 		// reachability had a chance to inspect it.
+		//
+		// But only a name something in the unit — or the runtime — actually
+		// declares. Every file's declarations are merged before this one is
+		// emitted, so a capitalised receiver nobody declares is not a neighbour
+		// waiting to be resolved: it is a module this conversion never fetched.
+		// `keiyoushi.utils.UrlUtils` lives in a directory the source fetcher
+		// did not read, and `UrlUtils.fixUrl(…)` passed through here to become
+		// `UrlUtils is not defined` on every HLS extraction, with the conversion
+		// reporting complete. Refused by name instead, it says what is missing.
+		if (
+			receiver.type === 'simple_identifier' &&
+			/^[A-Z]/.test(receiver.text) &&
+			!this.knownCapital(receiver.text)
+		) {
+			this.refuse(receiver, `\`${receiver.text}\``);
+		}
 		const receiverText =
 			receiver.type === 'simple_identifier' && /^[A-Z]/.test(receiver.text)
 				? this.safe(receiver.text)

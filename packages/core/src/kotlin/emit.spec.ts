@@ -3649,6 +3649,26 @@ describe('refusing by name', () => {
 		);
 	});
 
+	it('refuses a capitalised receiver nothing in the unit or the runtime declares', () => {
+		// `UrlUtils.fixUrl(…)` from a module the fetcher never read passed
+		// through as a cross-file object and became `UrlUtils is not defined`
+		// at the first extraction. A receiver the unit does declare still
+		// passes — see the cross-file object tests.
+		expect(refusalNames(inClass('    fun a(u: String) = UrlUtils.fixUrl(u)'))).toContain(
+			'`UrlUtils`'
+		);
+		expect(
+			refusalNames(
+				kt(
+					'object Helper { fun fix(u: String) = u }',
+					'class Demo : Source() {',
+					'    fun a(u: String) = Helper.fix(u)',
+					'}'
+				)
+			)
+		).toEqual([]);
+	});
+
 	it('does not refuse a string for the words in it', () => {
 		// The message a reader sees when a site wants a login is the commonest
 		// way a manga extension *mentions* WebView, and matching the prose put
