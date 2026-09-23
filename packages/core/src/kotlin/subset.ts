@@ -2801,6 +2801,26 @@ const HOST_DRAWN_MEMBERS: ReadonlySet<string> = new Set([
 	'restartApp'
 ]);
 
+/**
+ * Host-drawn members that nothing runs, ever — so what they call is not a
+ * caller's need.
+ *
+ * `setupPreferenceScreen` is read *statically* (`aniyomi-preferences.ts`
+ * derives the manifest's settings from its source) and no driver invokes it:
+ * the Mihon driver's `__super` answers it with an empty function and the
+ * Aniyomi driver has no such member. So its body is inert, and two things it
+ * used to decide were wrong. It was a reachability root, like everything the
+ * extension declares, so a refused helper only it called blocked the build;
+ * and its calls counted as a translated caller's, so once the preference
+ * types translated, `super.setupPreferenceScreen(screen)` in an extension
+ * made its template's refused screen block — one DooPlay extension stopped
+ * loading for a preference listener lambda that can never run.
+ *
+ * `getFilterList` is host-drawn too and is NOT here: the driver calls it on
+ * every search, which is exactly why a refused helper it calls must block.
+ */
+export const NEVER_INVOKED_MEMBERS: ReadonlySet<string> = new Set(['setupPreferenceScreen']);
+
 /** True when refusing this member does not stop a bundle from being built. */
 export function isHostDrawn(member: string): boolean {
 	if (HOST_DRAWN_MEMBERS.has(member)) return true;

@@ -958,6 +958,58 @@ describe('which refusals stop a build', () => {
 		expect(result.message).toContain('setupPreferenceScreen');
 	});
 
+	it('does not block on what a preference screen calls, since nothing runs one', async () => {
+		// The extension's own screen translates now that the preference types
+		// do, and it calls its template's — which refuses on a toast — and a
+		// shared helper that refuses, which is MangaThemesia's paid-chapter
+		// helper's shape. Neither can run: no driver invokes
+		// `setupPreferenceScreen`. The same helper called from a member the
+		// host does run still blocks, below.
+		const files = (caller: string) => [
+			{
+				path: 'Demo.kt',
+				source: kt(
+					'class Demo : Theme() {',
+					'    override fun setupPreferenceScreen(screen: PreferenceScreen) {',
+					'        screen.addPreference(ListPreference(screen.context))',
+					'        Helper().addTo(screen)',
+					'        super.setupPreferenceScreen(screen)',
+					'    }',
+					caller,
+					'}'
+				)
+			},
+			{
+				path: 'theme/Theme.kt',
+				source: kt(
+					'abstract class Theme : Source() {',
+					'    override fun setupPreferenceScreen(screen: PreferenceScreen) {',
+					'        Toast.makeText(screen.context, "saved", Toast.LENGTH_SHORT).show()',
+					'    }',
+					'}',
+					'',
+					'class Helper {',
+					'    fun addTo(screen: PreferenceScreen?) = Injekt.get<Loader>()',
+					'}'
+				)
+			}
+		];
+
+		const inert = await convertKotlin(files(''), { parser });
+		expect(inert.refusals.map((one) => one.member).sort()).toEqual([
+			'addTo',
+			'setupPreferenceScreen'
+		]);
+		expect(inert.blocking).toEqual([]);
+		expect(inert.complete).toBe(true);
+
+		const reached = await convertKotlin(
+			files('    override fun popularAnimeParse(response: Response) = Helper().addTo(null)'),
+			{ parser }
+		);
+		expect(reached.blocking.map((one) => one.member)).toEqual(['addTo']);
+	});
+
 	it('blocks on a member that returns data', async () => {
 		const result = await convertKotlin(
 			[
