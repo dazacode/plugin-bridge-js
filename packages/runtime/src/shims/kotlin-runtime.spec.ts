@@ -1781,8 +1781,36 @@ describe('java.util.regex, translated', () => {
 		expect(k.regex('(?<=\\?e=)(.*?)(?=&f=)').find('a?e=VALUE&f=b')?.value).toBe('VALUE');
 	});
 
+	it('translates the named classes that have an identical JavaScript spelling', () => {
+		// Madara's shared date parser is '(?<!\p{L})(?:year|…)'. Refusing it
+		// threw in every Madara chapter list that states a relative date.
+		const year = k.regex('(?<!\\p{L})(?:year|năm)');
+		expect(year.containsMatchIn('2 years ago')).toBe(true);
+		expect(year.containsMatchIn('3 năm trước')).toBe(true);
+		expect(year.containsMatchIn('nearyear')).toBe(false);
+		expect(year.containsMatchIn('éyear')).toBe(false);
+		expect(k.regex('\\P{L}+').find('ab12cd')?.value).toBe('12');
+		expect(k.regex('\\pL+').find('12ab')?.value).toBe('ab');
+		expect(k.regex('[\\p{Mn}]').replace('e\u0301', '')).toBe('e');
+		// POSIX names are US-ASCII in Java, so they are ranges, not categories.
+		expect(k.regex('\\p{Alpha}+').find('éab')?.value).toBe('ab');
+		expect(k.regex('\\p{Punct}').replace('a.b!', '')).toBe('ab');
+		expect(k.regex('[^\\p{ASCII}]').replace('aé', '')).toBe('a');
+		expect(k.regex('\\P{Alnum}+').find('ab--cd')?.value).toBe('--');
+		// A block is a fixed range.
+		expect(k.regex('\\p{InCombiningDiacriticalMarks}+').replace('e\u0301\u0300', '')).toBe('e');
+		expect(k.regex('\\p{InHangul_Syllables}').containsMatchIn('한')).toBe(true);
+	});
+
 	it('refuses what it cannot translate identically', () => {
-		expect(() => k.regex('\\p{Alpha}+').find('a')).toThrow(/Unicode class/);
+		// A script, and a block nobody measured, are not guessed at.
+		expect(() => k.regex('\\p{IsLatin}+').find('a')).toThrow(/Unicode class/);
+		expect(() => k.regex('\\p{InGreek}').find('a')).toThrow(/Unicode class/);
+		expect(() => k.regex('\\p{javaLowerCase}').find('a')).toThrow(/Unicode class/);
+		// A negated range has no spelling inside a class that is already open.
+		expect(() => k.regex('[a\\P{Alpha}]').find('a')).toThrow(/Unicode class/);
+		// Unicode mode rejects an escape the default mode reads as a letter.
+		expect(() => k.regex('\\p{L}\\j').find('a')).toThrow(/Unicode mode rejects/);
 		expect(() => k.regex('a++').find('a')).toThrow(/possessive/);
 		expect(() => k.regex('\\d*+').find('1')).toThrow(/possessive/);
 		expect(() => k.regex('(?>ab)').find('ab')).toThrow(/atomic/);

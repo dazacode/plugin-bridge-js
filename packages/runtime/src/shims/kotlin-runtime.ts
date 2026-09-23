@@ -1116,7 +1116,15 @@ function __regexSource(pattern) {
 
     if (ch === '\\\\') {
       var next = text.charAt(i + 1);
-      if (next === 'p' || next === 'P') throw __regexRefusal('a \\\\p{...} Unicode class', pattern);
+      if (next === 'p' || next === 'P') {
+        var named = __regexNamedClass(text, i, next === 'P', inClass);
+        if (named === null) throw __regexRefusal('a \\\\p{...} Unicode class', pattern);
+        out += named.text;
+        if (named.unicode && flags.indexOf('u') === -1) flags += 'u';
+        i = named.end;
+        quantified = false;
+        continue;
+      }
       if (next === 'Q') {
         var end = text.indexOf('\\\\E', i + 2);
         var literal = end === -1 ? text.slice(i + 2) : text.slice(i + 2, end);
@@ -1196,7 +1204,110 @@ function __regexSource(pattern) {
     quantified = false;
   }
 
+  // A general category needs Unicode mode, which is stricter about escapes
+  // than the mode everything else here was written for. A pattern it rejects
+  // is refused, never compiled without the flag: without it '\\\\p{L}' is the
+  // letter 'p', which matches something else.
+  if (flags.indexOf('u') !== -1) {
+    try {
+      new RegExp(out, flags);
+    } catch (error) {
+      throw __regexRefusal('a \\\\p{...} Unicode class in a pattern Unicode mode rejects', pattern);
+    }
+  }
+
   return { source: out, flags: flags };
+}
+
+/*
+ * Java's named classes that have a JavaScript spelling matching identically.
+ *
+ * - General categories ('L', 'Lu', 'Mn' …, also 'IsL' and 'gc=L') are the same
+ *   Unicode property in both, so they pass through as '\\\\p{L}' under the
+ *   'u' flag.
+ * - POSIX names ('Alpha', 'Punct' …) are US-ASCII in Java unless the pattern
+ *   asks for UNICODE_CHARACTER_CLASS, which the subset has no option for, so
+ *   they are these exact ranges.
+ * - A block ('InCombiningDiacriticalMarks') is a fixed code-point range. Only
+ *   the blocks the catalogue was measured using are listed; any other name is
+ *   refused as before rather than guessed.
+ *
+ * Scripts ('IsLatin'), the 'java*' methods and anything else stay refused.
+ */
+var __REGEX_CATEGORIES = [
+  'L', 'Lu', 'Ll', 'Lt', 'Lm', 'Lo', 'LC', 'M', 'Mn', 'Mc', 'Me', 'N', 'Nd', 'Nl', 'No',
+  'P', 'Pc', 'Pd', 'Ps', 'Pe', 'Pi', 'Pf', 'Po', 'S', 'Sm', 'Sc', 'Sk', 'So',
+  'Z', 'Zs', 'Zl', 'Zp', 'C', 'Cc', 'Cf', 'Co', 'Cs', 'Cn'
+];
+
+var __REGEX_POSIX = {
+  Lower: [[0x61, 0x7a]],
+  Upper: [[0x41, 0x5a]],
+  ASCII: [[0x00, 0x7f]],
+  Alpha: [[0x41, 0x5a], [0x61, 0x7a]],
+  Digit: [[0x30, 0x39]],
+  Alnum: [[0x30, 0x39], [0x41, 0x5a], [0x61, 0x7a]],
+  Punct: [[0x21, 0x2f], [0x3a, 0x40], [0x5b, 0x60], [0x7b, 0x7e]],
+  Graph: [[0x21, 0x7e]],
+  Print: [[0x20, 0x7e]],
+  Blank: [[0x09, 0x09], [0x20, 0x20]],
+  Cntrl: [[0x00, 0x1f], [0x7f, 0x7f]],
+  XDigit: [[0x30, 0x39], [0x41, 0x46], [0x61, 0x66]],
+  Space: [[0x09, 0x0d], [0x20, 0x20]]
+};
+
+/* Keyed by the name with case, spaces, '_' and '-' removed, as Java matches it. */
+var __REGEX_BLOCKS = {
+  COMBININGDIACRITICALMARKS: [[0x0300, 0x036f]],
+  HANGULSYLLABLES: [[0xac00, 0xd7af]]
+};
+
+function __regexCodeUnit(code) {
+  var hex = code.toString(16);
+  while (hex.length < 4) hex = '0' + hex;
+  return '\\\\u' + hex;
+}
+
+/** The class at text[at] ('\\\\p' or '\\\\P'), or null to refuse it. */
+function __regexNamedClass(text, at, negated, inClass) {
+  var name;
+  var end;
+  if (text.charAt(at + 2) === '{') {
+    var close = text.indexOf('}', at + 3);
+    if (close === -1) return null;
+    name = text.slice(at + 3, close);
+    end = close + 1;
+  } else {
+    name = text.charAt(at + 2);
+    end = at + 3;
+  }
+
+  var category = name.replace(/^(Is|gc=|general_category=)/, '');
+  if (__REGEX_CATEGORIES.indexOf(category) !== -1) {
+    return { text: (negated ? '\\\\P{' : '\\\\p{') + category + '}', end: end, unicode: true };
+  }
+
+  var ranges = null;
+  if (Object.prototype.hasOwnProperty.call(__REGEX_POSIX, name)) {
+    ranges = __REGEX_POSIX[name];
+  } else {
+    var block = /^(In|block=|blk=)(.+)$/.exec(name);
+    var key = block === null ? '' : block[2].replace(/[ _-]/g, '').toUpperCase();
+    if (block !== null && Object.prototype.hasOwnProperty.call(__REGEX_BLOCKS, key)) {
+      ranges = __REGEX_BLOCKS[key];
+    }
+  }
+  if (ranges === null) return null;
+  // A negated range cannot be written inside a class that is already open.
+  if (negated && inClass) return null;
+
+  var body = '';
+  for (var r = 0; r < ranges.length; r += 1) {
+    body += ranges[r][0] === ranges[r][1]
+      ? __regexCodeUnit(ranges[r][0])
+      : __regexCodeUnit(ranges[r][0]) + '-' + __regexCodeUnit(ranges[r][1]);
+  }
+  return { text: inClass ? body : (negated ? '[^' : '[') + body + ']', end: end, unicode: false };
 }
 
 function __regexFlags(base, extra) {
