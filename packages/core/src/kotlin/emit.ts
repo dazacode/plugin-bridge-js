@@ -3446,14 +3446,17 @@ class Emitter {
 						let emitted: string | null;
 						try {
 							emitted = this.member(key, child, () => {
-								const accessor = this.moduleGetter(child, members[index + 1], key);
 								// An object's getter is a member of the literal, where
 								// JavaScript has a `get` of its own to say it with. Its
-								// body runs on read, so it may reach a sibling.
-								if (accessor !== null) {
-									this.emittingObjectProperty = outerProperty;
-									return `get ${JSON.stringify(key)}() ${accessor}`;
-								}
+								// body runs on read, so it may reach a sibling — and
+								// reaches it through the object, not the hoisted const:
+								// emitted while this was still the object's, a getter
+								// over a `var` read the value it was declared with
+								// forever, whatever was assigned since.
+								this.emittingObjectProperty = outerProperty;
+								const accessor = this.moduleGetter(child, members[index + 1], key);
+								if (accessor !== null) return `get ${JSON.stringify(key)}() ${accessor}`;
+								this.emittingObjectProperty = name;
 								// `private val GENRES_LIST by lazy { getPairListByIndex(0) }`
 								// — inside an `object`, `lazy` is load-bearing rather than
 								// decorative. The block reads a `lateinit` that the first
@@ -3544,7 +3547,17 @@ class Emitter {
 				);
 			}
 
-			const literal = `const ${self} = Object.freeze(${block(fields.map(comma))});`;
+			// Frozen, unless the object declares a `var`: `object Intl { var lang =
+			// "zh" }` is assigned from a template's constructor, and a frozen
+			// literal made that assignment a TypeError at load. Sealed instead,
+			// so the shape still cannot grow and a `var` can be written — a
+			// `val` cannot be assigned in Kotlin in the first place.
+			const mutable = members.some(
+				(child) =>
+					child.type === 'property_declaration' &&
+					kids(child).some((part) => part.type === 'binding_pattern_kind' && part.text === 'var')
+			);
+			const literal = `const ${self} = Object.${mutable ? 'seal' : 'freeze'}(${block(fields.map(comma))});`;
 			// `object X : JsonTransformingSerializer<T>(ListSerializer(Item.serializer()))`
 			// — the typed decoder runs X's `transformDeserialize` and then the
 			// base serializer, which it can only do as "decode as this type".
@@ -8301,7 +8314,7 @@ class Emitter {
 		const shadowed =
 			objectMember ||
 			(lambda === null &&
-				(this.extensionFunctions.has(name) ||
+				(this.reachableExtension(name) ||
 					(importedExtension !== null &&
 						this.neighbourExtensions.has(`${importedExtension}.${name}`))));
 		// The two rate-limit helpers take their period as a *unit plus a number*,
@@ -8431,6 +8444,14 @@ class Emitter {
 		// implements and a declaration on the class both still win: what is
 		// filled here is only the gap where nothing else answered at all.
 		if (extension === undefined && this.neighbourModuleExtensions.has(name)) extension = 'module';
+		// A *member* extension needs the class's instance as its dispatch
+		// receiver, and a companion or a file-scope declaration has none — so
+		// Kotlin never resolves to one from there. `companion object { val re =
+		// names.joinToString("|").toRegex() }` in a class that also declares
+		// `private fun JsonElement.joinToString()` is the standard library's
+		// `joinToString`; emitted as the member it was `this.joinToString(…)` at
+		// module scope, and the bundle died at load.
+		if (extension === 'method' && this.selfClass === null) extension = undefined;
 		// Imported by name from a shared `object` — see `importedMembers`.
 		const importedFrom = extension === undefined ? this.importedOwner(name) : null;
 		if (importedFrom !== null && this.neighbourExtensions.has(`${importedFrom}.${name}`)) {
@@ -8927,7 +8948,24 @@ class Emitter {
 			if (shape === null) this.refuse(callee, `\`${name}()\` with no type argument`);
 			return `${this.helper('decode')}(${[implicit, this.decodeType(shape), ...tail].join(', ')})`;
 		}
-		if (implicit !== null && !this.isSourceMember(name)) {
+		// A method the class's translated *base* declares, called bare from an
+		// extension function whose receiver does not have it —
+		// `override fun OkHttpClient.Builder.configureClient() =
+		// addInterceptor(acceptHeaderInterceptor())` in an extension whose
+		// template declares that helper. Kotlin looks through the extension
+		// receiver first and then the dispatch receiver, and the builder has no
+		// such method, so it is the source's. Emitted on the receiver it was
+		// `__recv.acceptHeaderInterceptor is not a function` at the first
+		// request. Only a name no shim or stdlib helper also answers, because
+		// for one of those the innermost receiver may well be the one.
+		const inheritedCall =
+			implicit !== null &&
+			!this.isSourceMember(name) &&
+			this.ownerBase !== null &&
+			this.baseDeclares(this.ownerBase, name) &&
+			!HOST_METHODS.has(name) &&
+			!EXTENSION_METHODS.has(name);
+		if (implicit !== null && !this.isSourceMember(name) && !inheritedCall) {
 			const helper = EXTENSION_METHODS.get(name);
 			if (helper !== undefined) {
 				// With its trailing lambda, which this dropped.
@@ -10682,6 +10720,18 @@ class Emitter {
 	private receiverDeclares(name: string): boolean {
 		if (this.receiverType === null) return false;
 		return this.classMemberIndex.get(this.receiverType)?.has(name) === true;
+	}
+
+	/**
+	 * Whether an extension function this file declares can be the one a call
+	 * here means. A *member* extension needs the class's instance as its
+	 * dispatch receiver, and a companion or file-scope declaration has none, so
+	 * from there Kotlin never resolves to it — see the explicit-receiver call.
+	 */
+	private reachableExtension(name: string): boolean {
+		const kind = this.extensionFunctions.get(name);
+		if (kind === undefined) return false;
+		return kind !== 'method' || this.selfClass !== null;
 	}
 
 	private isSourceMember(name: string): boolean {

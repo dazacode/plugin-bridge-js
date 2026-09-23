@@ -667,6 +667,26 @@ describe('a reference to a member the template declares', () => {
 	});
 });
 
+describe('a template method called bare from an extension function', () => {
+	it('calls the source, since the extension receiver does not have it', async () => {
+		// `override fun OkHttpClient.Builder.configureClient() =
+		// addInterceptor(acceptHeaderInterceptor())` with the helper declared by
+		// the template. Kotlin tries the builder, then the source; emitted on
+		// the builder it was `__recv.acceptHeaderInterceptor is not a function`.
+		const sub = await instantiate(
+			'Sub',
+			kt('open class Base {', '    open fun marker(): String = "from the template"', '}'),
+			kt(
+				'class Sub : Base() {',
+				'    fun StringBuilder.tagged(): String = append(marker()).toString()',
+				'    fun run(): String = StringBuilder("> ").tagged()',
+				'}'
+			)
+		);
+		expect(sub.run()).toBe('> from the template');
+	});
+});
+
 describe('a decode that names a @Serializable class', () => {
 	// The structural decoder recognised a record by its field set, and a class
 	// whose fields are all optional fits every record — so `Filters` below made
@@ -1108,6 +1128,54 @@ describe('a member imported by name from a shared object', () => {
 		// list instead of the declared extension, it answered an encoded list.
 		const demo = await instantiate('Demo', shared, importing);
 		expect(demo.query()).toBe('a b');
+	});
+});
+
+describe('a member extension, from where it cannot be called', () => {
+	it('leaves a companion’s call to the standard library', async () => {
+		// A member extension needs the instance as its dispatch receiver, and a
+		// companion has none. Read as the member, this was `this.joinToString`
+		// at module scope, and the bundle died at load.
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class Demo(private val words: List<String> = listOf("x", "y")) {',
+				'    private fun List<String>.joinToString(): String = "member"',
+				'    fun own(): String = words.joinToString()',
+				'    fun shared(): String = PATTERN',
+				'    companion object {',
+				'        val NAMES = listOf("a", "b")',
+				'        val PATTERN = NAMES.joinToString("|")',
+				'    }',
+				'}'
+			)
+		);
+		expect(demo.shared()).toBe('a|b');
+		expect(demo.own()).toBe('member');
+	});
+});
+
+describe('an object with a var', () => {
+	it('can be assigned, and its getters read what was assigned', async () => {
+		// `object Labels { var lang = "zh"; val sort get() = when (lang) … }`,
+		// assigned from a template's constructor. Frozen, the assignment threw
+		// at load; and a getter emitted against the hoisted constant read the
+		// declared value forever.
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'object Labels {',
+				'    var lang = "zh"',
+				'    val sort get() = if (lang == "zh") "排序" else "Sort by"',
+				'    val initial = lang + "!"',
+				'}',
+				'class Demo {',
+				'    init { Labels.lang = "en" }',
+				'    fun read(): String = Labels.sort + "|" + Labels.initial + "|" + Labels.lang',
+				'}'
+			)
+		);
+		expect(demo.read()).toBe('Sort by|zh!|en');
 	});
 });
 
