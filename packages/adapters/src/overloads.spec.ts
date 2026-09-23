@@ -164,6 +164,29 @@ class Ext : ParsedHttpSource() {
 		expect(ext.mapped()).toEqual(['one:d']);
 	});
 
+	it('keeps two objects\u2019 overloads of one name apart', async () => {
+		// The signature table is collected by name across files, so each
+		// dispatcher lists the other object's signatures too. Only the ones
+		// actually on the object it is resolving against may be picked.
+		const { exported } = await run(
+			`
+object Packed {
+    fun unpack(a: String, b: String, c: String): String = "P3"
+    fun unpack(x: Int): String = "Pi"
+}
+object Js {
+    fun unpack(s: String): String = "J1"
+    fun unpack(s: Collection<String>): String = "Jc"
+}
+class Ext : ParsedHttpSource() {
+    fun all(): String = Packed.unpack("a", "b", "c") + Packed.unpack(1) + Js.unpack("x") + Js.unpack(listOf("y"))
+}
+`,
+			['Ext']
+		);
+		expect(new exported.Ext().all()).toBe('P3PiJ1Jc');
+	});
+
 	it('falls back to the driver base when no translated declaration accepts the call', async () => {
 		const { exported } = await run(
 			`

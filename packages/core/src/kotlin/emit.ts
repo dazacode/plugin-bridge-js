@@ -223,6 +223,90 @@ const BASE_SOURCE_MEMBERS: ReadonlySet<string> = new Set([
 	'versionId'
 ]);
 
+/**
+ * Names a source has and a model type does not, for the one exception to
+ * `BASE_SOURCE_MEMBERS`'s rule that a model field name read inside `apply {}`
+ * is the receiver's.
+ *
+ * That rule costs a wrong string whenever the body means the *source's* own
+ * `name` — `SManga.create().apply { title = "$name ($year)" }` titled every
+ * comic of one source "undefined (2026)". Where the receiver is visibly
+ * built as a model type (`modelTypeOf`), whether that type has the field is
+ * a fact rather than a guess: an `SManga` has a title and no name. Kept to
+ * the names and types where it is certain; an `SChapter` *does* have a
+ * `name`, and a receiver whose type is not written keeps the old rule.
+ */
+const MODEL_LACKS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+	['SManga', new Set(['name', 'id'])],
+	['SAnime', new Set(['name', 'id'])]
+]);
+
+/**
+ * The fields each model type declares — the other half of the same fact.
+ *
+ * Kotlin resolves an implicit receiver innermost first, so inside
+ * `SChapter.create().apply { … }` a bare `name` is the *chapter's* even
+ * though every extension also declares its own `name`. `BASE_SOURCE_MEMBERS`'
+ * rule sent it to whichever declared it, and the extension always does, so
+ * `chapter_number = name.substringAfter("Ch.")` read the source's name.
+ * Only used positively: a name listed here is the receiver's; a name missing
+ * from it is left to the old rule, so an incomplete list costs nothing new.
+ */
+const MODEL_FIELDS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+	[
+		'SManga',
+		new Set([
+			'url',
+			'title',
+			'artist',
+			'author',
+			'description',
+			'genre',
+			'status',
+			'thumbnail_url',
+			'update_strategy',
+			'initialized'
+		])
+	],
+	[
+		'SAnime',
+		new Set([
+			'url',
+			'title',
+			'artist',
+			'author',
+			'description',
+			'genre',
+			'status',
+			'thumbnail_url',
+			'update_strategy',
+			'initialized'
+		])
+	],
+	['SChapter', new Set(['url', 'name', 'date_upload', 'chapter_number', 'scanlator'])],
+	[
+		'SEpisode',
+		new Set([
+			'url',
+			'name',
+			'date_upload',
+			'episode_number',
+			'scanlator',
+			'fillermark',
+			'summary',
+			'preview_url'
+		])
+	]
+]);
+
+/** `SManga.create()` as `SManga`: the model type a receiver expression visibly builds. */
+function modelTypeOf(node: KNode): string | null {
+	const match = /^(SManga|SAnime|SChapter|SEpisode)\.create\(\)$/.exec(
+		node.text.replace(/\s+/g, '')
+	);
+	return match === null ? null : match[1];
+}
+
 /** Reserved in JavaScript, legal in Kotlin. Renamed rather than refused. */
 const RESERVED: ReadonlySet<string> = new Set([
 	'arguments',
@@ -625,6 +709,11 @@ interface Frame {
 	usesSelf: boolean;
 	/** On an `inline` frame: how the block's own receiver is spelled, if it has one. */
 	readonly alias?: string | null;
+	/**
+	 * On a receiver block: the model type its receiver was built as, when the
+	 * text says so — `SManga.create().apply { … }`. See `MODEL_LACKS`.
+	 */
+	readonly model?: string | null;
 	/** On an `inline` frame: where the block's value goes, for `return@label`. */
 	readonly sink?: Sink;
 	/** On an `inline` frame: the JavaScript label a `return@label` leaves by. */
@@ -5551,7 +5640,14 @@ class Emitter {
 			const receiverText = this.expr(receiver);
 			const tail = this.provenance(
 				helper,
-				this.callArguments(name, args, lambda, labelled, RECEIVER_SCOPE.has(name)),
+				this.callArguments(
+					name,
+					args,
+					lambda,
+					labelled,
+					RECEIVER_SCOPE.has(name),
+					RECEIVER_SCOPE.has(name) ? modelTypeOf(receiver) : null
+				),
 				1
 			);
 			// `filters.filterIsInstance<OrderFilter>()` — the type is the whole
@@ -5674,7 +5770,14 @@ class Emitter {
 		if (lambda !== null && !builderLambda) this.refuse(lambda, `a lambda passed to \`.${name}()\``);
 
 		const argumentsText = builderLambda
-			? this.callArguments(name, args, lambda, labelled, !argumentLambda)
+			? this.callArguments(
+					name,
+					args,
+					lambda,
+					labelled,
+					!argumentLambda,
+					argumentLambda ? null : modelTypeOf(receiver)
+				)
 			: this.plainArguments(name, args, this.receiverTypeOf(receiver));
 		// `element.parent()` is a jsoup call and a runtime field; see
 		// `HOST_PROPERTY_METHODS` for what emitting it as written cost.
@@ -6014,14 +6117,17 @@ class Emitter {
 		args: KNode[],
 		lambda: KNode | null,
 		labelled: string | null,
-		receiverForm: boolean
+		receiverForm: boolean,
+		model: string | null = null
 	): string[] {
 		const out = this.plainArguments(name, args);
 		// An unlabelled lambda carries an implicit label: the name of the
 		// function it was passed to. `return@map` inside `.map {}` is ordinary
 		// Kotlin, and it is a return from the lambda, which translates.
 		if (lambda !== null) {
-			out.push(this.lambda(lambda, receiverForm, labelled ?? name, !NO_BLOCK_PARAMETER.has(name)));
+			out.push(
+				this.lambda(lambda, receiverForm, labelled ?? name, !NO_BLOCK_PARAMETER.has(name), model)
+			);
 		}
 		return out;
 	}
@@ -6474,7 +6580,8 @@ class Emitter {
 		node: KNode,
 		receiver: boolean,
 		labelled: string | null = null,
-		implicit = true
+		implicit = true,
+		model: string | null = null
 	): string {
 		const params = kids(node).find((child) => child.type === 'lambda_parameters');
 		const names: string[] = [];
@@ -6513,10 +6620,16 @@ class Emitter {
 		}
 
 		const bound = this.destructuredParts.splice(0);
-		const emitted = this.functionScope(receiver ? 'receiver' : 'lambda', labelled, names, () => {
-			for (const part of bound) this.declare(part);
-			return block([...unpack, ...this.lambdaLines(node)]);
-		});
+		const emitted = this.functionScope(
+			receiver ? 'receiver' : 'lambda',
+			labelled,
+			names,
+			() => {
+				for (const part of bound) this.declare(part);
+				return block([...unpack, ...this.lambdaLines(node)]);
+			},
+			receiver ? model : null
+		);
 		if (emitted.isAsync) this.asyncLambdas += 1;
 
 		const head = `(${names.map((part) => this.safe(part)).join(', ')})`;
@@ -6873,6 +6986,7 @@ class Emitter {
 				sink: shape.yields === 'block' ? sink : null,
 				exit,
 				alias: shape.receiverForm ? subject : null,
+				model: shape.receiverForm && shape.subject !== null ? modelTypeOf(shape.subject) : null,
 				bound: bound.bound
 			},
 			() => {
@@ -6949,6 +7063,7 @@ class Emitter {
 			sink: Sink;
 			exit: string;
 			alias?: string | null;
+			model?: string | null;
 			loop?: boolean;
 			bound?: readonly string[];
 		},
@@ -6960,6 +7075,7 @@ class Emitter {
 			usesAwait: false,
 			usesSelf: false,
 			alias: options.alias ?? null,
+			model: options.model ?? null,
 			sink: options.sink,
 			exit: options.exit,
 			loop: options.loop === true,
@@ -7183,7 +7299,16 @@ class Emitter {
 		if (/^[A-Z]/.test(name) && !this.classMembers.has(name)) this.refuse(node, `\`${name}\``);
 
 		const receiver = this.receiverAlias();
-		if (receiver !== null && !this.isSourceMember(name)) return `${receiver}.${name}`;
+		if (receiver !== null && MODEL_FIELDS.get(this.receiverModel() ?? '')?.has(name) === true) {
+			return `${receiver}.${name}`;
+		}
+		if (
+			receiver !== null &&
+			!this.isSourceMember(name) &&
+			MODEL_LACKS.get(this.receiverModel() ?? '')?.has(name) !== true
+		) {
+			return `${receiver}.${name}`;
+		}
 		// Inside `fun Element.getInfo()`, a bare name is the receiver's unless
 		// the enclosing class declares it — the same rule, and the same residual
 		// risk, as an `apply {}` body.
@@ -7255,6 +7380,20 @@ class Emitter {
 		return null;
 	}
 
+	/** The model type of the innermost receiver block, where one is known. */
+	private receiverModel(): string | null {
+		for (let index = this.frames.length - 1; index >= 0; index -= 1) {
+			const frame = this.frames[index];
+			if (frame.kind === 'receiver') return frame.model ?? null;
+			if (frame.kind === 'inline') {
+				if (frame.alias != null) return frame.model ?? null;
+				continue;
+			}
+			if (frame.kind === 'function') return null;
+		}
+		return null;
+	}
+
 	/** True when the nearest `this`-rebinding frame is an `apply`/`run` block. */
 	private inReceiver(): boolean {
 		return this.receiverAlias() !== null;
@@ -7313,9 +7452,10 @@ class Emitter {
 		kind: Frame['kind'],
 		label: string | null,
 		params: readonly string[],
-		run: () => string
+		run: () => string,
+		model: string | null = null
 	): Emitted {
-		const frame: Frame = { kind, label, usesAwait: false, usesSelf: false };
+		const frame: Frame = { kind, label, usesAwait: false, usesSelf: false, model };
 		this.frames.push(frame);
 		this.pushScope();
 		for (const param of params) this.declare(param);

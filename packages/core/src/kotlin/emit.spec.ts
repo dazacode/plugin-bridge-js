@@ -3617,6 +3617,22 @@ describe('refusing by name', () => {
 		expect(refusalNames(source)).toContain(expected);
 	});
 
+	it('reads the source\u2019s own name inside an SManga it is building, and a chapter\u2019s inside a chapter', () => {
+		// `SManga.create().apply { title = "$name ($year)" }` titled every comic
+		// of one source "undefined (2026)": `name` went to the record, and an
+		// SManga has no name. An SChapter does, so there it stays the record's.
+		const js = translate(
+			inClass(
+				'    override val name = "Strip"',
+				'    fun manga(year: Int): SManga = SManga.create().apply { title = "$name ($year)" }',
+				'    fun chapter(): SChapter = SChapter.create().apply { name = "c"; url = name }'
+			)
+		).js;
+		expect(js).toMatch(/title = `\$\{(?:__self|this)\.name\} \(/);
+		expect(js).not.toMatch(/manga[\s\S]*this\.title = `\$\{this\.name\}/);
+		expect(js).toMatch(/url = (?:this|__t\d+)\.name/);
+	});
+
 	it('lets `Thread.sleep` through as the wait it is, and nothing else about `Thread`', () => {
 		// The emitter has long written `Thread.sleep(n)` as the runtime's awaited
 		// `delay`; the scanner refused it anyway, at the leaf `Thread`, as a
