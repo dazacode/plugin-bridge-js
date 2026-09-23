@@ -108,7 +108,7 @@ async function build(loader: WasmLoader): Promise<KotlinParser> {
 	const parser = new Parser();
 	parser.setLanguage(language);
 
-	return (source: string): KotlinTree => {
+	const read = (source: string): KotlinTree => {
 		// Ahead of the first parse, and not gated on an error, because the gap it
 		// closes produces no error — see `genericCallOperands`. Kept only if the
 		// rewrite parses at least as well as the source did, which is what stops
@@ -136,6 +136,20 @@ async function build(loader: WasmLoader): Promise<KotlinParser> {
 		if (masked === source) return { root, hasError: true };
 		const recovered = wrap(parser.parse(masked).rootNode as unknown as RawNode);
 		return { root: recovered, hasError: recovered.hasError };
+	};
+
+	return (source: string): KotlinTree => {
+		// Also not gated on an error, for the reason `genericCallOperands` is
+		// not: the parse succeeds and is wrong. See `lineInitialCalls`. The split
+		// is kept only where it reads cleanly, so a file this could make worse
+		// is read exactly as it always was.
+		const split = lineInitialCalls(
+			(text) => parser.parse(text).rootNode as unknown as SplitNode,
+			source
+		);
+		if (split === null) return read(source);
+		const tree = read(split);
+		return tree.hasError ? read(source) : tree;
 	};
 }
 
@@ -1278,6 +1292,146 @@ function skipBraces(source: string, open: number): number {
 		at += 1;
 	}
 	return source.length;
+}
+
+/**
+ * A statement that begins with `(`, read as a call on the line above it.
+ *
+ *     val url = baseUrl + path
+ *     (if (filters.isEmpty()) getFilterList() else filters).forEach { … }
+ *
+ * Kotlin reads two statements there. Its grammar allows no newline in front
+ * of a call's argument list — `callSuffix` has no `NL*` where `navigationSuffix`
+ * does — so a `(` that begins a line is never an argument list for what ended
+ * the line before. The pinned grammar does not know that, and reads one
+ * statement: `path(if (…) … else filters).forEach { … }`, the previous line
+ * *called* with the next line's parenthesis as its arguments.
+ *
+ * That is not a parse error, so nothing else here would see it. Where the
+ * line above ended in a call the emitter refused the result as "a call
+ * returning a callable" (25 listings of one catalogue, eight of them for this
+ * alone); where it ended in a plain name it did not refuse at all — `x = y`
+ * above `(a + b).let { … }` became `x = y(a + b).let { … }`, a wrong program
+ * with nothing reported.
+ *
+ * The repair is the statement separator Kotlin inferred, written out: a `;` in
+ * front of the `(`. Three things keep it to the cases Kotlin agrees with.
+ *
+ * - **The `(` is the first thing on its line, and the callee ended on an
+ *   earlier one.** Read off the tree the pinned grammar produced, not off the
+ *   text, so a parenthesis in a string or a comment is never a candidate.
+ * - **The newline is one Kotlin counts.** Inside parentheses or brackets it
+ *   does not: `listOf(a` newline `(b))` really is `a(b)`. So the call must
+ *   sit in a block — a function body, a lambda, a `when` entry — with no
+ *   argument list, parenthesis, index, condition or string between it and
+ *   the block. Anything else is left alone.
+ * - **The result must parse cleanly**, or the file is read as it was.
+ *
+ * A `;` replaces the indentation character in front of the `(` where there is
+ * one, so no offset moves; no newline ever moves, so every line a refusal
+ * names is still the line it was.
+ */
+function lineInitialCalls(parse: (source: string) => SplitNode, source: string): string | null {
+	// Cheap enough to run on every file: a line that begins with `(`.
+	if (!/\n[ \t]*\(/.test(source)) return null;
+
+	const lines = source.split('\n');
+	const starts: number[] = [];
+	let offset = 0;
+	for (const line of lines) {
+		starts.push(offset);
+		offset += line.length + 1;
+	}
+
+	const edits = new Map<number, Edit>();
+	for (const suffix of parse(source).descendantsOfType('call_suffix')) {
+		const values = suffix.child(0);
+		const callee = suffix.previousSibling;
+		if (values === null || callee === null || values.type !== 'value_arguments') continue;
+		const row = values.startPosition.row;
+		if (row <= callee.endPosition.row || suffix.parent === null) continue;
+		const line = lines[row];
+		if (line === undefined || !/^[ \t]*\(/.test(line)) continue;
+		if (!countedNewline(suffix.parent)) continue;
+
+		const at = starts[row] + line.indexOf('(');
+		const before = source.charAt(at - 1);
+		edits.set(
+			at,
+			before === ' ' || before === '\t'
+				? { start: at - 1, end: at, text: ';' }
+				: { start: at, end: at, text: ';' }
+		);
+	}
+	if (edits.size === 0) return null;
+
+	let output = source;
+	for (const edit of [...edits.values()].sort((left, right) => right.start - left.start)) {
+		output = output.slice(0, edit.start) + edit.text + output.slice(edit.end);
+	}
+	return output;
+}
+
+/**
+ * Whether a newline in front of this call is one Kotlin reads as the end of a
+ * statement: true inside a block, false inside anything bracketed.
+ *
+ * Walked outward to the first construct that decides. A condition — `if (…)`,
+ * `while (…)`, a `for` header — is parenthesised, so arriving at one from
+ * anything but its body is arriving from inside the parentheses.
+ */
+function countedNewline(from: SplitNode): boolean {
+	let child = from;
+	for (let at = from.parent; at !== null; child = at, at = at.parent) {
+		if (BRACKETED.has(at.type)) return false;
+		if (BLOCKS.has(at.type)) return true;
+		if (CONDITIONED.has(at.type) && child.type !== 'control_structure_body') return false;
+	}
+	return true;
+}
+
+/** Constructs whose newlines Kotlin ignores. */
+const BRACKETED: ReadonlySet<string> = new Set([
+	'value_arguments',
+	'parenthesized_expression',
+	'indexing_suffix',
+	'collection_literal',
+	'when_subject',
+	'function_value_parameters',
+	'primary_constructor',
+	'annotation',
+	'string_literal',
+	'interpolation',
+	'type_arguments'
+]);
+
+/** Constructs whose newlines end a statement. */
+const BLOCKS: ReadonlySet<string> = new Set([
+	'statements',
+	'lambda_literal',
+	'when_entry',
+	'class_body',
+	'source_file'
+]);
+
+/** Constructs with a parenthesised header in front of a body. */
+const CONDITIONED: ReadonlySet<string> = new Set([
+	'if_expression',
+	'while_statement',
+	'do_while_statement',
+	'for_statement',
+	'catch_block'
+]);
+
+/** The subset of web-tree-sitter's node `lineInitialCalls` reads. */
+interface SplitNode {
+	readonly type: string;
+	readonly startPosition: { readonly row: number };
+	readonly endPosition: { readonly row: number };
+	readonly parent: SplitNode | null;
+	readonly previousSibling: SplitNode | null;
+	child(index: number): SplitNode | null;
+	descendantsOfType(type: string): SplitNode[];
 }
 
 interface ParserModule {

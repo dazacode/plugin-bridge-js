@@ -784,6 +784,13 @@ interface Frame {
 	jumpId?: number;
 	/** Set when a non-local jump actually named this frame, so the catch is emitted. */
 	catchesJump?: boolean;
+	/**
+	 * On a `receiver` frame: the `const` its `this` is captured in, set when a
+	 * `this@label` from inside a *nested* receiver block named it. The inner
+	 * `function () {}` has rebound `this`, so the outer one's has to be held
+	 * the way `__self` holds the source's. See `labelledThis`.
+	 */
+	capture?: string;
 }
 
 interface Emitted {
@@ -1310,6 +1317,14 @@ class Emitter {
 	private readonly scopes: Map<string, Local>[] = [];
 	private readonly frames: Frame[] = [];
 	private temporaries = 0;
+	/** The backing field `field` means in the accessor being emitted, if any. */
+	private backing: string | null = null;
+	/** Whether a property accessor is being emitted, where `field` is a keyword. */
+	private inAccessor = false;
+	/** What an unlabelled `break` here would land on; see `loopBody`. */
+	private readonly loops: ('loop' | 'barrier')[] = [];
+	/** Bumped per captured receiver; see `Frame.capture`. */
+	private captures = 0;
 	/** Bumped per inlined Kotlin block, for the label a `return@x` leaves by. */
 	private exits = 0;
 	/** The statement being emitted, and where a hoisted `?: return` guard goes. */
@@ -1588,6 +1603,24 @@ class Emitter {
 	private readonly expectedTypes = new Map<string, string | null>();
 	/** The receiver parameter of the extension function being emitted. */
 	private receiverParam: string | null = null;
+	/**
+	 * That function's own name, which is the label Kotlin gives its receiver:
+	 * `this@toSManga` inside `fun Dto.toSManga() = SManga.create().apply { … }`
+	 * is the DTO, reached past the `apply` whose own `this` is the model.
+	 */
+	private receiverLabel: string | null = null;
+	/**
+	 * And the type it extends, as the class index spells it, for the one
+	 * question only the declaration can answer: does a bare name inside the
+	 * function belong to the extension receiver? See `receiverDeclares`.
+	 */
+	private receiverType: string | null = null;
+	/**
+	 * The Kotlin name of the class `owner` is emitting, which `owner` is not
+	 * once a nested type has been renamed apart from a namesake — see
+	 * `scopeNestedTypes`. `this@Book` names the class as it was written.
+	 */
+	private ownerLabel: string | null = null;
 	private classMembers = new Set<string>();
 	private suspendMembers = new Set<string>();
 	private readonly signatures = new Map<string, readonly string[]>(KNOWN_SIGNATURES);
@@ -2335,7 +2368,9 @@ class Emitter {
 		// forty lines further down.
 		const outerMembers = this.classMembers;
 		const outerSuspends = this.suspendMembers;
+		const outerLabel = this.ownerLabel;
 		this.owner = name;
+		this.ownerLabel = this.nameOf(node) ?? name;
 		this.ownerBase = base;
 
 		this.classMembers = new Set(
@@ -2423,11 +2458,13 @@ class Emitter {
 					// A getter written on its own line — `override val baseUrl:
 					// String` then `get() = "…"` — is a *sibling* of the property
 					// here, not a child of it. Reading them apart refuses both.
-					const next = members[index + 1];
-					const detached =
-						next !== undefined && (next.type === 'getter' || next.type === 'setter')
-							? next
-							: undefined;
+					// Both of them, where there are both: `var x: T` then `get() = …`
+					// then `set(v) = …` are three siblings.
+					const detached: KNode[] = [];
+					for (const next of members.slice(index + 1, index + 3)) {
+						if (next.type !== 'getter' && next.type !== 'setter') break;
+						detached.push(next);
+					}
 					this.pushScope();
 					let emitted;
 					try {
@@ -2439,6 +2476,7 @@ class Emitter {
 					if (emitted === null) break;
 					if (emitted.kind === 'assign') ctorLines.push(emitted.text);
 					else memberLines.push(emitted.text);
+					if (emitted.ctor !== undefined) ctorLines.push(emitted.ctor);
 					break;
 				}
 				case 'getter':
@@ -2569,6 +2607,7 @@ class Emitter {
 
 		nested.restore();
 		this.owner = outerOwner;
+		this.ownerLabel = outerLabel;
 		this.ownerBase = outerBase;
 		this.enumScope = outerEnum;
 		this.classMembers = outerMembers;
@@ -2863,7 +2902,9 @@ class Emitter {
 			// here, and without it the member was refused for saying which of
 			// two receivers it meant, which is the one thing that made it clear.
 			const outerOwner = this.owner;
+			const outerLabel = this.ownerLabel;
 			this.owner = name;
+			this.ownerLabel = this.nameOf(node) ?? name;
 			this.pushScope();
 			// Declared out here because `finally` has to give the nested-type
 			// names back, and a `const` inside the `try` is not in its scope.
@@ -2945,6 +2986,7 @@ class Emitter {
 				scoped?.restore();
 				this.popScope();
 				this.owner = outerOwner;
+				this.ownerLabel = outerLabel;
 			}
 		});
 	}
@@ -3308,15 +3350,26 @@ class Emitter {
 		return run();
 	}
 
-	private member(name: string, node: KNode, run: () => string): string | null {
+	private member(
+		name: string,
+		node: KNode,
+		run: () => string,
+		/**
+		 * A property's accessors when they are its siblings rather than its
+		 * children — see `classProperty`. What a setter calls is as much the
+		 * property's edge as what its initialiser does, and an edge left out
+		 * lets reachability prune a refusal the setter still calls into.
+		 */
+		accessors: readonly KNode[] = []
+	): string | null {
 		// Recorded before anything is attempted, so a refused member still has
 		// edges — a member reachable only from one has to stay reachable.
 		this.graph.push({
 			member: name,
 			owner: this.owner,
 			construction: node.type === 'property_declaration',
-			references: mentions(node),
-			calls: callEdges(node)
+			references: [...new Set([node, ...accessors].flatMap((one) => mentions(one)))],
+			calls: [node, ...accessors].flatMap((one) => callEdges(one))
 		});
 
 		const previousName = this.memberName;
@@ -3385,8 +3438,8 @@ class Emitter {
 
 	private classProperty(
 		node: KNode,
-		detached?: KNode
-	): { kind: 'assign' | 'member'; text: string } | null {
+		detached: readonly KNode[] = []
+	): { kind: 'assign' | 'member'; text: string; ctor?: string } | null {
 		const name = this.propertyName(node);
 		if (name === null) return this.declineMember('val', node, 'an unnamed property');
 
@@ -3398,10 +3451,10 @@ class Emitter {
 		if (this.hasModifier(node, 'abstract')) return null;
 
 		const delegate = kids(node).find((child) => child.type === 'property_delegate');
-		const getter = accessorOf(node, detached, 'getter');
-		const setter = accessorOf(node, detached, 'setter');
-
-		if (setter !== undefined) return this.declineMember(name, setter, 'a custom property setter');
+		const getter =
+			accessorOf(node, undefined, 'getter') ?? detached.find((one) => one.type === 'getter');
+		const setter =
+			accessorOf(node, undefined, 'setter') ?? detached.find((one) => one.type === 'setter');
 
 		// `private lateinit var filterList: AnimeFilterList` — declared here,
 		// assigned before anything reads it. There is no value to emit, and in
@@ -3427,14 +3480,27 @@ class Emitter {
 			return text === null ? null : { kind: 'member', text };
 		}
 
+		const mutableProperty = kids(node).some(
+			(child) => child.type === 'binding_pattern_kind' && child.text === 'var'
+		);
+		const backed = this.backedAccessors(node, getter, setter, mutableProperty);
+		if (backed !== undefined) return backed;
+
 		if (getter !== undefined) {
-			const text = this.member(name, node, () => {
-				const body = kids(getter).find((child) => child.type === 'function_body');
-				if (body === undefined) this.refuse(getter, 'a getter with no body');
-				const emitted = this.functionScope('function', null, [], () => this.functionBody(body));
-				if (emitted.isAsync) this.refuse(getter, 'a suspending getter');
-				return this.overridable(name, `get ${name}() ${emitted.text}`);
-			});
+			const text = this.member(
+				name,
+				node,
+				() => {
+					const body = kids(getter).find((child) => child.type === 'function_body');
+					if (body === undefined) this.refuse(getter, 'a getter with no body');
+					const emitted = this.accessorScope(null, () =>
+						this.functionScope('function', null, [], () => this.functionBody(body))
+					);
+					if (emitted.isAsync) this.refuse(getter, 'a suspending getter');
+					return this.overridable(name, `get ${name}() ${emitted.text}`);
+				},
+				[getter]
+			);
 			return text === null ? null : { kind: 'member', text };
 		}
 
@@ -3503,6 +3569,112 @@ class Emitter {
 	}
 
 	/**
+	 * A property whose accessors need a backing field, or that has a setter.
+	 *
+	 * `var buildId = "" get() { if (field == "") field = fetch(); return field }`
+	 * is how this ecosystem memoises, and `var fontSize: Int get() = … set(v)
+	 * = prefs.put(v)` how it stores a setting. Kotlin gives the first a
+	 * backing field because an accessor names `field`, and any property whose
+	 * getter or setter is left at its default has one too. The field is a
+	 * plain property of the instance here, `__field_<name>`, assigned its
+	 * initial value in the constructor where Kotlin assigns it, and `field`
+	 * inside either accessor reads and writes it.
+	 *
+	 * Answers `undefined` for a property this is not — a getter alone that
+	 * never names `field`, which keeps the overridable shape above — so the
+	 * caller carries on. An accessor with no body (`private set`) is the
+	 * default one with a narrower visibility, and is emitted as the default.
+	 */
+	private backedAccessors(
+		node: KNode,
+		getter: KNode | undefined,
+		setter: KNode | undefined,
+		mutable: boolean
+	): { kind: 'member'; text: string; ctor?: string } | null | undefined {
+		const usesField = [getter, setter].some((one) => one !== undefined && namesField(one));
+		if (setter === undefined && !usesField) return undefined;
+		const name = this.propertyName(node);
+		if (name === null) return undefined;
+		const storage = `__field_${plainName(name)}`;
+		const getterBody = kids(getter).find((child) => child.type === 'function_body');
+		const setterBody = kids(setter).find((child) => child.type === 'function_body');
+		// Kotlin's own rule: a default accessor reads or writes the field.
+		const hasField = usesField || getterBody === undefined || (mutable && setterBody === undefined);
+		let ctor: string | undefined;
+		const text = this.member(
+			name,
+			node,
+			() => {
+				const initialiser = kids(node).find((child) => !PROPERTY_PARTS.has(child.type));
+				if (hasField && initialiser !== undefined) {
+					// Assigned in the constructor, and so run before the driver has
+					// attached the base class: an initial value that reads one of its
+					// members cannot be deferred the way a plain `val` is, because the
+					// accessors own the field from the first read.
+					if (this.readsBaseMember(initialiser)) {
+						this.refuse(initialiser, 'a backing field whose initial value reads the base class');
+					}
+					ctor = `this.${storage} = ${this.propertyValue(node, name)};`;
+				}
+				const read = hasField ? storage : null;
+				const get =
+					getterBody === undefined
+						? `get ${name}() ${block([`return this.${storage};`])}`
+						: `get ${name}() ${this.accessorBody(getter ?? node, getterBody, read, [])}`;
+				let set: string;
+				if (setter !== undefined && setterBody !== undefined) {
+					const param = kids(setter).find((child) => child.type === 'parameter_with_optional_type');
+					const value = param === undefined ? 'value' : boundName(param);
+					set = `set ${name}(${this.safe(value)}) ${this.accessorBody(setter, setterBody, read, [value])}`;
+				} else if (mutable) {
+					set = `set ${name}(__v) ${block([`this.${storage} = __v;`])}`;
+				} else {
+					// A `val`: nothing in Kotlin assigns it but an override, which is
+					// what `overridable` is for.
+					return this.overridable(name, get);
+				}
+				return `${get}\n${set}`;
+			},
+			[getter, setter].filter((one): one is KNode => one !== undefined)
+		);
+		if (text === null) return null;
+		return ctor === undefined ? { kind: 'member', text } : { kind: 'member', text, ctor };
+	}
+
+	/** One accessor's body, with `field` meaning the backing field if there is one. */
+	private accessorBody(
+		accessor: KNode,
+		body: KNode,
+		storage: string | null,
+		params: readonly string[]
+	): string {
+		const emitted = this.accessorScope(storage, () =>
+			this.functionScope('function', null, params, () => this.functionBody(body))
+		);
+		if (emitted.isAsync) {
+			this.refuse(
+				accessor,
+				accessor.type === 'setter' ? 'a suspending setter' : 'a suspending getter'
+			);
+		}
+		return emitted.text;
+	}
+
+	/** Runs an accessor's emission with `field` bound to its storage, or to nothing. */
+	private accessorScope<T>(storage: string | null, run: () => T): T {
+		const outerBacking = this.backing;
+		const outerIn = this.inAccessor;
+		this.backing = storage;
+		this.inAccessor = true;
+		try {
+			return run();
+		} finally {
+			this.backing = outerBacking;
+			this.inAccessor = outerIn;
+		}
+	}
+
+	/**
 	 * A getter a subclass is allowed to overwrite with a plain value.
 	 *
 	 * `protected open val mangaSubString get() = "manga"` on a template, and
@@ -3544,6 +3716,15 @@ class Emitter {
 	private readsBaseMember(node: KNode): boolean {
 		for (const found of walk(node)) {
 			if (found.type !== 'simple_identifier') continue;
+			// `private val imageHeaders = headersBuilder().set(…).build()` — a
+			// member the driver's base supplies, called rather than read. The
+			// call lands on `__super`, which the bundle declares after the
+			// source is constructed, so run in the constructor it was
+			// "Cannot access '__super' before initialization" at load. An
+			// override the class declares itself is no different: it is
+			// written to call `super.headersBuilder()`, which is the same
+			// `__super`. Deferring one that does not is only later, not wrong.
+			if (SUPER_MEMBERS.has(found.text)) return true;
 			if (!BASE_SOURCE_MEMBERS.has(found.text)) continue;
 			if (this.classMembers.has(found.text)) continue;
 			return true;
@@ -4335,8 +4516,14 @@ class Emitter {
 		];
 
 		const previousReceiver = this.receiverParam;
+		const previousLabel = this.receiverLabel;
+		const previousType = this.receiverType;
 		const previousReified = this.reifiedTypes;
-		if (receiverType !== null) this.receiverParam = '__recv';
+		if (receiverType !== null) {
+			this.receiverParam = '__recv';
+			this.receiverLabel = name;
+			this.receiverType = receiverType.split('.').pop() ?? receiverType;
+		}
 		if (reified.length > 0) {
 			this.reifiedTypes = new Map(reified.map((one) => [one, reifiedBinding(one)]));
 		}
@@ -4366,6 +4553,8 @@ class Emitter {
 			});
 		} finally {
 			this.receiverParam = previousReceiver;
+			this.receiverLabel = previousLabel;
+			this.receiverType = previousType;
 			this.reifiedTypes = previousReified;
 		}
 		if (receiverType !== null) {
@@ -4766,11 +4955,13 @@ class Emitter {
 				return this.assignment(node);
 			case 'for_statement':
 				return this.forStatement(node);
-			case 'while_statement':
-				return `while (${this.expr(kids(node)[0])}) ${block(this.bodyLines(kids(node)[1] ?? null))}`;
+			case 'while_statement': {
+				const test = this.expr(kids(node)[0]);
+				return `while (${test}) ${block(this.loopBody(kids(node)[1] ?? null))}`;
+			}
 			case 'do_while_statement': {
 				const body = kids(node).find((child) => child.type === 'control_structure_body') ?? null;
-				return `do ${block(this.bodyLines(body))} while (${this.expr(kids(node)[kids(node).length - 1])});`;
+				return `do ${block(this.loopBody(body))} while (${this.expr(kids(node)[kids(node).length - 1])});`;
 			}
 			case 'jump_expression':
 				return this.jump(node, detached);
@@ -4920,6 +5111,15 @@ class Emitter {
 	): string {
 		const frame = this.guards;
 		if (frame === null || !frame.hoistable.has(node)) {
+			// A `throw` needs no statement position: it leaves by propagating,
+			// which it does out of a callback exactly as out of the member. So
+			// `ifEmpty { throw … }` where no hoist can reach is the ordinary
+			// call, with a block that throws.
+			const raised = this.raisedBy(guarded);
+			if (raised !== null) {
+				const helper = guarded.test === 'isEmpty' ? 'ifEmpty' : 'ifBlank';
+				return `${this.helper(helper)}(${this.expr(guarded.value)}, () => ${raised})`;
+			}
 			this.refuse(
 				node,
 				`an \`${guarded.test === 'isEmpty' ? 'ifEmpty' : 'ifBlank'}\` that jumps, used as a value`
@@ -4934,6 +5134,24 @@ class Emitter {
 		return holder;
 	}
 
+	/**
+	 * A `throw` jump as an expression that throws, or null for any other jump.
+	 *
+	 * `thrown` answers either a helper call that throws on its own (`__k.error`)
+	 * or a value to be thrown (a caught error, rethrown); `raise` throws the
+	 * latter and is never reached by the former.
+	 */
+	private raisedBy(guarded: { jump: KNode; detached?: KNode }): string | null {
+		const jump = guarded.jump;
+		if (jump.allChildren[0]?.type !== 'throw') return null;
+		const value =
+			kids(jump).find((child) => child.type !== 'label') ??
+			guarded.detached ??
+			this.jumpValues.get(jump);
+		if (value === undefined) return null;
+		return `${this.helper('raise')}(${this.thrown(value)})`;
+	}
+
 	private hoistedGuard(
 		node: KNode,
 		guarded: { value: KNode; jump: KNode; detached?: KNode }
@@ -4946,6 +5164,12 @@ class Emitter {
 			// and a call is an expression. See `nonLocalTarget`.
 			const nonLocal = this.nonLocalGuard(guarded);
 			if (nonLocal !== null) return nonLocal;
+			// `.set("X-Token", token() ?: throw Exception("…"))` — a `throw` is
+			// the one jump that is an expression once it is a call, so it stays
+			// where it was written and is evaluated when Kotlin would have: only
+			// when the left side is null, after everything before it.
+			const raised = this.raisedBy(guarded);
+			if (raised !== null) return `(${this.expr(guarded.value)} ?? ${raised})`;
 			this.refuse(node, 'a `?: return` used as a value');
 		}
 		// Emitted before the temporary is claimed and before the lines are
@@ -5148,7 +5372,15 @@ class Emitter {
 				!this.isIndexedTarget(swallowed) &&
 				this.elvisJump(value) === null
 			) {
-				const write = `${this.assignable(swallowed)} = ${this.expr(value)};`;
+				// `if (x) headers["k"] = v` — the swallowed target is an *index*,
+				// which inside the `if` the grammar reads as an ordinary
+				// `indexing_expression` rather than an assignable one. Handed to
+				// `assignable` it became `__k.index(headers, 'k') = v`, which is
+				// not JavaScript: the bundle would not load.
+				const write =
+					swallowed.type === 'indexing_expression'
+						? this.swallowedIndexWrite(swallowed, value)
+						: `${this.assignable(swallowed)} = ${this.expr(value)};`;
 				return `if (${this.expr(condition)}) ${block([write])}`;
 			}
 		}
@@ -5181,7 +5413,24 @@ class Emitter {
 					? this.lookupLocal(inner.text)
 					: null;
 			if (local !== null && !local.mutable) {
-				return `${this.helper(rebound)}(${this.assignable(target)}, ${this.expr(value)});`;
+				const receiver = this.assignable(target);
+				// `all += page.entries ?: throw Exception("…")` — the elvis guard
+				// below, on the one path that returned before reaching it. The
+				// guard is a statement in front of the mutation, which is where
+				// Kotlin evaluates it: the right-hand side is read in full before
+				// `plusAssign` runs, so a throw leaves the list untouched either
+				// way. Left out, this refused a multisrc template's chapter list
+				// and every one of the 33 listings built on it.
+				const guarded = this.elvisJump(value);
+				if (guarded !== null) {
+					const temporary = this.temporary();
+					return [
+						`const ${temporary} = ${this.expr(guarded.value)};`,
+						`if (${temporary} == null) ${this.stmt(guarded.jump, this.jumpValues.get(guarded.jump))}`,
+						`${this.helper(rebound)}(${receiver}, ${temporary});`
+					].join('\n');
+				}
+				return `${this.helper(rebound)}(${receiver}, ${this.expr(value)});`;
 			}
 		}
 
@@ -5210,10 +5459,22 @@ class Emitter {
 			].join('\n');
 		}
 
-		const write = (text: string): string =>
-			indexed
-				? `${this.helper('setIndex')}(${this.indexedTarget(target).join(', ')}, ${text});`
-				: `${this.assignable(target)} ${operator} ${text};`;
+		const write = (text: string): string => {
+			if (indexed)
+				return `${this.helper('setIndex')}(${this.indexedTarget(target).join(', ')}, ${text});`;
+			const written = this.assignable(target);
+			// `var genres = listOf(…); genres += more` rebinds the name to
+			// `genres + more`, and that `+` is Kotlin's — a list concatenation —
+			// where JavaScript's `+=` made it one long string. The same `+` as
+			// `additive`, and for the same reason: the target's type is what
+			// decides it, and nothing here can see one. A `val` local that
+			// mutates in place took `plusAssign` above.
+			if (rebound !== undefined) {
+				const helper = operator === '+=' ? 'plus' : 'minus';
+				return `${written} = ${this.helper(helper)}(${written}, ${text});`;
+			}
+			return `${written} ${operator} ${text};`;
+		};
 
 		// `title = element.selectFirst(x)?.text() ?: return@mapNotNull null` is
 		// the single most common shape of `?: return` in this catalogue, and it
@@ -5231,6 +5492,14 @@ class Emitter {
 		}
 
 		return write(this.expr(value));
+	}
+
+	/** `receiver[key] = value` where the target arrived as an `indexing_expression`. */
+	private swallowedIndexWrite(target: KNode, value: KNode): string {
+		const receiver = kids(target)[0];
+		const key = kids(kids(target)[1])[0];
+		if (receiver === undefined || key === undefined) this.refuse(target, 'an empty index');
+		return `${this.helper('setIndex')}(${this.expr(receiver)}, ${this.expr(key)}, ${this.expr(value)});`;
 	}
 
 	/** True when an assignment target's last step is `[…]` rather than `.name`. */
@@ -5298,7 +5567,15 @@ class Emitter {
 		// the assignable rule does not reach over a call. Handing that to `expr`
 		// emitted an immediately-invoked function on the left of an `=`, which is
 		// a JavaScript syntax error in a bundle that reported nothing refused.
-		if (node.type !== 'directly_assignable_expression') return this.expr(node);
+		if (node.type !== 'directly_assignable_expression') {
+			// Only the two shapes whose emitted text is itself assignable. An
+			// index or a call emits a helper call, and a call on the left of an
+			// `=` is a SyntaxError that takes the whole bundle down at load.
+			if (node.type !== 'simple_identifier' && node.type !== 'navigation_expression') {
+				this.refuse(node, `an assignment target this build cannot read (\`${node.type}\`)`);
+			}
+			return this.expr(node);
+		}
 		const parts = kids(node);
 		const inner = parts[0];
 		if (inner === undefined) this.refuse(node, 'an empty assignment target');
@@ -5328,7 +5605,7 @@ class Emitter {
 			target = this.read(inner.text, inner);
 		} else if (inner.type === 'simple_identifier') {
 			const local = this.lookup(inner.text);
-			if (inner.text === 'field') this.refuse(inner, 'a `field` backing reference');
+			const backing = local === null ? this.fieldReference(inner.text, inner) : null;
 			// Writes inside `apply {}` go to the receiver: that is the idiom, and
 			// Kotlin agrees — an inner lambda's implicit receiver outranks an
 			// outer function's parameter. The emitter cannot ask whether the
@@ -5342,7 +5619,12 @@ class Emitter {
 			// title = this@Dto.title }` writes the *parameter* instead, and the
 			// show installs, searches and lists with no title.
 			const receiver = this.receiverAlias();
-			if (local !== null && (receiver === null || this.lookupLocal(inner.text)?.mutable === true)) {
+			if (backing !== null) {
+				target = backing;
+			} else if (
+				local !== null &&
+				(receiver === null || this.lookupLocal(inner.text)?.mutable === true)
+			) {
 				target = local;
 			} else if (receiver !== null) {
 				target = `${receiver}.${inner.text}`;
@@ -5365,6 +5647,16 @@ class Emitter {
 		}
 
 		for (const suffix of parts.slice(1)) {
+			// `chapters[0].date_upload = x` — an index on the way to the property
+			// being written is a *read*, and reads through the runtime's `index`
+			// like any other. Only the final step is the write, and a final index
+			// never reaches here: `isIndexedTarget` sends it to `setIndex`.
+			if (suffix.type === 'indexing_suffix') {
+				const key = kids(suffix)[0];
+				if (key === undefined) this.refuse(suffix, 'an empty index');
+				target = `${this.helper('index')}(${target}, ${this.expr(key)})`;
+				continue;
+			}
 			// Only a property write. An indexed write (`map["k"] = v`) needs the
 			// runtime's own map semantics rather than JavaScript's, and guessing
 			// between them writes to the wrong container.
@@ -5408,7 +5700,7 @@ class Emitter {
 				this.declare(name);
 				head = `const ${this.safe(name)}`;
 			}
-			return `for (${head} of ${sequence}) ${block(this.bodyLines(body))}`;
+			return `for (${head} of ${sequence}) ${block(this.loopBody(body))}`;
 		} finally {
 			this.popScope();
 		}
@@ -5425,7 +5717,16 @@ class Emitter {
 		}
 
 		if (keyword === 'break' || keyword === 'continue') {
-			if (this.inLambda()) this.refuse(node, `a \`${keyword}\` crossing a lambda`);
+			// Answered by what encloses it most closely, not by whether a lambda
+			// encloses it anywhere: `forEach { for (x in xs) { … break } }` breaks
+			// a loop inside the lambda, which is ordinary, and was refused as
+			// crossing one. What must not happen is a JavaScript `break` landing
+			// on a loop Kotlin did not mean — past a callback, which is a syntax
+			// error, or out of an inlined `forEach`, which is a `for…of` here and
+			// a lambda in Kotlin. See `loopBody`.
+			if (this.loops[this.loops.length - 1] !== 'loop') {
+				this.refuse(node, `a \`${keyword}\` crossing a lambda`);
+			}
 			return `${keyword};`;
 		}
 
@@ -5473,6 +5774,14 @@ class Emitter {
 	}
 
 	private thrown(node: KNode): string {
+		// `catch (e: Exception) { …; throw e }` and `onFailure { throw it }` —
+		// rethrowing what was caught, which is a local holding the very error
+		// the runtime threw. Only a local: a name that is not one is not
+		// something this can know is an exception at all.
+		if (node.type === 'simple_identifier') {
+			const local = this.lookup(node.text);
+			if (local !== null) return local;
+		}
 		const isCall = node.type === 'call_expression';
 		const callee = isCall ? kids(node)[0] : node;
 		const typeName = callee?.text ?? '';
@@ -5578,9 +5887,9 @@ class Emitter {
 
 	private tryBlock(node: KNode, sink: Sink): string {
 		const body = kids(node).find((child) => child.type === 'statements');
-		const catches = kids(node).filter((child) => child.type === 'catch_block');
+		const written = kids(node).filter((child) => child.type === 'catch_block');
 		const ensure = kids(node).find((child) => child.type === 'finally_block');
-		if (catches.length > 1) this.refuse(catches[1], 'more than one `catch` clause');
+		const catches = this.reachableCatches(written);
 
 		let text = `try ${block(body === undefined ? [] : this.statementList(body, sink))}`;
 		if (catches.length === 1) {
@@ -5612,8 +5921,53 @@ class Emitter {
 		return text;
 	}
 
+	/**
+	 * The `catch` clauses that can run here, or a refusal.
+	 *
+	 * JavaScript has one `catch` and no type to dispatch on, and this runtime
+	 * throws plain `Error`s, so a Kotlin clause list can be kept only where the
+	 * type tests would not have decided anything. The shape this ecosystem
+	 * writes is exactly that: `catch (e: CancellationException) { throw e }`
+	 * and then `catch (e: Exception) { … }`. Nothing here cancels a coroutine
+	 * — there is no dispatcher to do it — so the first clause can never run,
+	 * and the catch-all is the whole of what is left. Any other list would need
+	 * the type of an error this runtime does not carry, and is refused.
+	 */
+	private reachableCatches(clauses: readonly KNode[]): readonly KNode[] {
+		if (clauses.length <= 1) return clauses;
+		const typeOf = (clause: KNode): string =>
+			typeName(kids(clause).find((child) => child.type.endsWith('type')))
+				.split('.')
+				.pop() ?? '';
+		const last = clauses[clauses.length - 1];
+		const unreachable = clauses.slice(0, -1).every((one) => NEVER_THROWN.has(typeOf(one)));
+		if (!unreachable || !CATCH_ALL.has(typeOf(last))) {
+			this.refuse(clauses[1], 'more than one `catch` clause');
+		}
+		return [last];
+	}
+
 	private bodyLines(node: KNode | null): string[] {
 		return this.branchLines(node, null);
+	}
+
+	/**
+	 * A Kotlin loop's body, with the loop recorded as what a `break` inside it
+	 * leaves.
+	 *
+	 * `loops` is the innermost-last list of the constructs an unlabelled
+	 * `break` or `continue` could land on: a Kotlin loop, or a barrier — a
+	 * callback, which JavaScript's `break` cannot cross, and an inlined
+	 * `forEach`, which is a JavaScript loop where Kotlin had a lambda. Only a
+	 * Kotlin loop on top is a `break` that means what it says.
+	 */
+	private loopBody(node: KNode | null): string[] {
+		this.loops.push('loop');
+		try {
+			return this.bodyLines(node);
+		} finally {
+			this.loops.pop();
+		}
 	}
 
 	/** One branch of an `if`/`when`/`try`, delivering its tail to the sink. */
@@ -5718,10 +6072,7 @@ class Emitter {
 					// out as the class rather than the string it was prefixing.
 					return this.receiverAlias() ?? this.receiverParam ?? 'this';
 				}
-				if (label !== this.owner && label !== this.className) {
-					this.refuse(node, `\`${node.text}\``);
-				}
-				return this.selfReference();
+				return this.labelledThis(label, node);
 			}
 			case 'parenthesized_expression': {
 				const inner = kids(node)[0];
@@ -5741,6 +6092,7 @@ class Emitter {
 				return this.binary(node, (operator) => operator);
 			}
 			case 'additive_expression':
+				return this.additive(node);
 			case 'multiplicative_expression':
 				return this.binary(node, (operator) => operator);
 			case 'conjunction_expression':
@@ -5802,6 +6154,51 @@ class Emitter {
 	}
 
 	/**
+	 * `a + b` and `a - b`, which are JavaScript's operators only for numbers
+	 * and strings.
+	 *
+	 * Kotlin resolves `+` on the left operand's type, and most of what an
+	 * extension adds is not a number: `listOf(a) + listOf(b)`, `EVERY +
+	 * getPairList(n)`, `map + (k to v)`, `ids - seen`. JavaScript's `+` reads
+	 * every one of those as text — `"1,2"` where a list was meant — and its
+	 * `-` answers NaN, with nothing refused and nothing thrown. So an operand
+	 * this cannot *prove* is a number or a string goes through `__k.plus` or
+	 * `__k.minus`, which dispatch on the value at run time the way Kotlin
+	 * dispatched on its type.
+	 *
+	 * Proof is the left operand's shape, because that is the one Kotlin reads:
+	 * a numeric literal or arithmetic, or a string literal or template. `x + 1`
+	 * proves nothing — `x` may be a list — so it takes the helper, which adds
+	 * two numbers exactly as the operator would.
+	 *
+	 * A `Char` literal on the left is the one type a value cannot reveal at run
+	 * time, since a Char is a one-character string here and `'a' + 1` would
+	 * concatenate. Kotlin has no other `Char.plus`, so it is code arithmetic.
+	 */
+	private additive(node: KNode, prefix = ''): string {
+		const operator = node.allChildren.find((child) => child.type === '+' || child.type === '-');
+		if (operator === undefined) {
+			this.refuse(node, `an operator this build could not read, in ${spoken(node)}`);
+		}
+		const left = kids(node)[0];
+		const right = kids(node)[kids(node).length - 1];
+		const head = prefix.length === 0 ? this.expr(left) : this.prefixOver(prefix, left);
+		const tail = this.expr(right);
+		const shape = prefix === '-' || prefix === '+' ? 'number' : primitiveShape(left);
+		if (shape === 'number' || (shape === 'string' && operator.type === '+')) {
+			return `(${head} ${operator.type} ${tail})`;
+		}
+		if (shape === 'char' && prefix.length === 0) {
+			const code = `${head}.charCodeAt(0)`;
+			return operator.type === '+'
+				? `String.fromCharCode(${code} + ${tail})`
+				: `${this.helper('minus')}(${head}, ${tail})`;
+		}
+		const helper = operator.type === '+' ? 'plus' : 'minus';
+		return `${this.helper(helper)}(${head}, ${tail})`;
+	}
+
+	/**
 	 * A prefix operator applied to its operand — which is not what the tree says.
 	 *
 	 * The vendored grammar parses `!a && b` as `prefix(conjunction(a, b))`: the
@@ -5824,8 +6221,9 @@ class Emitter {
 		switch (node.type) {
 			case 'equality_expression':
 				return this.binary(node, (token) => (token.startsWith('==') ? '===' : '!=='), operator);
-			case 'comparison_expression':
 			case 'additive_expression':
+				return this.additive(node, operator);
+			case 'comparison_expression':
 			case 'multiplicative_expression':
 				return this.binary(node, (token) => token, operator);
 			case 'conjunction_expression':
@@ -5856,6 +6254,16 @@ class Emitter {
 		}
 		if (name.text === 'downTo') {
 			return `${this.helper('downTo')}(${this.expr(left)}, ${this.expr(right)})`;
+		}
+		// `for (i in 0 until len step 2)` — left-associative, so the left side is
+		// already the progression, whichever of the three built it. `step` is
+		// Kotlin's only way to stride a loop, and a decrypt routine walking a
+		// byte array two at a time is where this ecosystem writes it.
+		if (name.text === 'step') {
+			return `${this.helper('step')}(${this.expr(left)}, ${this.expr(right)})`;
+		}
+		if (name.text === 'matches') {
+			return `${this.helper('regexMatches')}(${this.expr(left)}, ${this.expr(right)})`;
 		}
 		if (name.text === 'and') {
 			return `${this.helper('bitwiseAnd')}(${this.expr(left)}, ${this.expr(right)})`;
@@ -6097,6 +6505,22 @@ class Emitter {
 		// and only what the name resolves to tells them apart.
 		const owner = parts[0];
 		const named = owner.type === 'simple_identifier' || owner.type === 'type_identifier';
+		// `sortedByDescending(SChapter::chapter_number)` and
+		// `filter(Genre::state)` — an unbound reference to a property the
+		// *framework* declares: a field of one of the four models, or the
+		// `state` of a filter class that extends the framework's. Nothing in
+		// the file set declares either, so the two branches below cannot see
+		// them; `SChapter` is a runtime global, which the next branch reads as
+		// a bound receiver and refuses. Named rather than inferred, and only
+		// where no translated class in the chain declares the name itself.
+		if (
+			named &&
+			FRAMEWORK_PROPERTIES.has(member.text) &&
+			(MODEL_TYPES.has(owner.text) ||
+				(this.declaredTypes.has(owner.text) && !this.baseDeclares(owner.text, member.text)))
+		) {
+			return `(__recv) => __recv.${member.text}`;
+		}
 		if (named && this.isValueName(owner.text)) {
 			const receiver = this.read(owner.text, owner);
 			const helper = EXTENSION_METHODS.get(member.text);
@@ -6234,6 +6658,19 @@ class Emitter {
 		const letGuarded = letGuard(node);
 		if (letGuarded !== null) return this.hoistedGuard(node, letGuarded);
 
+		// `formatter()(key)` — a call whose value is itself called. Kotlin's
+		// function types are JavaScript functions here (a lambda is an arrow, a
+		// `::ref` is an arrow), so invoking the result is invoking it: the inner
+		// call is emitted exactly as it would be on its own and the outer list
+		// is applied to what it answered. A function type takes no named
+		// arguments in Kotlin, so the list is positional by construction.
+		//
+		// Not reached for a statement that begins with `(` under a line ending
+		// in a call — that is two statements, and `grammar.ts` splits them
+		// before the tree gets here; see `lineInitialCalls`.
+		const invoked = this.invokedResult(node);
+		if (invoked !== null) return invoked;
+
 		const { callee, args, lambda, labelled, typeArgument } = this.flatten(node);
 		const expected = typeArgument === null ? this.expectedOf(node) : null;
 		if (callee.type === 'navigation_expression') {
@@ -6249,6 +6686,29 @@ class Emitter {
 		// `(f)(x)` and `map[k](x)`: a call through something with no name, whose
 		// signature is not knowable from here.
 		this.refuse(callee, `a call through ${spoken(callee)}`);
+	}
+
+	/** `f(a)(b)`, as the value of `f(a)` called with `b` — or null for any other call. */
+	private invokedResult(node: KNode): string | null {
+		const inner = kids(node)[0];
+		const suffix = kids(node)[1];
+		if (inner?.type !== 'call_expression' || suffix === undefined) return null;
+		const values = kids(suffix).find((child) => child.type === 'value_arguments');
+		if (values === undefined) return null;
+		// Only when the callee is a call that already has its own argument list.
+		// `f { … }(x)` and `f<T>(x)` are not this shape.
+		const own = kids(inner)[1];
+		if (own === undefined || !kids(own).some((child) => child.type === 'value_arguments')) {
+			return null;
+		}
+		if (kids(suffix).some((child) => child.type !== 'value_arguments')) {
+			this.refuse(suffix, 'a call returning a callable, given a lambda or type arguments');
+		}
+		const args = kids(values).filter((child) => child.type === 'value_argument');
+		if (args.some((arg) => this.argumentName(arg) !== null)) {
+			this.refuse(suffix, 'a named argument to a callable a call returned');
+		}
+		return `(${this.expr(inner)})(${args.flatMap((arg) => this.argumentExpressions(arg)).join(', ')})`;
 	}
 
 	/**
@@ -6322,8 +6782,16 @@ class Emitter {
 	): string {
 		const receiver = kids(callee)[0];
 		const suffix = kids(callee)[kids(callee).length - 1];
-		const name = kids(suffix).find((child) => child.type === 'simple_identifier')?.text ?? null;
-		if (name === null) this.refuse(callee, 'a call through something with no name');
+		const written = kids(suffix).find((child) => child.type === 'simple_identifier')?.text ?? null;
+		if (written === null) this.refuse(callee, 'a call through something with no name');
+		// jsoup's `element.\`val\`()` — backticked only because `val` is a
+		// Kotlin keyword. The quoting is not part of the name, and every table
+		// below is keyed by the name: left on, a method the DOM shim implements
+		// was refused as one nobody had heard of. A name JavaScript cannot take
+		// after a dot at all is still refused, rather than emitted as a syntax
+		// error.
+		const name = fieldName(written);
+		if (!JS_IDENTIFIER.test(name)) this.refuse(suffix, `\`.${written}()\``);
 		const safe = suffix.allChildren[0]?.type === '?.';
 
 		// `newBuilder().block()` — a parameter typed `R.() -> T`, invoked on an
@@ -6440,6 +6908,25 @@ class Emitter {
 			return this.clientVerb(receiver, name, args);
 		}
 
+		// `scope.launch { … }`: a block started and never awaited. See
+		// `__k.launch` for what that means here and what it deliberately does
+		// not. A bare `launch` inside `coroutineScope { }` is a different
+		// thing — a child the scope waits for — and stays refused by the
+		// scanner; only a launch on a named scope reaches this.
+		if (name === 'launch' && lambda !== null && receiver.type !== 'super_expression') {
+			const context = args.map((arg) => arg.text.replace(/\s+/g, ''));
+			if (context.length > 1 || context.some((part) => !/^Dispatchers\.\w+$/.test(part))) {
+				this.refuse(suffix, 'a `launch` given a context this build does not model');
+			}
+			const started = this.lambda(lambda, false, labelled ?? name, false);
+			if (receiver.text.trim() === 'GlobalScope')
+				return `${this.helper('launch')}(null, ${started})`;
+			const scope = this.expr(receiver);
+			return safe
+				? `${this.helper('sc')}(${scope}, (__r) => ${this.helper('launch')}(__r, ${started}))`
+				: `${this.helper('launch')}(${scope}, ${started})`;
+		}
+
 		if (name === 'not' && args.length === 0 && lambda === null && !safe) {
 			// `Boolean.not()` is the operator written as a call, which this
 			// ecosystem reaches for when negating something already parenthesised:
@@ -6515,6 +7002,19 @@ class Emitter {
 			// to the source, and dropping it turns a spaced-out retry into a
 			// source being hammered.
 			return this.awaited(`${this.helper('delay')}(${this.plainArguments(name, args).join(', ')})`);
+		}
+
+		// `UUID.randomUUID()` — a session id, in the one shape this ecosystem
+		// writes, and always turned straight into its text. Passed through as
+		// written it named a `UUID` nothing defines and died at load.
+		if (
+			name === 'randomUUID' &&
+			receiver.type === 'simple_identifier' &&
+			receiver.text === 'UUID' &&
+			args.length === 0 &&
+			lambda === null
+		) {
+			return `${this.helper('randomUUID')}()`;
 		}
 
 		if (
@@ -6925,7 +7425,13 @@ class Emitter {
 			// `EXTENSION_METHODS`. Because Kotlin inlines it, a `return` inside
 			// belongs to the enclosing function — which the lambda frame refuses
 			// rather than quietly rerouting into the wrapper.
-			return this.iife(() => this.lambdaLines(lambda));
+			//
+			// Labelled with the block's own name, as every other callback is:
+			// `return@run x` leaves exactly this block with `x`, which is what
+			// the arrow's `return` does. Unlabelled, the label had no frame to
+			// name and a plain early exit out of a `for` inside the block was
+			// refused as crossing a lambda it never left.
+			return this.iife(() => this.lambdaLines(lambda), labelled ?? name);
 		}
 		if (name === 'buildString') {
 			// The block is called with a string accumulator as its receiver, so
@@ -6941,7 +7447,26 @@ class Emitter {
 			return 'Json';
 		}
 
-		const free = FREE_FUNCTIONS.get(name);
+		// `CoroutineScope(Dispatchers.IO + SupervisorJob())` — what a `launch`
+		// is started on. The dispatcher names a thread pool, and there is one
+		// thread here, so it is dropped; the Job decides what a failure does to
+		// the scope, so it is kept. See `__k.coroutineScope`. Anything else in
+		// the context — an exception handler, a name — is behaviour this does
+		// not model, and keeps the refusal it had.
+		if (name === 'CoroutineScope' && lambda === null && args.length === 1) {
+			const parts = args[0].text.replace(/\s+/g, '').split('+');
+			if (parts.every((part) => COROUTINE_CONTEXT.test(part))) {
+				return `${this.helper('coroutineScope')}(${parts.includes('SupervisorJob()')})`;
+			}
+		}
+
+		// A name the source declares for itself — a local, a member, a file-scope
+		// `fun` — outranks the standard library's, as it does in Kotlin: an
+		// extension's own `check(url)` is not `kotlin.check`.
+		const free =
+			this.lookup(name) === null && !this.isSourceMember(name) && !this.moduleNames.has(name)
+				? FREE_FUNCTIONS.get(name)
+				: undefined;
 		if (free !== undefined) {
 			const before = this.asyncLambdas;
 			const tail = this.provenance(
@@ -7052,6 +7577,23 @@ class Emitter {
 			return this.suspendMembers.has(name) ? this.awaited(call) : call;
 		}
 
+		// A method the extension receiver's own class declares, called bare —
+		// `url = getUrl()` inside `fun Dto.toSManga() = SManga.create().apply
+		// { … }`. The model built by the `apply` has no such method and the
+		// source does not either, so Kotlin resolved it to the DTO; read as a
+		// member of the source it was `this.getUrl is not a function` at the
+		// first browse. A name a framework shim also answers is left to the
+		// paths below, because then the innermost receiver may well be the one.
+		if (
+			this.receiverParam !== null &&
+			lambda === null &&
+			this.receiverDeclares(name) &&
+			!(implicit !== this.receiverParam && HOST_METHODS.has(name))
+		) {
+			const call = `${this.receiverParam}.${name}(${tail.join(', ')})`;
+			return this.declaredSuspends.has(name) ? this.awaited(call) : call;
+		}
+
 		if (implicit !== null && lambda !== null && BUILDER_LAMBDA_METHODS.has(name)) {
 			const withLambda = this.callArguments(name, args, lambda, labelled, true);
 			return `${implicit}.${name}(${withLambda.join(', ')})`;
@@ -7145,7 +7687,14 @@ class Emitter {
 			collided === null
 				? `${self}.${name}(${tail.join(', ')})`
 				: this.overloadCall(self, self, name, tail, collided);
-		if (lambda !== null && this.isSourceMember(name)) {
+		// Declared by the class being emitted, or by a translated base class it
+		// really `extends` — `launchIO { countViews(document) }` in an extension
+		// on a theme that declares `launchIO`. Either way the method exists on
+		// the prototype chain and takes the block as its last parameter; only
+		// a name nothing in reach declares is the passthrough that cannot
+		// carry one.
+		const inherited = this.ownerBase !== null && this.baseDeclares(this.ownerBase, name);
+		if (lambda !== null && (this.isSourceMember(name) || inherited)) {
 			const withLambda = `${this.callArguments(name, args, lambda, labelled, false).join(', ')}`;
 			return `${self}.${name}(${withLambda})`;
 		}
@@ -8404,12 +8953,17 @@ class Emitter {
 			broke: false
 		};
 		this.frames.push(frame);
+		// An inlined `forEach` is a `for…of` here: a `break` inside it would
+		// end the walk, where Kotlin's — non-local, out of an inline lambda —
+		// meant a loop outside it.
+		if (frame.loop === true) this.loops.push('barrier');
 		this.pushScope();
 		for (const name of options.bound ?? []) this.declare(name);
 		try {
 			return { lines: run(), broke: frame.broke === true };
 		} finally {
 			this.popScope();
+			if (frame.loop === true) this.loops.pop();
 			this.frames.pop();
 		}
 	}
@@ -8596,7 +9150,8 @@ class Emitter {
 		if (importedFrom !== null && this.classFieldIndex.get(importedFrom)?.has(name) === true) {
 			return `${this.safe(importedFrom)}.${fieldName(name)}`;
 		}
-		if (name === 'field') this.refuse(node, 'a `field` backing reference');
+		const backing = this.fieldReference(name, node);
+		if (backing !== null) return backing;
 		if (name === 'it') this.refuse(node, 'an `it` with no lambda around it');
 		// `"https:$this"` — a `this` inside a string template arrives here as an
 		// identifier rather than as `this_expression`, and it means what it
@@ -8632,12 +9187,34 @@ class Emitter {
 		if (receiver !== null && MODEL_FIELDS.get(this.receiverModel() ?? '')?.has(name) === true) {
 			return `${receiver}.${name}`;
 		}
+		// `fun Dto.toSManga() = SManga.create().apply { genre = tags.join… }`
+		// has three implicit receivers, and `tags` is the DTO's: the model does
+		// not have one, and Kotlin tries the extension receiver before the
+		// class. Read off the model instead it is `undefined`, and the genre
+		// list is empty with nothing thrown. A model field the DTO *also*
+		// declares stays with the model — that is the innermost receiver, and
+		// it is why the source had to write `this@toSManga.title` to mean the
+		// other one. Where the model is not written, every model's fields stay
+		// with the receiver, which is the old rule.
+		if (
+			receiver !== null &&
+			this.receiverParam !== null &&
+			!(MODEL_FIELDS.get(this.receiverModel() ?? '') ?? ANY_MODEL_FIELD).has(name) &&
+			this.receiverDeclares(name)
+		) {
+			return `${this.receiverParam}.${name}`;
+		}
 		if (
 			receiver !== null &&
 			!this.isSourceMember(name) &&
 			MODEL_LACKS.get(this.receiverModel() ?? '')?.has(name) !== true
 		) {
 			return `${receiver}.${name}`;
+		}
+		// Kotlin tries the extension receiver before the class it is declared
+		// in, so a name both declare is the receiver's.
+		if (this.receiverParam !== null && this.receiverDeclares(name)) {
+			return `${this.receiverParam}.${name}`;
 		}
 		// Inside `fun Element.getInfo()`, a bare name is the receiver's unless
 		// the enclosing class declares it — the same rule, and the same residual
@@ -8646,6 +9223,30 @@ class Emitter {
 			return `${this.receiverParam}.${name}`;
 		}
 		return `${this.selfReference()}.${name}`;
+	}
+
+	/**
+	 * `field`, as the backing field of the property whose accessor this is —
+	 * or null when `name` is some other name, including a property that is
+	 * simply called `field`.
+	 *
+	 * `class SelectFilter(val field: String)` reads its own `field` in a
+	 * method, and Kotlin only makes the word a keyword inside an accessor.
+	 * Refusing it everywhere refused two whole filter themes for a parameter
+	 * name. Inside an accessor with no field this build modelled it still
+	 * refuses: reading the class's member there would be a different value.
+	 */
+	private fieldReference(name: string, node: KNode): string | null {
+		if (name !== 'field') return null;
+		if (this.backing !== null) return `${this.selfReference()}.${this.backing}`;
+		if (!this.inAccessor && this.classMembers.has('field')) return null;
+		this.refuse(node, 'a `field` backing reference');
+	}
+
+	/** Whether the extension function being emitted extends a type declaring `name`. */
+	private receiverDeclares(name: string): boolean {
+		if (this.receiverType === null) return false;
+		return this.classMemberIndex.get(this.receiverType)?.has(name) === true;
 	}
 
 	private isSourceMember(name: string): boolean {
@@ -8724,6 +9325,50 @@ class Emitter {
 		return null;
 	}
 
+	/**
+	 * `this@label`: the receiver the label names, or a refusal.
+	 *
+	 * Kotlin gives a receiver a label three ways, and each already has a
+	 * spelling here, so this only has to find the right one:
+	 *
+	 * - **A scope block** — `this@apply`, `this@run`, `this@buildString` —
+	 *   whose receiver is `this` inside a block emitted as `function () {}` and
+	 *   a `const` inside one that was inlined. An outer *callback's* `this` is
+	 *   out of reach once an inner one has rebound it, and that one refuses.
+	 * - **An extension function** — `this@toSManga` — whose receiver this
+	 *   emitter moved into its first parameter, which every closure inside the
+	 *   function can still see.
+	 * - **The class** being emitted, which is the source object wherever this
+	 *   code runs: `selfReference` is already how that is reached past a block.
+	 *
+	 * Innermost first, which is the order Kotlin resolves them in. A label
+	 * naming anything else is a receiver this build no longer has, and guessing
+	 * which one it was is how a scraper reads a selector off the wrong object.
+	 */
+	private labelledThis(label: string, node: KNode): string {
+		let rebound = false;
+		for (let index = this.frames.length - 1; index >= 0; index -= 1) {
+			const frame = this.frames[index];
+			if (frame.kind === 'function') break;
+			if (frame.label === label) {
+				if (frame.kind === 'inline' && frame.alias != null) return frame.alias;
+				if (frame.kind === 'receiver') {
+					if (!rebound) return 'this';
+					this.captures += 1;
+					frame.capture ??= `__this${this.captures}`;
+					return frame.capture;
+				}
+				this.refuse(node, `\`${node.text}\``);
+			}
+			if (frame.kind === 'receiver') rebound = true;
+		}
+		if (label === this.receiverLabel && this.receiverParam !== null) return this.receiverParam;
+		if (label === this.owner || label === this.ownerLabel || label === this.className) {
+			return this.selfReference();
+		}
+		this.refuse(node, `\`${node.text}\``);
+	}
+
 	/** True when the nearest `this`-rebinding frame is an `apply`/`run` block. */
 	private inReceiver(): boolean {
 		return this.receiverAlias() !== null;
@@ -8752,11 +9397,8 @@ class Emitter {
 		this.scopes.pop();
 	}
 
-	private declare(name: string, mutable = false): void {
-		this.scopes[this.scopes.length - 1]?.set(name, {
-			text: this.safe(name),
-			mutable
-		});
+	private declare(name: string, mutable = false, text = this.safe(name)): void {
+		this.scopes[this.scopes.length - 1]?.set(name, { text, mutable });
 	}
 
 	/** A local bound under a JavaScript name other than its own. See `localBinding`. */
@@ -8846,6 +9488,7 @@ class Emitter {
 	): Emitted {
 		const frame: Frame = { kind, label, usesAwait: false, usesSelf: false, model };
 		this.frames.push(frame);
+		this.loops.push('barrier');
 		this.pushScope();
 		for (const param of params) this.declare(param);
 		try {
@@ -8860,13 +9503,19 @@ class Emitter {
 					: body;
 			// `__self` is declared once per real function, so an `apply {}` nested
 			// anywhere inside it can still reach the source's own members.
-			const text =
+			const self =
 				frame.usesSelf && kind === 'function' && raw.startsWith('{')
 					? `{\n\tconst __self = this;${raw.slice(1)}`
 					: raw;
+			// A receiver block an inner one reached past with `this@label`.
+			const text =
+				frame.capture !== undefined && self.startsWith('{')
+					? `{\n\tconst ${frame.capture} = this;${self.slice(1)}`
+					: self;
 			return { text, isAsync: frame.usesAwait, usesSelf: frame.usesSelf };
 		} finally {
 			this.popScope();
+			this.loops.pop();
 			this.frames.pop();
 		}
 	}
@@ -8887,8 +9536,8 @@ class Emitter {
 	}
 
 	/** A statement sequence used where a value is needed. */
-	private iife(lines: () => string[]): string {
-		const emitted = this.functionScope('lambda', null, [], () => block(lines()));
+	private iife(lines: () => string[], label: string | null = null): string {
+		const emitted = this.functionScope('lambda', label, [], () => block(lines()));
 		if (!emitted.isAsync) return `(() => ${emitted.text})()`;
 		const outer = this.frames[this.frames.length - 1];
 		if (outer !== undefined) outer.usesAwait = true;
@@ -9004,11 +9653,85 @@ class Emitter {
 
 /* ── shared shapes ────────────────────────────────────────────────────────── */
 
+/**
+ * What an operand is provably, from its shape alone, or null.
+ *
+ * Deliberately short. Anything a name, a call or a property read produced is
+ * null, because none of those says what it holds; see `additive`.
+ */
+function primitiveShape(node: KNode | undefined): 'number' | 'string' | 'char' | null {
+	if (node === undefined) return null;
+	switch (node.type) {
+		case 'integer_literal':
+		case 'hex_literal':
+		case 'bin_literal':
+		case 'long_literal':
+		case 'unsigned_literal':
+		case 'real_literal':
+		case 'multiplicative_expression':
+			return 'number';
+		case 'string_literal':
+			return 'string';
+		case 'character_literal':
+			return 'char';
+		case 'parenthesized_expression':
+			return primitiveShape(kids(node)[0]);
+		case 'prefix_expression':
+			return node.allChildren[0]?.type === '-' || node.allChildren[0]?.type === '+'
+				? primitiveShape(kids(node)[0])
+				: null;
+		case 'additive_expression': {
+			// Left-associative, so the leftmost operand decides the whole chain:
+			// `"a" + x + y` is a string throughout, and `1 + x` is a number.
+			const left = primitiveShape(kids(node)[0]);
+			if (left === 'char') {
+				// `'a' + 1` is a Char and `'z' - 'a'` an Int; neither is worth a
+				// fast path, so the chain goes through the helper.
+				return null;
+			}
+			return left;
+		}
+		default:
+			return null;
+	}
+}
+
 function sameNames(left: readonly string[], right: readonly string[]): boolean {
 	return left.length === right.length && left.every((name, index) => name === right[index]);
 }
 
 /** Parts of a `property_declaration` that are not its initialiser. */
+/**
+ * Every model's fields at once, for the one question asked where the model
+ * an `apply {}` builds is not written: is a bare name possibly the model's?
+ * Inside `fun Dto.toSManga() = …apply { … }` a name listed here stays with the
+ * receiver, as it always has; everything else the DTO declares is the DTO's.
+ * `memo` is keiyoushi's extra field on all four.
+ */
+const ANY_MODEL_FIELD: ReadonlySet<string> = new Set([
+	...[...MODEL_FIELDS.values()].flatMap((fields) => [...fields]),
+	'memo'
+]);
+
+/** One term of a `CoroutineScope(…)` context the runtime models. */
+const COROUTINE_CONTEXT =
+	/^(?:Dispatchers\.(?:IO|Default|Main|Unconfined)|SupervisorJob\(\)|Job\(\))$/;
+
+/** Exception types nothing in this runtime can throw; see `reachableCatches`. */
+const NEVER_THROWN: ReadonlySet<string> = new Set([
+	'CancellationException',
+	'TimeoutCancellationException'
+]);
+
+/** Clause types that catch whatever a translated extension can throw. */
+const CATCH_ALL: ReadonlySet<string> = new Set(['Exception', 'Throwable']);
+
+/** The framework's model types, whose fields `MODEL_FIELDS` lists. */
+const MODEL_TYPES: ReadonlySet<string> = new Set(MODEL_FIELDS.keys());
+
+/** Properties the framework declares, for an unbound `Type::name` reference to one. */
+const FRAMEWORK_PROPERTIES: ReadonlySet<string> = new Set([...ANY_MODEL_FIELD, 'state', 'values']);
+
 const PROPERTY_PARTS: ReadonlySet<string> = new Set([
 	'modifiers',
 	'binding_pattern_kind',
@@ -9887,6 +10610,15 @@ function block(input: readonly string[]): string {
  * declaration that is spelled the ordinary way, so both are asked for here and
  * every caller passes the sibling that follows it.
  */
+/** Whether an accessor names `field`, which is what gives its property a backing field. */
+function namesField(accessor: KNode): boolean {
+	for (const found of walk(accessor)) {
+		if (found.type === 'simple_identifier' && found.text === 'field') return true;
+		if (found.type === 'interpolated_identifier' && found.text === 'field') return true;
+	}
+	return false;
+}
+
 function accessorOf(
 	node: KNode,
 	next: KNode | undefined,

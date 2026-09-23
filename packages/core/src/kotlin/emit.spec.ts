@@ -136,7 +136,62 @@ const helpers: Record<string, (...args: never[]) => unknown> = {
 	addAll: (list: Any[], items: Any[]) => list.push(...items),
 	size: (value: Any) => (value as Any[]).length,
 	flatten: (list: Any[][]) => list.flat(),
-	plus: (list: Any[], other: Any) => list.concat(other as Any[]),
+	// Kotlin's `+`, dispatched on the left operand as the runtime's is.
+	plus: (left: Any, right: Any) => {
+		if (typeof left === 'number' || typeof left === 'string' || nullish(left)) {
+			return (left as number) + (right as number);
+		}
+		if (left instanceof Map) {
+			const merged = new Map(left);
+			if (right instanceof Map) right.forEach((value, key) => merged.set(key, value));
+			else {
+				const pair = right as { first: Any; second: Any };
+				merged.set(pair.first, pair.second);
+			}
+			return merged;
+		}
+		const isPair = Array.isArray(right) && 'first' in right;
+		return Array.isArray(right) && !isPair
+			? (left as Any[]).concat(right)
+			: [...(left as Any[]), right];
+	},
+	minus: (left: Any, right: Any) => {
+		if (typeof left === 'number') return left - Number(right);
+		if (typeof left === 'string') {
+			return typeof right === 'string'
+				? left.charCodeAt(0) - right.charCodeAt(0)
+				: String.fromCharCode(left.charCodeAt(0) - Number(right));
+		}
+		const dropping = Array.isArray(right) ? right : [right];
+		return (left as Any[]).filter((item) => !dropping.includes(item));
+	},
+	step: (progression: Any[], by: number) => progression.filter((_, index) => index % by === 0),
+	regexMatches: (left: Any, right: Any) =>
+		left instanceof RegExp
+			? new RegExp(`^(?:${left.source})$`).test(String(right))
+			: new RegExp(`^(?:${(right as RegExp).source})$`).test(String(left)),
+	plusAssign: (list: Any[], more: Any) => {
+		if (Array.isArray(more)) list.push(...more);
+		else list.push(more);
+	},
+	raise: (error: Any) => {
+		throw error;
+	},
+	check: (value: Any, message?: () => Any) => {
+		if (value !== true) throw new Error(String(message?.() ?? 'check failed'));
+	},
+	sortedByDescending: (list: Any[], fn: (item: Any) => number) =>
+		[...list].sort((a, b) => fn(b) - fn(a)),
+	coroutineScope: (supervisor: boolean) => ({ supervisor, cancelled: false }),
+	launch: (_scope: Any, block: () => Any) => {
+		const done = Promise.resolve()
+			.then(() => block())
+			.then(
+				() => undefined,
+				() => undefined
+			);
+		return { join: () => done };
+	},
 
 	// The collection helpers settle a suspending callback, as `runtime-api.ts`
 	// requires of them. A `map` that returned a list of promises would look
@@ -2671,7 +2726,10 @@ describe('an extension function declared in an `object`', () => {
 		const emitted = translate(source);
 
 		expect(emitted.refusals).toEqual([]);
-		expect(emitted.js).toContain("text += 'b'");
+		// A rebinding, through Kotlin's `+` rather than JavaScript's: the
+		// helper concatenates a string exactly as the operator would, and a
+		// list as a list. See `additive`.
+		expect(emitted.js).toContain("text = __k.plus(text, 'b')");
 	});
 
 	it('runs an `object`’s `by lazy` on first read, and only once', () => {
@@ -5034,5 +5092,382 @@ describe('reading a template property through super', () => {
 				)
 			)
 		).toContain('`super.` used as a property');
+	});
+});
+
+describe('control flow written in the middle of an expression' + ' (control flow)', () => {
+	it('guards a `+=` onto a list with the elvis `throw` on its right', () => {
+		// `all += page.entries ?: throw …` — the guard runs before the list is
+		// touched, and a null throws rather than appending nothing.
+		const demo = instantiate(
+			inClass(
+				'    fun collect(entries: List<String>?): List<String> {',
+				'        val all = mutableListOf("a")',
+				'        all += entries ?: throw Exception("no entries")',
+				'        return all',
+				'    }'
+			)
+		);
+
+		expect(demo.collect(['b', 'c'])).toEqual(['a', 'b', 'c']);
+		expect(() => demo.collect(null)).toThrow('no entries');
+	});
+
+	it('strides a loop with `step`', () => {
+		const demo = instantiate(
+			inClass(
+				'    fun evens(n: Int): List<Int> {',
+				'        val out = mutableListOf<Int>()',
+				'        for (i in 0 until n step 2) out.add(i)',
+				'        return out',
+				'    }'
+			)
+		);
+
+		expect(demo.evens(7)).toEqual([0, 2, 4, 6]);
+	});
+
+	it('calls the function a call returned', () => {
+		const demo = instantiate(
+			inClass(
+				'    private fun formatter(loud: Boolean): (String) -> String =',
+				'        if (loud) { s -> s.uppercase() } else { s -> s }',
+				'    fun title(key: String) = formatter(true)(key)'
+			)
+		);
+
+		expect(demo.title('ab')).toBe('AB');
+	});
+
+	it('reads a line that begins with `(` as its own statement, as Kotlin does', () => {
+		// Read as one statement, the line above was *called* with this line's
+		// parenthesis: `seen = last(if …)`, the wrong program with nothing
+		// refused.
+		const demo = instantiate(
+			inClass(
+				'    fun walk(items: List<Int>, last: Int): List<Int> {',
+				'        val out = mutableListOf<Int>()',
+				'        var seen = last',
+				'        (if (items.isEmpty()) listOf(seen) else items).forEach { out.add(it) }',
+				'        return out',
+				'    }'
+			)
+		);
+
+		expect(demo.walk([], 7)).toEqual([7]);
+		expect(demo.walk([1, 2], 7)).toEqual([1, 2]);
+	});
+
+	it('calls a backticked method by its name', () => {
+		// jsoup's `val()` has to be quoted in Kotlin, where `val` is a keyword.
+		const demo = instantiate(inClass('    fun value(input: Element): String = input.`val`()'));
+
+		expect(demo.value({ val: () => 'on' })).toBe('on');
+	});
+
+	it('reads an infix `matches` with the Regex on either side', () => {
+		const demo = instantiate(
+			inClass(
+				'    fun left(text: String) = ID matches text',
+				'    fun right(text: String) = text matches ID',
+				'    companion object { private val ID = Regex("[0-9]+") }'
+			)
+		);
+
+		expect(demo.left('123')).toBe(true);
+		expect(demo.right('12a')).toBe(false);
+	});
+});
+
+describe('a receiver named by its label' + ' (control flow)', () => {
+	it('reads `this@fn` as the extension receiver, past the `apply` that shadows it', () => {
+		// Inside the `apply`, a bare `title` is the model's; `this@toModel` is
+		// the DTO's. The DTO's own `tags` and `link()` are the DTO's too, since
+		// the model has neither and Kotlin tries the extension receiver before
+		// the class.
+		const demo = instantiate(
+			kt(
+				'class Dto(val title: String, val tags: List<String>) {',
+				'    fun link(): String = "/x/" + title',
+				'}',
+				'class Demo : Source() {',
+				'    private fun Dto.toModel() = SAnime.create().apply {',
+				'        title = this@toModel.title',
+				'        url = link()',
+				'        genre = tags.joinToString(", ")',
+				'    }',
+				'    fun make(title: String) = Dto(title, listOf("a", "b")).toModel()',
+				'}'
+			)
+		);
+
+		expect(demo.make('One')).toEqual({ title: 'One', url: '/x/One', genre: 'a, b' });
+	});
+
+	it('reaches an outer `apply` receiver from inside a nested receiver block', () => {
+		const demo = instantiate(
+			inClass(
+				'    fun make(): Any = SAnime.create().apply {',
+				'        url = "/a"',
+				'        memo = buildJsonObject { put("slug", slug(this@apply)) }',
+				'    }',
+				'    private fun slug(model: SAnime): String = model.url + "!"'
+			),
+			{},
+			{ SAnime: { create: () => ({}) } }
+		);
+
+		// `this@apply` is the model, not the JSON builder whose `this` the inner
+		// block has rebound.
+		expect(demo.make()).toEqual({ url: '/a', memo: { slug: '/a!' } });
+	});
+
+	it('refuses a label that names no receiver in reach', () => {
+		expect(
+			refusalNames(inClass('    fun go(x: String) = listOf(1).map { this@nowhere.size }'))
+		).toContain('`this@nowhere`');
+	});
+
+	it('concatenates lists rather than their text', () => {
+		// `EVERY + getPairList(n)` built one long string with JavaScript's `+`,
+		// and nothing refused or threw.
+		const found = evaluate(
+			kt(
+				'object F {',
+				'    val EVERY = listOf("all")',
+				'    val GENRES by lazy { EVERY + listOf("a", "b") }',
+				'    fun more(x: List<Int>, y: List<Int>) = x + y',
+				'    fun one(x: List<Int>) = x + 3',
+				'}'
+			),
+			'[F.GENRES, F.more([1], [2]), F.one([1, 2])]'
+		);
+
+		expect(found).toEqual([
+			['all', 'a', 'b'],
+			[1, 2],
+			[1, 2, 3]
+		]);
+	});
+
+	it('adds numbers and concatenates strings exactly as before', () => {
+		const found = evaluate(
+			kt(
+				'object F {',
+				'    fun next(page: Int) = page + 1',
+				'    fun title(name: String, n: Int) = "Chapter " + n + ": " + name',
+				'    fun back(page: Int) = page - 1',
+				'}'
+			),
+			'[F.next(2), F.title("x", 3), F.back(2)]'
+		);
+
+		expect(found).toEqual([3, 'Chapter 3: x', 1]);
+	});
+
+	it('merges a map with a pair and rebinds a `var` list on `+=`', () => {
+		const found = evaluate(
+			kt(
+				'object F {',
+				'    fun put(m: Map<String, Int>) = m + ("b" to 2)',
+				'    fun grow(xs: List<Int>): List<Int> {',
+				'        var acc = listOf(0)',
+				'        acc += xs',
+				'        acc -= 0',
+				'        return acc',
+				'    }',
+				'}'
+			),
+			'[F.put(new Map([["a", 1]])), F.grow([4, 5])]'
+		) as [Map<string, number>, number[]];
+
+		expect([...found[0]]).toEqual([
+			['a', 1],
+			['b', 2]
+		]);
+		expect(found[1]).toEqual([4, 5]);
+	});
+
+	it('does Char arithmetic, which a one-character string cannot say by itself', () => {
+		const found = evaluate(
+			kt(
+				'object F {',
+				"    fun rot(c: Char) = (c - 'A' + 13) % 26",
+				"    fun shift(i: Int) = 'a' + i",
+				'}'
+			),
+			'[F.rot("B"), F.shift(2)]'
+		);
+
+		expect(found).toEqual([14, 'c']);
+	});
+});
+
+describe('a block launched and not awaited' + ' (control flow)', () => {
+	it('starts `scope.launch { }` after the caller carries on, through a declared helper', async () => {
+		// The theme's own `launchIO`, called with a block from the extension —
+		// the shape a whole family of templates fetches its genres with.
+		const demo = instantiate(
+			inClass(
+				'    private var genres: List<String> = emptyList()',
+				'    private val scope = CoroutineScope(Dispatchers.IO)',
+				'    protected fun launchIO(block: () -> Unit) = scope.launch { block() }',
+				'    fun filters(): List<String> {',
+				'        launchIO { genres = listOf("a", "b") }',
+				'        return genres',
+				'    }'
+			)
+		);
+
+		expect(demo.filters()).toEqual([]);
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(demo.filters()).toEqual(['a', 'b']);
+	});
+
+	it('keeps a bare `launch` inside `coroutineScope` refused, which is a child it waits for', () => {
+		expect(
+			refusalNames(
+				inClass(
+					'    suspend fun all(): Unit = coroutineScope {',
+					'        launch { println("x") }',
+					'    }'
+				)
+			)
+		).toContain('launch {}');
+	});
+
+	it('refuses a launch given an exception handler it cannot model', () => {
+		expect(
+			refusalNames(inClass('    fun go() { scope.launch(handler) { println("x") } }'))
+		).toContain('a `launch` given a context this build does not model');
+	});
+});
+
+describe('a property with its own accessors' + ' (control flow)', () => {
+	it('keeps a backing field for `field`, set in the constructor and read by the getter', () => {
+		// The memoising shape: the getter hands out the flag and resets it.
+		const demo = instantiate(
+			inClass(
+				'    private var changed: Boolean = true',
+				'        get() {',
+				'            val current = field',
+				'            field = false',
+				'            return current',
+				'        }',
+				'    fun poll(): List<Boolean> = listOf(changed, changed)'
+			)
+		);
+
+		expect(demo.poll()).toEqual([true, false]);
+	});
+
+	it('runs a custom setter, and a default getter reads what it stored', () => {
+		const demo = instantiate(
+			inClass(
+				'    var name: String = ""',
+				'        set(value) { field = value.trim() }',
+				'    fun rename(to: String): String {',
+				'        name = to',
+				'        return name',
+				'    }'
+			)
+		);
+
+		expect(demo.rename('  Demo  ')).toBe('Demo');
+	});
+
+	it('reads a property that is merely called `field` as that property', () => {
+		const found = evaluate(
+			kt('class Pick(val field: String) {', '    fun key() = "by-" + field', '}'),
+			'new Pick("date").key()'
+		);
+
+		expect(found).toBe('by-date');
+	});
+
+	it("throws `check`'s lazy message only when the check fails", () => {
+		const demo = instantiate(
+			inClass('    fun go(n: Int): Int { check(n > 0) { "bad $n" }; return n }')
+		);
+
+		expect(demo.go(2)).toBe(2);
+		expect(() => demo.go(0)).toThrow('bad 0');
+	});
+
+	it("prefers an extension's own `check` to the standard library's", () => {
+		const demo = instantiate(
+			inClass(
+				'    private fun check(url: String) = url.startsWith("/")',
+				'    fun go() = check("/a")'
+			)
+		);
+
+		expect(demo.go()).toBe(true);
+	});
+
+	it('reads an unbound reference to a framework property as a read of it', () => {
+		const demo = instantiate(
+			inClass(
+				'    fun order(chapters: List<SChapter>) = chapters.sortedByDescending(SChapter::chapter_number)'
+			)
+		);
+
+		expect(demo.order([{ chapter_number: 1 }, { chapter_number: 3 }])).toEqual([
+			{ chapter_number: 3 },
+			{ chapter_number: 1 }
+		]);
+	});
+});
+
+describe('throwing where Kotlin throws' + ' (control flow)', () => {
+	it('keeps `?: throw` in an argument, evaluated only when the left side is null', () => {
+		const demo = instantiate(
+			inClass(
+				'    fun pick(token: String?): String = listOf(token ?: throw Exception("no token")).first()'
+			)
+		);
+
+		expect(demo.pick('t')).toBe('t');
+		expect(() => demo.pick(null)).toThrow('no token');
+	});
+
+	it('rethrows what a `catch` caught, past a clause for a cancellation nothing raises', () => {
+		const demo = instantiate(
+			inClass(
+				'    fun parse(text: String): Int? = try {',
+				'        text.toInt()',
+				'    } catch (e: CancellationException) {',
+				'        throw e',
+				'    } catch (e: Exception) {',
+				'        null',
+				'    }',
+				'    fun strict(text: String): Int = try { text.toInt() } catch (e: Exception) { throw e }'
+			)
+		);
+
+		expect(demo.parse('4')).toBe(4);
+		expect(demo.parse('x')).toBeNull();
+		expect(() => demo.strict('x')).toThrow('not a number');
+	});
+
+	it('still refuses a clause list whose types would have decided which ran', () => {
+		expect(
+			refusalNames(
+				inClass(
+					'    fun go(text: String): Int = try { text.toInt() } catch (e: IOException) { 1 } catch (e: Exception) { 2 }'
+				)
+			)
+		).toContain('more than one `catch` clause');
+	});
+
+	it('writes through an index on the way to a property', () => {
+		const demo = instantiate(
+			inClass('    fun stamp(chapters: List<SChapter>, at: Long) { chapters[0].date_upload = at }')
+		);
+		const chapters = [{ date_upload: 0 }, { date_upload: 0 }];
+		demo.stamp(chapters, 7);
+
+		expect(chapters).toEqual([{ date_upload: 7 }, { date_upload: 0 }]);
 	});
 });

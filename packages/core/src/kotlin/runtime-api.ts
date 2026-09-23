@@ -276,6 +276,11 @@ export const RUNTIME_HELPERS = [
 	'range',
 	'until',
 	'downTo',
+	/* `0 until n step 2`, over the array the three above answer. */
+	'step',
+	/* The infix `matches`, which Kotlin declares on both sides: `regex
+	   matches text` and `text matches regex` mean the same whole-string test. */
+	'regexMatches',
 
 	/* The environment the host supplies, reached through extension functions
 	   rather than through methods: `"…".toHttpUrl()`, `response.asJsoup()`,
@@ -337,6 +342,17 @@ export const RUNTIME_HELPERS = [
 	'jump',
 	'isJump',
 	'jumpValue',
+
+	/* `scope.launch { … }`: a block started and not awaited, on a scope that
+	   remembers whether a failure has cancelled it. See the helpers. */
+	'coroutineScope',
+	'launch',
+
+	/* `x ?: throw e` where no statement can hold the `throw`: throws its argument. */
+	'raise',
+
+	/* `UUID.randomUUID()`, as the text of a version-4 UUID. */
+	'randomUUID',
 
 	/* `buildString { append(…) }`: the block is called with a string
 	   accumulator as its receiver, and the accumulated text comes back. */
@@ -486,6 +502,8 @@ export const RUNTIME_HELPERS = [
 	   page through and report a source with nothing on it. */
 	'require',
 	'requireNotNull',
+	'check',
+	'checkNotNull',
 
 	/* `Int.toChar()` and `Char(code)`: the character AT that code, where
 	   `String(n)` would answer the digits of the number. */

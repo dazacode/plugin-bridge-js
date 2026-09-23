@@ -1116,6 +1116,98 @@ describe('the parts of Kotlin that have no JavaScript spelling', () => {
 		expect(k.range(1, 0)).toEqual([]);
 	});
 
+	it('strides a progression with `step`, and refuses a step that is not positive', () => {
+		expect(k.step(k.until(0, 7), 2)).toEqual([0, 2, 4, 6]);
+		expect(k.step(k.range(1, 10), 3)).toEqual([1, 4, 7, 10]);
+		expect(k.step(k.downTo(10, 1), 3)).toEqual([10, 7, 4, 1]);
+		expect(k.step(k.until(0, 0), 2)).toEqual([]);
+		expect(() => k.step(k.until(0, 4), 0)).toThrow(/positive/);
+	});
+
+	it('dispatches `+` and `-` on the left operand, as Kotlin resolves them', () => {
+		expect(k.plus(1, 2)).toBe(3);
+		expect(k.plus('a', 1)).toBe('a1');
+		expect(k.plus(null, 'x')).toBe('nullx');
+		expect(k.plus([1], [2, 3])).toEqual([1, 2, 3]);
+		expect(k.plus([1], 2)).toEqual([1, 2]);
+		// A Pair is an array here, and is one element rather than two.
+		expect(k.plus([k.to('a', 1)], k.to('b', 2)).length).toBe(2);
+		const merged = k.plus(k.mapOf(k.to('a', 1)), k.to('b', 2));
+		expect([...merged.entries()]).toEqual([
+			['a', 1],
+			['b', 2]
+		]);
+		expect([...k.plus(k.setOf(1, 2), [2, 3])]).toEqual([1, 2, 3]);
+		expect(k.minus(5, 2)).toBe(3);
+		// No String minus exists, so a string on the left is a Char.
+		expect(k.minus('C', 'A')).toBe(2);
+		expect(k.minus('c', 1)).toBe('b');
+		expect([...k.minus(k.mapOf(k.to('a', 1), k.to('b', 2)), 'a').keys()]).toEqual(['b']);
+		expect(k.minus([1, 2, 3], [2])).toEqual([1, 3]);
+	});
+
+	it('starts a launched block without awaiting it, and swallows what it throws', async () => {
+		const ran: string[] = [];
+		const job = k.launch(k.coroutineScope(true), async () => {
+			ran.push('block');
+		});
+		// Not yet: the caller carries on first, as it would past a launch.
+		expect(ran).toEqual([]);
+		await job.join();
+		expect(ran).toEqual(['block']);
+		expect(job.isCompleted).toBe(true);
+
+		const failed = k.launch(k.coroutineScope(true), () => {
+			throw new Error('site down');
+		});
+		await expect(failed.join()).resolves.toBeUndefined();
+		expect(failed.isCancelled).toBe(true);
+		// Cancelling a running block cannot be done honestly, so it says so.
+		expect(() => job.cancel()).toThrow(/cannot be stopped/);
+	});
+
+	it('cancels a plain-Job scope on a failure, and leaves a supervisor alone', async () => {
+		const plain = k.coroutineScope(false);
+		await k
+			.launch(plain, () => {
+				throw new Error('first');
+			})
+			.join();
+		let later = false;
+		await k
+			.launch(plain, () => {
+				later = true;
+			})
+			.join();
+		expect(later).toBe(false);
+
+		const supervised = k.coroutineScope(true);
+		await k
+			.launch(supervised, () => {
+				throw new Error('first');
+			})
+			.join();
+		await k
+			.launch(supervised, () => {
+				later = true;
+			})
+			.join();
+		expect(later).toBe(true);
+	});
+
+	it('answers `UUID.randomUUID()` as the text of a version-4 UUID', () => {
+		const one = k.randomUUID();
+		expect(one).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+		expect(k.randomUUID()).not.toBe(one);
+	});
+
+	it('reads the infix `matches` from whichever side holds the Regex', () => {
+		expect(k.regexMatches(k.regex('a+'), 'aaa')).toBe(true);
+		expect(k.regexMatches('aaa', k.regex('a+'))).toBe(true);
+		// Whole-input, not a search.
+		expect(k.regexMatches(k.regex('a+'), 'baaa')).toBe(false);
+	});
+
 	it('keeps named integer bitwise operations explicit', () => {
 		expect(k.bitwiseAnd(6, 3)).toBe(2);
 	});
@@ -3865,6 +3957,14 @@ describe('the syntax whose JavaScript namesake is wrong', () => {
 		k.setIndex(list, 1, 'c');
 		expect(list[1]).toBe('c');
 		expect(() => k.setIndex(null, 'k', 'v')).toThrow(/was null/);
+	});
+
+	it('writes `headers["k"] = v` through the builder\'s own `set`', () => {
+		// Kotlin's indexed write is the receiver's `operator fun set`. As a
+		// property write the builder grew a field and the header never went.
+		const builder = runtime.globals.Headers.Builder();
+		k.setIndex(builder, 'Referer', 'https://example.invalid/');
+		expect(builder.build().get('Referer')).toBe('https://example.invalid/');
 	});
 
 	it('runs a synchronized block and answers with its value', () => {

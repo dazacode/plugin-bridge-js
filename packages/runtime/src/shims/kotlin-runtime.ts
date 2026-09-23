@@ -519,6 +519,25 @@ function __trimEnds(value, given, fromStart, fromEnd) {
 }
 
 /** A Kotlin Char, which this runtime spells as a one-character string. */
+/** A Kotlin Pair, which is a two-element array carrying first and second. */
+function __isPair(value) {
+  return Array.isArray(value) && value.length === 2 &&
+    Object.prototype.hasOwnProperty.call(value, 'first');
+}
+
+/**
+ * Whether a '+' or '-' operand is a collection of elements or one element.
+ *
+ * A string is one element (a String in a List<String>), and so is a Pair and a
+ * Map: none of the three is an Iterable in Kotlin, whatever it is here.
+ */
+function __isCollection(value) {
+  if (value === null || value === undefined || typeof value !== 'object') return false;
+  if (__isPair(value) || value instanceof Map) return false;
+  return Array.isArray(value) || value instanceof Set ||
+    typeof value.toArray === 'function' || typeof value[Symbol.iterator] === 'function';
+}
+
 function __isChar(value) {
   return typeof value === 'string' && value.length === 1;
 }
@@ -3001,16 +3020,54 @@ var __k = {
     return __each(chunks, function (chunk) { return transform(chunk); });
   },
 
-  /** Kotlin's list + x, where x may be a list or a single element. */
-  plus: function (list, other, unit) {
+  /**
+   * Kotlin's '+', and the plus() it is spelled as — dispatched on the LEFT
+   * operand, which is where Kotlin resolves it.
+   *
+   * The emitter has no types, and JavaScript's '+' reads a list as its text:
+   * 'listOf(1) + listOf(2)' was the string "12", a filter list built as
+   * 'EVERY + getPairList(n)' was one long string, and nothing refused or threw.
+   * So an operand the emitter cannot prove is a number or a string comes here.
+   *
+   * A number adds and a string (or a null String?) concatenates, exactly as
+   * the plain operator would. A Map merges a Map, a Pair or a list of Pairs;
+   * a Set unions; anything else that iterates is a list, which concatenates a
+   * collection and appends anything else. A Pair is an array here, and is one
+   * element rather than two. A class that declares its own 'operator fun plus'
+   * is asked for it.
+   *
+   * 'Char + Int' is the one case this cannot see: a Char is a one-character
+   * string, so it concatenates. The emitter answers that where the Char is a
+   * literal, which is the only place it can be told apart.
+   */
+  plus: function (left, right, unit) {
     // A date moved by an amount: 'zoned.plus(3, ChronoUnit.DAYS)'.
-    if (list !== null && list !== undefined && list.__kTime === true) return list.plus(other, unit);
-    var items = __arr(list).slice();
-    if (Array.isArray(other) || (other !== null && other !== undefined && typeof other !== 'string' &&
-        typeof other[Symbol.iterator] === 'function')) {
-      return items.concat(__arr(other));
+    if (left !== null && left !== undefined && left.__kTime === true) return left.plus(right, unit);
+    if (typeof left === 'number' || typeof left === 'string' || left === null || left === undefined) {
+      return left + right;
     }
-    items.push(other);
+    if (left instanceof Map) {
+      var merged = new Map(left);
+      if (right instanceof Map) right.forEach(function (value, key) { merged.set(key, value); });
+      else if (__isPair(right)) merged.set(right.first, right.second);
+      else {
+        var entries = __arr(right);
+        for (var e = 0; e < entries.length; e += 1) merged.set(entries[e].first, entries[e].second);
+      }
+      return merged;
+    }
+    if (left instanceof Set) {
+      var union = __k.toSet(__arr(left));
+      var adding = __isCollection(right) ? __arr(right) : [right];
+      for (var u = 0; u < adding.length; u += 1) union.add(adding[u]);
+      return union;
+    }
+    if (!Array.isArray(left) && typeof left === 'object' && typeof left.plus === 'function') {
+      return left.plus(right);
+    }
+    var items = __arr(left).slice();
+    if (__isCollection(right)) return items.concat(__arr(right));
+    items.push(right);
     return items;
   },
 
@@ -3109,6 +3166,109 @@ var __k = {
     var promise = Promise.resolve().then(function () { return fn(); });
     promise.await = function () { return promise; };
     return promise;
+  },
+
+  /**
+   * 'CoroutineScope(Dispatchers.IO)', and whether it is a supervisor.
+   *
+   * The dispatcher is a thread pool, and there is one thread here, so it is
+   * dropped. The Job is not: under a plain Job one failed child cancels the
+   * whole scope, and every launch after it never runs; under a SupervisorJob a
+   * failure is its child's alone. The emitter reads which was written.
+   */
+  coroutineScope: function (supervisor) {
+    return { supervisor: supervisor === true, cancelled: false };
+  },
+
+  /**
+   * 'scope.launch { … }' — started, not awaited.
+   *
+   * On Android this is a block handed to another thread while the caller
+   * carries on, and the caller never sees its result. Here it is the same
+   * block started as a promise nobody awaits: it begins once the caller has
+   * yielded, runs concurrently with whatever the caller does next, and a
+   * request it makes goes out through the host like any other. That is the
+   * whole of what 'launch' promises; how many threads carry it is not.
+   *
+   * A failure is logged, never thrown: a launched block has nobody to throw
+   * to, and on Android an uncaught one is an app crash, which a host must not
+   * reproduce. A plain-Job scope is then cancelled, as Kotlin's would be, so
+   * a later launch on it does not run. 'scope' is null for GlobalScope, which
+   * nothing cancels.
+   *
+   * Cancelling a running job is refused rather than faked: Kotlin stops the
+   * block at its next suspension point, and a promise cannot be stopped, so a
+   * 'cancel' that answered would let the block go on making requests and
+   * writing state while the caller believed it had stopped.
+   */
+  launch: function (scope, block) {
+    var job = {
+      isActive: true,
+      isCompleted: false,
+      isCancelled: false,
+      cancel: function () {
+        throw new Error('This converted extension cancelled a launched coroutine, which cannot be stopped here.');
+      }
+    };
+    var scoped = scope !== null && typeof scope === 'object';
+    if (scoped && scope.cancelled === true) {
+      job.isActive = false;
+      job.isCompleted = true;
+      job.isCancelled = true;
+      job.done = Promise.resolve();
+      job.join = function () { return job.done; };
+      return job;
+    }
+    job.done = Promise.resolve()
+      .then(function () { return block(); })
+      .then(
+        function () {
+          job.isActive = false;
+          job.isCompleted = true;
+        },
+        function (error) {
+          job.isActive = false;
+          job.isCompleted = true;
+          job.isCancelled = true;
+          if (scoped && scope.supervisor !== true) scope.cancelled = true;
+          __k.printStackTrace(error);
+        }
+      );
+    job.join = function () { return job.done; };
+    return job;
+  },
+
+  /** A throw, as a call: 'x ?: throw e' in a position only an expression can hold. */
+  raise: function (error) {
+    // Kotlin's 'throw null' is a NullPointerException, not a throw of nothing.
+    if (error === null || error === undefined) {
+      throw new Error('This converted extension threw a value that was null.');
+    }
+    throw error;
+  },
+
+  /**
+   * java.util.UUID.randomUUID(), as its text: 122 random bits in the
+   * version-4 layout. What an extension does with one is send it as a session
+   * id, and a site can check its shape but not where the bits came from, so
+   * the platform's secure generator is used where there is one and
+   * Math.random where there is not.
+   */
+  randomUUID: function () {
+    var bytes = [];
+    var secure = typeof crypto !== 'undefined' && crypto !== null && typeof crypto.getRandomValues === 'function';
+    if (secure) {
+      var buffer = new Uint8Array(16);
+      crypto.getRandomValues(buffer);
+      for (var i = 0; i < 16; i += 1) bytes.push(buffer[i]);
+    } else {
+      for (var j = 0; j < 16; j += 1) bytes.push(Math.floor(Math.random() * 256));
+    }
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    var hex = bytes.map(function (b) { return (b < 16 ? '0' : '') + b.toString(16); }).join('');
+    return hex.slice(0, 8) + '-' + hex.slice(8, 12) + '-' + hex.slice(12, 16) + '-' +
+      hex.slice(16, 20) + '-' + hex.slice(20);
   },
 
   awaitAll: function (list) {
@@ -3838,6 +3998,39 @@ var __k = {
   },
 
   /**
+   * 'progression step n' — every n-th element, starting with the first.
+   *
+   * The three builders above answer the whole progression as an array whose
+   * neighbours differ by exactly one, so every n-th element of it is exactly
+   * the progression Kotlin's step builds: '0 until 7 step 2' is 0, 2, 4, 6 and
+   * '10 downTo 1 step 3' is 10, 7, 4, 1. Kotlin throws for a step that is not
+   * positive rather than looping forever or answering nothing, and so does
+   * this.
+   */
+  step: function (progression, n) {
+    var by = Number(n);
+    if (!(by > 0)) throw new Error('Step must be positive, was: ' + n + '.');
+    var all = __arr(progression);
+    var out = [];
+    for (var i = 0; i < all.length; i += by) out.push(all[i]);
+    return out;
+  },
+
+  /**
+   * The infix 'matches': 'REGEX matches text', or 'text matches REGEX'.
+   *
+   * Kotlin declares it on Regex and on CharSequence, and both are the
+   * whole-input test. Which side is the pattern is only knowable at run time
+   * here, and a Regex is always one of this runtime's own, so that is what is
+   * asked. Neither side a Regex is not something Kotlin can compile.
+   */
+  regexMatches: function (left, right) {
+    if (left instanceof __KRegex) return left.matches(right);
+    if (right instanceof __KRegex) return right.matches(left);
+    throw new Error('This converted extension used matches without a Regex on either side.');
+  },
+
+  /**
    * Kotlin's error(), which is a throw and not a log.
    *
    * It reaches the host as an ordinary plugin failure, which is what the
@@ -4249,6 +4442,24 @@ var __k = {
     if (typeof value === 'number') return value - Number(other);
     // And the same for a date: 'ZonedDateTime.now(zone).minus(n, unit)'.
     if (value !== null && value !== undefined && value.__kTime === true) return value.minus(other, unit);
+    // Kotlin has no String minus, so a string on the left is a Char: 'c - 'A''
+    // is the distance between two, and 'c - 1' is the Char one before. As
+    // JavaScript's '-' both were NaN.
+    if (typeof value === 'string') {
+      var code = value.charCodeAt(0);
+      if (typeof other === 'string') return code - other.charCodeAt(0);
+      return String.fromCharCode(code - Number(other));
+    }
+    if (value instanceof Map) {
+      var without = new Map(value);
+      var keys = __isCollection(other) ? __arr(other) : [other];
+      for (var k = 0; k < keys.length; k += 1) without.delete(keys[k]);
+      return without;
+    }
+    if (value !== null && typeof value === 'object' && !Array.isArray(value) &&
+        !(value instanceof Set) && typeof value.minus === 'function') {
+      return value.minus(other);
+    }
     if (value instanceof Set) {
       var removing = other instanceof Set || Array.isArray(other) ? __arr(other) : [other];
       var kept = new Set(value);
@@ -4889,6 +5100,21 @@ var __k = {
     if (__present(value)) return value;
     throw new Error(
       __requireMessage(lazyMessage, 'This converted extension required a value that was null.')
+    );
+  },
+
+  /** check() and checkNotNull(): require's twins for state rather than arguments. */
+  check: function (value, lazyMessage) {
+    if (value) return undefined;
+    throw new Error(
+      __requireMessage(lazyMessage, 'This converted extension checked something that was not true.')
+    );
+  },
+
+  checkNotNull: function (value, lazyMessage) {
+    if (__present(value)) return value;
+    throw new Error(
+      __requireMessage(lazyMessage, 'This converted extension checked a value that was null.')
     );
   },
 
