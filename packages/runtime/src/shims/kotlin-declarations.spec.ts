@@ -295,6 +295,50 @@ describe('names a third catalogue pass found, run', () => {
 		expect(demo.status(false)).toBe(1);
 	});
 
+	it('sorts with a `Comparator { a, b -> … }`, reversed and chained', async () => {
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    private val byLength = Comparator<String> { a, b -> a.length - b.length }',
+				'    fun sorted(l: List<String>) = l.sortedWith(byLength)',
+				'    fun reversed(l: List<String>) = l.sortedWith(byLength.reversed())',
+				'    fun chained(l: List<String>) = l.sortedWith(byLength.thenBy { it })',
+				'}'
+			)
+		);
+		expect(demo.sorted(['ccc', 'a', 'bb'])).toEqual(['a', 'bb', 'ccc']);
+		expect(demo.reversed(['ccc', 'a', 'bb'])).toEqual(['ccc', 'bb', 'a']);
+		// Stable, as Kotlin's sort is: equal lengths keep their order until
+		// `thenBy` breaks the tie.
+		expect(demo.sorted(['b', 'a'])).toEqual(['b', 'a']);
+		expect(demo.chained(['b', 'a', 'cc'])).toEqual(['a', 'b', 'cc']);
+	});
+
+	it('reads letters in any case after `parseCaseInsensitive()`, and only then', async () => {
+		// A template's lazy chapter-date formatter is built this way. Without the
+		// flag java.time is case-sensitive, and so is this reader for a literal.
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    private val loose by lazy {',
+				'        DateTimeFormatterBuilder().parseCaseInsensitive()',
+				'            .appendPattern("MMMM d, yyyy \'at\' HH:mm").toFormatter(Locale.forLanguageTag("en"))',
+				'    }',
+				'    private val strict = DateTimeFormatterBuilder().appendPattern("MMMM d, yyyy \'at\' HH:mm").toFormatter(Locale.ENGLISH)',
+				'    fun a(s: String): Long = LocalDateTime.parse(s, loose).toInstant(ZoneOffset.UTC).toEpochMilli()',
+				'    fun b(s: String): Long = LocalDateTime.parse(s, strict).toInstant(ZoneOffset.UTC).toEpochMilli()',
+				'    fun late(): Any = DateTimeFormatterBuilder().appendPattern("d").parseCaseInsensitive()',
+				'}'
+			)
+		);
+		expect(demo.a('MARCH 5, 2024 AT 10:30')).toBe(Date.UTC(2024, 2, 5, 10, 30));
+		expect(demo.b('March 5, 2024 at 10:30')).toBe(Date.UTC(2024, 2, 5, 10, 30));
+		expect(() => demo.b('March 5, 2024 AT 10:30')).toThrow(/does not match/);
+		expect(() => demo.late()).toThrow(/after a pattern/);
+	});
+
 	it('defaults a field the pattern leaves out, and only that one', async () => {
 		const demo = await instantiate('Demo', source);
 		expect(demo.date('12 March', 2024)).toBe(Date.UTC(2024, 2, 12));
@@ -865,6 +909,33 @@ describe('a decode whose type is written where the value goes', () => {
 				)
 			)
 		).toEqual(['`.decodeFromString()` with no type argument']);
+	});
+
+	it('reads the type off a property whose getter sits on its own line', async () => {
+		// In a class body the getter is the property's *sibling*, and the walk
+		// that reads declared types looked only at children — so this was
+		// refused for a type argument the declaration names.
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    private val json = Json { ignoreUnknownKeys = true }',
+				'    var text = "[1,2]"',
+				'    private val numbers: List<Int>',
+				'        get() {',
+				'            val raw = text',
+				'            return json.decodeFromString(raw)',
+				'        }',
+				'    private var word: String',
+				'        get() = json.decodeFromString(text)',
+				'        set(value) { text = value }',
+				'    fun n(): List<Int> = numbers',
+				'    fun w(): String { word = "42"; return word }',
+				'}'
+			)
+		);
+		expect(demo.n()).toEqual([1, 2]);
+		expect(demo.w()).toBe('42');
 	});
 
 	it('still refuses a decode with nowhere to read its type from', () => {

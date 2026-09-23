@@ -5650,6 +5650,26 @@ var __k = {
    * 'compareBy(comparator, { … })' means.
    */
   compareBy: function () { return __byKeys(Array.prototype.slice.call(arguments), 1); },
+
+  /**
+   * 'Comparator<T> { a, b -> … }' — the SAM constructor, whose lambda is the
+   * compare function itself. Kotlin's is synchronous (Comparator.compare is
+   * not a suspend function), so an answer that is a Promise is refused where
+   * it happens rather than read as a non-zero number, which would sort by
+   * nothing and look almost right.
+   */
+  comparatorOf: function (compare) {
+    if (typeof compare !== 'function') {
+      throw new Error('This converted extension built a Comparator from something that is not a function.');
+    }
+    return __comparator(function (a, b) {
+      var delta = compare(a, b);
+      if (__thenable(delta)) {
+        throw new Error('This converted extension compared with a function that suspends, which Kotlin cannot do either.');
+      }
+      return Number(delta);
+    });
+  },
   compareByDescending: function () { return __byKeys(Array.prototype.slice.call(arguments), -1); },
 
   thenBy: function (comparator, selector) {

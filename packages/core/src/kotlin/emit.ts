@@ -5087,6 +5087,29 @@ class Emitter {
 					this.expectAssignments(node);
 					break;
 			}
+			// A getter written on its own line is a *sibling* of its property in
+			// a class body, not a child of it — the case above never saw it, and
+			// `val token: Dto get() { …; return text.parseAs() }` was refused
+			// for a type argument the declaration had written down. The same
+			// siblings `classProperty` is handed: the next one or two, getter
+			// or setter, in either order.
+			const members = kids(node);
+			for (const [index, member] of members.entries()) {
+				if (member.type !== 'property_declaration') continue;
+				if (kids(member).some((child) => child.type === 'getter')) continue;
+				const declaration = kids(member).find((child) => child.type === 'variable_declaration');
+				const type = typeText(kids(declaration).find((child) => child.type.endsWith('type')));
+				if (type === null) continue;
+				for (const next of members.slice(index + 1, index + 3)) {
+					if (next.type !== 'getter' && next.type !== 'setter') break;
+					if (next.type !== 'getter') continue;
+					this.expectBody(
+						kids(next).find((child) => child.type === 'function_body'),
+						type
+					);
+					break;
+				}
+			}
 		}
 	}
 

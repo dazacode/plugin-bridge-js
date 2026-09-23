@@ -495,6 +495,7 @@ export const RUNTIME_HELPERS = [
 	'sortedDescending',
 	'compareBy',
 	'compareByDescending',
+	'comparatorOf',
 	'thenBy',
 	'thenByDescending',
 	'asSequence',

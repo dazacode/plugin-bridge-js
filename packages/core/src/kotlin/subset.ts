@@ -1387,6 +1387,8 @@ export const HOST_METHODS: ReadonlySet<string> = new Set([
 	'codePointAt',
 	'appendPattern',
 	'parseDefaulting',
+	'parseCaseInsensitive',
+	'parseCaseSensitive',
 	'toFormatter',
 	'addPreference',
 	'setDefaultValue',
@@ -2023,6 +2025,10 @@ export const FREE_FUNCTIONS: ReadonlyMap<string, string> = new Map([
 	// Comparator construction, which `sortedWith` is always handed
 	['compareBy', 'compareBy'],
 	['compareByDescending', 'compareByDescending'],
+	// `Comparator<T> { a, b -> … }`, the SAM constructor: the lambda IS the
+	// compare function, and the runtime marks it as a comparator so
+	// `reversed()` and `thenBy` treat it as one rather than as a list.
+	['Comparator', 'comparatorOf'],
 
 	// `Char(code)`, the constructor form of `Int.toChar()`
 	['Char', 'toChar'],
