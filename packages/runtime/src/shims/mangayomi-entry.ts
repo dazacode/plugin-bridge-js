@@ -24,6 +24,9 @@
  * | `MProvider` | declared here; carries `source` and `getPreference` |
  * | `SharedPreferences` | the same lookup, over the manifest's own `settings` |
  * | `unpackJs` | `extract/patterns.ts`, inlined by the same generator |
+ * | `cryptoHandler`, the AES helpers | `ctx.crypto.aes`, and `digests.ts` for MD5 |
+ * | `deobfuscateJsPassword`, `unpackJsAndCombine` | ported from the format's host |
+ * | `parseDates` | `null`, which is what the format's own JavaScript host answers |
  * | `__episodeNumber` | `foreign/episode-recognition.ts`, as its own `toString()` |
  *
  * `Document` is the reason this file needs a generated source blob at all. A
@@ -58,6 +61,7 @@
 import { EPISODE_RECOGNITION_SOURCE } from '@plugin-bridge/core/episode-recognition';
 import { JS_RUNTIME } from './js-runtime';
 import { STREAM_GUARDS } from './stream-guards';
+import { DIGESTS } from './digests';
 import { DOM_RUNTIME_SOURCE } from './generated/dom-source';
 
 export interface MangayomiEntrypointOptions {
@@ -218,6 +222,373 @@ String.prototype.substringBetween = function (left, right) {
 };
 
 function unpackJs(source) { return __rt.unpackDeanEdwards(String(source)); }
+
+/* --- the format's crypto and unpacking helpers -------------------------------
+ *
+ * Seven more globals the format's own host defines for every source. Each body
+ * below is a port of that host's — its JavaScript utils forward to a Dart
+ * bridge, and the bridge is what is ported, down to which failures throw and
+ * which quietly hand the input back. A source written against that host reads
+ * those differences: \`cryptoHandler\` answering its own input is how it learns
+ * the key was wrong.
+ *
+ * **Four of them answer asynchronously here, and upstream they do not.** The
+ * three AES helpers and \`cryptoHandler\` need a cipher, and a cipher is the
+ * host's (\`ABI.md\` §2): \`ctx.crypto.aes\` is WebCrypto and returns a promise,
+ * and writing AES in this file to avoid that is the trade this runtime refuses
+ * everywhere else. So a source that awaits the call gets exactly upstream's
+ * answer, and one that uses the answer as a string without awaiting it gets a
+ * sentence saying so — from the first property it reads, the first string it is
+ * concatenated into, the JSON.parse it is handed to — instead of the string
+ * "[object Promise]" travelling on into a request. \`__mgAnswer\` is that
+ * guard. The other three helpers have no key and answer synchronously, as
+ * upstream does.
+ */
+
+/** Bytes of a string as the Dart bridge takes them: each code unit, low 8 bits. */
+function __mgCodeUnits(value) {
+  const text = String(value);
+  const out = new Uint8Array(text.length);
+  for (let i = 0; i < text.length; i += 1) out[i] = text.charCodeAt(i) & 0xff;
+  return out;
+}
+
+function __mgJoin(parts) {
+  let length = 0;
+  for (const part of parts) length += part.length;
+  const out = new Uint8Array(length);
+  let offset = 0;
+  for (const part of parts) { out.set(part, offset); offset += part.length; }
+  return out;
+}
+
+/**
+ * UTF-8, as Dart's \`utf8.decode(bytes, allowMalformed: true)\` reads it.
+ *
+ * The host's decoder is WHATWG's, which agrees on every malformed sequence (both
+ * substitute U+FFFD) and disagrees on one well-formed one: it strips a leading
+ * byte-order mark, and Dart keeps it. Put back, so a payload that starts with
+ * one reaches the source as upstream hands it over.
+ */
+function __mgUtf8(bytes) {
+  const text = __host().text.decode(bytes);
+  const bom = bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf;
+  return bom ? '\\ufeff' + text : text;
+}
+
+/**
+ * Base64 as Dart's \`base64.decode\` reads it: either alphabet, padding
+ * required, and anything else refused rather than skipped.
+ */
+function __mgBase64(value) {
+  const text = String(value);
+  if (text.length % 4 !== 0) throw new Error('Invalid base64 length: ' + text.length);
+  const pad = text.slice(-2) === '==' ? 2 : text.slice(-1) === '=' ? 1 : 0;
+  const body = text.slice(0, text.length - pad).replace(/-/g, '+').replace(/_/g, '/');
+  if (!/^[A-Za-z0-9+/]*$/.test(body)) throw new Error('Invalid base64 character.');
+  return __host().bytes.fromBase64(body + (pad === 2 ? '==' : pad === 1 ? '=' : ''));
+}
+
+/** Hex as Dart's \`hex.decode\` reads it: even length, hex digits only. */
+function __mgHex(value) {
+  const text = String(value);
+  if (text.length % 2 !== 0 || !/^[0-9a-fA-F]*$/.test(text)) throw new Error('Invalid hex: ' + text);
+  const out = new Uint8Array(text.length / 2);
+  for (let i = 0; i < out.length; i += 1) out[i] = parseInt(text.substr(i * 2, 2), 16);
+  return out;
+}
+
+/**
+ * OpenSSL's \`EVP_BytesToKey\` with MD5 and one round, which is what CryptoJS
+ * does with a passphrase: hash(password ‖ salt), then hash(previous ‖ password
+ * ‖ salt) until there are 48 bytes, split as a 32-byte key and a 16-byte IV.
+ * A port of the Dart bridge's \`deriveKeyAndIV\`, whose loop this is.
+ */
+function __mgKeyAndIv(password, salt) {
+  let derived = new Uint8Array(0);
+  let previous = new Uint8Array(0);
+  while (derived.length < 48) {
+    previous = __digestMd5(__mgJoin([previous, password, salt]));
+    derived = __mgJoin([derived, previous]);
+  }
+  return { key: derived.slice(0, 32), iv: derived.slice(32, 48) };
+}
+
+/**
+ * An asynchronous answer that refuses to be used as a synchronous one.
+ *
+ * Awaiting it, or calling \`then\`, \`catch\` or \`finally\`, is the promise as
+ * normal. Reading anything else off it — a property, a coercion to string or
+ * number, \`toJSON\` — throws the sentence below, which is the only place the
+ * difference between this host and upstream's can surface honestly. A rejection
+ * nobody awaited is absorbed, because a source that ignored the call entirely
+ * has not failed.
+ */
+function __mgAnswer(name, work) {
+  const promise = work();
+  promise.catch(function () {});
+  return new Proxy(promise, {
+    get(target, key) {
+      if (key === 'then' || key === 'catch' || key === 'finally') return target[key].bind(target);
+      if (key === Symbol.toStringTag) return 'Promise';
+      throw new Error(
+        'This source used the answer of ' + name + '() without awaiting it. The format\\'s own ' +
+          'app answers it at once; this one has to ask the host\\'s WebCrypto, which answers ' +
+          'later, so the source needs an await it does not have.'
+      );
+    }
+  });
+}
+
+/**
+ * AES-CBC with PKCS#7, key and IV taken as the UTF-8 bytes of two strings.
+ * Encrypting answers base64 and decrypting takes it. **Any failure answers the
+ * input unchanged**, which is upstream's own behaviour and the signal a source
+ * checks for.
+ */
+function cryptoHandler(text, iv, secretKeyString, encrypt) {
+  return __mgAnswer('cryptoHandler', async function () {
+    const input = String(text);
+    // Upstream's parameter is a Dart bool, so anything else is a type error
+    // before its own try is reached, and that is not the input handed back.
+    if (typeof encrypt !== 'boolean') throw new Error('cryptoHandler takes true or false as its fourth argument.');
+    try {
+      const key = __host().text.encode(String(secretKeyString));
+      const vector = __host().text.encode(String(iv));
+      if (encrypt === true) {
+        const sealed = await __host().crypto.aes('encrypt', 'AES-CBC', key, vector, __host().text.encode(input));
+        return __host().bytes.toBase64(sealed);
+      }
+      const opened = await __host().crypto.aes('decrypt', 'AES-CBC', key, vector, __mgBase64(input));
+      return __mgUtf8(opened);
+    } catch (error) {
+      return input;
+    }
+  });
+}
+
+/**
+ * CryptoJS's passphrase format: \`Salted__\`, an 8-byte salt, then AES-256-CBC
+ * under the key and IV \`EVP_BytesToKey\` derives. Both sides are trimmed first,
+ * as upstream trims them, and a failure throws, as upstream's rethrows.
+ *
+ * The salt's bytes are 1 to 245, because that is the range upstream draws from
+ * (\`nextInt(245) + 1\`); drawn here by rejection from the host's random bytes,
+ * so the distribution is the same one and not merely the same range.
+ */
+function encryptAESCryptoJS(plainText, passphrase) {
+  return __mgAnswer('encryptAESCryptoJS', async function () {
+    const salt = new Uint8Array(8);
+    let filled = 0;
+    while (filled < 8) {
+      const draw = __host().crypto.randomBytes(16);
+      for (let i = 0; i < draw.length && filled < 8; i += 1) {
+        if (draw[i] < 245) { salt[filled] = draw[i] + 1; filled += 1; }
+      }
+    }
+    const derived = __mgKeyAndIv(__mgCodeUnits(String(passphrase).trim()), salt);
+    const sealed = await __host().crypto.aes(
+      'encrypt', 'AES-CBC', derived.key, derived.iv, __host().text.encode(String(plainText).trim())
+    );
+    return __host().bytes.toBase64(__mgJoin([__mgCodeUnits('Salted__'), salt, sealed]));
+  });
+}
+
+/**
+ * The inverse. Upstream reads the salt from bytes 8 to 16 without checking the
+ * \`Salted__\` marker in front of it, and so does this.
+ */
+function decryptAESCryptoJS(encrypted, passphrase) {
+  return __mgAnswer('decryptAESCryptoJS', async function () {
+    const all = __mgBase64(String(encrypted).trim());
+    if (all.length < 16) throw new Error('decryptAESCryptoJS was given ' + all.length + ' bytes, too few to hold a salt.');
+    const derived = __mgKeyAndIv(__mgCodeUnits(String(passphrase).trim()), all.slice(8, 16));
+    const opened = await __host().crypto.aes('decrypt', 'AES-CBC', derived.key, derived.iv, all.slice(16));
+    return __mgUtf8(opened);
+  });
+}
+
+/**
+ * AES-GCM with a 128-bit tag: base64 ciphertext, hex key and nonce, and the tag
+ * as hex beside it or already on the end of the ciphertext (then '' here). Any
+ * failure — a wrong key, a tag that does not verify — answers the ciphertext
+ * unchanged, as upstream's does.
+ */
+function decryptAESGCM(encrypted, keyHex, ivHex, tagHex) {
+  return __mgAnswer('decryptAESGCM', async function () {
+    const input = String(encrypted);
+    try {
+      const data = __mgJoin([__mgBase64(input), __mgHex(tagHex === undefined || tagHex === null ? '' : tagHex)]);
+      const opened = await __host().crypto.aes('decrypt', 'AES-GCM', __mgHex(keyHex), __mgHex(ivHex), data, 128);
+      return __mgUtf8(opened);
+    } catch (error) {
+      return input;
+    }
+  });
+}
+
+/**
+ * A password written as JSFuck-style digits: \`[...]\` is a digit counted from
+ * its \`!+[]\`s (a lone \`+[]\` is 0, more than nine or none is '-'), and \`(...)\`
+ * is a '.', skipping a \`[...]\` that directly follows it. A port of upstream's
+ * deobfuscator, including where it throws: an unbalanced bracket, or a
+ * parenthesis at the very end, is an index out of range there and an error here.
+ */
+function deobfuscateJsPassword(inputString) {
+  const input = String(inputString);
+  const matching = function (opening) {
+    const open = input.charAt(opening);
+    const close = open === '[' ? ']' : ')';
+    let counter = 0;
+    for (let i = opening; i < input.length; i += 1) {
+      if (input.charAt(i) === open) counter += 1;
+      if (input.charAt(i) === close) counter -= 1;
+      if (counter === 0) return i;
+      if (counter < 0) return -1;
+    }
+    return -1;
+  };
+  const count = function (text, needle) {
+    let found = 0;
+    let at = text.indexOf(needle);
+    while (at !== -1) { found += 1; at = text.indexOf(needle, at + needle.length); }
+    return found;
+  };
+  const refuse = function () {
+    throw new Error('deobfuscateJsPassword was given an unbalanced expression.');
+  };
+
+  let out = '';
+  let index = 0;
+  while (index < input.length) {
+    const chr = input.charAt(index);
+    if (chr !== '[' && chr !== '(') { index += 1; continue; }
+    const closing = matching(index);
+    if (closing < index) refuse();
+    if (chr === '[') {
+      const part = input.substring(index, closing);
+      const bangs = count(part, '!+[]');
+      if (bangs === 0) out += count(part, '+[]') === 1 ? '0' : '-';
+      else out += bangs <= 9 ? String(bangs) : '-';
+    } else {
+      out += '.';
+      if (closing + 1 >= input.length) refuse();
+      if (input.charAt(closing + 1) === '[') {
+        const skipping = matching(closing + 1);
+        if (skipping < 0) refuse();
+        index = skipping + 1;
+        continue;
+      }
+    }
+    index = closing + 1;
+  }
+  return out;
+}
+
+/**
+ * Every Dean Edwards packed block in a script, unpacked and joined with a
+ * space — '' when there is none.
+ *
+ * Upstream's own unpacker rather than \`unpackJs\`'s, because the two differ and
+ * a source is written against this one: it reads the arguments with one regular
+ * expression, substitutes only when the dictionary has exactly the claimed
+ * count, and keeps a word whose entry is empty. A token that indexes past the
+ * dictionary is a range error upstream and is one here. Parsed, never run.
+ */
+const __MG_PACKED = /eval[(]function[(]p,a,c,k,e,[r|d]?/im;
+const __MG_PACKED_ARGS = /[}][(]'(.*)', *(\\d+), *(\\d+), *'(.*?)'[.]split[(]'[|]'[)]/gim;
+const __MG_ALPHABETS = {
+  52: '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP',
+  54: '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQR',
+  62: '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ',
+  // Printable ASCII with one extra backslash after '&'. That backslash is in
+  // upstream's literal (an escaped one, before the apostrophe) and shifts every
+  // later digit by one, so it is kept: a table that "fixed" it would unpack a
+  // base-95 payload differently from the app the source was written against.
+  95: (function () {
+    let out = '';
+    for (let code = 32; code <= 126; code += 1) {
+      out += String.fromCharCode(code);
+      if (code === 38) out += String.fromCharCode(92);
+    }
+    return out;
+  })()
+};
+
+/** Upstream's \`Unbaser.unbase\`, including Dart's strict \`int.tryParse\`. */
+function __mgUnbase(word, base) {
+  if (base >= 2 && base <= 36) {
+    const digits = '0123456789abcdefghijklmnopqrstuvwxyz'.slice(0, base);
+    const lower = word.toLowerCase();
+    let value = 0;
+    for (let i = 0; i < lower.length; i += 1) {
+      const digit = digits.indexOf(lower.charAt(i));
+      if (digit < 0) return 0;
+      value = value * base + digit;
+    }
+    // Dart's tryParse answers null past a 64-bit int, and upstream reads null as 0.
+    return word.length === 0 || value > 9223372036854775807 ? 0 : value;
+  }
+  const alphabet = __MG_ALPHABETS[base];
+  let value = 0;
+  for (let i = 0; i < word.length; i += 1) {
+    const digit = alphabet === undefined ? -1 : alphabet.indexOf(word.charAt(word.length - 1 - i));
+    value += Math.pow(base, i) * (digit < 0 ? 0 : digit);
+  }
+  return value;
+}
+
+function unpackJsAndCombine(scriptBlock) {
+  const script = String(scriptBlock);
+  if (!__MG_PACKED.test(script)) return '';
+  const unpacked = [];
+  __MG_PACKED_ARGS.lastIndex = 0;
+  let match = __MG_PACKED_ARGS.exec(script);
+  while (match !== null) {
+    const payload = match[1];
+    const symtab = match[4].split('|');
+    const radix = Number(match[2]);
+    const count = Number(match[3]);
+    if (symtab.length === count) {
+      unpacked.push(payload.replace(/\\b\\w+\\b/gi, function (word) {
+        const index = __mgUnbase(word, radix);
+        if (index < 0 || index >= symtab.length) {
+          throw new Error('unpackJsAndCombine met a token outside the packed dictionary.');
+        }
+        return symtab[index].length === 0 ? word : symtab[index];
+      }));
+    }
+    if (match[0].length === 0) __MG_PACKED_ARGS.lastIndex += 1;
+    match = __MG_PACKED_ARGS.exec(script);
+  }
+  return unpacked.join(' ');
+}
+
+/**
+ * Null, which is what the format's own JavaScript host answers.
+ *
+ * Its utils define \`parseDates\` as a message to a channel named "parseDates",
+ * and that host registers no handler under the name — the date parser lives
+ * only on the Dart side, for Dart sources. The runtime that carries the message
+ * prints "No channel parseDates registered" and returns nothing. A source that
+ * works there has therefore never relied on an answer, and inventing one here —
+ * a locale-driven date parser this engine subset cannot even express, since it
+ * has no Intl — would give this host a behaviour upstream does not have.
+ */
+function parseDates(value, dateFormat, dateFormatLocale) {
+  return null;
+}
+
+/**
+ * Refused by name. It asks the app to load a page in a real browser and run
+ * scripts in it, and a plugin here has no browser to lend (\`FOREIGN.md\` §4.1).
+ */
+async function evaluateJavascriptViaWebview(url, headers, scripts) {
+  throw new Error(
+    'This source runs scripts in a web page through evaluateJavascriptViaWebview. Yorozo has ' +
+      'no browser to lend a plugin, so it can browse this source but not do that step.'
+  );
+}
 
 /**
  * A per-host extractor this build does not have, as a function that says so.
@@ -692,6 +1063,7 @@ export function mangayomiEntrypoint(options: MangayomiEntrypointOptions): string
 	return `${JS_RUNTIME}
 ${STREAM_GUARDS}
 ${EPISODE_RECOGNITION_SOURCE}
+${DIGESTS}
 ${constants}
 
 // Declared before the runtime, because MProvider's constructor reads it, and
