@@ -151,6 +151,60 @@ describe('the collection members a catalogue pass named, run', () => {
 	});
 });
 
+describe('the framework filters a filter class names in its supertype call', () => {
+	it('slots named arguments by upstream parameter order, sort selection included', async () => {
+		// `: Filter.Group<X>(name = …, state = …)` and friends were refused
+		// for the names alone; `Filter.Sort.Selection(3, false)` for being a
+		// call on a nested type. Both now build what the runtime's filters hold.
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class SortFilter(state: Selection = Selection(2, ascending = false)) :',
+				'    Filter.Sort(name = "Sort", values = arrayOf("a", "b", "c"), state = state)',
+				'class TypeFilter : Filter.Select<String>(values = arrayOf("x", "y"), name = "Type", state = 1)',
+				'class Genres(genres: List<String>) :',
+				'    Filter.Group<Filter.CheckBox>(name = "Genres", state = genres.map { Filter.CheckBox(it) })',
+				'class Demo {',
+				'    fun filters() = listOf(SortFilter(), TypeFilter(), Genres(listOf("g")),',
+				'        SortFilter(Filter.Sort.Selection(1, true)))',
+				'}'
+			)
+		);
+		const [sort, type, genres, chosen] = demo.filters();
+		expect([sort.name, sort.values.length, sort.state]).toEqual([
+			'Sort',
+			3,
+			{ index: 2, ascending: false }
+		]);
+		expect([type.name, type.values, type.state]).toEqual(['Type', ['x', 'y'], 1]);
+		expect([genres.name, genres.state[0].name, genres.state[0].state]).toEqual([
+			'Genres',
+			'g',
+			false
+		]);
+		expect(chosen.state).toEqual({ index: 1, ascending: true });
+	});
+});
+
+describe('an exception built as a value', () => {
+	it('is made, not thrown, and rejects the Observable it is handed to', async () => {
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    fun licensed(): Observable<List<String>> = Observable.error(Exception("Licensed"))',
+				'    fun wrapped(cause: Throwable): Throwable = IOException("wrapped", cause)',
+				'}'
+			)
+		);
+		await expect(demo.licensed()).rejects.toThrow('Licensed');
+		const made = demo.wrapped('root');
+		expect(made).toBeInstanceOf(Error);
+		expect(made.message).toBe('wrapped');
+		expect(made.cause).toBe('root');
+	});
+});
+
 describe('a Kotlin Map, as a JS Map and as a JsonObject', () => {
 	// A Map iterated as bare [k, v] arrays, so `it.key` was undefined, and its
 	// `keys`/`values`/`entries` were property reads of a JS Map's *methods*; a

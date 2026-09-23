@@ -7489,6 +7489,19 @@ class Emitter {
 		// Arity separates them cleanly. Every SharedPreferences call in this
 		// ecosystem passes a default (`getString(KEY, DEFAULT)!!`); every
 		// org.json read passes only the field.
+		// `Filter.Sort.Selection(3, false)` — the sort state written qualified,
+		// which is the same value the bare `Selection(…)` already builds
+		// through `__k.selection`. The receiver is the framework's nested type,
+		// not a value, so it is dropped rather than passed through.
+		if (
+			name === 'Selection' &&
+			lambda === null &&
+			!safe &&
+			/^(?:Anime)?Filter\.Sort$/.test(receiver.text.replace(/\s+/g, ''))
+		) {
+			return `${this.helper('selection')}(${this.callArguments(name, args, null, labelled, false).join(', ')})`;
+		}
+
 		// `body.source().asResponseBody(type)` — okio's spelling of "the same
 		// bytes under another content type", which is how an interceptor fixes a
 		// host that serves its pages as `application/octet-stream`. A response
@@ -8023,6 +8036,24 @@ class Emitter {
 			return this.declaredSuspends.has(name) ? this.awaited(call) : call;
 		}
 
+		// `Observable.error(Exception("Licensed"))` — an exception built as a
+		// value rather than thrown on the spot. `throw` already reads the same
+		// names (`thrownHelper`); here the error is made and handed on, which
+		// is `__k.exception`. Only a type this build did not see declared: an
+		// extension's own `class LoginRequired : Exception()` is a class like
+		// any other, and a name nothing declares that does not end in
+		// Exception/Error/Throwable is not this.
+		if (
+			thrownHelper(name) === 'error' &&
+			lambda === null &&
+			args.length <= 2 &&
+			!this.classMembers.has(name) &&
+			!this.declaredTypes.has(name) &&
+			!this.moduleNames.has(name)
+		) {
+			return `${this.helper('exception')}(${this.plainArguments(name, args).join(', ')})`;
+		}
+
 		// A capitalised bare call is a constructor of a class this build has not
 		// translated — an extractor, a DTO from a shared module, an injected
 		// service. Rewriting it as a method on the source would run and be wrong.
@@ -8090,6 +8121,21 @@ class Emitter {
 
 		if (implicit !== null && lambda !== null && BUILDER_LAMBDA_METHODS.has(name)) {
 			const withLambda = this.callArguments(name, args, lambda, labelled, true);
+			return `${implicit}.${name}(${withLambda.join(', ')})`;
+		}
+		// `configureClient() = addCookie { listOf("age" to "18") }` — the same
+		// call the written-receiver form already makes, on the builder that is
+		// the implicit receiver, with the block as an ordinary argument (the
+		// cookies, asked for per request). Only `addCookie`: the other
+		// argument-lambda method is `addInterceptor`, and an interceptor lambda
+		// is a boundary this path must not open by the back door.
+		if (
+			implicit !== null &&
+			lambda !== null &&
+			name === 'addCookie' &&
+			!this.isSourceMember(name)
+		) {
+			const withLambda = this.callArguments(name, args, lambda, labelled, false);
 			return `${implicit}.${name}(${withLambda.join(', ')})`;
 		}
 		// `configureClient() = rateLimit(3)`: the builder is the implicit

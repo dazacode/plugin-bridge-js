@@ -5128,6 +5128,28 @@ describe("okio's source, which is only ever the same body under another type", (
 	});
 });
 
+describe("keiyoushi's addCookie block on an implicit builder", () => {
+	it('passes the block to the builder `configureClient` receives', () => {
+		// The written-receiver form already did this; the implicit one refused
+		// the block. The runtime half is in mihon-conversion.spec.ts. An
+		// interceptor block on the same path stays refused.
+		const emission = translate(
+			inClass(
+				'    override fun OkHttpClient.Builder.configureClient() = addCookie { listOf("age" to "18") }'
+			)
+		);
+		expect(emission.refusals).toEqual([]);
+		expect(emission.js).toContain('return __recv.addCookie((it) => {');
+		expect(
+			refusalNames(
+				inClass(
+					'    override fun OkHttpClient.Builder.configureClient() = addInterceptor { it.proceed(it.request()) }'
+				)
+			)
+		).toContain('a lambda passed to `addInterceptor`');
+	});
+});
+
 describe('the androidx preference idiom', () => {
 	it('builds the preference and hands it to the screen, not to the source', () => {
 		// MangaThemesia's paid-chapter helper. `setDefaultValue` inside the

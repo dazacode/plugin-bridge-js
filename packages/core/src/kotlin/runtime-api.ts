@@ -198,6 +198,8 @@ export const RUNTIME_HELPERS = [
 	'jeFloatOrNull',
 	'jeBoolean',
 	'jeBooleanOrNull',
+	/* An exception built as a value, not thrown — see `exception`. */
+	'exception',
 	/* MutableList.removeAt/reverse and Map.getValue — see each in the runtime. */
 	'removeAt',
 	'reverseInPlace',

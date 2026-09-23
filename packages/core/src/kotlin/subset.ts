@@ -2451,6 +2451,26 @@ export const KNOWN_SIGNATURES: ReadonlyMap<string, readonly string[]> = new Map(
 	// counterpart and named about as often as it is passed positionally.
 	['MangasPage', ['mangas', 'hasNextPage']],
 
+	// The framework's filter constructors, which a filter class names in its
+	// supertype call — `: Filter.Group<TriStateItem>(name = "Genre", state =
+	// genres.map(::TriStateItem))` — and which were refused for the names
+	// alone. The lists are upstream's parameter order, which is also the
+	// runtime's (`AnimeFilter` in `KOTLIN_MODELS`), under both spellings of
+	// the type. `Header` and `Separator` take only a name.
+	...['Filter', 'AnimeFilter'].flatMap((base): [string, readonly string[]][] => [
+		[`${base}.Select`, ['name', 'values', 'state']],
+		[`${base}.Sort`, ['name', 'values', 'state']],
+		[`${base}.Text`, ['name', 'state']],
+		[`${base}.CheckBox`, ['name', 'state']],
+		[`${base}.TriState`, ['name', 'state']],
+		[`${base}.Group`, ['name', 'state']],
+		[`${base}.Header`, ['name']],
+		[`${base}.Separator`, ['name']]
+	]),
+	// `Filter.Sort.Selection(index, ascending)`, a sort filter's state, which
+	// the catalogue writes as `Selection(2, ascending = false)`.
+	['Selection', ['index', 'ascending']],
+
 	// **`SMangaUpdate(manga = …, chapters = …)`**, the pair the current
 	// manga API returns details and chapters in, from one request. Every
 	// construction site in the measured catalogue names both — 92 listings

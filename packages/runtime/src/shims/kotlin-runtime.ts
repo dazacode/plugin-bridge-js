@@ -4489,6 +4489,19 @@ var __k = {
   },
 
   /**
+   * 'Exception(message)', 'IOException(message, cause)' and their kin built as
+   * a VALUE — 'Observable.error(Exception("Licensed"))' — rather than thrown
+   * where they stand, which is 'error' above. The error is made, not thrown;
+   * whoever it is handed to decides. A cause is kept as the standard one.
+   */
+  exception: function (message, cause) {
+    var text = message === undefined || message === null ? '' : __str(message);
+    var made = new Error(text.length > 0 ? text : 'This converted extension failed.');
+    if (cause !== undefined && cause !== null) made.cause = cause;
+    return made;
+  },
+
+  /**
    * The safe answer to the common packed-script helper. The decoder itself is
    * in the generated generic runtime and never evaluates the returned text.
    * An unpacker that needs custom alphabet or delimiters is intentionally
