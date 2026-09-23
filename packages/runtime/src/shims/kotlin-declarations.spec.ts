@@ -1886,3 +1886,29 @@ describe('a reference to a member of a declared object', () => {
 		expect(demo.many(['//b.example.invalid', 'c'])).toEqual(['https://b.example.invalid', 'c']);
 	});
 });
+
+describe('a write through a preference-delegated extension property', () => {
+	it('lands on the delegate’s key, and the next read answers it', async () => {
+		// `private var SharedPreferences.latestId by preferences.delegate(KEY,
+		// 0)`, then `preferences.latestId = id` — refused as a write to an
+		// extension property, while the delegate names the key to write.
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    private val preferences by getPreferencesLazy()',
+				'    private var SharedPreferences.latestId by preferences.delegate(PREF_LATEST_KEY, 0)',
+				'    fun bump(): Int {',
+				'        val before = preferences.latestId',
+				'        preferences.latestId = before + 3',
+				'        return preferences.latestId * 10 + preferences.getInt(PREF_LATEST_KEY, -1)',
+				'    }',
+				'    companion object {',
+				'        private const val PREF_LATEST_KEY = "latest_id"',
+				'    }',
+				'}'
+			)
+		);
+		expect(demo.bump()).toBe(33);
+	});
+});

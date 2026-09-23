@@ -2682,7 +2682,8 @@ class Emitter {
 						child.type === 'property_declaration' &&
 						extensionReceiverOf(child) === 'SharedPreferences' &&
 						(accessorOf(child, undefined, 'setter') !== undefined ||
-							members.slice(at + 1, at + 3).some((next) => next.type === 'setter'))
+							members.slice(at + 1, at + 3).some((next) => next.type === 'setter') ||
+							preferenceDelegateOf(child) !== null)
 				)
 				.map((child) => this.propertyName(child))
 				.filter((found): found is string => found !== null)
@@ -4170,7 +4171,19 @@ class Emitter {
 					const value = memoised
 						? `${this.helper('lazy')}(this, ${JSON.stringify(method)}, ${thunk})`
 						: `(${thunk})()`;
-					return `${method}(__recv) ${block([`return ${value};`])}`;
+					const read = `${method}(__recv) ${block([`return ${value};`])}`;
+					// `private var SharedPreferences.latestId by preferences
+					// .delegate(KEY, DEFAULT)`, then `preferences.latestId = id`:
+					// keiyoushi's delegate writes the key it reads, so the write
+					// goes through the store's editor to the same key — the per-run
+					// overlay every `edit().put…()` lands in — and the next read,
+					// which is not memoised, answers it.
+					const key = preferenceDelegateOf(node);
+					if (key === null) return read;
+					const written = this.expr(kids(key)[0] ?? key);
+					return `${read}\n__ext_set_${name}(__recv, __v) ${block([
+						`${this.helper('prefs')}().edit().putString(${written}, __v).apply();`
+					])}`;
 				}
 				if (getter === undefined) this.refuse(node, 'an extension property with no getter');
 				const read = this.extensionAccessor(getter, name, []);
@@ -12709,6 +12722,23 @@ function declaredTypeName(children: readonly KNode[]): string | null {
 	if (type === undefined) return null;
 	const parts = kids(type);
 	return parts.length === 1 && parts[0].type === 'type_identifier' ? parts[0].text : null;
+}
+
+/**
+ * The key argument of a `var` property delegated to keiyoushi's preference
+ * delegate — `var SharedPreferences.x by preferences.delegate(KEY, DEFAULT)` —
+ * or null for anything else, a `val` included.
+ */
+function preferenceDelegateOf(node: KNode): KNode | null {
+	if (!kids(node).some((child) => child.type === 'binding_pattern_kind' && child.text === 'var')) {
+		return null;
+	}
+	const delegate = kids(node).find((child) => child.type === 'property_delegate');
+	const call = kids(delegate).find((child) => child.type === 'call_expression');
+	if (call === undefined || !/^[\w.]+\.delegate\s*\(/.test(call.text)) return null;
+	const suffix = kids(call).find((child) => child.type === 'call_suffix');
+	const passed = kids(kids(suffix).find((child) => child.type === 'value_arguments'));
+	return passed.length >= 2 ? passed[0] : null;
 }
 
 /** `okhttp3.Response` as `Response` — the part an override might not spell the same. */
