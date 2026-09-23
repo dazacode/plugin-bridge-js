@@ -93,6 +93,187 @@ function refusalNames(source: string): string[] {
 	return emission.refusals.flatMap((one) => one.obstacles.map((obstacle) => obstacle.kind));
 }
 
+describe('a reference to a member the template declares', () => {
+	it('binds it to the inherited value, not to the argument', async () => {
+		// DooPlay's `protected open val episodeNumberRegex`, read by a subclass
+		// as `.let(episodeNumberRegex::find)`. It was emitted as the unbound
+		// `__k.find(text)` — the first character of the text standing in for a
+		// regex match — so every episode number was wrong, with nothing refused.
+		const sub = await instantiate(
+			'Sub',
+			kt(
+				'open class Base {',
+				'    protected open val episodeNumberRegex by lazy { "(\\d+)$".toRegex() }',
+				'}',
+				'class Sub : Base() {',
+				'    fun number(text: String): String = text.let(episodeNumberRegex::find)?.groupValues?.last() ?: "0"',
+				'}'
+			)
+		);
+		expect(sub.number('Episode 12')).toBe('12');
+		expect(sub.number('Special')).toBe('0');
+	});
+});
+
+describe('a decode that names a @Serializable class', () => {
+	// The structural decoder recognised a record by its field set, and a class
+	// whose fields are all optional fits every record — so `Filters` below made
+	// `Chapter` unrecognisable, and `dto.toPages()` was not a function on a
+	// bundle that reported nothing refused. A written type needs no guess.
+	const dtos = kt(
+		'@Serializable',
+		'class Filters(val genres: List<String> = emptyList(), val tags: List<String> = emptyList())',
+		'@Serializable',
+		'class Envelope<T>(val data: T, val total: Int = 0)',
+		'@Serializable',
+		'class Chapter(',
+		'    @SerialName("cap_id") val id: Int,',
+		'    @JsonNames("cap_nome", "titulo") val name: String,',
+		'    val number: Float? = null,',
+		'    @SerialName("cap_paginas") @Serializable(PageList::class) val pages: List<PageSrc> = emptyList(),',
+		'    val scan: Scan? = null,',
+		') {',
+		'    fun toPages(): List<String> = pages.map { "${scan?.slug ?: "-"}/" + it.src }',
+		'    var views: Int = 0',
+		'}',
+		'@Serializable',
+		'class PageSrc(val src: String, val mime: String? = null)',
+		'@Serializable',
+		'data class Scan(@SerialName("scan_slug") val slug: String)',
+		'object PageList : JsonTransformingSerializer<List<PageSrc>>(ListSerializer(PageSrc.serializer())) {',
+		'    override fun transformDeserialize(element: JsonElement) = JsonArray(',
+		'        element.jsonArray.map { page ->',
+		'            when (page) {',
+		'                is JsonPrimitive -> buildJsonObject { put("src", page.content) }',
+		'                else -> page',
+		'            }',
+		'        },',
+		'    )',
+		'}',
+		'object FirstOrSelf : JsonTransformingSerializer<PageSrc>(PageSrc.serializer()) {',
+		'    override fun transformDeserialize(element: JsonElement): JsonElement = if (element is JsonArray) element[0] else element',
+		'}',
+		'object StringOrNumber : KSerializer<String> {',
+		'    override val descriptor: SerialDescriptor = PrimitiveSerialDescriptor("StringOrNumber", PrimitiveKind.STRING)',
+		'    override fun deserialize(decoder: Decoder): String = when (decoder) {',
+		'        is JsonDecoder -> decoder.decodeJsonElement().jsonPrimitive.content',
+		'        else -> decoder.decodeString()',
+		'    }',
+		'    override fun serialize(encoder: Encoder, value: String) {',
+		'        encoder.encodeString(value)',
+		'    }',
+		'}',
+		'@Serializable',
+		'class Cover(@Serializable(FirstOrSelf::class) val image: PageSrc, @Serializable(with = StringOrNumber::class) val id: String)',
+		'@Serializable',
+		'class Ranked(val ids: List<@Serializable(StringOrNumber::class) String>)'
+	);
+	const demo = kt(
+		'class Demo {',
+		'    private val json = Json { ignoreUnknownKeys = true }',
+		'    fun chapter(text: String): Chapter = json.decodeFromString<Chapter>(text)',
+		'    fun wrapped(text: String): Envelope<List<Chapter>> = json.decodeFromString(text)',
+		'    fun cover(text: String): Cover = json.decodeFromString<Cover>(text)',
+		'    fun ranked(text: String): Ranked = json.decodeFromString<Ranked>(text)',
+		'    fun filters(text: String): Filters = json.decodeFromString<Filters>(text)',
+		'    fun encode(value: Chapter): JsonElement = value.toJsonElement()',
+		'}'
+	);
+
+	it('builds the class the type names, with its methods, renames and defaults', async () => {
+		const d = await instantiate('Demo', demo, dtos);
+		const chapter = d.chapter(
+			'{"cap_id":7,"titulo":"Seven","cap_paginas":["a.jpg",{"src":"b.webp"}],"scan":{"scan_slug":"s1"},"views":3}'
+		);
+		expect(chapter.id).toBe(7);
+		expect(chapter.name).toBe('Seven');
+		expect(chapter.number).toBeNull();
+		expect(chapter.views).toBe(3);
+		// The extension's own PageList reshaped the bare string into a record.
+		expect(chapter.toPages()).toEqual(['s1/a.jpg', 's1/b.webp']);
+		const empty = d.chapter('{"cap_id":1,"cap_nome":"One"}');
+		expect(empty.toPages()).toEqual([]);
+		expect(empty.views).toBe(0);
+		// `Filters` fits every record; it is still only what its type says.
+		expect(d.filters('{}').genres).toEqual([]);
+	});
+
+	it('carries a type argument through a generic class', async () => {
+		const d = await instantiate('Demo', demo, dtos);
+		const page = d.wrapped('{"data":[{"cap_id":2,"cap_nome":"Two","cap_paginas":["x"]}]}');
+		expect(page.total).toBe(0);
+		expect(page.data[0].toPages()).toEqual(['-/x']);
+	});
+
+	it('runs a transforming serializer and a KSerializer where they are written', async () => {
+		const d = await instantiate('Demo', demo, dtos);
+		const cover = d.cover('{"image":[{"src":"first"},{"src":"second"}],"id":42}');
+		expect(cover.image.src).toBe('first');
+		expect(cover.id).toBe('42');
+		expect(d.cover('{"image":{"src":"only"},"id":"x"}').image.src).toBe('only');
+		// On a type argument, the serializer applies to each element.
+		expect(d.ranked('{"ids":[1,"b",3]}').ids).toEqual(['1', 'b', '3']);
+	});
+
+	it('fails a missing required field as kotlinx does, and not a nullable one', async () => {
+		const d = await instantiate('Demo', demo, dtos);
+		expect(() => d.chapter('{"cap_nome":"no id"}')).toThrow(/response\.id/);
+		expect(d.chapter('{"cap_id":1,"cap_nome":"n","number":null,"cap_paginas":null}').pages).toEqual(
+			[]
+		);
+	});
+
+	it('uses a @Contextual default when the key is absent, and refuses it when present', async () => {
+		// MayoTune's `@Contextual private val sdf = SimpleDateFormat(…)`: kotlinx
+		// asks the serializersModule only for a key the payload carries.
+		const d = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    fun read(text: String): Dated = Json.decodeFromString<Dated>(text)',
+				'}',
+				'@Serializable',
+				'data class Dated(val id: String) {',
+				'    @Contextual',
+				'    private val stamp = listOf(1, 2)',
+				'    fun size(): Int = stamp.size',
+				'}'
+			)
+		);
+		expect(d.read('{"id":"a"}').size()).toBe(2);
+		expect(() => d.read('{"id":"a","stamp":"x"}')).toThrow(/@Contextual field/);
+	});
+
+	it("reads the app's Json through Injekt, and binds a reference to it", async () => {
+		// keiyoushi core's `val jsonInstance: Json = Injekt.get()`, and
+		// OneReader's `contentOrNull?.let(jsonInstance::parseToJsonElement)`,
+		// which used to call `parseToJsonElement` on the string itself.
+		const d = await instantiate(
+			'Demo',
+			kt(
+				'val jsonInstance: Json = Injekt.get()',
+				'class Demo {',
+				'    fun tags(text: String?): JsonElement? = text?.let(jsonInstance::parseToJsonElement)',
+				'    fun empty(): JsonObject = JsonObject(emptyMap())',
+				'    fun one(): JsonObject = JsonObject(mutableMapOf("a" to JsonPrimitive(1)))',
+				'}'
+			)
+		);
+		expect(d.tags('["a","b"]')).toEqual(['a', 'b']);
+		expect(d.tags(null)).toBeNull();
+		// A Kotlin Map's entries are the object, not a mutable map's methods.
+		expect(Object.keys(d.empty())).toEqual([]);
+		expect(d.one()).toEqual({ a: 1 });
+	});
+
+	it('refuses to encode a record whose class runs a custom serializer', async () => {
+		// Encoding it as its decoded fields is not what the serializer writes.
+		const d = await instantiate('Demo', demo, dtos);
+		const chapter = d.chapter('{"cap_id":7,"cap_nome":"n"}');
+		expect(() => d.encode(chapter)).toThrow(/custom serializer/);
+	});
+});
+
 describe('a decode whose type is written where the value goes', () => {
 	const source = kt(
 		'class Demo {',

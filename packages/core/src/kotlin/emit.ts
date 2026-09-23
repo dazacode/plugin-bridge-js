@@ -2314,23 +2314,16 @@ class Emitter {
 		// An enum is a class with a fixed set of instances — see `enumTail`.
 		const isEnum = kinds.has('enum_class_body');
 
-		// `@Serializable(with = X::class)`, wherever in the class it is written.
-		// kotlinx hands that value to the extension's own serializer — a
-		// `JsonTransformingSerializer` that reshapes the raw JSON first, or a
-		// `KSerializer` whose `deserialize` reads it however it likes — and the
-		// decoder here is a structural walk that has no way to call one. Read
-		// past, the annotation decoded the JSON the serializer existed to
-		// reshape: a tuple array read as a record with every field `undefined`,
-		// a bare string where the class reads `.src` off an object, a number
-		// where it reads a string, `element[0]` never taken. All of it
-		// converted, loaded, and answered wrong with nothing refused.
-		//
-		// Refused by name, and graphed, so it blocks exactly the members that
-		// reach the class and no others. Checked before the `data` branch:
-		// the type-argument form used to be checked after it, so a `data class`
-		// carrying one went through.
-		const serializer = customSerializer(node);
-		if (serializer !== null) {
+		// A `@Serializable` class registers what kotlinx knows about it — its
+		// fields' wire names, types and defaults, and any custom serializer it
+		// names — so a decode that names its type builds it the way kotlinx
+		// does. See `serialRegistration`. A custom serializer this build cannot
+		// run faithfully is refused here, by name, and graphed, so it blocks
+		// exactly the members that reach the class and no others: read past,
+		// it decoded the JSON the serializer existed to reshape, and converted,
+		// loaded and answered wrong with nothing refused.
+		const serial = this.serialRegistration(node, name, modifiers.has('data'), isEnum);
+		if (serial !== null && 'refusal' in serial) {
 			this.graph.push({
 				member: name,
 				owner: this.owner,
@@ -2338,13 +2331,13 @@ class Emitter {
 				references: mentions(node),
 				calls: callEdges(node)
 			});
-			return this.declineMember(
-				name,
-				node,
-				`a custom serializer \`${serializer.name}\` ${serializer.placement}`
-			);
+			return this.declineMember(name, node, serial.refusal);
 		}
-		if (modifiers.has('data')) return this.dataDeclaration(node, name);
+		const registration = serial === null ? null : serial.text;
+		if (modifiers.has('data')) {
+			const data = this.dataDeclaration(node, name);
+			return data === null || registration === null ? data : `${data}\n${registration}`;
+		}
 
 		// The header — everything but the body — must parse cleanly. A recovered
 		// base-class name or constructor call means every member below it is
@@ -2703,7 +2696,8 @@ class Emitter {
 		// beside the class so the runtime can recognise a decoded object as one
 		// — see `shape` in the runtime for why the match has to be exact.
 		const shape = this.serialisableShape(node, name);
-		return orderClasses([...hoisted, shape === null ? cls : `${cls}\n${shape}`]).join('\n\n');
+		const tail = [shape, registration].filter((line) => line !== null).join('\n');
+		return orderClasses([...hoisted, tail.length === 0 ? cls : `${cls}\n${tail}`]).join('\n\n');
 	}
 
 	/**
@@ -3287,7 +3281,24 @@ class Emitter {
 				);
 			}
 
-			return `const ${self} = Object.freeze(${block(fields.map(comma))});`;
+			const literal = `const ${self} = Object.freeze(${block(fields.map(comma))});`;
+			// `object X : JsonTransformingSerializer<T>(ListSerializer(Item.serializer()))`
+			// — the typed decoder runs X's `transformDeserialize` and then the
+			// base serializer, which it can only do as "decode as this type".
+			// That is exact when the base is built from default serializers,
+			// so only that is accepted, and the type it decodes is recorded.
+			const invoked = this.baseInvocation(node);
+			if (invoked?.type !== 'JsonTransformingSerializer') return literal;
+			const written = invoked.args.find((arg) => arg.type === 'value_argument');
+			const decodes =
+				written === undefined ||
+				invoked.args.filter((a) => a.type === 'value_argument').length !== 1
+					? null
+					: defaultSerializerType(written.text.replace(/\s+/g, ''));
+			if (decodes === null) {
+				this.refuse(node, `a \`JsonTransformingSerializer\` over \`${describe(written ?? node)}\``);
+			}
+			return `${literal}\n${this.helper('transforms')}(${self}, ${JSON.stringify(decodes)});`;
 		});
 	}
 
@@ -4164,6 +4175,149 @@ class Emitter {
 			this.hoisted.push(`const ${name} = {};`);
 		}
 		return name;
+	}
+
+	/**
+	 * What kotlinx knows about a `@Serializable` class, for the typed decoder,
+	 * or a refusal, or null for a class that is not one.
+	 *
+	 * The runtime used to recognise a decoded record by its field set, which is
+	 * a guess, and a class whose fields are all optional fits every record — so
+	 * one such DTO made the rest unrecognisable and a record came back with no
+	 * methods. A decode that names its type needs no guess: this writes down
+	 * the class's constructor (in declaration order), each field's wire names
+	 * (`@SerialName`, `@JsonNames`), declared type, whether it has a default,
+	 * whether it is `@Transient`, and which custom serializer it names — on
+	 * the field, on a type argument inside it, or on the class. See
+	 * `__serialDecode` in the runtime.
+	 *
+	 * A custom serializer is accepted only when it is an `object` this build
+	 * declares, built on `JsonTransformingSerializer` (whose base is checked
+	 * where the object is emitted) or on the `KSerializer` interface alone.
+	 * A generic serializer class, `@Contextual`, or any other base is refused.
+	 * An enum or a polymorphic class is not registered — it keeps the
+	 * structural walk it had — and one naming a serializer is refused.
+	 */
+	private serialRegistration(
+		node: KNode,
+		name: string,
+		isData: boolean,
+		isEnum: boolean
+	): { text: string } | { refusal: string } | null {
+		const annotations = kids(node).find((child) => child.type === 'modifiers');
+		const found = customSerializer(node);
+		if (annotations === undefined || !/@Serializable\b/.test(annotations.text)) {
+			return found === null
+				? null
+				: { refusal: `a custom serializer \`${found.name}\` ${found.placement}` };
+		}
+		const polymorphic = /\b(?:sealed|abstract)\b/.test(annotations.text);
+		if (isEnum || polymorphic) {
+			return found === null
+				? null
+				: { refusal: `a custom serializer \`${found.name}\` ${found.placement}` };
+		}
+
+		const serializers = new Set<string>();
+		const named = (written: string | undefined): string | null => {
+			const hit = written?.match(SERIALIZER_ANNOTATION)?.[1] ?? null;
+			if (hit !== null) serializers.add(hit);
+			return hit;
+		};
+		const wires = (declared: string, written: string): string[] => {
+			const out = [declared];
+			for (const annotation of written.matchAll(/@(SerialName|JsonNames)\s*\(([^)]*)\)/g)) {
+				const quoted = [...annotation[2].matchAll(/"([^"]*)"/g)].map((one) => one[1]);
+				if (annotation[1] === 'SerialName' && quoted.length > 0) out[0] = quoted[0];
+				else out.push(...quoted);
+			}
+			return out;
+		};
+		let contextual = false;
+		const typeOf = (holder: KNode | undefined): string => {
+			const written = kids(holder).find(
+				(part) => part.type.endsWith('type') && part.type !== 'binding_pattern_kind'
+			);
+			if (written === undefined) return 'Any';
+			if (/@Contextual\b/.test(written.text)) contextual = true;
+			for (const marker of written.text.matchAll(new RegExp(SERIALIZER_ANNOTATION, 'g'))) {
+				serializers.add(marker[1]);
+			}
+			return serialType(written.text);
+		};
+
+		const fields: unknown[] = [];
+		const constructor = kids(node).find((child) => child.type === 'primary_constructor');
+		for (const parameter of kids(constructor)) {
+			if (parameter.type !== 'class_parameter') continue;
+			const declared = kids(parameter).find((part) => part.type === 'simple_identifier')?.text;
+			if (declared === undefined) continue;
+			const written = kids(parameter).find((part) => part.type === 'modifiers')?.text ?? '';
+			fields.push([
+				fieldName(declared),
+				wires(fieldName(declared), written),
+				typeOf(parameter),
+				parameter.allChildren.some((part) => part.type === '='),
+				CONTEXTUAL.test(written) ? CONTEXTUAL_FIELD : named(written),
+				/@Transient\b/.test(written)
+			]);
+		}
+
+		// A property in the body with a backing field is serialised too — one
+		// with an initialiser, and no getter or delegate. Set after the
+		// constructor, when the payload carries it.
+		const body: unknown[] = [];
+		const members = kids(kids(node).find((child) => child.type === 'class_body'));
+		members.forEach((member, index) => {
+			if (member.type !== 'property_declaration') return;
+			const declared = this.propertyName(member);
+			if (declared === null) return;
+			if (accessorOf(member, members[index + 1], 'getter') !== undefined) return;
+			if (kids(member).some((part) => part.type === 'property_delegate')) return;
+			if (!member.allChildren.some((part) => part.type === '=')) return;
+			const written = kids(member).find((part) => part.type === 'modifiers')?.text ?? '';
+			if (/@Transient\b/.test(written)) return;
+			body.push([
+				fieldName(declared),
+				wires(fieldName(declared), written),
+				typeOf(kids(member).find((part) => part.type === 'variable_declaration')),
+				true,
+				CONTEXTUAL.test(written) ? CONTEXTUAL_FIELD : named(written),
+				false
+			]);
+		});
+
+		// `List<@Contextual Date>` decodes each element through the Json's
+		// `serializersModule`, which this runtime does not have and cannot
+		// read around. On a property it is only consulted when the payload
+		// carries the key — see `CONTEXTUAL_FIELD` — but on a type argument
+		// it is every element.
+		if (contextual) return { refusal: '`@Contextual` on a type argument' };
+
+		const params = kids(kids(node).find((child) => child.type === 'type_parameters'))
+			.filter((child) => child.type === 'type_parameter')
+			.map((child) => kids(child).find((part) => part.type === 'type_identifier')?.text ?? '?');
+		const own = named(annotations.text);
+
+		const custom: string[] = [];
+		for (const serializer of serializers) {
+			const bare = serializer.replace(/^.*\./, '');
+			if (!this.declaredObjects.has(bare)) {
+				return { refusal: `a custom serializer \`${serializer}\` that is not an \`object\`` };
+			}
+			const base = this.classBaseIndex.get(bare);
+			if (base !== undefined && base !== 'JsonTransformingSerializer') {
+				return { refusal: `a custom serializer \`${serializer}\` built on \`${base}\`` };
+			}
+			custom.push(`${JSON.stringify(serializer)}: () => ${this.safe(bare)}`);
+		}
+
+		const meta = { params, fields, body, with: own };
+		const make = `(__a) => ${isData ? '' : 'new '}${this.safe(name)}(...__a)`;
+		const map = custom.length === 0 ? 'null' : `{ ${custom.join(', ')} }`;
+		return {
+			text: `${this.helper('serial')}(${JSON.stringify(name)}, ${make}, ${JSON.stringify(meta)}, ${map});`
+		};
 	}
 
 	/**
@@ -6709,6 +6863,17 @@ class Emitter {
 			return `(__recv) => __recv.${member.text}`;
 		}
 
+		// Everything below reads the left side as a *type*: `Type::method`, whose
+		// argument becomes the receiver. A lowercase name is a value — Kotlin's
+		// types are capitalised — and one the checks above could not resolve.
+		// Read as a type it came out as `(__a) => __a.parseToJsonElement()`:
+		// `jsonInstance::parseToJsonElement` called the method on the string it
+		// was handed, and never mentioned `jsonInstance`, so the graph could not
+		// see that the value it names was refused. Refused by name instead.
+		if (named && /^[a-z_]/.test(owner.text)) {
+			this.refuse(node, `\`${owner.text}::${member.text}\` on a value this build did not resolve`);
+		}
+
 		const helper = EXTENSION_METHODS.get(member.text);
 		if (helper !== undefined) return `(__a) => ${this.helper(helper)}(__a)`;
 		// `sumOf(ByteArray::size)` — a reference to one of the properties the
@@ -6824,6 +6989,12 @@ class Emitter {
 		// is what should happen to a container reached for anything else.
 		const injected = INJEKT_GET.exec(node.text.replace(/\s+/g, ''));
 		if (injected !== null && GLOBAL_NAMES.has(injected[1])) return injected[1];
+		// `val jsonInstance: Json = Injekt.get()` — keiyoushi core's spelling,
+		// with the type on the property rather than the call. Only `Json`,
+		// which the scanner lets past for the same reason: see `INJECTED_JSON`.
+		if (node.text.replace(/\s+/g, '') === 'Injekt.get()' && this.expectedOf(node) === 'Json') {
+			return 'Json';
+		}
 
 		// `x.ifEmpty { return@map null }` before anything else looks at the call:
 		// its lambda is a jump out of the *enclosing* lambda, which only reads
@@ -9509,6 +9680,12 @@ class Emitter {
 	private isValueName(name: string): boolean {
 		if (this.lookup(name) !== null) return true;
 		if (this.classMembers.has(name) || BASE_SOURCE_MEMBERS.has(name)) return true;
+		// A member a translated template declares — DooPlay's `protected open
+		// val episodeNumberRegex`, read by `AnimePlayer : DooPlay` as
+		// `.let(episodeNumberRegex::find)`. The subclass inherits it through the
+		// real `extends`, so it is a value here exactly as its own members are.
+		const base = this.owner === null ? undefined : this.classBaseIndex.get(this.owner);
+		if (base !== undefined && this.baseDeclares(base, name)) return true;
 		if (GLOBAL_NAMES.has(name)) return true;
 		return this.moduleNames.has(name) && !this.declaredTypes.has(name);
 	}
@@ -10122,6 +10299,75 @@ function receiverSlots(node: KNode): ReceiverSlots | null {
 }
 
 /**
+ * `@Contextual` on a property: kotlinx asks the Json's `serializersModule` for
+ * the serializer, which this runtime does not have. It asks only when the
+ * payload carries the key — MayoTune's `@Contextual private val sdf =
+ * SimpleDateFormat(…)` never arrives, and its initialiser is what runs — so
+ * the field is registered with this marker in its serializer slot, and the
+ * runtime refuses by name only if the key is actually there.
+ */
+const CONTEXTUAL = /@Contextual\b/;
+const CONTEXTUAL_FIELD = '@Contextual';
+
+/** `@Serializable(X::class)` and `@Serializable(with = X::class)`, naming X. */
+const SERIALIZER_ANNOTATION = /@Serializable\s*\(\s*(?:with\s*=\s*)?([\w.]+)::class\s*\)/;
+
+/**
+ * A declared Kotlin type as the typed decoder reads it: no whitespace, no
+ * variance, no annotations — except `@Serializable(X::class)` on a type
+ * argument, which is written `@X|` in front of the type it applies to.
+ */
+function serialType(text: string): string {
+	return text
+		.replace(new RegExp(SERIALIZER_ANNOTATION, 'g'), '\u0000$1\u0001')
+		.replace(/@[\w.]+(?:\s*\([^()]*\))?/g, '')
+		.replace(/\b(?:out|in)\s+(?=[A-Za-z_*])/g, '')
+		.replace(/\s+/g, '')
+		.replace(/,>/g, '>')
+		.replace(/\u0000([\w.]+)\u0001/g, '@$1|');
+}
+
+/**
+ * The type a serializer built only from kotlinx's defaults decodes, or null.
+ *
+ * `ListSerializer(Item.serializer())` is `List<Item>`, `MapSerializer(a, b)`
+ * is `Map<A, B>`, `X.serializer().nullable` is `X?`. Anything else — a
+ * hand-written serializer, a polymorphic one — decodes something only its own
+ * code knows, and answers null.
+ */
+function defaultSerializerType(text: string): string | null {
+	const nullable = /^(.*)\.nullable$/.exec(text);
+	if (nullable !== null) {
+		const inner = defaultSerializerType(nullable[1]);
+		return inner === null ? null : `${inner}?`;
+	}
+	const own = /^([A-Za-z_][\w.]*)\.serializer\(\)$/.exec(text);
+	if (own !== null) return own[1].replace(/^.*\./, '');
+	const generic = /^serializer<(.+)>\(\)$/.exec(text);
+	if (generic !== null) return serialType(generic[1]);
+	const call = /^(ListSerializer|SetSerializer|MapSerializer)\((.*)\)$/.exec(text);
+	if (call === null) return null;
+	const parts: string[] = [];
+	let depth = 0;
+	let start = 0;
+	for (let at = 0; at < call[2].length; at += 1) {
+		const ch = call[2][at];
+		if (ch === '(' || ch === '<') depth += 1;
+		else if (ch === ')' || ch === '>') depth -= 1;
+		else if (ch === ',' && depth === 0) {
+			parts.push(call[2].slice(start, at));
+			start = at + 1;
+		}
+	}
+	parts.push(call[2].slice(start));
+	const types = parts.filter((part) => part.length > 0).map(defaultSerializerType);
+	if (types.some((type) => type === null)) return null;
+	if (call[1] === 'MapSerializer') return types.length === 2 ? `Map<${types.join(',')}>` : null;
+	if (types.length !== 1) return null;
+	return `${call[1] === 'ListSerializer' ? 'List' : 'Set'}<${types[0]}>`;
+}
+
+/**
  * The first custom serializer a `@Serializable(X::class)` names anywhere in this
  * class's own declaration, and where, or null. See `classDeclaration`.
  *
@@ -10132,8 +10378,7 @@ function receiverSlots(node: KNode): ReceiverSlots | null {
  * declaration and answers for itself, so the walk stops at one.
  */
 function customSerializer(node: KNode): { name: string; placement: string } | null {
-	const named = (text: string | undefined) =>
-		text?.match(/@Serializable\s*\(\s*(?:with\s*=\s*)?([\w.]+)::class/)?.[1] ?? null;
+	const named = (text: string | undefined) => text?.match(SERIALIZER_ANNOTATION)?.[1] ?? null;
 
 	const own = named(kids(node).find((child) => child.type === 'modifiers')?.text);
 	if (own !== null) return { name: own, placement: 'on the class' };

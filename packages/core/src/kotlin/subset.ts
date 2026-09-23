@@ -574,6 +574,13 @@ export function cryptoObstacle(text: string, asTransformation = false): string |
 const APPLICATION_PREFERENCES = /\bInjekt\.get<Application>\(\)\.getSharedPreferences\(/;
 
 /**
+ * `Injekt.get<Json>()`, or a property typed `Json` initialised by a bare
+ * `Injekt.get()`, whitespace squeezed out. See the exemption in `scanInto`.
+ */
+const INJECTED_JSON =
+	/^(?:Injekt\.get<Json>\(\)|(?:(?:private|internal|public)?(?:val|var))\w+:Json=Injekt\.get(?:<Json>)?\(\))$/;
+
+/**
  * The classpath, in the two spellings this ecosystem writes it in.
  *
  * `this::class.java.classLoader` and `javaClass.classLoader` are one idiom, and
@@ -1235,6 +1242,26 @@ export const HOST_PROPERTY_METHODS: ReadonlySet<string> = new Set([
  * is a deliberate cost rather than an oversight.
  */
 export const HOST_METHODS: ReadonlySet<string> = new Set([
+	// kotlinx's JsonDecoder, as a KSerializer's `deserialize` is handed it by
+	// the typed decoder (`__jsonDecoder` in the runtime). The `encode*` half
+	// is what the same object's `serialize` writes; the runtime never calls
+	// one, and refuses to encode a record whose class names a serializer.
+	'decodeJsonElement',
+	'decodeString',
+	'decodeInt',
+	'decodeLong',
+	'decodeDouble',
+	'decodeFloat',
+	'decodeBoolean',
+	'decodeNull',
+	'decodeNotNullMark',
+	'encodeString',
+	'encodeInt',
+	'encodeLong',
+	'encodeDouble',
+	'encodeBoolean',
+	'encodeNull',
+	'encodeJsonElement',
 	// The classpath, and the one question this ecosystem asks a `Locale`.
 	//
 	// `getResourceAsStream(name)` is the read at the bottom of `Intl`, and
@@ -2059,7 +2086,13 @@ export const GLOBAL_NAMES: ReadonlySet<string> = new Set([
 	   declared here rather than left to translate and fail. */
 	'PropertyResourceBundle',
 	'InputStreamReader',
-	'Collator'
+	'Collator',
+
+	/* kotlinx.serialization's names a hand-written KSerializer declares, and
+	   JsonNull, which is JSON's null — see the typed decoder in the runtime. */
+	'PrimitiveSerialDescriptor',
+	'PrimitiveKind',
+	'JsonNull'
 ]);
 
 /**
@@ -2902,6 +2935,13 @@ function scanInto(node: KNode, memberName: string, found: Untranslatable[]): voi
 	) {
 		return;
 	}
+	// The same container asked for the app's `Json`, which is the other object
+	// the runtime already owns: `by injectLazy<Json>()` has resolved to it all
+	// along, and keiyoushi core spells the same request `val jsonInstance:
+	// Json = Injekt.get()`. Mihon configures that instance with
+	// `ignoreUnknownKeys` and `explicitNulls = false`, which is what the
+	// runtime's decoder does. Anything else asked of Injekt stays refused.
+	if (INJECTED_JSON.test(node.text.replace(/\s+/g, ''))) return;
 
 	// And a fourth: `Thread.sleep(ms)`. The name table refuses `Thread` because
 	// a leaf cannot tell a pause from a thread (see the note on that entry),

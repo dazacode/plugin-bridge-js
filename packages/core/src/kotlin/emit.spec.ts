@@ -5159,68 +5159,134 @@ describe('file annotations, and a serializer on a type argument', () => {
 		).toEqual(['`@file:UseSerializers(BoxSerializer::class)`']);
 	});
 
-	it('refuses a custom serializer named on a type argument rather than decoding raw', () => {
-		// `List<@Serializable(RankingMangaSerializer::class) Ranking>` reshapes
-		// each element before the class sees it; decoded structurally, a tuple
-		// array became a record with every field `undefined`.
+	it('accepts a custom serializer it can run, in every placement', () => {
+		// The typed decoder runs an `object` serializer — a
+		// JsonTransformingSerializer over default serializers, or a
+		// KSerializer — where kotlinx would. On a constructor property, on a
+		// type argument, on a body property and on the class.
+		const transforming = kt(
+			'object Pages : JsonTransformingSerializer<List<Page>>(ListSerializer(Page.serializer())) {',
+			'    override fun transformDeserialize(element: JsonElement): JsonElement = element',
+			'}',
+			'object Flexible : KSerializer<String> {',
+			'    override val descriptor = PrimitiveSerialDescriptor("Flexible", PrimitiveKind.STRING)',
+			'    override fun deserialize(decoder: Decoder): String = decoder.decodeString()',
+			'    override fun serialize(encoder: Encoder, value: String) { encoder.encodeString(value) }',
+			'}',
+			'@Serializable',
+			'class Page(val src: String)'
+		);
+		expect(
+			refusalNames(
+				kt(
+					transforming,
+					'@Serializable',
+					'data class Chapter(',
+					'    @SerialName("cap_paginas") @Serializable(Pages::class) val pages: List<Page> = emptyList(),',
+					'    val ranked: List<@Serializable(Flexible::class) String>,',
+					') {',
+					'    @Serializable(with = Flexible::class)',
+					'    val title: String = ""',
+					'}',
+					'@Serializable(with = Flexible::class)',
+					'class Whole(val id: Int)'
+				)
+			)
+		).toEqual([]);
+	});
+
+	it('refuses a custom serializer it cannot run, by name', () => {
+		// Read past, each of these decoded the JSON the serializer existed to
+		// reshape: a tuple array read as a record, every field `undefined`.
 		expect(
 			refusalNames(
 				kt(
 					'@Serializable',
 					'class RankingResponse(',
-					'    val children: List<',
-					'        @Serializable(RankingMangaSerializer::class)',
-					'        Ranking,',
-					'        >,',
-					')'
-				)
-			)
-		).toEqual(['a custom serializer `RankingMangaSerializer` on a type argument']);
-	});
-
-	it('refuses a custom serializer on a property, in a data class too', () => {
-		// greenshit's `@Serializable(PageListSerializer::class) val pages`
-		// turns a bare string into `{ src }`; read past, the reader got strings
-		// and every page's `.src` was `undefined`. It is a `data class` in half
-		// the catalogue, and the type-argument check used to sit after the
-		// `data` branch, so neither placement was ever refused there.
-		expect(
-			refusalNames(
-				kt(
-					'@Serializable',
-					'data class Chapter(',
-					'    @SerialName("cap_paginas") @Serializable(PageListSerializer::class) val pages: List<Page> = emptyList(),',
-					')'
-				)
-			)
-		).toEqual(['a custom serializer `PageListSerializer` on a property']);
-		expect(
-			refusalNames(
-				kt(
-					'@Serializable',
-					'data class Ranking(',
 					'    val children: List<@Serializable(RankingMangaSerializer::class) Ranking>,',
 					')'
 				)
 			)
-		).toEqual(['a custom serializer `RankingMangaSerializer` on a type argument']);
-	});
-
-	it('refuses a custom serializer on the class and on a body property', () => {
+		).toEqual(['a custom serializer `RankingMangaSerializer` that is not an `object`']);
 		expect(
-			refusalNames(kt('@Serializable(with = MalSerializer::class)', 'class MalData(val id: Int)'))
-		).toEqual(['a custom serializer `MalSerializer` on the class']);
+			refusalNames(
+				kt(
+					'class Stringified<T>(element: KSerializer<T>) : JsonTransformingSerializer<List<T>>(ListSerializer(element))',
+					'@Serializable',
+					'class Dto(@Serializable(with = Stringified::class) val tags: List<String>)'
+				)
+			)
+		).toContain('a custom serializer `Stringified` that is not an `object`');
+		expect(
+			refusalNames(
+				kt(
+					'object Poly : JsonContentPolymorphicSerializer<Item>(Item::class) {',
+					'    override fun selectDeserializer(element: JsonElement) = Item.serializer()',
+					'}',
+					'@Serializable',
+					'class Dto(@Serializable(Poly::class) val item: Item)'
+				)
+			)
+		).toContain('a custom serializer `Poly` built on `JsonContentPolymorphicSerializer`');
+		expect(
+			refusalNames(kt('@Serializable', 'class Dto(val dates: List<@Contextual Date>)'))
+		).toEqual(['`@Contextual` on a type argument']);
+		// On a property it is only consulted when the key is present, which the
+		// runtime refuses by name; absent, the default runs, as in kotlinx.
 		expect(
 			refusalNames(
 				kt(
 					'@Serializable',
-					'class Dto(val id: Int) {',
-					'    @Serializable(with = StringOrNumberSerializer::class)',
-					'    val title: String = ""',
+					'data class Dto(val id: String) {',
+					'    @Contextual',
+					'    private val sdf = Date()',
 					'}'
 				)
 			)
-		).toEqual(['a custom serializer `StringOrNumberSerializer` on a property']);
+		).toEqual([]);
+	});
+
+	it('refuses a reference on a value it cannot resolve, rather than reading it as a type', () => {
+		// `helper::wrap` with no `helper` in reach was emitted as the unbound
+		// `(__a) => __a.wrap()`: the method called on the argument, and the
+		// value never mentioned, so nothing could see it was missing.
+		expect(refusalNames(kt('fun f(s: String?) = s?.let(helper::wrap)'))).toEqual([
+			'`helper::wrap` on a value this build did not resolve'
+		]);
+		// Injekt is still refused for anything but the app's Json.
+		expect(refusalNames(kt('val client: OkHttpClient = Injekt.get()'))).toEqual(['Injekt.get']);
+	});
+
+	it('refuses a transforming serializer whose base is not a default one', () => {
+		// "Decode the reshaped element as T" is only what kotlinx does when the
+		// base serializer is T's own. A hand-written base is its own decoder.
+		expect(
+			refusalNames(
+				kt(
+					'object Outer : JsonTransformingSerializer<List<String>>(ListSerializer(Custom)) {',
+					'    override fun transformDeserialize(element: JsonElement): JsonElement = element',
+					'}'
+				)
+			)
+		).toEqual(['a `JsonTransformingSerializer` over `ListSerializer(Custom)`']);
+	});
+
+	it('refuses a serializer on a class that is not registered, rather than reading past it', () => {
+		// No `@Serializable` of its own, an enum, a sealed class: the typed
+		// decoder does not build any of these, so a serializer on one could
+		// never run.
+		expect(
+			refusalNames(
+				kt(
+					'object S : KSerializer<String> {',
+					'    override fun deserialize(decoder: Decoder): String = decoder.decodeString()',
+					'}',
+					'class Loose(@Serializable(S::class) val a: String)',
+					'@Serializable',
+					'sealed class Base(@Serializable(S::class) val b: String)'
+				)
+			)
+		).toEqual(['a custom serializer `S` on a property', 'a custom serializer `S` on a property']);
 	});
 
 	it('still translates a plain @Serializable class', () => {

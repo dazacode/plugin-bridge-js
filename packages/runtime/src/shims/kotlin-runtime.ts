@@ -670,7 +670,10 @@ var __TYPES = {
   JsonObject: function (v) { return __jeKind(v) === 'object'; },
   JsonArray: function (v) { return __jeKind(v) === 'array'; },
   JsonPrimitive: function (v) { return __jeKind(v) === 'primitive'; },
-  JsonNull: function () { return false; }
+  JsonNull: function () { return false; },
+  // What a KSerializer's 'deserialize' is handed: see '__jsonDecoder'.
+  JsonDecoder: function (v) { return v.__kJsonDecoder === true; },
+  Decoder: function (v) { return v.__kJsonDecoder === true; }
 };
 
 /**
@@ -1396,6 +1399,24 @@ Collator.prototype.compare = function (left, right) {
 Collator.prototype.equals = function (left, right) {
   return this.compare(left, right) === 0;
 };
+
+/**
+ * kotlinx's descriptor vocabulary, as far as a hand-written KSerializer
+ * declares it: 'override val descriptor = PrimitiveSerialDescriptor("X",
+ * PrimitiveKind.STRING)'. Nothing in this runtime reads a descriptor — the
+ * typed decoder takes the type from the class that names the serializer — so
+ * these are the values themselves, kept so the object declaring one converts.
+ */
+function PrimitiveSerialDescriptor(serialName, kind) {
+  return { serialName: __str(serialName), kind: kind, isNullable: false };
+}
+var PrimitiveKind = {
+  STRING: 'STRING', INT: 'INT', LONG: 'LONG', SHORT: 'SHORT', BYTE: 'BYTE',
+  DOUBLE: 'DOUBLE', FLOAT: 'FLOAT', BOOLEAN: 'BOOLEAN', CHAR: 'CHAR'
+};
+
+/** kotlinx's JsonNull, which is JSON's null and so JS null here — see '__jeKind'. */
+var JsonNull = null;
 
 /**
  * The files an extension's own repository keeps beside its Kotlin.
@@ -6005,6 +6026,26 @@ var __k = {
    * the same record. Zero matches or two, and the record is left exactly as the
    * JSON had it.
    */
+  /**
+   * Registers a '@Serializable' class for typed decoding — see '__SERIAL'.
+   *
+   * 'make' builds one from its constructor arguments in declaration order
+   * ('new' for a class, a call for a data class's factory). 'meta' is what
+   * kotlinx's generated serializer knows: type parameters, the constructor's
+   * fields and the body's backing-field properties as [name, wireNames, type,
+   * hasDefault, serializer, transient], and a class-level serializer. 'custom'
+   * maps each serializer the class names to a thunk answering the object, or
+   * is null when it names none.
+   */
+  serial: function (name, make, meta, custom) {
+    __SERIAL[name] = { make: make, meta: meta, custom: custom };
+  },
+
+  /** A JsonTransformingSerializer object, and the type its base serializer decodes. */
+  transforms: function (serializer, decodes) {
+    if (__TRANSFORMS !== null) __TRANSFORMS.set(serializer, decodes);
+  },
+
   shape: function (ctor, fields, optional, aliases) {
     __SHAPES.push({
       ctor: ctor,
@@ -6424,6 +6465,15 @@ function __encodeElement(value, depth) {
     var fromSet = [];
     value.forEach(function (held) { fromSet.push(__encodeElement(held, depth + 1)); });
     return fromSet;
+  }
+
+  // A record whose class runs a custom serializer would be encoded here as its
+  // decoded fields, which is not what that serializer writes. Refused rather
+  // than sent: see '__serialObject'.
+  if (__SERIAL_CUSTOM !== null && __SERIAL_CUSTOM.has(value)) {
+    throw new Error(
+      'This converted extension encoded a record whose class has a custom serializer, which this runtime only runs for decoding.'
+    );
   }
 
   var found = null;
@@ -8912,6 +8962,8 @@ function __jsonText(value) {
 __k.decode = function (a, b, c, d) {
   var descriptor = a;
   var payload = b;
+  // The Kotlin type as written, where one was: see the typed path at the end.
+  var typeName = null;
 
   var receiverText = __jsonText(a);
   var isJson = a === Json;
@@ -8921,6 +8973,7 @@ __k.decode = function (a, b, c, d) {
     // in any position after the receiver — the emitter writes one when it has
     // one, and the type name alone when it does not.
     var named = typeof b === 'string' ? b : '';
+    if (named.length > 0) typeName = named;
     var element = __descriptorArg(b) || __descriptorArg(c) || __descriptorArg(d);
     descriptor = named.length > 0
       ? __typeKind(named, element === null ? undefined : element)
@@ -8943,9 +8996,11 @@ __k.decode = function (a, b, c, d) {
     // safe to tell apart.
     if (__looksLikeDescriptor(b) && !__looksLikeDescriptor(a)) {
       descriptor = __typeKind(b, undefined);
+      typeName = b;
       payload = a;
     } else if (__looksLikeDescriptor(a)) {
       descriptor = __typeKind(a, undefined);
+      typeName = a;
       payload = b;
     }
   }
@@ -8958,11 +9013,329 @@ __k.decode = function (a, b, c, d) {
       throw new Error('This converted extension expected JSON, and this source did not answer with JSON.');
     }
   }
+  // A type that names a '@Serializable' class this module declared is decoded
+  // the way kotlinx decodes it — see '__serialDecode'. Everything else takes
+  // the structural walk below, exactly as it did before that existed.
+  var typed = typeof typeName === 'string' ? __serialTree(typeName) : null;
+  if (typed !== null && __serialNames(typed)) return __serialDecode(typed, parsed, 'response', {});
   // The shapes last, over the decoded value: a '@Serializable' class that
   // renamed a field or computes one registered itself beside its declaration,
   // and until this ran neither survived the parse. See 'shape'.
   return __applyShapes(__decodeValue(descriptor, parsed, 'response'), 0);
 };
+
+/* --- typed decoding, the way kotlinx decodes --------------------------------- */
+
+/**
+ * Every '@Serializable' class this module declares, by the name a type is
+ * written with, and what kotlinx knows about it. See '__k.serial'.
+ *
+ * The structural walk above answers plain JSON and then *guesses* which class
+ * a record is from the fields it carries. The guess has to be unique, and a
+ * class whose fields are all optional fits every record — so one such DTO in a
+ * module made every other one unrecognisable, and a record came back with no
+ * methods: 'dto.toPageList is not a function' on the first chapter, out of a
+ * bundle that reported nothing refused. It also has no way to run a custom
+ * serializer, which is written on a field the guess cannot see.
+ *
+ * A type is not a guess. 'parseAs<Chapter>()' names the class, the class
+ * names its fields' types, and that is exactly the walk kotlinx's generated
+ * deserializer makes — so where the type is written, the record is built by
+ * the class itself: its constructor, its defaults, its '@SerialName' and
+ * '@JsonNames', its computed members, and at a '@Serializable(with = X)'
+ * field the extension's own X.
+ */
+var __SERIAL = {};
+/** A JsonTransformingSerializer object, to the type its base serializer decodes. */
+var __TRANSFORMS = typeof WeakMap === 'function' ? new WeakMap() : null;
+/** Instances built by a registration that runs a custom serializer. */
+var __SERIAL_CUSTOM = typeof WeakSet === 'function' ? new WeakSet() : null;
+var __SERIAL_TREES = {};
+
+/**
+ * A Kotlin type as the emitter writes it, parsed once: 'Box<List<@X|Item>?>'.
+ * '@X|' is a '@Serializable(X::class)' on that type argument. Null for text
+ * that is not a type, which then takes the structural walk.
+ */
+function __serialTree(text) {
+  var source = __str(text).replace(/\\s+/g, '');
+  if (Object.prototype.hasOwnProperty.call(__SERIAL_TREES, source)) return __SERIAL_TREES[source];
+  var at = 0;
+  function item() {
+    var ser = null;
+    if (source.charAt(at) === '@') {
+      var bar = source.indexOf('|', at);
+      if (bar === -1) throw null;
+      ser = source.slice(at + 1, bar);
+      at = bar + 1;
+    }
+    if (source.charAt(at) === '*') {
+      at += 1;
+      return { name: 'Any', args: [], nullable: true, ser: ser };
+    }
+    var name = /^[A-Za-z_][A-Za-z0-9_.]*/.exec(source.slice(at));
+    if (name === null) throw null;
+    at += name[0].length;
+    var args = [];
+    if (source.charAt(at) === '<') {
+      at += 1;
+      for (;;) {
+        args.push(item());
+        if (source.charAt(at) === ',') { at += 1; continue; }
+        if (source.charAt(at) === '>') { at += 1; break; }
+        throw null;
+      }
+    }
+    var nullable = source.charAt(at) === '?';
+    if (nullable) at += 1;
+    return { name: name[0].replace(/^.*\\./, ''), args: args, nullable: nullable, ser: ser };
+  }
+  var tree = null;
+  try {
+    tree = item();
+    if (at !== source.length) tree = null;
+  } catch (error) {
+    tree = null;
+  }
+  __SERIAL_TREES[source] = tree;
+  return tree;
+}
+
+/** Whether this type reaches a registered class anywhere — else nothing changes. */
+function __serialNames(tree) {
+  if (Object.prototype.hasOwnProperty.call(__SERIAL, tree.name)) return true;
+  for (var i = 0; i < tree.args.length; i += 1) if (__serialNames(tree.args[i])) return true;
+  return false;
+}
+
+var __SERIAL_LISTS = { List: 1, MutableList: 1, ArrayList: 1, Collection: 1, Iterable: 1, Array: 1,
+  Set: 1, MutableSet: 1, HashSet: 1, LinkedHashSet: 1 };
+var __SERIAL_MAPS = { Map: 1, MutableMap: 1, HashMap: 1, LinkedHashMap: 1 };
+var __SERIAL_PRIMITIVES = { String: 'string', Char: 'string', Int: 'int', Long: 'int', Short: 'int',
+  Byte: 'int', Double: 'double', Float: 'double', Boolean: 'boolean' };
+var __SERIAL_ELEMENTS = { JsonElement: 1, JsonObject: 1, JsonArray: 1, JsonPrimitive: 1, JsonNull: 1 };
+
+function __serialMissing(path) {
+  return new Error(
+    'This converted extension expected "' + path + '" to be present in the response, and it was not.'
+  );
+}
+
+/**
+ * One value, decoded as this type. 'bound' maps the enclosing class's type
+ * parameters to the trees they were given; 'custom' is the enclosing
+ * registration's serializers, for a '@X|' on a type argument.
+ */
+function __serialDecode(tree, raw, path, bound, custom) {
+  if (tree.ser !== null) {
+    if (raw === null && tree.nullable) return null;
+    return __serialRun(tree.ser, custom, raw, path);
+  }
+  if (Object.prototype.hasOwnProperty.call(bound, tree.name) && tree.args.length === 0) {
+    var given = bound[tree.name];
+    return raw === null && tree.nullable ? null : __serialDecode(given, raw, path, {}, custom);
+  }
+  if (raw === null || raw === undefined) {
+    if (tree.nullable || tree.name === 'Any' || tree.name === 'JsonElement' ||
+        tree.name === 'JsonPrimitive' || tree.name === 'JsonNull') {
+      return raw === undefined ? null : raw;
+    }
+    throw __serialMissing(path);
+  }
+  var primitive = __SERIAL_PRIMITIVES[tree.name];
+  if (primitive !== undefined) return __decodePrimitive(primitive, raw, path);
+  if (__SERIAL_ELEMENTS[tree.name] === 1) return raw;
+  var i;
+  if (__SERIAL_LISTS[tree.name] === 1) {
+    var element = tree.args.length > 0 ? tree.args[0] : null;
+    // The structural walk's leniency, kept so this path decodes no less than
+    // it did: a single value where a list was declared is a list of one.
+    var items = Array.isArray(raw) ? raw : [raw];
+    var list = [];
+    for (i = 0; i < items.length; i += 1) {
+      list.push(element === null ? items[i] : __serialDecode(element, items[i], path + '[' + i + ']', bound, custom));
+    }
+    return list;
+  }
+  if (__SERIAL_MAPS[tree.name] === 1) {
+    var held = tree.args.length > 1 ? tree.args[1] : null;
+    var map = {};
+    if (typeof raw !== 'object' || Array.isArray(raw)) return map;
+    for (var key in raw) {
+      if (!Object.prototype.hasOwnProperty.call(raw, key)) continue;
+      map[key] = held === null ? raw[key] : __serialDecode(held, raw[key], path + '.' + key, bound, custom);
+    }
+    return map;
+  }
+  var registration = __SERIAL[tree.name];
+  if (registration === undefined) {
+    // A class this module did not declare '@Serializable' — the structural
+    // walk decides it, as it decided everything before.
+    return __applyShapes(__decodeValue('any', raw, path), 0);
+  }
+  var args = [];
+  for (i = 0; i < tree.args.length; i += 1) {
+    var arg = tree.args[i];
+    args.push(arg.args.length === 0 && Object.prototype.hasOwnProperty.call(bound, arg.name) ? bound[arg.name] : arg);
+  }
+  return __serialObject(registration, args, raw, path);
+}
+
+/** A registered class, built from one JSON object by its own constructor. */
+function __serialObject(registration, typeArgs, raw, path) {
+  var meta = registration.meta;
+  if (meta.with !== null) return __serialRun(meta.with, registration.custom, raw, path);
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error('This converted extension expected "' + path + '" to be a JSON object.');
+  }
+  var bound = {};
+  for (var p = 0; p < meta.params.length; p += 1) {
+    bound[meta.params[p]] = p < typeArgs.length ? typeArgs[p] : { name: 'Any', args: [], nullable: true, ser: null };
+  }
+  var args = [];
+  for (var i = 0; i < meta.fields.length; i += 1) {
+    args.push(__serialField(registration, meta.fields[i], raw, path, bound, true));
+  }
+  var built = registration.make(args);
+  for (var b = 0; b < meta.body.length; b += 1) {
+    var value = __serialField(registration, meta.body[b], raw, path, bound, false);
+    if (value !== undefined) built[meta.body[b][0]] = value;
+  }
+  if (registration.custom !== null && __SERIAL_CUSTOM !== null && built !== null && typeof built === 'object') {
+    __SERIAL_CUSTOM.add(built);
+  }
+  return built;
+}
+
+/**
+ * One field: [name, wireNames, type, hasDefault, serializer, transient].
+ *
+ * Undefined means "use the declared default" — the constructor's own default
+ * parameter, which is where the emitter put it. An absent field with no
+ * default is kotlinx's MissingFieldException, except that a nullable one is
+ * null, which is what every extension's 'explicitNulls = false' asks for. A
+ * null where the type is not nullable takes the default when there is one,
+ * which is 'coerceInputValues'.
+ */
+function __serialField(registration, field, raw, path, bound, required) {
+  var name = field[0];
+  var tree = __serialTree(field[2]) || { name: 'Any', args: [], nullable: true, ser: null };
+  var where = path + '.' + name;
+  var found = false;
+  var value;
+  if (field[5] !== true) {
+    for (var w = 0; w < field[1].length; w += 1) {
+      if (Object.prototype.hasOwnProperty.call(raw, field[1][w])) {
+        found = true;
+        value = raw[field[1][w]];
+        break;
+      }
+    }
+  }
+  if (!found) {
+    if (field[3] || !required) return undefined;
+    if (tree.nullable) return null;
+    throw __serialMissing(where);
+  }
+  if (field[4] === '@Contextual') {
+    // kotlinx would ask the Json's serializersModule, which is not here. It
+    // only asks when the key is present, and so does this.
+    throw new Error(
+      'This converted extension decoded "' + where + '", a @Contextual field, whose serializer only the Json configuration of the extension knows.'
+    );
+  }
+  if (value === null && !tree.nullable) {
+    if (field[3]) return undefined;
+    if (field[4] === null && tree.ser === null) throw __serialMissing(where);
+  }
+  if (field[4] !== null) {
+    if (value === null && tree.nullable) return null;
+    return __serialRun(field[4], registration.custom, value, where);
+  }
+  return __serialDecode(tree, value, where, bound, registration.custom);
+}
+
+/**
+ * The extension's own serializer, over one JSON value.
+ *
+ * Two kinds occur, and both are run exactly as kotlinx runs them. A
+ * JsonTransformingSerializer reshapes the element with its own
+ * 'transformDeserialize' and hands the result to its base serializer — which
+ * the emitter only accepted when it was built from default serializers, and
+ * recorded as the type it decodes (see '__k.transforms'). A KSerializer's
+ * 'deserialize' is handed a JsonDecoder over the value and answers the value
+ * itself. Anything else is refused here by name rather than read past.
+ */
+function __serialRun(name, custom, raw, path) {
+  var lookup = custom === null ? undefined : custom[name];
+  var serializer = typeof lookup === 'function' ? lookup() : undefined;
+  if (serializer === null || serializer === undefined) {
+    throw new Error('This converted extension decodes "' + path + '" with ' + name + ', which is not in this bundle.');
+  }
+  var decodes = __TRANSFORMS === null ? undefined : __TRANSFORMS.get(serializer);
+  var out;
+  if (decodes !== undefined) {
+    var shaped = typeof serializer.transformDeserialize === 'function'
+      ? serializer.transformDeserialize(raw === undefined ? null : raw)
+      : raw;
+    if (__thenable(shaped)) {
+      throw new Error('This converted extension decodes with ' + name + ', and it suspends, which kotlinx cannot do either.');
+    }
+    var tree = __serialTree(decodes);
+    if (tree === null) throw new Error('This converted extension decodes "' + path + '" as ' + decodes + '.');
+    return __serialDecode(tree, shaped, path, {}, custom);
+  }
+  if (typeof serializer.deserialize === 'function') {
+    out = serializer.deserialize(__jsonDecoder(raw === undefined ? null : raw, path));
+    if (__thenable(out)) {
+      throw new Error('This converted extension decodes with ' + name + ', and it suspends, which kotlinx cannot do either.');
+    }
+    return out;
+  }
+  throw new Error(
+    'This converted extension decodes "' + path + '" with ' + name +
+    ', which is neither a JsonTransformingSerializer nor a KSerializer this runtime can run.'
+  );
+}
+
+/**
+ * kotlinx's JsonDecoder over one value — the decoder a KSerializer's
+ * 'deserialize' is handed. 'decodeJsonElement' is how nearly every hand-written
+ * one starts; the primitive reads are kotlinx's own, over the same accessors
+ * '.int' and '.content' use. A structured read ('beginStructure',
+ * 'decodeSerializableValue') refuses by name: it needs descriptors this
+ * runtime does not build.
+ */
+function __jsonDecoder(raw, path) {
+  function refuse(what) {
+    return function () {
+      throw new Error('This converted extension decoded "' + path + '" with a serializer calling ' + what +
+        ', which this runtime does not implement.');
+    };
+  }
+  return {
+    __kJsonDecoder: true,
+    json: typeof Json === 'undefined' ? null : Json,
+    decodeJsonElement: function () { return raw; },
+    decodeString: function () {
+      if (typeof raw === 'string') return raw;
+      throw new Error('This converted extension expected "' + path + '" to be a string.');
+    },
+    decodeInt: function () { return __jeNumber(raw, 'int', true, false); },
+    decodeLong: function () { return __jeNumber(raw, 'long', true, false); },
+    decodeShort: function () { return __jeNumber(raw, 'int', true, false); },
+    decodeByte: function () { return __jeNumber(raw, 'int', true, false); },
+    decodeDouble: function () { return __jeNumber(raw, 'double', false, false); },
+    decodeFloat: function () { return __jeNumber(raw, 'float', false, false); },
+    decodeBoolean: function () { return __jeBoolean(raw, 'boolean', false); },
+    decodeChar: function () { return __jeContent(raw, 'char').charAt(0); },
+    decodeNull: function () { return null; },
+    decodeNotNullMark: function () { return raw !== null; },
+    beginStructure: refuse('beginStructure'),
+    decodeSerializableValue: refuse('decodeSerializableValue'),
+    decodeInline: refuse('decodeInline')
+  };
+}
 
 /* --- keiyoushi core's Next.js extraction ---------------------------------- */
 
@@ -9278,7 +9651,11 @@ function __nextDecode(payloads, chunks, models, type, predicate) {
   for (var i = 0; i < payloads.length; i += 1) {
     var resolved = __nextResolve(payloads[i], chunks, models, []);
     var found = __nextFind(resolved, function (value) { return test(value) === true; });
-    if (found !== undefined) return __applyShapes(__decodeValue(__typeKind(type, undefined), found, 'data'), 0);
+    if (found !== undefined) {
+      var typed = __serialTree(type);
+      if (typed !== null && __serialNames(typed)) return __serialDecode(typed, found, 'data', {});
+      return __applyShapes(__decodeValue(__typeKind(type, undefined), found, 'data'), 0);
+    }
   }
   return null;
 }
@@ -10882,6 +11259,15 @@ function AnimeFilterList(filters) {
 
 /** kotlinx.serialization's JsonObject is a marked plain object in this runtime. */
 function JsonObject(value) {
+  // 'JsonObject(emptyMap())' and 'JsonObject(mapOf(...))' hand over a Kotlin
+  // Map, which is a JS Map here — and a mutable one carries its put/remove as
+  // own properties, so copying its properties made a JSON object whose keys
+  // were those methods and none of its entries. Its entries are the object.
+  if (value instanceof Map) {
+    var out = {};
+    value.forEach(function (held, key) { out[__str(key)] = held; });
+    return __marked(out);
+  }
   return __marked(Object.assign({}, value || {}));
 }
 

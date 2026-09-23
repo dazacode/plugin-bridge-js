@@ -197,6 +197,9 @@ export const RUNTIME_HELPERS = [
 	'jeFloatOrNull',
 	'jeBoolean',
 	'jeBooleanOrNull',
+	/* Typed decoding: a '@Serializable' class, and a JsonTransformingSerializer. */
+	'serial',
+	'transforms',
 	'associateWith',
 	'sumOf',
 	'count',
@@ -958,7 +961,13 @@ export const RUNTIME_GLOBALS = [
 	   declared here rather than left to translate and fail. */
 	'PropertyResourceBundle',
 	'InputStreamReader',
-	'Collator'
+	'Collator',
+
+	/* kotlinx.serialization's names a hand-written KSerializer declares, and
+	   JsonNull, which is JSON's null — see the typed decoder in the runtime. */
+	'PrimitiveSerialDescriptor',
+	'PrimitiveKind',
+	'JsonNull'
 ] as const;
 
 /** Everything the runtime source must define, for the spec that checks it. */
