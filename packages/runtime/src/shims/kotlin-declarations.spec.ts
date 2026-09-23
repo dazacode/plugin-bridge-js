@@ -736,3 +736,144 @@ describe('detached accessors and minimal declarations', () => {
 		).toEqual(['an anonymous `object : LinkedHashMap(…)` over a constructed base']);
 	});
 });
+
+describe('an interceptor whose recovery needs the WebView', () => {
+	// The Voe extractor's `DdosGuardInterceptor`, cut to its shape: pass every
+	// answer through unless it is a DDoS-Guard challenge, and only then go to
+	// the WebView's cookie store. Refused whole, it refused every extension
+	// that installs the extractor, although the tail only runs when a hoster
+	// challenges. See `memberWithRecovery` in `emit.ts`.
+	const source = kt(
+		'class Guard(private val client: OkHttpClient) : Interceptor {',
+		'    override fun intercept(chain: Interceptor.Chain): Response {',
+		'        val originalRequest = chain.request()',
+		'        val response = chain.proceed(originalRequest)',
+		'',
+		'        // Check if DDos-GUARD is on',
+		'        if (response.code !in ERROR_CODES || response.header("Server") !in SERVER_CHECK) {',
+		'            return response',
+		'        }',
+		'',
+		'        response.close()',
+		'        val cookies = CookieManager.getInstance().getCookie(originalRequest.url.toString())',
+		'        return chain.proceed(originalRequest.newBuilder().addHeader("cookie", cookies).build())',
+		'    }',
+		'',
+		'    companion object {',
+		'        private val ERROR_CODES = listOf(403)',
+		'        private val SERVER_CHECK = listOf("ddos-guard")',
+		'    }',
+		'}'
+	);
+
+	function chain(code: number, server: string | null) {
+		const answer = {
+			code,
+			header: (name: string) => (name.toLowerCase() === 'server' ? server : null),
+			close: () => undefined
+		};
+		const proceeded: unknown[] = [];
+		return {
+			answer,
+			proceeded,
+			request: () => ({ url: 'https://hoster.invalid/e/1' }),
+			proceed: async (request: unknown) => {
+				proceeded.push(request);
+				return answer;
+			}
+		};
+	}
+
+	it('translates the pass-through and reports the cut, not a refusal', () => {
+		const emission = emitKotlin(parse(source));
+		expect(emission.refusals).toEqual([]);
+		expect(emission.translated).toContain('intercept');
+		// Still named: the member is there, and so is what its tail needed.
+		expect(emission.deferred.map((one) => one.member)).toEqual(['intercept']);
+		expect(emission.deferred[0].obstacles.map((one) => one.kind)).toEqual([
+			'the WebView cookie store'
+		]);
+		// The awaited answer is what the guard reads. Not awaited, every read
+		// of it was `undefined` and every challenge passed as an answer.
+		expect(emission.js).toContain('(await chain.proceed(originalRequest))');
+	});
+
+	it('hands back every answer the guard passes, exactly as the Kotlin does', async () => {
+		const guard = await instantiate('Guard', source);
+		for (const [code, server] of [
+			[200, 'nginx'],
+			[403, 'nginx'],
+			[200, 'ddos-guard'],
+			[404, null]
+		] as const) {
+			const link = chain(code, server);
+			expect(await guard.intercept(link)).toBe(link.answer);
+			expect(link.proceeded).toHaveLength(1);
+		}
+	});
+
+	it('raises an error naming the boundary where the recovery would begin', async () => {
+		const guard = await instantiate('Guard', source);
+		const link = chain(403, 'ddos-guard');
+		await expect(guard.intercept(link)).rejects.toThrow(
+			/Guard got an answer it would only get past through the WebView's cookie store/
+		);
+		// Nothing after the guard ran: no second request went out.
+		expect(link.proceeded).toHaveLength(1);
+	});
+
+	it('leaves a tail refused for an ordinary gap refused', () => {
+		// The cut is for a boundary only. A tail that fails for a translator gap
+		// is ours to fix, and a cut would hide it behind a runtime error.
+		const emission = emitKotlin(
+			parse(
+				source.replace(
+					'CookieManager.getInstance().getCookie(originalRequest.url.toString())',
+					'Injekt.get<Loader>()'
+				)
+			)
+		);
+		expect(emission.refusals.map((one) => one.member)).toEqual(['intercept']);
+		expect(emission.deferred).toEqual([]);
+	});
+
+	it('does not cut after a guard that decides which requests to handle', () => {
+		// `return chain.proceed(…)` afresh, before any answer is read: there
+		// the tail is the interceptor's purpose, not a recovery from an answer.
+		const emission = emitKotlin(
+			parse(
+				kt(
+					'class Gate : Interceptor {',
+					'    override fun intercept(chain: Interceptor.Chain): Response {',
+					'        val request = chain.request()',
+					'        if (!request.url.host.contains("cdn")) return chain.proceed(request)',
+					'        val cookies = CookieManager.getInstance().getCookie(request.url.toString())',
+					'        return chain.proceed(request.newBuilder().addHeader("cookie", cookies).build())',
+					'    }',
+					'}'
+				)
+			)
+		);
+		expect(emission.refusals.map((one) => one.member)).toEqual(['intercept']);
+		expect(emission.deferred).toEqual([]);
+	});
+
+	it('does not cut when the boundary is reached before the guard', () => {
+		const emission = emitKotlin(
+			parse(
+				kt(
+					'class Early : Interceptor {',
+					'    override fun intercept(chain: Interceptor.Chain): Response {',
+					'        val cookies = CookieManager.getInstance().getCookie("https://x.invalid")',
+					'        val response = chain.proceed(chain.request())',
+					'        if (response.code != 403) return response',
+					'        return chain.proceed(chain.request())',
+					'    }',
+					'}'
+				)
+			)
+		);
+		expect(emission.refusals.map((one) => one.member)).toEqual(['intercept']);
+		expect(emission.deferred).toEqual([]);
+	});
+});

@@ -1006,6 +1006,82 @@ describe('which refusals stop a build', () => {
 		expect(result.complete).toBe(false);
 	});
 
+	it('installs an interceptor whose only refused part is a WebView recovery', async () => {
+		// The Voe extractor's shape, whole: the recovery tail is cut (see
+		// `memberWithRecovery`), and the refused `by lazy` store it read is read
+		// by nothing that survived — so neither blocks, and the cut is reported.
+		const result = await convertKotlin(
+			[
+				{
+					path: 'Demo.kt',
+					source: kt(
+						'class Demo : Source() {',
+						'    override val client = network.client.newBuilder().addInterceptor(Guard()).build()',
+						'    override fun popularAnimeRequest(page: Int) = GET("https://example.invalid/")',
+						'}',
+						'',
+						'class Guard : Interceptor {',
+						'    private val cookieManager by lazy { CookieManager.getInstance() }',
+						'    override fun intercept(chain: Interceptor.Chain): Response {',
+						'        val response = chain.proceed(chain.request())',
+						'        if (response.code != 403) return response',
+						'        val cookies = cookieManager.getCookie(chain.request().url.toString())',
+						'        return chain.proceed(chain.request().newBuilder().addHeader("cookie", cookies).build())',
+						'    }',
+						'}'
+					)
+				}
+			],
+			{ parser }
+		);
+
+		expect(result.blocking).toEqual([]);
+		expect(result.complete).toBe(true);
+		expect(result.refusals.map((one) => one.member)).toEqual(['cookieManager']);
+		expect(result.deferred.map((one) => one.member)).toEqual(['intercept']);
+	});
+
+	it('blocks on a refused lazy property the moment translated code reads it', async () => {
+		const result = await convertKotlin(
+			[
+				{
+					path: 'Demo.kt',
+					source: kt(
+						'class Demo : Source() {',
+						'    private val store by lazy { CookieManager.getInstance() }',
+						'    override fun popularAnimeRequest(page: Int) = GET("https://example.invalid/" + store)',
+						'}'
+					)
+				}
+			],
+			{ parser }
+		);
+
+		expect(result.blocking.map((one) => one.member)).toEqual(['store']);
+	});
+
+	it('blocks on a refused lazy property that overrides one the driver reads', async () => {
+		// Nothing in the Kotlin names `client`, but the driver does: pruned, it
+		// would fall back to the base's client, which is the fallback a refused
+		// override never gets.
+		const result = await convertKotlin(
+			[
+				{
+					path: 'Demo.kt',
+					source: kt(
+						'class Demo : Source() {',
+						'    override val client by lazy { CookieManager.getInstance() }',
+						'    override fun popularAnimeRequest(page: Int) = GET("https://example.invalid/")',
+						'}'
+					)
+				}
+			],
+			{ parser }
+		);
+
+		expect(result.blocking.map((one) => one.member)).toEqual(['client']);
+	});
+
 	it('blocks on a configureClient, which the driver calls although nothing else does', async () => {
 		const result = await convertKotlin(
 			[

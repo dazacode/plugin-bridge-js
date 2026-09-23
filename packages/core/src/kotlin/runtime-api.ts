@@ -351,6 +351,12 @@ export const RUNTIME_HELPERS = [
 	'catchingMap',
 	'catchingFlatMap',
 
+	/* The error an interceptor's cut-off recovery becomes: the pass-through
+	   before it translates, the part that needed a boundary (the WebView's
+	   cookie store, a WebView) does not, and reaching it says so by name.
+	   See `recoveryCut` in `emit.ts`. */
+	'recoveryRefused',
+
 	/* jsoup's `Elements.eachText()` / `eachAttr()`, which return every match's
 	   text at once — the shortcut scraper code reaches for instead of a `map`. */
 	'eachText',

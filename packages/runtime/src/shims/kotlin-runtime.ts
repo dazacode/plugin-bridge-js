@@ -2055,16 +2055,23 @@ var TimeUnit = {
   DAYS: __timeUnit(86400000)
 };
 
-/* --- charsets, of which there is exactly one ------------------------------ */
+/* --- charsets: UTF-8 by the host, the single-byte two here ---------------- */
 
 /**
- * The charsets an extension names, and the one the host can actually do.
+ * The charsets an extension names, and the ones this runtime actually does.
  *
- * 'ctx.text.encode' and 'ctx.text.decode' are UTF-8 and nothing else, so the
- * others are declared but not honoured: naming one is a named failure rather
- * than a decode that quietly produces mojibake. A byte sequence read as the
- * wrong charset is a title that looks almost right, which is the failure this
- * runtime least wants to ship.
+ * 'ctx.text.encode' and 'ctx.text.decode' are UTF-8 and nothing else. The two
+ * single-byte charsets need no host at all - ISO-8859-1 maps each byte to the
+ * code point of the same number and back, US-ASCII is its lower half - so they
+ * are done here, exactly, with the JVM's own answer for a character that has no
+ * byte ('?') and a byte that has no character (U+FFFD). ISO-8859-1 is not rare:
+ * it is how this ecosystem turns a byte array into a string one char per byte
+ * before shifting characters, which is the Voe extractor's whole decoder.
+ *
+ * The UTF-16 family is declared but not honoured: naming one is a named failure
+ * rather than a decode that quietly produces mojibake. A byte sequence read as
+ * the wrong charset is a title that looks almost right, which is the failure
+ * this runtime least wants to ship.
  */
 var Charsets = {
   UTF_8: { name: 'UTF-8' },
@@ -2076,6 +2083,37 @@ var Charsets = {
 };
 
 var StandardCharsets = Charsets;
+
+/* Which of the three a charset argument names: 'utf8', 'latin1' or 'ascii'. */
+function __charsetOf(charset) {
+  if (charset === null || charset === undefined) return 'utf8';
+  var name = typeof charset === 'string' ? charset : __str(charset.name);
+  if (/^(?:iso-?8859-1|iso_8859_1|latin-?1)$/i.test(name)) return 'latin1';
+  if (/^(?:us-?ascii|ascii)$/i.test(name)) return 'ascii';
+  __utf8Only(charset);
+  return 'utf8';
+}
+
+/* Bytes to text in a single-byte charset, as java.lang.String decodes them. */
+function __singleByteDecode(bytes, kind) {
+  var out = '';
+  for (var i = 0; i < bytes.length; i += 1) {
+    var b = bytes[i] & 255;
+    out += kind === 'ascii' && b > 127 ? '\\ufffd' : String.fromCharCode(b);
+  }
+  return out;
+}
+
+/* Text to bytes in a single-byte charset; an unmappable character is '?'. */
+function __singleByteEncode(text, kind) {
+  var limit = kind === 'ascii' ? 127 : 255;
+  var out = new Uint8Array(text.length);
+  for (var i = 0; i < text.length; i += 1) {
+    var c = text.charCodeAt(i);
+    out[i] = c > limit ? 63 : c;
+  }
+  return out;
+}
 
 function __utf8Only(charset) {
   if (charset === null || charset === undefined) return;
@@ -4543,6 +4581,27 @@ var __k = {
    * The concurrency is dropped: the sandbox has one thread, and requests are
    * made through one host anyway.
    */
+  /**
+   * What an okhttp interceptor's recovery path becomes when it needs a
+   * boundary this runtime does not cross.
+   *
+   * The emitter keeps an interceptor's pass-through - send the request, look at
+   * the answer, hand it back unless it is a challenge - and cuts the part after
+   * that guard when what refused it was the WebView or its cookie store. This is
+   * what runs in its place: the answer the Kotlin would have recovered from
+   * becomes an error naming the interceptor and what it reached for, at the
+   * point the recovery would have begun. Not an empty answer, and not the
+   * challenge page handed on as if it were the content.
+   */
+  recoveryRefused: function (owner, kinds) {
+    var needed = __arr(kinds).map(function (one) { return __str(one); }).join(', ');
+    return new Error(
+      'This converted extension\\'s ' + __str(owner) + ' got an answer it would only get past ' +
+      'through ' + needed + ', which Yorozo does not give a plugin. Answers it passes ' +
+      'through unchanged still work; this one cannot be recovered here.'
+    );
+  },
+
   catchingMap: function (list, fn) {
     return __then(__catching(__arr(list), fn), function (values) {
       var out = [];
@@ -4653,7 +4712,7 @@ var __k = {
    * runtime models one — it joins rather than decodes.
    */
   stringOf: function (value, charset) {
-    __utf8Only(charset);
+    var kind = __charsetOf(charset);
     if (value === null || value === undefined) return '';
     if (typeof value === 'string') return value;
     if (Array.isArray(value)) {
@@ -4661,6 +4720,7 @@ var __k = {
       for (var i = 0; i < value.length; i += 1) if (typeof value[i] !== 'string') chars = false;
       if (chars) return value.join('');
     }
+    if (kind !== 'utf8') return __singleByteDecode(__bytesOf(value), kind);
     return __host().text.decode(__bytesOf(value));
   },
 
@@ -4681,9 +4741,11 @@ var __k = {
     if (value !== null && typeof value === 'object' && value.__bigInteger === true) {
       return value.toByteArray();
     }
-    __utf8Only(charset);
+    var kind = __charsetOf(charset);
     if (value === null || value === undefined) return __host().text.encode('');
-    if (typeof value === 'string') return __host().text.encode(value);
+    if (typeof value === 'string') {
+      return kind === 'utf8' ? __host().text.encode(value) : __singleByteEncode(value, kind);
+    }
     return __bytesOf(value);
   },
 
@@ -7379,6 +7441,19 @@ function __responseOf(raw, text, request) {
     request: finalRequest,
     url: finalUrl,
     headers: __headersObject(__headerPairs(raw.headers)),
+    /*
+     * okhttp's 'response.header(name)' and 'header(name, default)': one header,
+     * case-insensitively, or the default (null when none is given). The method
+     * the request builder has always had, and the one an interceptor reads a
+     * challenge off: 'response.header("Server") !in SERVER_CHECK'. Missing, that
+     * line threw a TypeError out of the interceptor on every answer - a hoster
+     * lost for a reason no refusal named.
+     */
+    header: function (name, fallback) {
+      var value = response.headers.get(name);
+      if (value !== null && value !== undefined) return value;
+      return fallback === undefined ? null : fallback;
+    },
     body: {
       string: function () { return read(); },
       bytes: function () { return __host().text.encode(read()); },

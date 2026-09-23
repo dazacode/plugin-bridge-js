@@ -420,6 +420,38 @@ const NAMED_OBSTACLES: readonly {
 	{ pattern: /\bCookieManager\b/, name: 'the WebView cookie store' }
 ];
 
+/**
+ * The boundaries an anti-bot *recovery* reaches for, by the names refusals give
+ * them.
+ *
+ * An okhttp interceptor in this ecosystem very often has one shape: send the
+ * request, look at the answer, hand it straight back unless it is a challenge
+ * page, and only then do something about the challenge — read the WebView's
+ * cookie store for a clearance cookie, or open a WebView to earn one. The
+ * challenge half is a boundary and stays one (`docs/adr/0005-network-
+ * boundaries.md` §4). The pass-through half is ordinary Kotlin, and it is what
+ * runs on every request the source does not challenge.
+ *
+ * `emit.ts` (`recoveryCut`) uses this list to tell that shape from an
+ * interceptor that is *about* the boundary: the part of `intercept` after the
+ * pass-through guard may be cut off — replaced by an error naming the
+ * boundary — only when what refused it is one of these. A tail refused for an
+ * ordinary gap is a translator gap and is left refused, where it is counted.
+ *
+ * Every name here is one the scoreboard counts as a native capability
+ * (`host/src/scoreboard.ts`), and `scoreboard.spec.ts` holds the two lists to
+ * that. The passthrough spelling `.getCookie()` is on it because a lower-case
+ * `cookieManager` field read is not something the name table can see: the
+ * emitter meets the call and refuses it by the method's name.
+ */
+export const RECOVERY_BOUNDARIES: ReadonlyMap<string, string> = new Map([
+	// Refusal kind → what the runtime error calls it, in a viewer's words.
+	['WebView', 'a WebView'],
+	['the WebView cookie store', "the WebView's cookie store"],
+	['`.getCookie()`', "the WebView's cookie store"],
+	['reading a cookie jar', 'reading its own cookie jar']
+]);
+
 /* ── algorithms ───────────────────────────────────────────────────────────── */
 
 /**
@@ -1719,16 +1751,26 @@ export const HOST_METHODS: ReadonlySet<string> = new Set([
  * `BLOCKING_CALLS` carries that outward to whatever calls *it* — so a member
  * that decrypts becomes `async` and its callers await it, transitively.
  *
- * Only these four, and each is a name javax.crypto and java.security own.
+ * The crypto four are each a name javax.crypto and java.security own.
  * `init`, `initSign` and `update` stay synchronous because the shim keeps them
  * so: a key is recorded rather than imported, and the import happens inside the
  * operation, which is what keeps the asynchronous surface this small.
+ *
+ * `proceed` is okhttp's `Interceptor.Chain.proceed`, and it is on this list for
+ * the same reason: the runtime runs the chain (`__proceed`) and the end of it
+ * is the host's send, so what it hands back is a promise of the response. Not
+ * awaited, `val response = chain.proceed(request)` held that promise, and every
+ * read of it answered `undefined` — `response.code != 403` was true of every
+ * answer, so an interceptor that exists to notice a challenge noticed nothing
+ * and handed the promise back, which the runtime then happened to await. A
+ * returned response survived that by accident; a *read* one never did.
  */
 export const AWAITED_HOST_METHODS: ReadonlySet<string> = new Set([
 	'doFinal',
 	'sign',
 	'verify',
-	'generateKeyPair'
+	'generateKeyPair',
+	'proceed'
 ]);
 
 /**

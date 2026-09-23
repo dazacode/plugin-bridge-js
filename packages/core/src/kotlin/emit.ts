@@ -107,6 +107,7 @@ import {
 	HOST_PROPERTY_METHODS,
 	KNOWN_SIGNATURES,
 	OUT_OF_SCOPE_KINDS,
+	RECOVERY_BOUNDARIES,
 	swallowedWhenElse,
 	SUPER_BASE_PROPERTIES,
 	SUPER_MEMBERS,
@@ -157,6 +158,17 @@ export interface MemberEdges {
 	readonly owner: string | null;
 	/** True for a property: it runs whenever its owner is constructed. */
 	readonly construction: boolean;
+	/**
+	 * True for a `by lazy` property that overrides nothing.
+	 *
+	 * Counted as construction above, because reachability over-approximates;
+	 * but its initialiser does not in fact run at construction — it runs on
+	 * the first read — and nothing outside the Kotlin can read it, the driver
+	 * included, since it overrides nothing the driver asks for. `pipeline.ts`
+	 * uses this to stop a refused one blocking when no translated code names
+	 * it. Absent on members this was never worked out for.
+	 */
+	readonly lazy?: boolean;
 	/** Every identifier under the member, deduplicated. */
 	readonly references: readonly string[];
 	/** Call targets, with unresolved receivers kept as conservative edges. */
@@ -190,6 +202,15 @@ export interface Emission {
 	 * against the extension that merely sits beside it.
 	 */
 	readonly graph: readonly MemberEdges[];
+	/**
+	 * Members that translated with a tail cut off, and what the tail needed.
+	 *
+	 * Not refusals — the member is in `translated` and the host calls it — and
+	 * not silence either: each names the boundary the cut-off part reached for,
+	 * so a caller can still say what the converted plugin cannot do. See
+	 * `recoveryCut`.
+	 */
+	readonly deferred: readonly Refusal[];
 }
 
 /**
@@ -419,14 +440,14 @@ const LOG_CALL = /^Log\.(?:v|d|i|w|e|wtf)$/;
 /**
  * The calls that make a member `async` whether or not it said `suspend`.
  *
- * `.execute()` blocks in Kotlin and cannot here; the crypto four are
- * `AWAITED_HOST_METHODS`, which the runtime shim implements over
+ * `.execute()` blocks in Kotlin and cannot here; the crypto four and an
+ * interceptor chain's `.proceed()` are `AWAITED_HOST_METHODS`, which the runtime shim implements over
  * `crypto.subtle` and which are therefore promises. `blockingMembers` reads
  * this off a member's *source text* and propagates to a fixpoint, so a helper
  * that decrypts makes its callers `async` too.
  */
 const BLOCKING_CALLS =
-	/\.(?:execute|awaitSuccess|await|doFinal|generateKeyPair|verify)\s*\(|(?<!\bMath)\.sign\s*\(|\bThread\s*\.\s*sleep\s*\(|\b(?:client|[a-z]\w*Client)\s*\.\s*(?:get|post|put|head)\s*\(/;
+	/\.(?:execute|awaitSuccess|await|doFinal|generateKeyPair|verify|proceed)\s*\(|(?<!\bMath)\.sign\s*\(|\bThread\s*\.\s*sleep\s*\(|\b(?:client|[a-z]\w*Client)\s*\.\s*(?:get|post|put|head)\s*\(/;
 
 /**
  * keiyoushi's suspend verbs on an okhttp client, and what they are called on.
@@ -1480,6 +1501,13 @@ class Emitter {
 	private readonly destructuredParts: string[] = [];
 	/** What each member mentions; see `MemberEdges`. */
 	private readonly graph: MemberEdges[] = [];
+	/** Members translated with a boundary-reaching tail cut off; see `recoveryCut`. */
+	private readonly deferred: Refusal[] = [];
+	/**
+	 * The cut the *next* function body is emitted under, consumed on entry.
+	 * Set only around the one `functionDeclaration` call that asked for it.
+	 */
+	private cut: RecoveryCut | null = null;
 	/** The class or object whose members are being emitted. */
 	private owner: string | null = null;
 	/**
@@ -2125,7 +2153,8 @@ class Emitter {
 					refusals: this.refusals,
 					usedRuntime: [],
 					fileRefusal: this.fileRefusal,
-					graph: this.graph
+					graph: this.graph,
+					deferred: []
 				};
 			}
 			if (piece !== null && piece.length > 0) parts.push(piece);
@@ -2143,7 +2172,8 @@ class Emitter {
 			refusals: this.refusals,
 			usedRuntime: [...this.used].sort(),
 			fileRefusal: null,
-			graph: this.graph
+			graph: this.graph,
+			deferred: this.deferred
 		};
 	}
 
@@ -2552,7 +2582,11 @@ class Emitter {
 					// below.
 					const mangled =
 						this.overloadsOf(fnName) === null ? null : `${fnName}$${this.signatureOf(child).key}`;
-					const emitted = this.member(fnName, child, () =>
+					const candidate =
+						fnName === 'intercept' && implementsInterceptor(node)
+							? recoveryCandidate(child, this.nameOf(node) ?? name)
+							: null;
+					const emitted = this.memberWithRecovery(fnName, child, candidate, () =>
 						this.functionDeclaration(child, 'method', mangled)
 					);
 					if (emitted !== null) {
@@ -3465,16 +3499,31 @@ class Emitter {
 		 * property's edge as what its initialiser does, and an edge left out
 		 * lets reachability prune a refusal the setter still calls into.
 		 */
-		accessors: readonly KNode[] = []
+		accessors: readonly KNode[] = [],
+		/**
+		 * The parts of `node` that will actually be emitted, when that is not
+		 * all of it — only ever a `recoveryCut`. Edges and the obstacle scan are
+		 * read off these alone: the cut-off tail is never emitted, so what it
+		 * would have called is not reachable from here and what it would have
+		 * refused for is not this member's to answer.
+		 */
+		scope: readonly KNode[] | null = null
 	): string | null {
+		const parts = scope ?? [node, ...accessors];
 		// Recorded before anything is attempted, so a refused member still has
 		// edges — a member reachable only from one has to stay reachable.
 		this.graph.push({
 			member: name,
 			owner: this.owner,
 			construction: node.type === 'property_declaration',
-			references: [...new Set([node, ...accessors].flatMap((one) => mentions(one)))],
-			calls: [node, ...accessors].flatMap((one) => callEdges(one))
+			lazy:
+				node.type === 'property_declaration' &&
+				!this.hasModifier(node, 'override') &&
+				kids(node).some(
+					(child) => child.type === 'property_delegate' && /^by\s+lazy\b/.test(child.text)
+				),
+			references: [...new Set(parts.flatMap((one) => mentions(one)))],
+			calls: parts.flatMap((one) => callEdges(one))
 		});
 
 		const previousName = this.memberName;
@@ -3482,7 +3531,9 @@ class Emitter {
 		this.memberName = name;
 		this.pending = [];
 
-		const obstacles = scanObstacles(node, name);
+		// The node alone when there is no cut, as before it: a setter written
+		// beside its property is scanned where it is emitted, not here.
+		const obstacles = (scope ?? [node]).flatMap((one) => scanObstacles(one, name));
 		if (obstacles.length > 0) {
 			this.refusals.push({ member: name, obstacles });
 			this.memberName = previousName;
@@ -3528,6 +3579,90 @@ class Emitter {
 			this.extensionFunctions.clear();
 			for (const [name, shape] of extensionsBefore) this.extensionFunctions.set(name, shape);
 		}
+	}
+
+	/**
+	 * `member`, with one second chance: an interceptor whose only trouble is in
+	 * the recovery it runs after a pass-through guard.
+	 *
+	 * The shape, from the Voe extractor's `DdosGuardInterceptor`:
+	 *
+	 *     val response = chain.proceed(originalRequest)
+	 *     if (response.code !in ERROR_CODES || response.header("Server") !in SERVER_CHECK) {
+	 *         return response
+	 *     }
+	 *     …read the WebView's cookie store for a clearance cookie…
+	 *
+	 * Refused whole, that one member refused every extension that installs the
+	 * extractor — sixteen in one catalogue that never reach the tail unless the
+	 * hoster answers with a DDoS-Guard challenge — because an interceptor's
+	 * `intercept` is reached the moment the class is (see `reach` in
+	 * `pipeline.ts`) and a refused one cannot be pruned. Dropping it and letting
+	 * the client call through would be the base-class fallback this project does
+	 * not make: a challenged answer handed to the extractor as if it were the
+	 * video page.
+	 *
+	 * So the member is emitted up to and including the guard, and the tail
+	 * becomes `throw __k.recoveryRefused(…)` naming what it needed. Every answer
+	 * the guard passes through behaves exactly as the Kotlin does; the one the
+	 * Kotlin would have recovered from is an error with a name on it, raised
+	 * where the recovery would have started. What the extension does with that
+	 * error is its own business — the same as any other failed request.
+	 *
+	 * Taken only when the first attempt was refused, every obstacle it found
+	 * sits in the tail, and at least one of them is a `RECOVERY_BOUNDARIES`
+	 * name. A tail refused only for an ordinary translator gap stays refused,
+	 * because that is ours to fix and a cut would hide it; a guard or prefix
+	 * that does not translate stays refused, because then the pass-through is
+	 * not what would run. The member is reported in `deferred` either way it
+	 * is cut, so the boundary is still named.
+	 */
+	private memberWithRecovery(
+		name: string,
+		node: KNode,
+		candidate: RecoveryCandidate | null,
+		run: () => string
+	): string | null {
+		const refusalsBefore = this.refusals.length;
+		const graphAt = this.graph.length;
+		const first = this.member(name, node, run);
+		if (first !== null || candidate === null) return first;
+
+		const refusal = this.refusals[this.refusals.length - 1];
+		if (this.refusals.length !== refusalsBefore + 1 || refusal.member !== name) return null;
+		const late = refusal.obstacles.every((one) => one.line >= candidate.tailLine);
+		const kinds = [
+			...new Set(
+				refusal.obstacles
+					.map((one) => RECOVERY_BOUNDARIES.get(one.kind))
+					.filter((one): one is string => one !== undefined)
+			)
+		];
+		if (!late || kinds.length === 0) return null;
+
+		const firstEdges = this.graph[graphAt];
+		this.refusals.pop();
+		this.graph.splice(graphAt, 1);
+		this.cut = { body: candidate.body, keep: candidate.keep, owner: candidate.owner, kinds };
+		const secondAt = this.graph.length;
+		let second: string | null;
+		try {
+			second = this.member(name, node, run, [], candidate.kept);
+		} finally {
+			this.cut = null;
+		}
+		if (second !== null) {
+			this.deferred.push(refusal);
+			return second;
+		}
+		// The pass-through itself did not translate, so the cut buys nothing:
+		// put back what the whole member was refused for, which is the more
+		// useful thing to read.
+		this.graph.splice(secondAt, 1);
+		this.graph.splice(graphAt, 0, firstEdges);
+		this.refusals.pop();
+		this.refusals.push(refusal);
+		return null;
 	}
 
 	private declineMember(name: string, node: KNode, kind: string): null {
@@ -4823,6 +4958,17 @@ class Emitter {
 	}
 
 	private functionBody(node: KNode): string {
+		const cut = this.cut;
+		if (cut !== null && node.line === cut.body.line && node.text === cut.body.text) {
+			// See `recoveryCut`: the statements up to and including the
+			// pass-through guard, then the error the tail would have become.
+			this.cut = null;
+			const statements = kids(node).find((child) => child.type === 'statements');
+			return block([
+				...(statements === undefined ? [] : this.statementList(statements, null, cut.keep)),
+				`throw ${this.helper('recoveryRefused')}(${JSON.stringify(cut.owner)}, ${JSON.stringify(cut.kinds)});`
+			]);
+		}
 		if (node.allChildren.some((child) => child.type === '{')) {
 			const statements = kids(node).find((child) => child.type === 'statements');
 			return block(statements === undefined ? [] : this.statementList(statements, null));
@@ -5099,8 +5245,8 @@ class Emitter {
 
 	/* ── statements ──────────────────────────────────────────────────────── */
 
-	private statementList(node: KNode, sink: Sink): string[] {
-		const children = this.rejoinJumps(kids(node));
+	private statementList(node: KNode, sink: Sink, limit?: number): string[] {
+		const children = this.rejoinJumps(kids(node).slice(0, limit));
 		const out: string[] = [];
 		children.forEach((entry, index) => {
 			const tail =
@@ -11170,6 +11316,106 @@ function accessorOf(
 	return (
 		kids(node).find((child) => child.type === kind) ?? (next?.type === kind ? next : undefined)
 	);
+}
+
+/**
+ * Where an interceptor's pass-through ends and its recovery begins, if it has
+ * that shape. See `memberWithRecovery` for why, and for when the cut is taken.
+ *
+ * Read off the syntax, narrowly, because the claim it supports is narrow —
+ * "every answer this guard hands back runs exactly as written":
+ *
+ * - `intercept` takes one parameter, the chain;
+ * - a top-level `val r = chain.proceed(…)` binds the answer;
+ * - a later top-level `if (…) return r`, with no `else`, whose condition reads
+ *   `r` — a guard *about the answer*, handing that same answer back.
+ *
+ * A guard that returns `chain.proceed(…)` afresh is deliberately not one: that
+ * decides which *requests* the interceptor handles, and there the tail is the
+ * interceptor's purpose rather than its recovery.
+ */
+function recoveryCandidate(fn: KNode, owner: string): RecoveryCandidate | null {
+	const list = kids(fn).find((child) => child.type === 'function_value_parameters');
+	const params = kids(list).filter((child) => child.type === 'parameter');
+	if (params.length !== 1) return null;
+	const chain = kids(params[0]).find((child) => child.type === 'simple_identifier')?.text;
+	if (chain === undefined) return null;
+	const body = kids(fn).find((child) => child.type === 'function_body');
+	const statements = kids(body).find((child) => child.type === 'statements');
+	if (body === undefined || statements === undefined) return null;
+
+	const answers = new Set<string>();
+	const proceeds = new RegExp(`^${chain}\\s*\\.\\s*proceed\\s*\\(`);
+	const lines = kids(statements);
+	for (const [index, statement] of lines.entries()) {
+		if (statement.type === 'property_declaration') {
+			const parts = kids(statement);
+			const bound = kids(parts.find((part) => part.type === 'variable_declaration'))[0]?.text;
+			const value = parts[parts.length - 1];
+			if (bound !== undefined && value !== undefined && proceeds.test(value.text)) {
+				answers.add(bound);
+			}
+			continue;
+		}
+		const guard = passThrough(statement);
+		if (guard === null || !answers.has(guard.returned)) continue;
+		if (!mentions(guard.condition).includes(guard.returned)) continue;
+		const tail = lines[index + 1];
+		if (tail === undefined) return null;
+		return {
+			body,
+			keep: index + 1,
+			kept: [...params, ...lines.slice(0, index + 1)],
+			tailLine: tail.line,
+			owner
+		};
+	}
+	return null;
+}
+
+/** `if (cond) return x` / `if (cond) { return x }`, no `else`: its parts, or null. */
+function passThrough(node: KNode): { condition: KNode; returned: string } | null {
+	if (node.type !== 'if_expression') return null;
+	if (node.allChildren.some((child) => child.type === 'else')) return null;
+	const parts = kids(node);
+	if (parts.length !== 2 || parts[1].type !== 'control_structure_body') return null;
+	let inner = kids(parts[1]);
+	if (inner.length === 1 && inner[0].type === 'statements') inner = kids(inner[0]);
+	if (inner.length !== 1 || inner[0].type !== 'jump_expression') return null;
+	const jump = inner[0];
+	if (!/^return\s/.test(jump.text)) return null;
+	const value = kids(jump);
+	if (value.length !== 1 || value[0].type !== 'simple_identifier') return null;
+	return { condition: parts[0], returned: value[0].text };
+}
+
+/** Whether a class lists okhttp's `Interceptor` among its supertypes. */
+function implementsInterceptor(node: KNode): boolean {
+	return kids(node).some(
+		(child) =>
+			child.type === 'delegation_specifier' && /^(?:okhttp3\.)?Interceptor$/.test(child.text.trim())
+	);
+}
+
+interface RecoveryCandidate {
+	/** The `function_body`, to recognise when it is reached. */
+	readonly body: KNode;
+	/** How many statements (`kids` of `statements`) are kept: through the guard. */
+	readonly keep: number;
+	/** The parameter and the kept statements: what edges and the scan read. */
+	readonly kept: readonly KNode[];
+	/** The first line of the tail; an obstacle on or after it is the tail's. */
+	readonly tailLine: number;
+	/** The class, as the error names it. */
+	readonly owner: string;
+}
+
+interface RecoveryCut {
+	readonly body: KNode;
+	readonly keep: number;
+	readonly owner: string;
+	/** What the tail was refused for, in `RECOVERY_BOUNDARIES`' plain words. */
+	readonly kinds: readonly string[];
 }
 
 /**
