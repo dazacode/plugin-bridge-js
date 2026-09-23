@@ -931,6 +931,39 @@ describe('a conversion that refuses', () => {
 });
 
 describe('which refusals stop a build', () => {
+	it('does not block on a private helper only the settings screen calls', async () => {
+		// A `private fun` is not the host's to call, so it is a root no longer;
+		// it is reached when a reachable member names it — by a call, or by a
+		// `::name` reference — and here only the never-run screen does.
+		const source = (caller: string) =>
+			kt(
+				'class Demo : Source() {',
+				'    override val baseUrl = "https://example.invalid"',
+				'    override fun setupPreferenceScreen(screen: PreferenceScreen) {',
+				'        checkLogin("a")',
+				'    }',
+				'    private fun checkLogin(email: String) {',
+				'        Thread { println(email) }.start()',
+				'    }',
+				'    override fun popularMangaRequest(page: Int): Request {',
+				`        ${caller}`,
+				'        return GET(baseUrl, headers)',
+				'    }',
+				'}'
+			);
+		const unused = await convertKotlin([{ path: 'Demo.kt', source: source('') }], { parser });
+		expect(unused.refusals.map((one) => one.member)).toEqual(['checkLogin']);
+		expect(unused.blocking).toEqual([]);
+		expect(unused.complete).toBe(true);
+
+		// Called from a member the host runs, it blocks — and so does a
+		// reference to it, which is no call at all.
+		for (const caller of ['checkLogin("b")', 'listOf("b").forEach(::checkLogin)']) {
+			const used = await convertKotlin([{ path: 'Demo.kt', source: source(caller) }], { parser });
+			expect(used.blocking.map((one) => one.member)).toEqual(['checkLogin']);
+		}
+	});
+
 	it('does not block on a member the host draws itself', async () => {
 		// A converted bundle declares no settings, so nothing ever calls
 		// `setupPreferenceScreen` — the same line `themes/convert.ts` draws.

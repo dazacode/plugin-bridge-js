@@ -239,6 +239,7 @@ export async function convertKotlin(
 	const perFile: FileConversion[] = [];
 	const graph: MemberEdges[] = [];
 	const entryMembers = new Set<string>();
+	const privateEntry = new Set<string>();
 	const refusals: Refusal[] = [];
 	const translated: string[] = [];
 	const deferred: Refusal[] = [];
@@ -361,8 +362,21 @@ export async function convertKotlin(
 			// pruned one there would be the extension's own behaviour going
 			// missing.
 			// Except a member no driver runs: see `NEVER_INVOKED_MEMBERS`.
+			//
+			// And except a `private fun`, which is not the host's to call: only the
+			// class itself can, so it is reached exactly when a reachable member
+			// mentions it — by a call, or by a `::name` reference, which `reach`
+			// follows for these. The one caller that is left out is the settings
+			// screen: a private `checkLogin` that starts a `Thread` and shows a
+			// `Toast`, called only from a preference-change listener, refused a
+			// listing whose every reachable member translated.
 			for (const edges of emission.graph) {
-				if (!NEVER_INVOKED_MEMBERS.has(edges.member)) entryMembers.add(edges.member);
+				if (NEVER_INVOKED_MEMBERS.has(edges.member)) continue;
+				if (privateFunctionIn(file.source, edges.member)) {
+					privateEntry.add(edges.member);
+					continue;
+				}
+				entryMembers.add(edges.member);
 			}
 			if (emission.className !== null) entryMembers.add(emission.className);
 		}
@@ -374,7 +388,7 @@ export async function convertKotlin(
 	}
 
 	const abiMembers = translated.filter((member) => ABI_MEMBERS.has(member));
-	const reachable = reach(graph, entryMembers);
+	const reachable = reach(graph, entryMembers, privateEntry);
 	// Reachability is the whole filter. An earlier version also required a
 	// refusal to name an `ABI_MEMBERS` member *or* to come from outside the
 	// entry file, and the second clause silently exempted every private helper
@@ -744,7 +758,23 @@ function importsOf(source: string): string[] {
  * phone, which is a worse failure than the one it replaced — so every
  * uncertainty here resolves towards keeping.
  */
-function reach(graph: readonly MemberEdges[], entryMembers: ReadonlySet<string>): Set<string> {
+/**
+ * Whether `source` declares `name` as a `private fun` — an extension function
+ * (`private fun Element.name(`) and a generic one included. Read off the text,
+ * like the rest of this file's edges, and conservative in the same direction:
+ * a declaration it does not recognise stays a root.
+ */
+function privateFunctionIn(source: string, name: string): boolean {
+	return new RegExp(
+		`\\bprivate\\s+(?:(?:suspend|inline|tailrec|infix|operator)\\s+)*fun\\s+(?:<[^>]*>\\s*)?(?:[\\w.<>?, ]+\\.)?${name}\\s*\\(`
+	).test(source);
+}
+
+function reach(
+	graph: readonly MemberEdges[],
+	entryMembers: ReadonlySet<string>,
+	privateEntry: ReadonlySet<string> = new Set()
+): Set<string> {
 	const byName = new Map<string, MemberEdges[]>();
 	const byOwner = new Map<string, MemberEdges[]>();
 	for (const edges of graph) {
@@ -780,7 +810,9 @@ function reach(graph: readonly MemberEdges[], entryMembers: ReadonlySet<string>)
 				if (!reached.has(call.member)) pending.push(call.member);
 			}
 			for (const reference of edges.references) {
-				if (fileScope.has(reference) && !reached.has(reference)) pending.push(reference);
+				if ((fileScope.has(reference) || privateEntry.has(reference)) && !reached.has(reference)) {
+					pending.push(reference);
+				}
 			}
 		}
 
