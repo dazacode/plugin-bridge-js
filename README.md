@@ -94,23 +94,22 @@ argument, every time. See [`docs/security.md`](docs/security.md) for why.
 ## Status
 
 **v0.5.1 runs 1,123 of 1,652 Kotlin extensions from two whole published
-repositories — up from 1,050 in v0.5.0 and 902 before it — and 772 of them
-drive their code through browse, list and read, up from 691 and 474.** Every
-one of those gains came from fixing a _semantic_ once, not from patching a
-source.
+repositories, where v0.1.0 ran 62, and 772 of them drive their code through
+browse, list and read, where v0.1.0 drove 56.** Every one of those gains came
+from fixing a _semantic_ once, not from patching a source.
 
-|                                | v0.1.0   | before v0.5.0 | **v0.5.1**      | change since v0.1.0 |
-| ------------------------------ | -------- | ------------- | --------------- | ------------------- |
-| Mihon manga, loaded (of 1,396) | — ¹      | 828           | **993 (71%)**   | **+993**            |
-| Mihon manga, all three stages  | — ¹      | 412           | **657 (47%)**   | **+657**            |
-| Aniyomi anime, loaded (of 256) | 62 (24%) | 74            | **130 (51%)**   | **+68**             |
-| Aniyomi anime, all three       | 56 (22%) | 62            | **115 (45%)**   | **+59**             |
-| **Combined, loaded**           | 62 (4%)  | 902           | **1,123 (68%)** | **+1,061**          |
-| **Combined, all three stages** | 56 (3%)  | 474           | **772 (47%)**   | **+716**            |
+|                                | v0.1.0   | **v0.5.1**      | change since v0.1.0 |
+| ------------------------------ | -------- | --------------- | ------------------- |
+| Mihon manga, loaded (of 1,396) | — ¹      | **993 (71%)**   | **+993**            |
+| Mihon manga, all three stages  | — ¹      | **657 (47%)**   | **+657**            |
+| Aniyomi anime, loaded (of 256) | 62 (24%) | **130 (51%)**   | **+68**             |
+| Aniyomi anime, all three       | 56 (22%) | **115 (45%)**   | **+59**             |
+| **Combined, loaded**           | 62 (4%)  | **1,123 (68%)** | **+1,061**          |
+| **Combined, all three stages** | 56 (3%)  | **772 (47%)**   | **+716**            |
 
 ¹ v0.1.0 (2026-09-11) could not run a manga source at all; chapters and pages
 arrived with API level 2. Its anime figures were measured on 2026-09-23 over
-the same index, with the same harness, as the other two columns. v0.1.0
+the same index, with the same harness, as the v0.5.1 column. v0.1.0
 shipped the day after Phase 1 concluded that translation had
 [reached diminishing returns](docs/measurements.md#why-diminishing-returns-was-wrong).
 The v0.5.1 column is what happened once the measurement changed shape.
