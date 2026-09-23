@@ -31,14 +31,21 @@ Measured over two whole published indexes of the Kotlin extension family,
 translated from source: a Mihon-family manga repository and an Aniyomi-family
 anime repository. Counts are of distinct listings, on the merged commit.
 
-|                          | before v0.5.0 | **v0.5.1**      | change   |
-| ------------------------ | ------------- | --------------- | -------- |
-| manga, loaded (of 1,396) | 828           | **993 (71%)**   | **+165** |
-| manga, all three stages  | 412           | **657 (47%)**   | **+245** |
-| anime, loaded (of 256)   | 74            | **130 (51%)**   | **+56**  |
-| anime, all three stages  | 62            | **115 (45%)**   | **+53**  |
-| **combined, loaded**     | 902 of 1,652  | **1,123 (68%)** | **+221** |
-| **combined, all three**  | 474           | **772 (47%)**   | **+298** |
+|                          | v0.1.0   | before v0.5.0 | **v0.5.1**      | change since v0.1.0 |
+| ------------------------ | -------- | ------------- | --------------- | ------------------- |
+| manga, loaded (of 1,396) | — ¹      | 828           | **993 (71%)**   | **+993**            |
+| manga, all three stages  | — ¹      | 412           | **657 (47%)**   | **+657**            |
+| anime, loaded (of 256)   | 62 (24%) | 74            | **130 (51%)**   | **+68**             |
+| anime, all three stages  | 56 (22%) | 62            | **115 (45%)**   | **+59**             |
+| **combined, loaded**     | 62 (4%)  | 902 of 1,652  | **1,123 (68%)** | **+1,061**          |
+| **combined, all three**  | 56 (3%)  | 474           | **772 (47%)**   | **+716**            |
+
+¹ v0.1.0 (2026-09-11) could not run a manga source at all; chapters and pages
+arrived with API level 2. Its anime figures were measured on 2026-09-23 over
+the same index, with the same harness, as the other two columns. v0.1.0
+shipped the day after Phase 1 concluded that translation had
+[reached diminishing returns](#why-diminishing-returns-was-wrong).
+The v0.5.1 column is what happened once the measurement changed shape.
 
 v0.5.1 continues the v0.5.0 pass over the same two catalogues, with the same
 method; the v0.5.0 section below is kept as it was measured.
@@ -195,6 +202,7 @@ was overturned and the way it was overturned is the lesson.
 | 2026-09-19 | a second JavaScript ecosystem, measured as a no            | 16 of 101 verified playable, about 2 relevant — see [`compatibility.md`](compatibility.md)    |
 | 2026-09-22 | v0.5.0: two whole Kotlin-family indexes                    | 1,050 of 1,652 load (+148), 691 reach all three stages (+217); Madara chapters 0 → 164 of 176 |
 | 2026-09-23 | v0.5.1: the same two indexes                               | 1,123 load (+73, net of 7 refused on purpose), 772 reach all three stages (+81)               |
+| 2026-09-23 | v0.1.0 re-measured over the v0.5.1 anime index             | 62 of 256 load, 56 reach all three stages; no manga support, so 0 of 1,396                    |
 
 ### Why "diminishing returns" was wrong
 
