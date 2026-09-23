@@ -2474,6 +2474,10 @@ export const KNOWN_SIGNATURES: ReadonlyMap<string, readonly string[]> = new Map(
 	// were refused on that alone — and the order is the data class's own.
 	['SMangaUpdate', ['manga', 'chapters']],
 
+	// `Filter.Sort.Selection(index, ascending)`, the state of a Sort filter,
+	// which HeanCms-style sources build as `Selection(1, ascending = false)`.
+	['Selection', ['index', 'ascending']],
+
 	// **`getMangaUpdate(manga, chapters, fetchDetails = …, fetchChapters = …)`**,
 	// the base class's `final` entry point, which an extension calls on itself
 	// to reuse its own `fetchMangaUpdate` for a detail read — always with the

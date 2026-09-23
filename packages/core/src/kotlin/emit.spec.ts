@@ -5884,3 +5884,21 @@ describe('jsoup beyond select and read', () => {
 		);
 	});
 });
+
+describe('a Sort filter’s Selection, however it is spelled', () => {
+	it('builds the qualified and the named forms with the bare form’s helper', () => {
+		const { js, refusals } = translate(
+			inClass(
+				'    fun a() = Filter.Sort.Selection(3, false)',
+				'    fun b() = Filter.Sort.Selection(1, ascending = true)',
+				'    fun c() = Selection(2, ascending = false)',
+				'    fun d() = AnimeFilter.Sort.Selection(ascending = true, index = 4)'
+			)
+		);
+		expect(refusals).toEqual([]);
+		expect(js).toContain('__k.selection(3, false)');
+		expect(js).toContain('__k.selection(1, true)');
+		expect(js).toContain('__k.selection(2, false)');
+		expect(js).toContain('__k.selection(4, true)');
+	});
+});

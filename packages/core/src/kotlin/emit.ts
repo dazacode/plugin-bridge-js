@@ -393,6 +393,9 @@ const RECEIVER_BUILDERS: ReadonlySet<string> = new Set([
 /** `java.net.URLEncoder`, and the other packages written out in full. */
 const QUALIFIED_GLOBAL = /^(?:java|javax|kotlin|android)\.[\w.]*?\.?(\w+)$/;
 
+/** `Filter.Sort.Selection` and the video fork's `AnimeFilter.Sort.Selection`. */
+const SORT_SELECTION = /^(?:Anime)?Filter\.Sort\.Selection$/;
+
 /**
  * `Injekt.get<T>()`, whitespace already squeezed out of the text.
  *
@@ -7023,6 +7026,23 @@ class Emitter {
 
 		const { callee, args, lambda, labelled, typeArgument } = this.flatten(node);
 		const expected = typeArgument === null ? this.expectedOf(node) : null;
+		// `Filter.Sort.Selection(1, false)` — the qualified spelling of the
+		// `Selection(…)` the runtime already answers bare. Read as a method
+		// call it was a member `Selection` of the value `Filter.Sort`, which is
+		// no member anything defines, so it was refused; it is one constructor
+		// written two ways, and both now reach the same helper with the same
+		// named-argument signature.
+		if (
+			callee.type === 'navigation_expression' &&
+			SORT_SELECTION.test(callee.text.replace(/\s+/g, '')) &&
+			!this.moduleNames.has('Filter') &&
+			!this.moduleNames.has('AnimeFilter') &&
+			!this.declaredTypes.has('Selection')
+		) {
+			if (lambda !== null) this.refuse(lambda, 'a lambda passed to `Selection`');
+			const tail = this.callArguments('Selection', args, null, labelled, false);
+			return `${this.helper('selection')}(${tail.join(', ')})`;
+		}
 		if (callee.type === 'navigation_expression') {
 			return this.methodCall(callee, args, lambda, labelled, typeArgument, expected);
 		}
