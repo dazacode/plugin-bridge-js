@@ -370,6 +370,48 @@ object Filters {
 		expect(tree.hasError).toBe(false);
 	});
 
+	it('ends a statement before a line that begins with `(`', async () => {
+		// Kotlin allows no newline in front of an argument list, so the second
+		// line is a statement of its own. The pinned grammar read it as the
+		// first line's value *called* with the second line's parenthesis —
+		// `y(a + b).let { … }` — with no error to say so.
+		const parse = await loadKotlinGrammar(vendorWasm);
+		const tree = parse(`
+class Demo {
+    fun go(a: Int, b: Int) {
+        x = y
+        (a + b).let { println(it) }
+    }
+}
+`);
+
+		expect(tree.hasError).toBe(false);
+		const statements = firstOfType(tree.root, 'statements');
+		expect(statements?.children.map((child) => child.type)).toEqual([
+			'assignment',
+			'call_expression'
+		]);
+		expect(statements?.children[0]?.text).toBe('x = y');
+	});
+
+	it('leaves a line-initial `(` inside parentheses as the call Kotlin reads', async () => {
+		// Inside an argument list Kotlin ignores the newline, so `a` newline
+		// `(b)` really is `a(b)` there — and splitting it would change the call.
+		const parse = await loadKotlinGrammar(vendorWasm);
+		const tree = parse(`
+class Demo {
+    fun go() = listOf(
+        wrap
+        (1)
+    )
+}
+`);
+
+		expect(tree.hasError).toBe(false);
+		const args = firstOfType(tree.root, 'value_argument');
+		expect(args?.text.replace(/\s+/g, '')).toBe('wrap(1)');
+	});
+
 	it('reports an error for source that is genuinely broken', async () => {
 		const parse = await loadKotlinGrammar(vendorWasm);
 		// The check has to be able to fail. An error-tolerant parser that never

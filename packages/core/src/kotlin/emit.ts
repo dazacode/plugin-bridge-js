@@ -5421,6 +5421,19 @@ class Emitter {
 		const letGuarded = letGuard(node);
 		if (letGuarded !== null) return this.hoistedGuard(node, letGuarded);
 
+		// `formatter()(key)` — a call whose value is itself called. Kotlin's
+		// function types are JavaScript functions here (a lambda is an arrow, a
+		// `::ref` is an arrow), so invoking the result is invoking it: the inner
+		// call is emitted exactly as it would be on its own and the outer list
+		// is applied to what it answered. A function type takes no named
+		// arguments in Kotlin, so the list is positional by construction.
+		//
+		// Not reached for a statement that begins with `(` under a line ending
+		// in a call — that is two statements, and `grammar.ts` splits them
+		// before the tree gets here; see `lineInitialCalls`.
+		const invoked = this.invokedResult(node);
+		if (invoked !== null) return invoked;
+
 		const { callee, args, lambda, labelled, typeArgument } = this.flatten(node);
 		if (callee.type === 'navigation_expression') {
 			return this.methodCall(callee, args, lambda, labelled, typeArgument);
@@ -5435,6 +5448,29 @@ class Emitter {
 		// `(f)(x)` and `map[k](x)`: a call through something with no name, whose
 		// signature is not knowable from here.
 		this.refuse(callee, `a call through ${spoken(callee)}`);
+	}
+
+	/** `f(a)(b)`, as the value of `f(a)` called with `b` — or null for any other call. */
+	private invokedResult(node: KNode): string | null {
+		const inner = kids(node)[0];
+		const suffix = kids(node)[1];
+		if (inner?.type !== 'call_expression' || suffix === undefined) return null;
+		const values = kids(suffix).find((child) => child.type === 'value_arguments');
+		if (values === undefined) return null;
+		// Only when the callee is a call that already has its own argument list.
+		// `f { … }(x)` and `f<T>(x)` are not this shape.
+		const own = kids(inner)[1];
+		if (own === undefined || !kids(own).some((child) => child.type === 'value_arguments')) {
+			return null;
+		}
+		if (kids(suffix).some((child) => child.type !== 'value_arguments')) {
+			this.refuse(suffix, 'a call returning a callable, given a lambda or type arguments');
+		}
+		const args = kids(values).filter((child) => child.type === 'value_argument');
+		if (args.some((arg) => this.argumentName(arg) !== null)) {
+			this.refuse(suffix, 'a named argument to a callable a call returned');
+		}
+		return `(${this.expr(inner)})(${args.flatMap((arg) => this.argumentExpressions(arg)).join(', ')})`;
 	}
 
 	/**

@@ -4604,6 +4604,37 @@ describe('control flow written in the middle of an expression', () => {
 		expect(demo.evens(7)).toEqual([0, 2, 4, 6]);
 	});
 
+	it('calls the function a call returned', () => {
+		const demo = instantiate(
+			inClass(
+				'    private fun formatter(loud: Boolean): (String) -> String =',
+				'        if (loud) { s -> s.uppercase() } else { s -> s }',
+				'    fun title(key: String) = formatter(true)(key)'
+			)
+		);
+
+		expect(demo.title('ab')).toBe('AB');
+	});
+
+	it('reads a line that begins with `(` as its own statement, as Kotlin does', () => {
+		// Read as one statement, the line above was *called* with this line's
+		// parenthesis: `seen = last(if …)`, the wrong program with nothing
+		// refused.
+		const demo = instantiate(
+			inClass(
+				'    fun walk(items: List<Int>, last: Int): List<Int> {',
+				'        val out = mutableListOf<Int>()',
+				'        var seen = last',
+				'        (if (items.isEmpty()) listOf(seen) else items).forEach { out.add(it) }',
+				'        return out',
+				'    }'
+			)
+		);
+
+		expect(demo.walk([], 7)).toEqual([7]);
+		expect(demo.walk([1, 2], 7)).toEqual([1, 2]);
+	});
+
 	it('reads an infix `matches` with the Regex on either side', () => {
 		const demo = instantiate(
 			inClass(
