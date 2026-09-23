@@ -833,6 +833,9 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 	['parallelForEachBlocking', 'forEach'],
 	['parallelCatchingMap', 'catchingMap'],
 	['parallelCatchingMapBlocking', 'catchingMap'],
+	// The NotNull variant also drops nulls; catchingMap already skips failed
+	// transforms and null results. Only its parallelism is lost in the sandbox.
+	['parallelCatchingMapNotNull', 'catchingMap'],
 	['parallelCatchingFlatMap', 'catchingFlatMap'],
 	['parallelCatchingFlatMapBlocking', 'catchingFlatMap'],
 	// The same three functions again without the `parallel` prefix. The
@@ -1895,6 +1898,7 @@ export const GLOBAL_NAMES: ReadonlySet<string> = new Set([
 	'RegexOption',
 	'Observable',
 	'UpdateStrategy',
+	'AnimeUpdateStrategy',
 	'SMangaUpdate',
 	'SimpleDateFormat',
 	'DateTimeFormatter',

@@ -717,6 +717,8 @@ export const RUNTIME_GLOBALS = [
 	/* RxJava's one type, as this ecosystem uses it. */
 	'Observable',
 	'UpdateStrategy',
+	/* Aniyomi's spelling of the same library-refresh hint. */
+	'AnimeUpdateStrategy',
 	'SMangaUpdate',
 	'SimpleDateFormat',
 	/* The `java.time` formatter the same helpers are called on —

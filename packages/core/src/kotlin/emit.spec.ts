@@ -4692,6 +4692,19 @@ describe('the shared playlist module’s signatures', () => {
 		expect(emitted.js).toContain('this.max(4)');
 	});
 
+	it('uses the catching map and Aniyomi update hint', () => {
+		const emitted = translate(
+			inClass(
+				'    suspend fun lengths(xs: List<String>): List<Int> = xs.parallelCatchingMapNotNull { it.length }',
+				'    fun hint() = AnimeUpdateStrategy.ONLY_FETCH_ONCE'
+			)
+		);
+
+		expect(emitted.refusals).toEqual([]);
+		expect(emitted.js).toContain('__k.catchingMap(xs,');
+		expect(emitted.js).toContain('AnimeUpdateStrategy.ONLY_FETCH_ONCE');
+	});
+
 	it('calls an object’s own member over the runtime function of that name', () => {
 		const shown = evaluate(
 			kt(

@@ -10531,6 +10531,9 @@ var UpdateStrategy = {
   ONLY_FETCH_ONCE: 'ONLY_FETCH_ONCE'
 };
 
+/** Aniyomi writes the same two library-refresh hints on SAnime. */
+var AnimeUpdateStrategy = UpdateStrategy;
+
 /**
  * Details and chapters together, from one request.
  *

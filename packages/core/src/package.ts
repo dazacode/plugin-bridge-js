@@ -152,8 +152,12 @@ const ENTRYPOINT = 'source';
  *     with the extension. They previously remained undeclared and were
  *     refused. This widens the converted bundle, so existing installations
  *     need another conversion to include those helpers.
+ *
+ * 51: the video libraries' update hint and catching map variant now use the
+ *     existing runtime equivalents. Extensions that called those names were
+ *     refused before, so reconversion is needed to pick up the widened subset.
  */
-export const CONVERTER_VERSION = 50;
+export const CONVERTER_VERSION = 51;
 
 export interface BundleInput {
 	readonly id: string;
