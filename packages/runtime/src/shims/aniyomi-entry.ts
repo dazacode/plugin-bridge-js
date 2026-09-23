@@ -90,6 +90,7 @@ import { JS_RUNTIME } from './js-runtime';
 import { kotlinRuntime } from './kotlin-runtime';
 import { STREAM_GUARDS } from './stream-guards';
 import { synchronyPrelude } from './synchrony';
+import { measurementPrelude } from './measurement';
 
 export interface AniyomiEntrypointOptions {
 	/** Must equal the manifest id, or the sandbox refuses to load the bundle. */
@@ -988,6 +989,7 @@ ${settingIds}
 ${kotlinRuntime()}
 ${constants}
 ${synchronyPrelude(options.synchronyScript)}
+${measurementPrelude()}
 
 /* --- the translated extension ---------------------------------------------- */
 

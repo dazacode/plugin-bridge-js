@@ -130,6 +130,7 @@ import {
 	type Refusal,
 	type Untranslatable
 } from './subset';
+import { granted } from './grants';
 import { HOST_BACKED_HELPERS, type RuntimeHelper } from './runtime-api';
 
 /**
@@ -1721,6 +1722,8 @@ class Emitter {
 	private extensionSetters = new Set<string>();
 	/** What the settings store is called in the class being emitted. */
 	private preferenceStores = new Set<string>(['preferences']);
+	/** What a measurement grant set aside instead of refusing; see `grants.ts`. */
+	private setAside: Untranslatable[] = [];
 	/** Members translated with a boundary-reaching tail cut off; see `recoveryCut`. */
 	private readonly deferred: Refusal[] = [];
 	/**
@@ -4061,7 +4064,12 @@ class Emitter {
 
 		// The node alone when there is no cut, as before it: a setter written
 		// beside its property is scanned where it is emitted, not here.
-		const obstacles = (scope ?? [node]).flatMap((one) => scanObstacles(one, name));
+		const scanned = (scope ?? [node]).flatMap((one) => scanObstacles(one, name));
+		// Under a measurement grant, what the grant covers is set aside rather
+		// than refused, and remembered, so `memberWithRecovery` decides exactly
+		// as it would have without the grant (`grants.ts`).
+		this.setAside.push(...scanned.filter((one) => granted(one.kind)));
+		const obstacles = scanned.filter((one) => !granted(one.kind));
 		if (obstacles.length > 0) {
 			this.refusals.push({ member: name, obstacles });
 			this.memberName = previousName;
@@ -4152,16 +4160,21 @@ class Emitter {
 		run: () => string
 	): string | null {
 		const refusalsBefore = this.refusals.length;
+		const setAsideBefore = this.setAside.length;
 		const graphAt = this.graph.length;
 		const first = this.member(name, node, run);
 		if (first !== null || candidate === null) return first;
 
 		const refusal = this.refusals[this.refusals.length - 1];
 		if (this.refusals.length !== refusalsBefore + 1 || refusal.member !== name) return null;
-		const late = refusal.obstacles.every((one) => one.line >= candidate.tailLine);
+		// Read with whatever a measurement grant set aside on the first attempt
+		// put back, so a grant never turns a cut member into a refused one: the
+		// boundary it covers is still what the tail was for.
+		const considered = [...refusal.obstacles, ...this.setAside.slice(setAsideBefore)];
+		const late = considered.every((one) => one.line >= candidate.tailLine);
 		const kinds = [
 			...new Set(
-				refusal.obstacles
+				considered
 					.map((one) => RECOVERY_BOUNDARIES.get(one.kind))
 					.filter((one): one is string => one !== undefined)
 			)
@@ -4194,6 +4207,9 @@ class Emitter {
 	}
 
 	private declineMember(name: string, node: KNode, kind: string): null {
+		// Under a measurement grant the member is left out rather than refused,
+		// and reaching for it throws naming the grant (`grants.ts`).
+		if (granted(kind)) return null;
 		// Named the way its author would recognise it wherever there is a name;
 		// a bare grammar kind in a message helps nobody read their own source.
 		const spoken = OUT_OF_SCOPE_KINDS.get(kind) ?? kind;
@@ -11773,6 +11789,13 @@ class Emitter {
 	}
 
 	private refuse(node: KNode, kind: string): never {
+		// Under a measurement grant the construct becomes a call that throws
+		// naming the boundary, so the rest of the member translates and the
+		// bundle can be counted — and cannot pass for one that works.
+		if (granted(kind)) {
+			this.setAside.push({ kind, line: node.line, memberName: this.memberName });
+			return `__grantedBoundary(${JSON.stringify(kind)})` as never;
+		}
 		this.pending.push({ kind, line: node.line, memberName: this.memberName });
 		throw new Refused(kind);
 	}

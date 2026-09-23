@@ -49,6 +49,7 @@ import { JS_RUNTIME } from './js-runtime';
 import { kotlinRuntime } from './kotlin-runtime';
 import { STREAM_GUARDS } from './stream-guards';
 import { synchronyPrelude } from './synchrony';
+import { measurementPrelude } from './measurement';
 
 export interface MihonEntrypointOptions {
 	/** Must equal the manifest id, or the sandbox refuses to load the bundle. */
@@ -736,6 +737,7 @@ ${resources}
 ${kotlinRuntime()}
 ${constants}
 ${synchronyPrelude(options.synchronyScript)}
+${measurementPrelude()}
 ${MIHON_BASE}
 
 /* --- the translated extension ---------------------------------------------- */

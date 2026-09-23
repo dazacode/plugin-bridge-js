@@ -25,6 +25,7 @@
 
 import type { ForeignOrigin } from './formats';
 import { parseSettingDescriptors, type SettingDescriptor } from '@plugin-bridge/core/settings';
+import { measurementGrants } from './kotlin/grants';
 
 /** Kept well below `zip.ts`'s own caps, which apply when this is read back. */
 const MAX_ENTRYPOINT_BYTES = 4 * 1024 * 1024;
@@ -428,6 +429,18 @@ export async function packageBundle(input: BundleInput): Promise<Uint8Array> {
 			'licenses/UPSTREAM.txt',
 			encoder.encode(`${licenseText}
 `)
+		);
+	}
+
+	// Built with a boundary set aside, to count what the boundary costs
+	// (`kotlin/grants.ts`). Said inside the archive, where the integrity check
+	// covers it, and `openPluginArchive` will not open it outside a process
+	// that is measuring too.
+	const grants = measurementGrants();
+	if (grants.length > 0) {
+		files.set(
+			'measurement.json',
+			encoder.encode(`${JSON.stringify({ measurementGrants: grants }, null, 2)}\n`)
 		);
 	}
 
