@@ -101,6 +101,26 @@ describe('readMihonBuildFile', () => {
 			});
 		});
 
+		it('reads a labelled mirror list as its URLs', () => {
+			// `"Label" to "https://…"` names each mirror for the picker; read as
+			// plain literals the first label became the base URL.
+			const file = readMihonBuildFile(
+				buildFile(`    source {
+        lang = "ru"
+        baseUrl {
+            mirrors(
+                "Первый" to "https://example.invalid",
+                "Second" to "https://mirror.example.invalid",
+            )
+        }
+    }`)
+			);
+			expect(file.sources[0].baseUrl).toEqual({
+				kind: 'mirrors',
+				urls: ['https://example.invalid', 'https://mirror.example.invalid']
+			});
+		});
+
 		it('reads a viewer-supplied URL, and says when there is no default', () => {
 			const file = readMihonBuildFile(
 				buildFile(`    source {
