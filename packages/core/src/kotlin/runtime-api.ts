@@ -476,6 +476,8 @@ export const RUNTIME_HELPERS = [
 	   page through and report a source with nothing on it. */
 	'require',
 	'requireNotNull',
+	'check',
+	'checkNotNull',
 
 	/* `Int.toChar()` and `Char(code)`: the character AT that code, where
 	   `String(n)` would answer the digits of the number. */

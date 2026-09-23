@@ -1572,6 +1572,10 @@ export const FREE_FUNCTIONS: ReadonlyMap<string, string> = new Map([
 	// `require(x) { "…" }` and `requireNotNull(x) { "…" }`, which throw
 	['require', 'require'],
 	['requireNotNull', 'requireNotNull'],
+	// …and their `check` siblings, which throw the same way for a state the
+	// extension did not expect rather than an argument it was handed.
+	['check', 'check'],
+	['checkNotNull', 'checkNotNull'],
 
 	// The BARE `repeat(n) { … }`, which is a loop. `String.repeat` is the other
 	// function of that name and it is in `EXTENSION_METHODS`; a bare call and a

@@ -1186,6 +1186,10 @@ class Emitter {
 	private readonly scopes: Map<string, Local>[] = [];
 	private readonly frames: Frame[] = [];
 	private temporaries = 0;
+	/** The backing field `field` means in the accessor being emitted, if any. */
+	private backing: string | null = null;
+	/** Whether a property accessor is being emitted, where `field` is a keyword. */
+	private inAccessor = false;
 	/** Bumped per local renamed apart from a name it shadows; see `freshLocal`. */
 	private shadows = 0;
 	/** What an unlabelled `break` here would land on; see `loopBody`. */
@@ -2173,11 +2177,13 @@ class Emitter {
 					// A getter written on its own line — `override val baseUrl:
 					// String` then `get() = "…"` — is a *sibling* of the property
 					// here, not a child of it. Reading them apart refuses both.
-					const next = members[index + 1];
-					const detached =
-						next !== undefined && (next.type === 'getter' || next.type === 'setter')
-							? next
-							: undefined;
+					// Both of them, where there are both: `var x: T` then `get() = …`
+					// then `set(v) = …` are three siblings.
+					const detached: KNode[] = [];
+					for (const next of members.slice(index + 1, index + 3)) {
+						if (next.type !== 'getter' && next.type !== 'setter') break;
+						detached.push(next);
+					}
 					this.pushScope();
 					let emitted;
 					try {
@@ -2189,6 +2195,7 @@ class Emitter {
 					if (emitted === null) break;
 					if (emitted.kind === 'assign') ctorLines.push(emitted.text);
 					else memberLines.push(emitted.text);
+					if (emitted.ctor !== undefined) ctorLines.push(emitted.ctor);
 					break;
 				}
 				case 'getter':
@@ -2902,15 +2909,26 @@ class Emitter {
 		return run();
 	}
 
-	private member(name: string, node: KNode, run: () => string): string | null {
+	private member(
+		name: string,
+		node: KNode,
+		run: () => string,
+		/**
+		 * A property's accessors when they are its siblings rather than its
+		 * children — see `classProperty`. What a setter calls is as much the
+		 * property's edge as what its initialiser does, and an edge left out
+		 * lets reachability prune a refusal the setter still calls into.
+		 */
+		accessors: readonly KNode[] = []
+	): string | null {
 		// Recorded before anything is attempted, so a refused member still has
 		// edges — a member reachable only from one has to stay reachable.
 		this.graph.push({
 			member: name,
 			owner: this.owner,
 			construction: node.type === 'property_declaration',
-			references: mentions(node),
-			calls: callEdges(node)
+			references: [...new Set([node, ...accessors].flatMap((one) => mentions(one)))],
+			calls: [node, ...accessors].flatMap((one) => callEdges(one))
 		});
 
 		const previousName = this.memberName;
@@ -2979,8 +2997,8 @@ class Emitter {
 
 	private classProperty(
 		node: KNode,
-		detached?: KNode
-	): { kind: 'assign' | 'member'; text: string } | null {
+		detached: readonly KNode[] = []
+	): { kind: 'assign' | 'member'; text: string; ctor?: string } | null {
 		const name = this.propertyName(node);
 		if (name === null) return this.declineMember('val', node, 'an unnamed property');
 
@@ -2992,10 +3010,10 @@ class Emitter {
 		if (this.hasModifier(node, 'abstract')) return null;
 
 		const delegate = kids(node).find((child) => child.type === 'property_delegate');
-		const getter = accessorOf(node, detached, 'getter');
-		const setter = accessorOf(node, detached, 'setter');
-
-		if (setter !== undefined) return this.declineMember(name, setter, 'a custom property setter');
+		const getter =
+			accessorOf(node, undefined, 'getter') ?? detached.find((one) => one.type === 'getter');
+		const setter =
+			accessorOf(node, undefined, 'setter') ?? detached.find((one) => one.type === 'setter');
 
 		// `private lateinit var filterList: AnimeFilterList` — declared here,
 		// assigned before anything reads it. There is no value to emit, and in
@@ -3021,14 +3039,27 @@ class Emitter {
 			return text === null ? null : { kind: 'member', text };
 		}
 
+		const mutableProperty = kids(node).some(
+			(child) => child.type === 'binding_pattern_kind' && child.text === 'var'
+		);
+		const backed = this.backedAccessors(node, getter, setter, mutableProperty);
+		if (backed !== undefined) return backed;
+
 		if (getter !== undefined) {
-			const text = this.member(name, node, () => {
-				const body = kids(getter).find((child) => child.type === 'function_body');
-				if (body === undefined) this.refuse(getter, 'a getter with no body');
-				const emitted = this.functionScope('function', null, [], () => this.functionBody(body));
-				if (emitted.isAsync) this.refuse(getter, 'a suspending getter');
-				return this.overridable(name, `get ${name}() ${emitted.text}`);
-			});
+			const text = this.member(
+				name,
+				node,
+				() => {
+					const body = kids(getter).find((child) => child.type === 'function_body');
+					if (body === undefined) this.refuse(getter, 'a getter with no body');
+					const emitted = this.accessorScope(null, () =>
+						this.functionScope('function', null, [], () => this.functionBody(body))
+					);
+					if (emitted.isAsync) this.refuse(getter, 'a suspending getter');
+					return this.overridable(name, `get ${name}() ${emitted.text}`);
+				},
+				[getter]
+			);
 			return text === null ? null : { kind: 'member', text };
 		}
 
@@ -3078,6 +3109,112 @@ class Emitter {
 				: `this.${name} = ${value};`;
 		});
 		return text === null ? null : { kind: deferred ? 'member' : 'assign', text };
+	}
+
+	/**
+	 * A property whose accessors need a backing field, or that has a setter.
+	 *
+	 * `var buildId = "" get() { if (field == "") field = fetch(); return field }`
+	 * is how this ecosystem memoises, and `var fontSize: Int get() = … set(v)
+	 * = prefs.put(v)` how it stores a setting. Kotlin gives the first a
+	 * backing field because an accessor names `field`, and any property whose
+	 * getter or setter is left at its default has one too. The field is a
+	 * plain property of the instance here, `__field_<name>`, assigned its
+	 * initial value in the constructor where Kotlin assigns it, and `field`
+	 * inside either accessor reads and writes it.
+	 *
+	 * Answers `undefined` for a property this is not — a getter alone that
+	 * never names `field`, which keeps the overridable shape above — so the
+	 * caller carries on. An accessor with no body (`private set`) is the
+	 * default one with a narrower visibility, and is emitted as the default.
+	 */
+	private backedAccessors(
+		node: KNode,
+		getter: KNode | undefined,
+		setter: KNode | undefined,
+		mutable: boolean
+	): { kind: 'member'; text: string; ctor?: string } | null | undefined {
+		const usesField = [getter, setter].some((one) => one !== undefined && namesField(one));
+		if (setter === undefined && !usesField) return undefined;
+		const name = this.propertyName(node);
+		if (name === null) return undefined;
+		const storage = `__field_${plainName(name)}`;
+		const getterBody = kids(getter).find((child) => child.type === 'function_body');
+		const setterBody = kids(setter).find((child) => child.type === 'function_body');
+		// Kotlin's own rule: a default accessor reads or writes the field.
+		const hasField = usesField || getterBody === undefined || (mutable && setterBody === undefined);
+		let ctor: string | undefined;
+		const text = this.member(
+			name,
+			node,
+			() => {
+				const initialiser = kids(node).find((child) => !PROPERTY_PARTS.has(child.type));
+				if (hasField && initialiser !== undefined) {
+					// Assigned in the constructor, and so run before the driver has
+					// attached the base class: an initial value that reads one of its
+					// members cannot be deferred the way a plain `val` is, because the
+					// accessors own the field from the first read.
+					if (this.readsBaseMember(initialiser)) {
+						this.refuse(initialiser, 'a backing field whose initial value reads the base class');
+					}
+					ctor = `this.${storage} = ${this.propertyValue(node, name)};`;
+				}
+				const read = hasField ? storage : null;
+				const get =
+					getterBody === undefined
+						? `get ${name}() ${block([`return this.${storage};`])}`
+						: `get ${name}() ${this.accessorBody(getter ?? node, getterBody, read, [])}`;
+				let set: string;
+				if (setter !== undefined && setterBody !== undefined) {
+					const param = kids(setter).find((child) => child.type === 'parameter_with_optional_type');
+					const value = param === undefined ? 'value' : boundName(param);
+					set = `set ${name}(${this.safe(value)}) ${this.accessorBody(setter, setterBody, read, [value])}`;
+				} else if (mutable) {
+					set = `set ${name}(__v) ${block([`this.${storage} = __v;`])}`;
+				} else {
+					// A `val`: nothing in Kotlin assigns it but an override, which is
+					// what `overridable` is for.
+					return this.overridable(name, get);
+				}
+				return `${get}\n${set}`;
+			},
+			[getter, setter].filter((one): one is KNode => one !== undefined)
+		);
+		if (text === null) return null;
+		return ctor === undefined ? { kind: 'member', text } : { kind: 'member', text, ctor };
+	}
+
+	/** One accessor's body, with `field` meaning the backing field if there is one. */
+	private accessorBody(
+		accessor: KNode,
+		body: KNode,
+		storage: string | null,
+		params: readonly string[]
+	): string {
+		const emitted = this.accessorScope(storage, () =>
+			this.functionScope('function', null, params, () => this.functionBody(body))
+		);
+		if (emitted.isAsync) {
+			this.refuse(
+				accessor,
+				accessor.type === 'setter' ? 'a suspending setter' : 'a suspending getter'
+			);
+		}
+		return emitted.text;
+	}
+
+	/** Runs an accessor's emission with `field` bound to its storage, or to nothing. */
+	private accessorScope<T>(storage: string | null, run: () => T): T {
+		const outerBacking = this.backing;
+		const outerIn = this.inAccessor;
+		this.backing = storage;
+		this.inAccessor = true;
+		try {
+			return run();
+		} finally {
+			this.backing = outerBacking;
+			this.inAccessor = outerIn;
+		}
 	}
 
 	/**
@@ -4643,7 +4780,7 @@ class Emitter {
 		let target: string;
 		if (inner.type === 'simple_identifier') {
 			const local = this.lookup(inner.text);
-			if (inner.text === 'field') this.refuse(inner, 'a `field` backing reference');
+			const backing = local === null ? this.fieldReference(inner.text, inner) : null;
 			// Writes inside `apply {}` go to the receiver: that is the idiom, and
 			// Kotlin agrees — an inner lambda's implicit receiver outranks an
 			// outer function's parameter. The emitter cannot ask whether the
@@ -4657,7 +4794,12 @@ class Emitter {
 			// title = this@Dto.title }` writes the *parameter* instead, and the
 			// show installs, searches and lists with no title.
 			const receiver = this.receiverAlias();
-			if (local !== null && (receiver === null || this.lookupLocal(inner.text)?.mutable === true)) {
+			if (backing !== null) {
+				target = backing;
+			} else if (
+				local !== null &&
+				(receiver === null || this.lookupLocal(inner.text)?.mutable === true)
+			) {
 				target = local;
 			} else if (receiver !== null) {
 				target = `${receiver}.${inner.text}`;
@@ -5468,6 +5610,22 @@ class Emitter {
 		// and only what the name resolves to tells them apart.
 		const owner = parts[0];
 		const named = owner.type === 'simple_identifier' || owner.type === 'type_identifier';
+		// `sortedByDescending(SChapter::chapter_number)` and
+		// `filter(Genre::state)` — an unbound reference to a property the
+		// *framework* declares: a field of one of the four models, or the
+		// `state` of a filter class that extends the framework's. Nothing in
+		// the file set declares either, so the two branches below cannot see
+		// them; `SChapter` is a runtime global, which the next branch reads as
+		// a bound receiver and refuses. Named rather than inferred, and only
+		// where no translated class in the chain declares the name itself.
+		if (
+			named &&
+			FRAMEWORK_PROPERTIES.has(member.text) &&
+			(MODEL_TYPES.has(owner.text) ||
+				(this.declaredTypes.has(owner.text) && !this.baseDeclares(owner.text, member.text)))
+		) {
+			return `(__recv) => __recv.${member.text}`;
+		}
 		if (named && this.isValueName(owner.text)) {
 			const receiver = this.read(owner.text, owner);
 			const helper = EXTENSION_METHODS.get(member.text);
@@ -6308,7 +6466,13 @@ class Emitter {
 			}
 		}
 
-		const free = FREE_FUNCTIONS.get(name);
+		// A name the source declares for itself — a local, a member, a file-scope
+		// `fun` — outranks the standard library's, as it does in Kotlin: an
+		// extension's own `check(url)` is not `kotlin.check`.
+		const free =
+			this.lookup(name) === null && !this.isSourceMember(name) && !this.moduleNames.has(name)
+				? FREE_FUNCTIONS.get(name)
+				: undefined;
 		if (free !== undefined) {
 			const before = this.asyncLambdas;
 			const tail = this.provenance(
@@ -7769,7 +7933,8 @@ class Emitter {
 				return `${this.safe(holder)}.${fieldName(name)}`;
 			}
 		}
-		if (name === 'field') this.refuse(node, 'a `field` backing reference');
+		const backing = this.fieldReference(name, node);
+		if (backing !== null) return backing;
 		if (name === 'it') this.refuse(node, 'an `it` with no lambda around it');
 		// `"https:$this"` — a `this` inside a string template arrives here as an
 		// identifier rather than as `this_expression`, and it means what it
@@ -7841,6 +8006,24 @@ class Emitter {
 			return `${this.receiverParam}.${name}`;
 		}
 		return `${this.selfReference()}.${name}`;
+	}
+
+	/**
+	 * `field`, as the backing field of the property whose accessor this is —
+	 * or null when `name` is some other name, including a property that is
+	 * simply called `field`.
+	 *
+	 * `class SelectFilter(val field: String)` reads its own `field` in a
+	 * method, and Kotlin only makes the word a keyword inside an accessor.
+	 * Refusing it everywhere refused two whole filter themes for a parameter
+	 * name. Inside an accessor with no field this build modelled it still
+	 * refuses: reading the class's member there would be a different value.
+	 */
+	private fieldReference(name: string, node: KNode): string | null {
+		if (name !== 'field') return null;
+		if (this.backing !== null) return `${this.selfReference()}.${this.backing}`;
+		if (!this.inAccessor && this.classMembers.has('field')) return null;
+		this.refuse(node, 'a `field` backing reference');
 	}
 
 	/** Whether the extension function being emitted extends a type declaring `name`. */
@@ -8257,6 +8440,12 @@ const ANY_MODEL_FIELD: ReadonlySet<string> = new Set([
 /** One term of a `CoroutineScope(…)` context the runtime models. */
 const COROUTINE_CONTEXT =
 	/^(?:Dispatchers\.(?:IO|Default|Main|Unconfined)|SupervisorJob\(\)|Job\(\))$/;
+
+/** The framework's model types, whose fields `MODEL_FIELDS` lists. */
+const MODEL_TYPES: ReadonlySet<string> = new Set(MODEL_FIELDS.keys());
+
+/** Properties the framework declares, for an unbound `Type::name` reference to one. */
+const FRAMEWORK_PROPERTIES: ReadonlySet<string> = new Set([...ANY_MODEL_FIELD, 'state', 'values']);
 
 const PROPERTY_PARTS: ReadonlySet<string> = new Set([
 	'modifiers',
@@ -9068,6 +9257,15 @@ function block(input: readonly string[]): string {
  * declaration that is spelled the ordinary way, so both are asked for here and
  * every caller passes the sibling that follows it.
  */
+/** Whether an accessor names `field`, which is what gives its property a backing field. */
+function namesField(accessor: KNode): boolean {
+	for (const found of walk(accessor)) {
+		if (found.type === 'simple_identifier' && found.text === 'field') return true;
+		if (found.type === 'interpolated_identifier' && found.text === 'field') return true;
+	}
+	return false;
+}
+
 function accessorOf(
 	node: KNode,
 	next: KNode | undefined,

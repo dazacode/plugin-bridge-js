@@ -4971,6 +4971,21 @@ var __k = {
     );
   },
 
+  /** check() and checkNotNull(): require's twins for state rather than arguments. */
+  check: function (value, lazyMessage) {
+    if (value) return undefined;
+    throw new Error(
+      __requireMessage(lazyMessage, 'This converted extension checked something that was not true.')
+    );
+  },
+
+  checkNotNull: function (value, lazyMessage) {
+    if (__present(value)) return value;
+    throw new Error(
+      __requireMessage(lazyMessage, 'This converted extension checked a value that was null.')
+    );
+  },
+
   /* -- the last of the long tail ------------------------------------------- */
 
   /**

@@ -421,6 +421,11 @@ const helpers: Record<string, (...args: never[]) => unknown> = {
 	error: (message?: string) => {
 		throw new Error(message ?? 'error');
 	},
+	check: (value: Any, message?: () => Any) => {
+		if (value !== true) throw new Error(String(message?.() ?? 'check failed'));
+	},
+	sortedByDescending: (list: Any[], fn: (item: Any) => number) =>
+		[...list].sort((a, b) => fn(b) - fn(a)),
 	decode: (_json: Any, _shape: string, body: string) => JSON.parse(body) as Any,
 	pref: (_store: Any, _key: string, fallback: Any) => fallback,
 
@@ -4862,5 +4867,83 @@ describe('a block launched and not awaited', () => {
 		expect(
 			refusalNames(inClass('    fun go() { scope.launch(handler) { println("x") } }'))
 		).toContain('a `launch` given a context this build does not model');
+	});
+});
+
+describe('a property with its own accessors', () => {
+	it('keeps a backing field for `field`, set in the constructor and read by the getter', () => {
+		// The memoising shape: the getter hands out the flag and resets it.
+		const demo = instantiate(
+			inClass(
+				'    private var changed: Boolean = true',
+				'        get() {',
+				'            val current = field',
+				'            field = false',
+				'            return current',
+				'        }',
+				'    fun poll(): List<Boolean> = listOf(changed, changed)'
+			)
+		);
+
+		expect(demo.poll()).toEqual([true, false]);
+	});
+
+	it('runs a custom setter, and a default getter reads what it stored', () => {
+		const demo = instantiate(
+			inClass(
+				'    var name: String = ""',
+				'        set(value) { field = value.trim() }',
+				'    fun rename(to: String): String {',
+				'        name = to',
+				'        return name',
+				'    }'
+			)
+		);
+
+		expect(demo.rename('  Demo  ')).toBe('Demo');
+	});
+
+	it('reads a property that is merely called `field` as that property', () => {
+		const found = evaluate(
+			kt('class Pick(val field: String) {', '    fun key() = "by-" + field', '}'),
+			'new Pick("date").key()'
+		);
+
+		expect(found).toBe('by-date');
+	});
+});
+
+describe("the standard library's own checks and references", () => {
+	it("throws `check`'s lazy message only when the check fails", () => {
+		const demo = instantiate(
+			inClass('    fun go(n: Int): Int { check(n > 0) { "bad $n" }; return n }')
+		);
+
+		expect(demo.go(2)).toBe(2);
+		expect(() => demo.go(0)).toThrow('bad 0');
+	});
+
+	it("prefers an extension's own `check` to the standard library's", () => {
+		const demo = instantiate(
+			inClass(
+				'    private fun check(url: String) = url.startsWith("/")',
+				'    fun go() = check("/a")'
+			)
+		);
+
+		expect(demo.go()).toBe(true);
+	});
+
+	it('reads an unbound reference to a framework property as a read of it', () => {
+		const demo = instantiate(
+			inClass(
+				'    fun order(chapters: List<SChapter>) = chapters.sortedByDescending(SChapter::chapter_number)'
+			)
+		);
+
+		expect(demo.order([{ chapter_number: 1 }, { chapter_number: 3 }])).toEqual([
+			{ chapter_number: 3 },
+			{ chapter_number: 1 }
+		]);
 	});
 });
