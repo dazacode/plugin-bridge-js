@@ -202,6 +202,7 @@ export const RUNTIME_HELPERS = [
 	'exception',
 	/* MutableList.removeAt/reverse and Map.getValue — see each in the runtime. */
 	'padEnd',
+	'toStringWith',
 	'findAnyOf',
 	'okioDecodeBase64',
 	'hashMap',
@@ -722,6 +723,8 @@ export const HOST_BACKED_HELPERS: ReadonlySet<RuntimeHelper> = new Set([
 	'toJsonBody',
 	'toRequestBody',
 	'toResponseBody',
+	'toStringWith',
+	'okioDecodeBase64',
 	'uri'
 ]);
 
@@ -998,6 +1001,11 @@ export const RUNTIME_GLOBALS = [
 	'ZoneOffset',
 	'ChronoUnit',
 	'ChronoField',
+	/* `DateTimeFormatterBuilder().appendPattern(…).parseDefaulting(YEAR, …)
+	   .toFormatter(locale)` — a pattern whose text leaves the year out. */
+	'DateTimeFormatterBuilder',
+	/* java.nio's Charset by name — `defaultCharset()` is Android's UTF-8. */
+	'Charset',
 	'DayOfWeek',
 	'Month',
 	'TextStyle',

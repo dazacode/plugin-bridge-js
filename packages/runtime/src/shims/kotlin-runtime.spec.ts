@@ -4668,6 +4668,9 @@ describe('what cannot run before a plugin call has entered', () => {
 		['a', 'UTF-8'],
 		[new Uint8Array([1, 2])],
 		[new Uint8Array([1, 2]), 'UTF-8'],
+		// A text that IS base64, because okio's decoder answers null for one
+		// that is not before it ever asks the host.
+		['aGk='],
 		[{}],
 		[{}, 'a'],
 		[1],

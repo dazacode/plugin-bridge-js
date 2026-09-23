@@ -1496,6 +1496,15 @@ class Emitter {
 	 * `__k.durationOf` for why the receiver still decides.
 	 */
 	private readonly durationImports = new Set<string>();
+
+	/**
+	 * `import eu.kanade.tachiyomi.source.model.SManga.Companion.COMPLETED`,
+	 * then `status = COMPLETED` — a companion constant of a type the runtime
+	 * defines by name, imported so it can be written bare. Name to the
+	 * qualified read. Only for a runtime global (`GLOBAL_NAMES`): anything
+	 * else is a class this build may not have, and stays refused by name.
+	 */
+	private readonly companionImports = new Map<string, string>();
 	private readonly declaredMethods = new Set<string>();
 	private readonly declaredSuspends = new Set<string>();
 	/**
@@ -2046,6 +2055,7 @@ class Emitter {
 			this.qualifiedTypes.has(name) ||
 			GLOBAL_NAMES.has(name) ||
 			BASE_CONSTANTS.has(name) ||
+			this.companionImports.has(name) ||
 			this.aliased(name) !== name
 		);
 	}
@@ -2132,6 +2142,12 @@ class Emitter {
 				if (found[1] === '*')
 					for (const unit of DURATION_UNITS.keys()) this.durationImports.add(unit);
 				else this.durationImports.add(found[1]);
+			}
+			for (const found of list.text.matchAll(
+				/^\s*import\s+[\w.]*?\b([A-Z]\w*)\.Companion\.([A-Z][A-Z0-9_]*)\s*$/gm
+			)) {
+				if (GLOBAL_NAMES.has(found[1]))
+					this.companionImports.set(found[2], `${found[1]}.${found[2]}`);
 			}
 		}
 		// Registered before anything is emitted: an extension function is
@@ -7514,6 +7530,22 @@ class Emitter {
 		// Arity separates them cleanly. Every SharedPreferences call in this
 		// ecosystem passes a default (`getString(KEY, DEFAULT)!!`); every
 		// org.json read passes only the field.
+		// `n.toString(16)` and `bytes.toString(Charsets.UTF_8)`: toString WITH an
+		// argument is a radix or a charset, never the plain one — see
+		// `toStringWith`. The plain helper ignored the argument.
+		if (
+			name === 'toString' &&
+			args.length === 1 &&
+			lambda === null &&
+			!this.extensionFunctions.has(name) &&
+			!this.declaredMethods.has(name)
+		) {
+			const value = this.expr(receiver);
+			const argument = this.plainArguments(name, args)[0];
+			const call = (target: string) => `${this.helper('toStringWith')}(${target}, ${argument})`;
+			return safe ? `${this.helper('sc')}(${value}, (__r) => ${call('__r')})` : call(value);
+		}
+
 		// `Filter.Sort.Selection(3, false)` — the sort state written qualified,
 		// which is the same value the bare `Selection(…)` already builds
 		// through `__k.selection`. The receiver is the framework's nested type,
@@ -9746,6 +9778,8 @@ class Emitter {
 		// so a source that declares the same name keeps meaning its own.
 		const inherited = BASE_CONSTANTS.get(name);
 		if (inherited !== undefined) return inherited;
+		const imported = this.companionImports.get(name);
+		if (imported !== undefined) return imported;
 
 		// A capitalised name this file did not declare belongs to another
 		// module — `Injekt`, `Dispatchers`, an extractor object. Reading it as a

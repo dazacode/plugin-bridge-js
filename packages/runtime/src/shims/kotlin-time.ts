@@ -1515,11 +1515,20 @@ function __DateTimeFormatter(pattern, locale, zone, iso) {
 __DateTimeFormatter.prototype.getZone = function () { return this.zone; };
 __DateTimeFormatter.prototype.getLocale = function () { return this.locale; };
 __DateTimeFormatter.prototype.withZone = function (zone) {
-  return new __DateTimeFormatter(this.pattern, this.locale, zone === null ? null : __zoneArg(zone), this.__iso);
+  return __withDefaults(
+    new __DateTimeFormatter(this.pattern, this.locale, zone === null ? null : __zoneArg(zone), this.__iso),
+    this.__defaults
+  );
 };
 __DateTimeFormatter.prototype.withLocale = function (locale) {
-  return new __DateTimeFormatter(this.pattern, locale, this.zone, this.__iso);
+  return __withDefaults(new __DateTimeFormatter(this.pattern, locale, this.zone, this.__iso), this.__defaults);
 };
+
+/** A formatter's 'parseDefaulting' fields, carried to a copy of it. */
+function __withDefaults(formatter, defaults) {
+  if (defaults !== undefined && defaults.length > 0) formatter.__defaults = defaults.slice();
+  return formatter;
+}
 __DateTimeFormatter.prototype.toString = function () { return this.pattern; };
 __DateTimeFormatter.prototype.__read = function (text) {
   if (this.__iso !== null) {
@@ -1542,6 +1551,17 @@ __DateTimeFormatter.prototype.__read = function (text) {
   }
   var read = __readDate(this.__parts, text);
   if (read === null) throw __parseError(text, 'it does not match "' + this.pattern + '"');
+  // 'parseDefaulting(field, value)' from a DateTimeFormatterBuilder: a field
+  // the pattern did not give is taken as that value, and one it did give is
+  // left alone, as java.time does.
+  var defaults = this.__defaults || [];
+  for (var d = 0; d < defaults.length; d += 1) {
+    var key = defaults[d][0];
+    if (read.has[key] !== true) {
+      read[key] = defaults[d][1];
+      read.has[key] = true;
+    }
+  }
   return read;
 };
 /** What java.time hands back from 'parse': the fields, and the instant when it can say. */
@@ -1647,6 +1667,38 @@ function __formatOffset(letter, run, seconds) {
   if (run === 2 || run === 4) return sign + hours + minutes;
   return sign + hours + ':' + minutes;
 }
+
+/**
+ * java.time's DateTimeFormatterBuilder, as this catalogue uses it: a pattern
+ * appended, fields defaulted for a text that leaves them out — "12 March"
+ * read as this year — and a formatter out of it. 'parseDefaulting' takes the
+ * six fields a date pattern here can carry; any other is refused where it is
+ * asked, rather than silently ignored at parse time.
+ */
+var __DEFAULTABLE = {
+  YEAR: 'year', MONTH_OF_YEAR: 'month', DAY_OF_MONTH: 'day',
+  HOUR_OF_DAY: 'hour', MINUTE_OF_HOUR: 'minute', SECOND_OF_MINUTE: 'second'
+};
+function DateTimeFormatterBuilder() {
+  if (!(this instanceof DateTimeFormatterBuilder)) return new DateTimeFormatterBuilder();
+  this.__pattern = '';
+  this.__defaults = [];
+}
+DateTimeFormatterBuilder.prototype.appendPattern = function (pattern) {
+  this.__pattern += __str(pattern);
+  return this;
+};
+DateTimeFormatterBuilder.prototype.parseDefaulting = function (field, value) {
+  var key = field === null || field === undefined ? undefined : __DEFAULTABLE[field.name];
+  if (key === undefined) {
+    throw __timeError('This converted extension defaulted a date field this runtime does not parse.');
+  }
+  this.__defaults.push([key, Number(value)]);
+  return this;
+};
+DateTimeFormatterBuilder.prototype.toFormatter = function (locale) {
+  return __withDefaults(new __DateTimeFormatter(this.__pattern, locale), this.__defaults);
+};
 
 var DateTimeFormatter = {
   ofPattern: function (pattern, locale) { return new __DateTimeFormatter(__str(pattern), locale); },

@@ -2141,6 +2141,24 @@ var Charsets = {
 
 var StandardCharsets = Charsets;
 
+/**
+ * java.nio's Charset by name. 'defaultCharset()' is UTF-8, which is what
+ * Android's always is. 'forName' answers the named charset, and every reader
+ * here that takes one asks '__utf8Only' of it — so a charset other than UTF-8
+ * fails where it is used, by name, as it did before this existed.
+ */
+var Charset = {
+  forName: function (name) {
+    var wanted = __str(name);
+    for (var key in Charsets) {
+      if (Object.prototype.hasOwnProperty.call(Charsets, key) &&
+          Charsets[key].name.toLowerCase() === wanted.toLowerCase()) return Charsets[key];
+    }
+    return { name: wanted };
+  },
+  defaultCharset: function () { return Charsets.UTF_8; }
+};
+
 function __utf8Only(charset) {
   if (charset === null || charset === undefined) return;
   var name = typeof charset === 'string' ? charset : __str(charset.name);
@@ -2665,6 +2683,7 @@ var __k = {
   toStringOf: function (value) {
     if (value === null || value === undefined) return 'null';
     if (typeof value === 'string') return value;
+
     // jsoup's Element and Elements both answer their outer HTML, and an
     // extension reaching for a script block writes select(...).toString().
     // Elements is a real Array here, so the list branch below rendered every
@@ -2684,6 +2703,31 @@ var __k = {
       return '[' + parts.join(', ') + ']';
     }
     return String(value);
+  },
+
+  /**
+   * toString(argument), which is two different functions and neither is
+   * toString(): 'Int.toString(radix)' — '255.toString(16)' is "ff" — and
+   * 'ByteArray.toString(charset)', which DECODES the bytes. Both used to reach
+   * 'toStringOf', which ignores an argument: the radix was dropped (a hex
+   * digest came out decimal) and the bytes printed as a list. A receiver with
+   * its own one-argument toString answers for itself.
+   */
+  toStringWith: function (value, argument) {
+    if (typeof argument === 'number') {
+      if (typeof value === 'number' || typeof value === 'bigint') {
+        var radix = Math.trunc(argument);
+        if (radix < 2 || radix > 36) throw new Error('This converted extension asked for radix ' + radix + '.');
+        return value.toString(radix);
+      }
+    } else if (typeof Uint8Array !== 'undefined' && value instanceof Uint8Array) {
+      return __k.stringOf(value, argument);
+    }
+    if (value !== null && value !== undefined && typeof value === 'object' &&
+        typeof value.toString === 'function' && value.toString.length === 1) {
+      return value.toString(argument);
+    }
+    throw new Error('This converted extension called toString with an argument this runtime does not read.');
   },
 
   /**

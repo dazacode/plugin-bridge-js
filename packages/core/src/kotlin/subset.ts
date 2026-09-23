@@ -1296,6 +1296,10 @@ export const HOST_METHODS: ReadonlySet<string> = new Set([
 	// `setDefaultValue` is the call inside that block, bare, on the
 	// preference: without it here the block's implicit receiver lost to the
 	// source object and the default was asked of the extension instead.
+	// java.time's DateTimeFormatterBuilder (`kotlin-time.ts`).
+	'appendPattern',
+	'parseDefaulting',
+	'toFormatter',
 	'addPreference',
 	'setDefaultValue',
 	// okio's ByteString readers, on what `decodeBase64()` answers (see
@@ -2148,6 +2152,8 @@ export const GLOBAL_NAMES: ReadonlySet<string> = new Set([
 	'ZoneOffset',
 	'ChronoUnit',
 	'ChronoField',
+	'DateTimeFormatterBuilder',
+	'Charset',
 	'DayOfWeek',
 	'Month',
 	'TextStyle',

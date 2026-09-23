@@ -260,6 +260,55 @@ describe('the string and collection members a second catalogue pass named', () =
 	});
 });
 
+describe('names a third catalogue pass found, run', () => {
+	const source = kt(
+		'import eu.kanade.tachiyomi.source.model.SManga.Companion.COMPLETED',
+		'import eu.kanade.tachiyomi.source.model.SManga.Companion.ONGOING',
+		'class Demo {',
+		'    fun status(done: Boolean): Int = SManga.create().apply { status = if (done) COMPLETED else ONGOING }.status',
+		'    fun date(s: String, year: Long): Long {',
+		'        val parser = DateTimeFormatterBuilder()',
+		'            .appendPattern("d MMMM")',
+		'            .parseDefaulting(ChronoField.YEAR, year)',
+		'            .toFormatter(Locale.ENGLISH)',
+		'        return LocalDate.parse(s, parser).atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli()',
+		'    }',
+		'    fun dated(s: String): Long {',
+		'        val parser = DateTimeFormatterBuilder().appendPattern("d MMMM yyyy")',
+		'            .parseDefaulting(ChronoField.YEAR, 1999L).toFormatter(Locale.ENGLISH)',
+		'        return LocalDate.parse(s, parser).atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli()',
+		'    }',
+		'    fun decoded(s: String): String = Base64.decode(s, Base64.DEFAULT).toString(Charset.defaultCharset())',
+		'    fun latin(s: String): String = String(Base64.decode(s, Base64.DEFAULT), Charset.forName("ISO-8859-1"))',
+		'    fun hex(n: Int): String = n.toString(16) + "|" + (-10).toString(16) + "|" + n.toString(2)',
+		'}'
+	);
+
+	it('reads a companion constant imported by name', async () => {
+		const demo = await instantiate('Demo', source);
+		expect(demo.status(true)).toBe(2);
+		expect(demo.status(false)).toBe(1);
+	});
+
+	it('defaults a field the pattern leaves out, and only that one', async () => {
+		const demo = await instantiate('Demo', source);
+		expect(demo.date('12 March', 2024)).toBe(Date.UTC(2024, 2, 12));
+		// A year in the text wins over the default, as java.time has it.
+		expect(demo.dated('12 March 2020')).toBe(Date.UTC(2020, 2, 12));
+	});
+
+	it('decodes bytes through `toString(charset)`, and still refuses a charset other than UTF-8', async () => {
+		const demo = await instantiate('Demo', source);
+		expect(demo.decoded('aGVsbG8=')).toBe('hello');
+		expect(() => demo.latin('aGVsbG8=')).toThrow(/ISO-8859-1 charset/);
+	});
+
+	it('formats in the radix `toString(radix)` names, which the plain helper dropped', async () => {
+		const demo = await instantiate('Demo', source);
+		expect(demo.hex(255)).toBe('ff|-a|11111111');
+	});
+});
+
 describe('a Kotlin Iterable, declared or delegated', () => {
 	// `Iterable<T> by list` was refused; `override fun iterator()` translated
 	// into a class JavaScript could not iterate, and `x.map { }` over it ran
