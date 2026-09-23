@@ -974,6 +974,15 @@ export interface Declared {
 	/** Of `types`, the ones declared `object` — see `declaredObjects`. */
 	readonly objects: ReadonlySet<string>;
 	/**
+	 * Members with `reified` type parameters, as `Owner.name` → their names.
+	 *
+	 * `inline fun <reified R> AnimeFilterList.parseCheckbox(…)` declared in a
+	 * shared `object` and imported by the extension next door takes its type
+	 * as a carried argument (see `reifiedFunctions`); a call site in another
+	 * file has to know to pass it, or `it is R` asks about a type called "R".
+	 */
+	readonly reified: ReadonlyMap<string, readonly string[]>;
+	/**
 	 * Every signature a class member function is declared with, by name.
 	 *
 	 * Kotlin resolves a call among same-named functions by the arguments'
@@ -1078,6 +1087,7 @@ const EMPTY_DECLARED: Declared = {
 	moduleExtensions: new Set(),
 	qualifiedSignatures: new Map(),
 	objects: new Set(),
+	reified: new Map(),
 	overloads: new Map(),
 	classFunctions: new Map(),
 	receiverLambdas: new Map()
@@ -1103,6 +1113,7 @@ export function mergeDeclared(parts: readonly Declared[]): Declared {
 	const moduleExtensions = new Set<string>();
 	const qualifiedSignatures = new Map<string, readonly string[]>();
 	const objects = new Set<string>();
+	const reified = new Map<string, readonly string[]>();
 	const classMembers = new Map<string, Set<string>>();
 	const classFields = new Map<string, Set<string>>();
 	const classBases = new Map<string, string>();
@@ -1151,6 +1162,7 @@ export function mergeDeclared(parts: readonly Declared[]): Declared {
 			if (!classBases.has(owner)) classBases.set(owner, base);
 		}
 		for (const name of part.objects) objects.add(name);
+		for (const [name, params] of part.reified) reified.set(name, params);
 		for (const [name, shape] of part.qualifiedSignatures) qualifiedSignatures.set(name, shape);
 		for (const name of part.extensions) extensions.add(name);
 		for (const name of part.moduleExtensions) moduleExtensions.add(name);
@@ -1189,6 +1201,7 @@ export function mergeDeclared(parts: readonly Declared[]): Declared {
 		moduleExtensions,
 		qualifiedSignatures,
 		objects,
+		reified,
 		overloads: new Map([...overloads].map(([name, shapes]) => [name, [...shapes.values()]])),
 		classFunctions,
 		receiverLambdas
@@ -1259,6 +1272,7 @@ class Emitter {
 		for (const [name, slots] of neighbours.receiverLambdas) {
 			mergeReceiverSlots(this.receiverLambdas, name, slots);
 		}
+		for (const [name, params] of neighbours.reified) this.reifiedMembers.set(name, params);
 		for (const [owner, members] of neighbours.classMembers) {
 			const into = this.classMemberIndex.get(owner) ?? new Set<string>();
 			for (const member of members) into.add(member);
@@ -1501,6 +1515,77 @@ class Emitter {
 	private readonly reifiedFunctions = new Map<string, readonly string[]>();
 	/** The reified parameters in scope, bound to the arguments carrying them. */
 	private reifiedTypes: ReadonlyMap<string, string> | null = null;
+	/** See `Declared.reified`. */
+	private readonly reifiedMembers = new Map<string, readonly string[]>();
+	/**
+	 * The enum whose body is being emitted, and its entries' names.
+	 *
+	 * Inside an enum a bare `SINGLE` is an entry, a bare `entries` its list and
+	 * a bare `values()` its copy — all reached through the class here.
+	 */
+	private enumScope: { owner: string; entries: ReadonlySet<string> } | null = null;
+	/**
+	 * Companion members written out under a name other than their own, while
+	 * the class holding them is emitted. See `registerCompanionNames`.
+	 */
+	private companionRenames: ReadonlyMap<string, string> = new Map();
+	/** Companion member names some class in this file already holds. */
+	private readonly companionClaims = new Set<string>();
+	/**
+	 * What each companion emitted since the class holding it began, to be
+	 * reachable through the class's name. See `companionStatics`.
+	 */
+	private companionMembers: CompanionMember[] = [];
+	/**
+	 * Members of a declared `object` this file imports by name, and the
+	 * object each is reached through.
+	 *
+	 * `import …AnimeStreamFilters.getPairListByIndex` then a bare
+	 * `getPairListByIndex(0)` inside another object is a call on
+	 * `AnimeStreamFilters`. With nothing recording the import it fell through
+	 * to "a bare lowercase call is a member of the source" and came out as
+	 * `this.getPairListByIndex(…)` — on the *calling* object, which has no
+	 * such member: a TypeError at the first search, with nothing refused. An
+	 * imported extension (`filters.parseCheckbox<GenresFilter>(…)`) was
+	 * refused instead, as a method nothing in reach declares.
+	 *
+	 * Only a member of an `object` this unit declares is recorded: that is
+	 * the one case where the import names a value this module holds. Kotlin
+	 * lets a member of the scope being emitted shadow an import, and so do
+	 * the call sites that read this — see `importedOwner`.
+	 */
+	private readonly importedMembers = new Map<string, string>();
+	/**
+	 * What a reified function's type parameter is *read off*, when a call site
+	 * names no type argument: its declared return type, or its receiver.
+	 *
+	 * `inline fun <reified T> Document.extractAstroProp(key): T` is called as
+	 * `val data: MangaDto = doc.extractAstroProp("manga")` — Kotlin infers `T`
+	 * from the type the value is going to, and `inline fun <reified T : Any>
+	 * T.toJsonRequestBody()` infers it from the value it is called on. Only a
+	 * return type or receiver that *is* the parameter, written bare, is kept:
+	 * `List<T>` would need unifying, and that is a type checker.
+	 */
+	private readonly reifiedFrom = new Map<string, { returns: boolean; receiver: boolean }>();
+	/**
+	 * The type a call's value is going to, where the source writes it down.
+	 *
+	 * `val list: List<MangaDto> = response.parseAs()` names the shape once, on
+	 * the left, and Kotlin carries it into the call as its type argument. This
+	 * is that inference and nothing more general: the positions a declared type
+	 * reaches a value *by being written there* — a typed `val`, a function's
+	 * declared return type (its expression body, or a `return` in its block
+	 * body), an `as`, an assignment to a typed local, and an argument to a
+	 * function this file declares. Each is followed through the constructs that
+	 * hand a value on unchanged — parentheses, `!!`, both sides of `?:`, each
+	 * branch of an `if`/`when`/`try` — and stops everywhere else.
+	 *
+	 * Keyed by line, kind and text rather than by node, because `ast.ts` wraps
+	 * a node afresh on each access. Two positions with the same key and
+	 * different types record `null`, which the reader treats as unknown and
+	 * refuses — a guessed shape drops fields without saying so.
+	 */
+	private readonly expectedTypes = new Map<string, string | null>();
 	/** The receiver parameter of the extension function being emitted. */
 	private receiverParam: string | null = null;
 	private classMembers = new Set<string>();
@@ -1560,6 +1645,7 @@ class Emitter {
 			moduleExtensions: this.declaredModuleExtensions,
 			qualifiedSignatures: this.qualifiedSignatures,
 			objects: this.declaredObjects,
+			reified: this.reifiedMembers,
 			classMembers: this.classMemberIndex,
 			classFields: this.classFieldIndex,
 			classBases: this.classBaseIndex,
@@ -1939,6 +2025,8 @@ class Emitter {
 		this.registerExtensions(kids(root), 'module');
 		this.registerTypes(kids(root), true);
 		this.registerSignatures(kids(root));
+		this.registerExpectedTypes(root);
+		this.registerImports(kids(root).find((child) => child.type === 'import_list'));
 
 		const top = kids(root);
 		for (const [index, child] of top.entries()) {
@@ -2139,14 +2227,15 @@ class Emitter {
 		);
 
 		if (kinds.has('interface')) return this.interfaceDeclaration(node, name);
-		if (kinds.has('enum_class_body')) return this.enumDeclaration(node, name);
+		// An enum is a class with a fixed set of instances — see `enumTail`.
+		const isEnum = kinds.has('enum_class_body');
 		if (modifiers.has('data')) return this.dataDeclaration(node, name);
 
 		// The header — everything but the body — must parse cleanly. A recovered
 		// base-class name or constructor call means every member below it is
 		// being read against a guess, so the whole file goes.
 		for (const child of kids(node)) {
-			if (child.type === 'class_body') continue;
+			if (child.type === 'class_body' || child.type === 'enum_class_body') continue;
 			if (child.hasError) {
 				this.fileRefusal =
 					`This extension's \`${name}\` class header did not parse. Yorozo will not ` +
@@ -2209,6 +2298,7 @@ class Emitter {
 		// the adapter sorts the class `build.gradle` names there. Elsewhere the
 		// old rule stands.
 		const claims =
+			!isEnum &&
 			rename === undefined &&
 			(base === null || this.entryFile) &&
 			(this.className === null || (invoked !== null && !this.entryConstructsBase));
@@ -2220,10 +2310,21 @@ class Emitter {
 			return this.declineMember(name, node, `a base class \`${invoked.type}\` this build has not`);
 		}
 
-		const body = kids(node).find((child) => child.type === 'class_body') ?? null;
-		const members = body === null ? [] : kids(body);
+		const body =
+			kids(node).find((child) => child.type === 'class_body' || child.type === 'enum_class_body') ??
+			null;
+		const members = body === null ? [] : kids(body).filter((child) => child.type !== 'enum_entry');
+		const enumEntries =
+			body === null ? [] : kids(body).filter((child) => child.type === 'enum_entry');
 		const outerOwner = this.owner;
 		const outerBase = this.ownerBase;
+		const outerEnum = this.enumScope;
+		if (isEnum) {
+			this.enumScope = {
+				owner: name,
+				entries: new Set(enumEntries.map((entry) => this.nameOf(entry) ?? ''))
+			};
+		}
 		// Saved with them, and for the same reason. A nested class — this
 		// ecosystem writes `protected class SMangaDto(…)` inside the template it
 		// belongs to — replaced the enclosing class's member table and never
@@ -2300,12 +2401,19 @@ class Emitter {
 		this.emittedTypes.add(name);
 		const nested = this.scopeNestedTypes(members, name);
 
-		this.registerCompanionNames(members);
+		const outerRenames = this.companionRenames;
+		const outerCompanion = this.companionMembers;
+		this.companionRenames = this.registerCompanionNames(members, name);
+		this.companionMembers = [];
 
 		const hoisted: string[] = [];
-		const ctorLines: string[] = constructorParams
-			.filter((param) => param.isProperty)
-			.map((param) => `this.${param.name} = ${this.safe(param.name)};`);
+		const enumCompanion: string[] = [];
+		const ctorLines: string[] = [
+			...(isEnum ? ['this.name = __name;', 'this.ordinal = __ordinal;'] : []),
+			...constructorParams
+				.filter((param) => param.isProperty)
+				.map((param) => `this.${param.name} = ${this.safe(param.name)};`)
+		];
 		const memberLines: string[] = [];
 		const dispatched = new Set<string>();
 
@@ -2387,7 +2495,10 @@ class Emitter {
 					break;
 				}
 				case 'companion_object':
-					hoisted.push(...this.companion(child));
+					// An enum's companion is initialised after its entries, and
+					// commonly reads one (`val default = SINGLE`), so it follows
+					// them rather than preceding the class.
+					(isEnum ? enumCompanion : hoisted).push(...this.companion(child));
 					break;
 				case 'object_declaration': {
 					const declared = this.nameOf(child) ?? 'object';
@@ -2442,20 +2553,50 @@ class Emitter {
 		// a *wrong value* rather than a missing one, which is the failure this
 		// file exists to refuse rather than emit. `dataDeclaration` already did
 		// this; a plain class did not.
-		const ctorParams = this.constructorSignature(constructorParams);
+		const ctorParams = [
+			...(isEnum ? ['__name', '__ordinal'] : []),
+			...this.constructorSignature(constructorParams)
+		];
 
 		const ctor =
 			superLine.length > 0 || constructorParams.length > 0 || ctorLines.length > 0
 				? [`constructor(${ctorParams.join(', ')}) ` + block([...superLine, ...ctorLines])]
 				: [];
+		if (isEnum) memberLines.push(...enumMethods(this.classMembers));
+		// Built before the scope is taken down: an entry's arguments are read
+		// with the enum's own names in reach, as Kotlin reads them.
+		const enumLines = isEnum ? this.enumTail(name, node, enumEntries, members) : [];
 
 		nested.restore();
 		this.owner = outerOwner;
 		this.ownerBase = outerBase;
+		this.enumScope = outerEnum;
 		this.classMembers = outerMembers;
 		this.suspendMembers = outerSuspends;
+		const companionMembers = this.companionMembers;
+		this.companionRenames = outerRenames;
+		this.companionMembers = outerCompanion;
 		const heritage = base === null ? '' : `extends ${base} `;
-		const cls = `class ${this.safe(name)} ${heritage}${block([...ctor, ...memberLines])}`;
+		const statics = this.companionStatics(name, companionMembers);
+		if (isEnum) {
+			// One piece, in Kotlin's initialisation order: the class, its
+			// entries, then its companion — and frozen last, so nothing
+			// reassigns an entry.
+			const cls = `class ${this.safe(name)} ${heritage}${block([...ctor, ...memberLines])}`;
+			return orderClasses([
+				...hoisted,
+				[
+					cls,
+					...enumLines,
+					...enumCompanion,
+					...(statics.length > 0 ? [statics] : []),
+					`Object.freeze(${this.safe(name)});`
+				].join('\n')
+			]).join('\n\n');
+		}
+		const cls =
+			`class ${this.safe(name)} ${heritage}${block([...ctor, ...memberLines])}` +
+			(statics.length > 0 ? `\n${statics}` : '');
 		// A `@Serializable` class is a *shape* as well as a class: the decoder
 		// answers plain JSON, so a field the source renamed and a property it
 		// computes are both absent from what a member then reads. Registered
@@ -2639,7 +2780,23 @@ class Emitter {
 	 * 254-listing catalogue, that one omission was the single most common
 	 * blocker in the set.
 	 */
-	private registerCompanionNames(members: readonly KNode[]): void {
+	/**
+	 * A companion's member names, registered before the class body is emitted,
+	 * and renamed where an earlier companion in this file already took one.
+	 *
+	 * Companion members hoist to module scope, where two classes' `private val
+	 * options = arrayOf(…)` are one name — and a filters file declares a dozen
+	 * classes that each keep their options in a companion. The second was
+	 * refused as a collision, which refused every filter after the first.
+	 * Kotlin scopes each to its own class, and so does this: the later one is
+	 * written out as `Owner_options`, and while that class and its companion
+	 * are being emitted `safe` maps the bare name onto it — the scope Kotlin
+	 * resolves a bare companion name in, nested classes included.
+	 *
+	 * Answers the renames to install, which the caller takes back afterwards.
+	 */
+	private registerCompanionNames(members: readonly KNode[], owner: string): Map<string, string> {
+		const renames = new Map(this.companionRenames);
 		for (const child of members) {
 			if (child.type !== 'companion_object') continue;
 			const inner = kids(child).find((part) => part.type === 'class_body');
@@ -2650,9 +2807,45 @@ class Emitter {
 						: part.type === 'function_declaration'
 							? this.nameOf(part)
 							: null;
-				if (declared !== null) this.moduleNames.add(declared);
+				if (declared === null) continue;
+				if (this.emittedNames.has(declared) || this.companionClaims.has(declared)) {
+					let binding = `${plainName(owner)}_${plainName(declared)}`;
+					while (this.emittedNames.has(binding) || this.moduleNames.has(binding)) binding += '_';
+					renames.set(declared, binding);
+				} else {
+					renames.delete(declared);
+				}
+				this.companionClaims.add(declared);
+				this.moduleNames.add(declared);
 			}
 		}
+		return renames;
+	}
+
+	/**
+	 * Every companion member emitted for `owner`, reachable as `Owner.name`.
+	 *
+	 * Inside the class a companion member is a bare name and resolves
+	 * lexically to its hoisted binding. From anywhere else Kotlin writes it
+	 * through the class — `Holder.KEY`, `Layout.fromKey(…)` — and the emitted
+	 * class had no such property, so the read answered `undefined` with
+	 * nothing refused. A getter rather than a copy, so a companion `var`
+	 * written after load is still the value read.
+	 *
+	 * `name`, `length` and `prototype` are a function's own, and not
+	 * overwritten: a companion member spelled that way stays reachable bare.
+	 */
+	private companionStatics(owner: string, members: readonly CompanionMember[]): string {
+		const lines: string[] = [];
+		for (const member of members) {
+			if (FUNCTION_OWN_NAMES.has(member.name)) continue;
+			const value = member.getter ? `${member.binding}()` : member.binding;
+			const write = member.mutable === true ? `, set: (__v) => { ${member.binding} = __v; }` : '';
+			lines.push(
+				`Object.defineProperty(${this.safe(owner)}, ${JSON.stringify(member.name)}, { get: () => ${value}${write}, enumerable: true, configurable: true });`
+			);
+		}
+		return lines.join('\n');
 	}
 
 	private dataDeclaration(node: KNode, name: string): string | null {
@@ -2678,6 +2871,8 @@ class Emitter {
 				renames: ReadonlyMap<string, string>;
 				restore: () => void;
 			} | null = null;
+			let outerRenames = this.companionRenames;
+			let outerCompanion = this.companionMembers;
 			try {
 				const args = params.map((param) => {
 					this.declare(param.name);
@@ -2692,7 +2887,10 @@ class Emitter {
 				const body = kids(node).find((child) => child.type === 'class_body');
 				this.emittedTypes.add(name);
 				scoped = this.scopeNestedTypes(kids(body), name);
-				this.registerCompanionNames(kids(body));
+				outerRenames = this.companionRenames;
+				outerCompanion = this.companionMembers;
+				this.companionRenames = this.registerCompanionNames(kids(body), name);
+				this.companionMembers = [];
 				const nested: string[] = [];
 				for (const child of kids(body)) {
 					if (child.type === 'function_declaration') {
@@ -2733,9 +2931,17 @@ class Emitter {
 					fields.push(`get ${member}() ${emitted.text}`);
 				}
 
-				const factory = `function ${this.safe(name)}(${args.join(', ')}) ${block([`return ${block(fields.map(comma))};`])}`;
-				return [...nested, factory].join('\n\n');
+				// Handed to `dataRecord` with its own factory and field order, so
+				// `copy(count = 3)` can rebuild it: a computed property here
+				// closes over the *parameters*, and a record copied field by
+				// field would keep answering from the old ones.
+				const record = `${this.helper('dataRecord')}(${block(fields.map(comma))}, ${this.safe(name)}, ${JSON.stringify(params.map((param) => fieldName(param.name)))})`;
+				const factory = `function ${this.safe(name)}(${args.join(', ')}) ${block([`return ${record};`])}`;
+				const statics = this.companionStatics(name, this.companionMembers);
+				return [...nested, statics.length > 0 ? `${factory}\n${statics}` : factory].join('\n\n');
 			} finally {
+				this.companionRenames = outerRenames;
+				this.companionMembers = outerCompanion;
 				scoped?.restore();
 				this.popScope();
 				this.owner = outerOwner;
@@ -2743,31 +2949,79 @@ class Emitter {
 		});
 	}
 
-	/** `enum class E { A, B }` → a frozen map, so `E.A` reads and nothing mutates. */
-	private enumDeclaration(node: KNode, name: string): string | null {
-		return this.member(name, node, () => {
-			const body = kids(node).find((child) => child.type === 'enum_class_body');
-			const params = this.primaryConstructorParams(node);
-			const entries: string[] = [];
-			let ordinal = 0;
-
-			for (const child of kids(body)) {
-				if (child.type !== 'enum_entry') this.refuse(child, 'a member on an `enum class`');
-				const entryName = this.nameOf(child) ?? 'entry';
-				const args = kids(child).find((inner) => inner.type === 'value_arguments');
-				const fields = [`name: ${JSON.stringify(entryName)}`, `ordinal: ${ordinal}`];
-				for (const [index, arg] of kids(args).entries()) {
-					const key = params[index]?.name;
-					if (key === undefined) this.refuse(arg, 'an enum entry with unnamed state');
-					fields.push(`${JSON.stringify(key)}: ${this.expr(this.argumentValue(arg))}`);
-				}
-				entries.push(`${JSON.stringify(entryName)}: Object.freeze({ ${fields.join(', ')} })`);
-				ordinal += 1;
+	/**
+	 * An enum's entries, and the three things Kotlin gives every enum class.
+	 *
+	 * `enum class Layout(val prefix: String) { SLUG(""), ROOT("/") ; fun
+	 * url(slug) = … }` is a class with a fixed set of instances, and is emitted
+	 * as one: each entry is `new Layout("SLUG", 0, "")`, so a method or a
+	 * computed property on the enum is an ordinary method on the class. It was
+	 * a frozen map of frozen records before, which could hold state but no
+	 * behaviour — every member was refused — and which had no `entries`,
+	 * `values()` or `valueOf()` either: `Layout.entries.map { … }` read
+	 * undefined and mapped over nothing, in extensions that loaded and
+	 * reported nothing refused.
+	 *
+	 * An entry with a body of its own is a subclass per entry, and is refused.
+	 * So is one whose arguments read the enum's companion: Kotlin initialises
+	 * entries first, and a companion `const` it inlined would here be a binding
+	 * not yet written.
+	 */
+	private enumTail(
+		name: string,
+		node: KNode,
+		entries: readonly KNode[],
+		members: readonly KNode[]
+	): string[] {
+		const owner = this.safe(name);
+		const companionNames = new Set<string>();
+		for (const member of members) {
+			if (member.type !== 'companion_object') continue;
+			const inner = kids(member).find((part) => part.type === 'class_body');
+			for (const part of kids(inner)) {
+				const declared =
+					part.type === 'property_declaration'
+						? this.propertyName(part)
+						: part.type === 'function_declaration'
+							? this.nameOf(part)
+							: null;
+				if (declared !== null) companionNames.add(declared);
 			}
-
-			this.moduleNames.add(name);
-			return `const ${this.safe(name)} = Object.freeze(${block(entries.map(comma))});`;
+		}
+		// Under the enum's own name, so a refusal here is one the members that
+		// mention the enum are held to.
+		const emitted = this.member(name, node, () => {
+			const lines: string[] = [];
+			for (const [ordinal, entry] of entries.entries()) {
+				const entryName = this.nameOf(entry);
+				if (entryName === null) this.refuse(entry, 'an enum entry with no name');
+				if (kids(entry).some((part) => part.type === 'class_body')) {
+					this.refuse(entry, 'an enum entry with a body of its own');
+				}
+				const args = kids(kids(entry).find((part) => part.type === 'value_arguments')).filter(
+					(part) => part.type === 'value_argument'
+				);
+				for (const arg of args) {
+					for (const found of walk(arg)) {
+						if (found.type === 'simple_identifier' && companionNames.has(found.text)) {
+							this.refuse(found, 'an enum entry reading its own companion');
+						}
+					}
+				}
+				const passed = this.plainArguments(name, args);
+				lines.push(
+					`${owner}.${entryName} = new ${owner}(${[JSON.stringify(entryName), String(ordinal), ...passed].join(', ')});`
+				);
+			}
+			const listed = entries.map((entry) => `${owner}.${this.nameOf(entry) ?? ''}`);
+			lines.push(`${owner}.entries = Object.freeze([${listed.join(', ')}]);`);
+			lines.push(`${owner}.values = function () { return ${owner}.entries.slice(); };`);
+			lines.push(
+				`${owner}.valueOf = function (value) { for (const entry of ${owner}.entries) if (entry.name === value) return entry; throw new Error(${JSON.stringify(`No enum constant ${name}.`)} + value); };`
+			);
+			return lines.join('\n');
 		});
+		return emitted === null ? [] : [emitted];
 	}
 
 	/** `object X { … }` → a frozen literal at module scope. */
@@ -2929,8 +3183,9 @@ class Emitter {
 		for (const child of kids(body)) {
 			if (child.type === 'property_declaration') {
 				const name = this.propertyName(child) ?? 'val';
+				const binding = this.companionRenames.get(name) ?? name;
 				const emitted = this.member(name, child, () => {
-					if (this.emittedNames.has(name)) {
+					if (this.emittedNames.has(binding)) {
 						this.refuse(child, `a second companion member named \`${name}\``);
 					}
 					// `private val LATEST_PREF_ENTRIES get() = arrayOf(…)` — a
@@ -2948,14 +3203,21 @@ class Emitter {
 						);
 						this.moduleNames.add(name);
 						this.moduleGetters.add(name);
-						this.emittedNames.add(name);
+						this.emittedNames.add(binding);
+						this.companionMembers.push({ name, binding: this.safe(name), getter: true });
 						const prefix = emittedBody.isAsync ? 'async ' : '';
 						return `${prefix}function ${this.safe(name)}() ${emittedBody.text}`;
 					}
 					const value = this.propertyValue(child, name);
 					this.moduleNames.add(name);
-					this.emittedNames.add(name);
-					return `const ${this.safe(name)} = ${value};`;
+					this.emittedNames.add(binding);
+					// A companion `var` is assigned after load — `counter += 1`,
+					// a cache filled on first use — and a `const` throws there.
+					const mutable = kids(child).some(
+						(part) => part.type === 'binding_pattern_kind' && part.text === 'var'
+					);
+					this.companionMembers.push({ name, binding: this.safe(name), getter: false, mutable });
+					return `${mutable ? 'let' : 'const'} ${this.safe(name)} = ${value};`;
 				});
 				if (emitted !== null) out.push(emitted);
 				continue;
@@ -2964,7 +3226,13 @@ class Emitter {
 				const name = this.nameOf(child) ?? 'fun';
 				const emitted = this.member(name, child, () => {
 					this.moduleNames.add(name);
-					return this.functionDeclaration(child, 'module');
+					const text = this.functionDeclaration(child, 'module');
+					// An extension function takes its receiver first, and is not
+					// something a caller reaches as `Owner.name(…)`.
+					if (receiverOf(child) === null) {
+						this.companionMembers.push({ name, binding: this.safe(name), getter: false });
+					}
+					return text;
 				});
 				if (emitted !== null) out.push(emitted);
 				continue;
@@ -3486,12 +3754,16 @@ class Emitter {
 			for (const member of kids(body)) {
 				if (member.type === 'function_declaration') {
 					const method = this.nameOf(member);
+					const owner = this.nameOf(child);
+					const reified = reifiedParams(member);
+					if (method !== null && owner !== null && reified.length > 0) {
+						this.reifiedMembers.set(`${owner}.${method}`, reified);
+					}
 					// An extension function is called with its receiver moved
 					// into first position, so it is not a passthrough method —
 					// but it still has to cross a file boundary, under the name
 					// of the class that declares it.
 					if (method !== null && receiverOf(member) !== null) {
-						const owner = this.nameOf(child);
 						if (owner !== null) this.declaredExtensions.add(`${owner}.${method}`);
 					} else if (method !== null && !isEntry) {
 						this.declaredMethods.add(method);
@@ -3713,6 +3985,268 @@ class Emitter {
 			this.extensionFunctions.set(name, shape);
 			if (owner !== null) this.extensionOwners.set(name, owner);
 		}
+	}
+
+	/** See `importedMembers`. */
+	private registerImports(list: KNode | undefined): void {
+		for (const header of kids(list)) {
+			if (header.type !== 'import_header') continue;
+			// `import a.B.c as d` renames, and `import a.B.*` names nothing.
+			if (kids(header).some((child) => child.type !== 'identifier')) continue;
+			if (header.allChildren.some((child) => child.type === '*' || child.type === '.*')) continue;
+			const path = (kids(header)[0]?.text ?? '').replace(/\s+/g, '').split('.');
+			if (path.length < 2) continue;
+			const member = path[path.length - 1];
+			const owner = path[path.length - 2];
+			// A nested type imported this way is a type, and already resolves.
+			if (!this.declaredObjects.has(owner) || this.declaredTypes.has(member)) continue;
+			this.importedMembers.set(member, owner);
+			const reified = this.reifiedMembers.get(`${owner}.${member}`);
+			if (reified !== undefined && !this.reifiedFunctions.has(member)) {
+				this.reifiedFunctions.set(member, reified);
+			}
+		}
+	}
+
+	/** A bare name inside an enum's body or companion that means the enum's own. */
+	private enumMember(name: string): string | null {
+		const scope = this.enumScope;
+		if (scope === null || this.lookup(name) !== null) return null;
+		if (this.classMembers.has(name)) return null;
+		const known = scope.entries.has(name) || ENUM_STATICS.has(name);
+		return known ? `${this.safe(scope.owner)}.${name}` : null;
+	}
+
+	/** The object an imported `name` is reached through, unless something closer declares it. */
+	private importedOwner(name: string): string | null {
+		const owner = this.importedMembers.get(name);
+		if (owner === undefined || owner === this.owner) return null;
+		if (this.isSourceMember(name) || this.objectMembers.has(name)) return null;
+		if (this.extensionFunctions.has(name) || this.lookup(name) !== null) return null;
+		return owner;
+	}
+
+	/* ── expected types ─────────────────────────────────────────────────── */
+
+	/** See `expectedTypes`. One walk over the file, before anything is emitted. */
+	private registerExpectedTypes(root: KNode): void {
+		// Parameter types of the functions and classes this file declares, by
+		// name — dropped the moment two declarations disagree, because an
+		// argument to the wrong overload would be given the wrong shape.
+		const parameterTypes = new Map<string, (string | null)[] | null>();
+		const note = (name: string | null, types: (string | null)[] | null): void => {
+			if (name === null || types === null) return;
+			const known = parameterTypes.get(name);
+			if (known === undefined) parameterTypes.set(name, types);
+			else if (known === null || known.join('|') !== types.join('|')) {
+				parameterTypes.set(name, null);
+			}
+		};
+		for (const node of walk(root)) {
+			if (node.type === 'function_declaration') {
+				note(this.nameOf(node), parameterTypesOf(kids(node).find(isValueParameters)));
+				const name = this.nameOf(node);
+				const reified = reifiedParams(node);
+				if (name !== null && reified.length === 1) {
+					const [only] = reified;
+					this.reifiedFrom.set(name, {
+						returns: returnTypeText(node) === only,
+						receiver: receiverOf(node) === only && !/[<?]/.test(receiverText(node) ?? '')
+					});
+				}
+			} else if (node.type === 'class_declaration') {
+				const constructor = kids(node).find((child) => child.type === 'primary_constructor');
+				const parameters = kids(constructor).find((child) => child.type === 'class_parameters');
+				if (parameters !== undefined) note(this.nameOf(node), parameterTypesOf(parameters));
+			}
+		}
+
+		for (const node of walk(root)) {
+			switch (node.type) {
+				case 'property_declaration': {
+					const declaration = kids(node).find((child) => child.type === 'variable_declaration');
+					const type = typeText(kids(declaration).find((child) => child.type.endsWith('type')));
+					if (type === null) break;
+					const delegate = kids(node).find((child) => child.type === 'property_delegate');
+					if (delegate !== undefined) {
+						// `val covers: Map<…> by lazy { … .parseAs() }` — the block's
+						// last value is the property's value.
+						const lazy = lazyBlock(delegate);
+						if (lazy !== null) this.expectLast(lazy, type);
+						break;
+					}
+					const getter = kids(node).find((child) => child.type === 'getter');
+					if (getter !== undefined) {
+						this.expectBody(
+							kids(getter).find((child) => child.type === 'function_body'),
+							type
+						);
+						break;
+					}
+					this.expect(
+						kids(node).find((child) => !PROPERTY_PARTS.has(child.type)),
+						type
+					);
+					break;
+				}
+				case 'function_declaration':
+					this.expectBody(
+						kids(node).find((child) => child.type === 'function_body'),
+						returnTypeText(node)
+					);
+					break;
+				case 'as_expression': {
+					const [value, type] = [kids(node)[0], kids(node)[kids(node).length - 1]];
+					if (value !== type) this.expect(value, typeText(type));
+					break;
+				}
+				case 'call_expression': {
+					const callee = kids(node)[0];
+					if (callee?.type !== 'simple_identifier') break;
+					const types = parameterTypes.get(callee.text);
+					if (types === undefined || types === null) break;
+					const suffix = kids(node)[1];
+					const values = kids(kids(suffix).find((child) => child.type === 'value_arguments'));
+					for (const [index, arg] of values.entries()) {
+						if (arg.type !== 'value_argument') continue;
+						if (arg.allChildren.some((child) => child.type === '=')) break;
+						const value = kids(arg)[kids(arg).length - 1];
+						this.expect(value, types[index] ?? null);
+					}
+					break;
+				}
+				case 'statements':
+					this.expectAssignments(node);
+					break;
+			}
+		}
+	}
+
+	/**
+	 * `x = …` where `x` is a local declared with a type in the same block.
+	 *
+	 * `lateinit var dto: ChapterListDto` then `dto = if (…) response.parseAs()
+	 * else …` is the shape. Only a plain name declared among the *same*
+	 * statements is followed; anything else answers nothing.
+	 */
+	private expectAssignments(statements: KNode): void {
+		const locals = new Map<string, string | null>();
+		for (const statement of kids(statements)) {
+			if (statement.type !== 'property_declaration') continue;
+			const declaration = kids(statement).find((child) => child.type === 'variable_declaration');
+			const name = kids(declaration).find((child) => child.type === 'simple_identifier')?.text;
+			const type = typeText(kids(declaration).find((child) => child.type.endsWith('type')));
+			if (name === undefined) continue;
+			locals.set(name, locals.has(name) ? null : type);
+		}
+		if (locals.size === 0) return;
+		for (const node of walk(statements)) {
+			if (node.type !== 'assignment') continue;
+			const operator = node.allChildren.find((child) => child.type.endsWith('='));
+			if (operator?.type !== '=') continue;
+			const target = kids(node)[0];
+			const name = target?.type === 'directly_assignable_expression' ? kids(target) : [];
+			if (name.length !== 1 || name[0].type !== 'simple_identifier') continue;
+			const type = locals.get(name[0].text);
+			if (type === undefined || type === null) continue;
+			this.expect(kids(node)[kids(node).length - 1], type);
+		}
+	}
+
+	/** A function body's value: its expression, or every unlabelled `return` in it. */
+	private expectBody(body: KNode | undefined, type: string | null): void {
+		if (body === undefined || type === null) return;
+		if (!body.allChildren.some((child) => child.type === '{')) {
+			this.expect(kids(body)[0], type);
+			return;
+		}
+		const visit = (node: KNode): void => {
+			for (const child of kids(node)) {
+				// A nested function, class or object returns to itself.
+				if (EXPECTATION_BARRIERS.has(child.type)) continue;
+				if (child.type === 'jump_expression' && /^return(?![@\w])/.test(child.text)) {
+					this.expect(kids(child)[0], type);
+				}
+				visit(child);
+			}
+		};
+		visit(body);
+	}
+
+	/** The last statement of a block-shaped node, which is its value. */
+	private expectLast(node: KNode, type: string): void {
+		const statements = kids(node).find((child) => child.type === 'statements');
+		const all = kids(statements);
+		this.expect(all[all.length - 1], type);
+	}
+
+	private expect(node: KNode | undefined, type: string | null): void {
+		if (node === undefined || type === null) return;
+		switch (node.type) {
+			case 'parenthesized_expression':
+				this.expect(kids(node)[0], type);
+				return;
+			case 'postfix_expression':
+				if (node.allChildren.some((child) => child.type === '!!')) this.expect(kids(node)[0], type);
+				return;
+			case 'elvis_expression':
+				this.expect(kids(node)[0], type);
+				this.expect(kids(node)[kids(node).length - 1], type);
+				return;
+			case 'control_structure_body':
+				if (node.allChildren.some((child) => child.type === '{')) this.expectLast(node, type);
+				else this.expect(kids(node)[0], type);
+				return;
+			case 'if_expression':
+				for (const child of kids(node)) {
+					if (child.type === 'control_structure_body') this.expect(child, type);
+				}
+				return;
+			case 'when_expression':
+				for (const entry of kids(node)) {
+					if (entry.type !== 'when_entry') continue;
+					this.expect(
+						kids(entry).find((child) => child.type === 'control_structure_body'),
+						type
+					);
+				}
+				return;
+			case 'try_expression':
+				this.expectLast(node, type);
+				for (const child of kids(node)) {
+					if (child.type === 'catch_block') this.expectLast(child, type);
+				}
+				return;
+			case 'call_expression': {
+				const key = expectationKey(node);
+				const known = this.expectedTypes.get(key);
+				this.expectedTypes.set(key, known === undefined || known === type ? type : null);
+				return;
+			}
+		}
+	}
+
+	/** The type a call's value is going to, if `registerExpectedTypes` found one. */
+	private expectedOf(node: KNode): string | null {
+		return this.expectedTypes.get(expectationKey(node)) ?? null;
+	}
+
+	/**
+	 * A type as a decoder is handed it: the text, or — inside `inline fun
+	 * <reified T>` — the argument carrying the type the call site named.
+	 *
+	 * `json.decodeFromString<T>(text)` in a reified helper used to hand the
+	 * runtime the *letter* `T`, which names nothing, so a helper called as
+	 * `parseAs<List<String>>()` decoded as "whatever the payload holds" and
+	 * lost the container. The carried argument is text when the call site
+	 * wrote a type the runtime reads by name and a class when it wrote one this
+	 * module declares; `typeText` answers the text of either.
+	 */
+	private decodeType(type: string): string {
+		const bare = type.replace(/\?$/, '');
+		const bound = this.reifiedTypes?.get(bare);
+		if (bound !== undefined) return `${this.helper('typeText')}(${bound})`;
+		return JSON.stringify(type);
 	}
 
 	/** The type annotation on a property declaration, if it carries one. */
@@ -4781,7 +5315,18 @@ class Emitter {
 		}
 
 		let target: string;
-		if (inner.type === 'simple_identifier') {
+		if (
+			inner.type === 'simple_identifier' &&
+			parts.length > 1 &&
+			this.lookup(inner.text) === null &&
+			!this.isSourceMember(inner.text) &&
+			(this.declaredTypes.has(inner.text) || this.moduleNames.has(inner.text))
+		) {
+			// `Holder.counter = 0` — the head is a declared type or a module
+			// binding being *read*, and the write is to its member. Read as the
+			// name being assigned, it came out as `this.Holder.counter`.
+			target = this.read(inner.text, inner);
+		} else if (inner.type === 'simple_identifier') {
 			const local = this.lookup(inner.text);
 			if (inner.text === 'field') this.refuse(inner, 'a `field` backing reference');
 			// Writes inside `apply {}` go to the receiver: that is the idiom, and
@@ -4803,6 +5348,15 @@ class Emitter {
 				target = `${receiver}.${inner.text}`;
 			} else if (this.receiverParam !== null && !this.isSourceMember(inner.text)) {
 				target = `${this.receiverParam}.${inner.text}`;
+			} else if (
+				local === null &&
+				this.companionClaims.has(inner.text) &&
+				!this.isSourceMember(inner.text)
+			) {
+				// A companion `var`, which is a module binding here: written as
+				// `this.counter` it set a field on the instance and left the
+				// companion's value where it was.
+				target = this.safe(inner.text);
 			} else {
 				target = `this.${inner.text}`;
 			}
@@ -5326,9 +5880,23 @@ class Emitter {
 	 * and the filter list the helper was reading would come back empty with
 	 * nothing anywhere saying so.
 	 */
-	private reifiedArguments(at: KNode, name: string, written: string | null): string[] {
+	private reifiedArguments(
+		at: KNode,
+		name: string,
+		typed: string | null,
+		expected: string | null = null,
+		receiverType: string | null = null
+	): string[] {
 		const reified = this.reifiedFunctions.get(name);
 		if (reified === undefined || reified.length === 0) return [];
+		// Kotlin infers an omitted argument; this follows it only where the
+		// parameter *is* the return type or the receiver type — see
+		// `reifiedFrom` — and the other side of it is written down.
+		const from = this.reifiedFrom.get(name);
+		const written =
+			typed ??
+			(from?.returns === true ? expected : null) ??
+			(from?.receiver === true ? receiverType : null);
 		if (written === null) {
 			this.refuse(at, `\`.${name}()\` with no type argument for its \`reified\` parameter`);
 		}
@@ -5667,11 +6235,12 @@ class Emitter {
 		if (letGuarded !== null) return this.hoistedGuard(node, letGuarded);
 
 		const { callee, args, lambda, labelled, typeArgument } = this.flatten(node);
+		const expected = typeArgument === null ? this.expectedOf(node) : null;
 		if (callee.type === 'navigation_expression') {
-			return this.methodCall(callee, args, lambda, labelled, typeArgument);
+			return this.methodCall(callee, args, lambda, labelled, typeArgument, expected);
 		}
 		if (callee.type === 'simple_identifier') {
-			return this.bareCall(callee, args, lambda, labelled, typeArgument);
+			return this.bareCall(callee, args, lambda, labelled, typeArgument, expected);
 		}
 		if (callee.type === 'callable_reference') {
 			if (lambda !== null) this.refuse(lambda, 'a lambda passed to a callable reference');
@@ -5748,7 +6317,8 @@ class Emitter {
 		args: KNode[],
 		lambda: KNode | null,
 		labelled: string | null,
-		typeArgument: string | null
+		typeArgument: string | null,
+		expected: string | null = null
 	): string {
 		const receiver = kids(callee)[0];
 		const suffix = kids(callee)[kids(callee).length - 1];
@@ -5835,6 +6405,31 @@ class Emitter {
 			return SUPER_SUSPEND_MEMBERS.has(name) ? this.awaited(call) : call;
 		}
 
+		if (name === 'copy' && lambda === null && !this.declaredMethods.has('copy')) {
+			// A data class's `copy(field = value)`: a new record with the fields
+			// named replaced and the rest carried over. The receiver's class is
+			// not knowable here, so the record answers for itself — a data
+			// class this build emitted rebuilds through its own factory (see
+			// `dataRecord`), and the framework's `MangasPage`, `AnimesPage` and
+			// `Video` are known to the runtime.
+			const positional: string[] = [];
+			const named: string[] = [];
+			for (const arg of args) {
+				const argName = this.argumentName(arg);
+				const value = this.expr(this.argumentValue(arg));
+				if (argName === null) {
+					if (named.length > 0) this.refuse(arg, 'a positional argument after a named one');
+					positional.push(value);
+				} else {
+					named.push(`${JSON.stringify(fieldName(argName))}: ${value}`);
+				}
+			}
+			const tail = `{ ${named.join(', ')} }, [${positional.join(', ')}]`;
+			const receiverText = this.expr(receiver);
+			if (!safe) return `${this.helper('copy')}(${receiverText}, ${tail})`;
+			return `${this.helper('sc')}(${receiverText}, (__r) => ${this.helper('copy')}(__r, ${tail}))`;
+		}
+
 		if (
 			CLIENT_VERBS.has(name) &&
 			lambda === null &&
@@ -5856,16 +6451,22 @@ class Emitter {
 			// The shape being decoded is named in the type argument, not the
 			// arguments. Without one the runtime would have to guess a
 			// descriptor, and a guessed descriptor silently drops fields.
-			if (typeArgument === null) this.refuse(suffix, `\`.${name}()\` with no type argument`);
+			//
+			// Kotlin infers an omitted one from where the value is going —
+			// `val list: List<Foo> = response.parseAs()` — and so does this,
+			// through `expectedTypes`, which only answers where the type is
+			// written down. Nowhere to read it from is still a refusal.
+			const shape = typeArgument ?? expected;
+			if (shape === null) this.refuse(suffix, `\`.${name}()\` with no type argument`);
 			if (lambda !== null) {
 				// `parseAs<T> { it.substringAfter("…") }` — the block runs BEFORE
 				// the parse, and what it digs out is a JSON document embedded in
 				// an HTML attribute. Dropping it would hand the parser a page.
 				const withBlock = this.callArguments(name, args, lambda, labelled, false);
-				return `${this.helper('decodeWith')}(${[this.expr(receiver), JSON.stringify(typeArgument), ...withBlock].join(', ')})`;
+				return `${this.helper('decodeWith')}(${[this.expr(receiver), this.decodeType(shape), ...withBlock].join(', ')})`;
 			}
 			const tail = this.plainArguments(name, args);
-			return `${this.helper('decode')}(${[this.expr(receiver), JSON.stringify(typeArgument), ...tail].join(', ')})`;
+			return `${this.helper('decode')}(${[this.expr(receiver), this.decodeType(shape), ...tail].join(', ')})`;
 		}
 
 		if (RESULT_MEMBERS.has(name) && !safe && runCatchingOf(receiver) !== null) {
@@ -5979,7 +6580,35 @@ class Emitter {
 		// `private fun Array<String>.any(url: String)` and call the stdlib
 		// `this.any { … }` from inside it: same name, and only the lambda says
 		// which. A declaration cannot shadow a helper at a call site carrying one.
-		const shadowed = lambda === null && this.extensionFunctions.has(name);
+		//
+		// An extension imported by name from a shared `object` shadows it the
+		// same way — the one that caused it: `filters.asQueryPart<TypeFilter>()`
+		// imported from a multisrc template's filters object came out as the
+		// URL-encoder applied to the whole filter list, type argument dropped.
+		const importedExtension = this.importedOwner(name);
+		//
+		// And a member of a declared `object`, called through the object's
+		// name: `LocalFilters.sorted(2)` is that object's `sorted`, which
+		// Kotlin resolves before any extension — the runtime's collection
+		// `sorted` would have been handed the object as a list.
+		//
+		// A construction of a declared class is the same fact one step on:
+		// `TypeFilter().count()` is that class's `count`, not the collection
+		// helper handed an instance.
+		const declaredOwner =
+			receiver.type === 'simple_identifier' && this.declaredObjects.has(receiver.text)
+				? receiver.text
+				: receiver.type === 'call_expression'
+					? this.receiverTypeOf(receiver)
+					: null;
+		const objectMember =
+			declaredOwner !== null && this.classMemberIndex.get(declaredOwner)?.has(name) === true;
+		const shadowed =
+			objectMember ||
+			(lambda === null &&
+				(this.extensionFunctions.has(name) ||
+					(importedExtension !== null &&
+						this.neighbourExtensions.has(`${importedExtension}.${name}`))));
 		// The two rate-limit helpers take their period as a *unit plus a number*,
 		// and the emitter is the only half of this converter that can still see
 		// which unit was written. Handled before the generic path because that
@@ -6083,6 +6712,11 @@ class Emitter {
 		// implements and a declaration on the class both still win: what is
 		// filled here is only the gap where nothing else answered at all.
 		if (extension === undefined && this.neighbourModuleExtensions.has(name)) extension = 'module';
+		// Imported by name from a shared `object` — see `importedMembers`.
+		const importedFrom = extension === undefined ? this.importedOwner(name) : null;
+		if (importedFrom !== null && this.neighbourExtensions.has(`${importedFrom}.${name}`)) {
+			extension = 'module';
+		}
 		if (extension !== undefined) {
 			// `element.getInfo("x")` calls `getInfo(element, "x")`: the receiver
 			// is the first argument, which is where the declaration put it. A
@@ -6099,14 +6733,20 @@ class Emitter {
 			// converted extension died with `this.fixLink is not a function` on
 			// its first search. The source is `__self` there, captured by the
 			// enclosing member — which is what this asks for.
-			const owner = this.extensionOwners.get(name);
+			const owner = this.extensionOwners.get(name) ?? importedFrom ?? undefined;
 			const callee =
 				extension === 'method'
 					? `${this.selfReference()}.${name}`
 					: owner === undefined
 						? this.safe(name)
 						: `${this.safe(owner)}.${name}`;
-			const types = this.reifiedArguments(suffix, name, typeArgument);
+			const types = this.reifiedArguments(
+				suffix,
+				name,
+				typeArgument,
+				expected,
+				this.receiverTypeOf(receiver)
+			);
 			const tail = this.callArguments(name, args, lambda, labelled, false);
 			const call = `${callee}(${[...types, receiverText, ...tail].join(', ')})`;
 			if (!safe) {
@@ -6192,7 +6832,8 @@ class Emitter {
 		args: KNode[],
 		lambda: KNode | null,
 		labelled: string | null,
-		typeArgument: string | null = null
+		typeArgument: string | null = null,
+		expected: string | null = null
 	): string {
 		const name = callee.text;
 
@@ -6318,6 +6959,10 @@ class Emitter {
 			return this.invokeReceiverLocal(callee, receiverLocal, null, args, lambda);
 		}
 
+		if ((name === 'values' || name === 'valueOf') && lambda === null) {
+			const inEnum = this.enumMember(name);
+			if (inEnum !== null) return `${inEnum}(${this.plainArguments(name, args).join(', ')})`;
+		}
 		const local = this.lookup(name);
 		if (local !== null) {
 			const call = `${local}(${this.callArguments(name, args, lambda, labelled, false).join(', ')})`;
@@ -6343,6 +6988,20 @@ class Emitter {
 			// A file-scope `suspend fun` is an `async function` here, and its
 			// call site says nothing about that in either language.
 			return this.moduleSuspends.has(declared) ? this.awaited(made) : made;
+		}
+
+		// Imported by name from a shared `object`: a call on that object, not on
+		// whatever `this` is here. See `importedMembers`.
+		const importedFrom = this.importedOwner(name);
+		if (
+			importedFrom !== null &&
+			!this.neighbourExtensions.has(`${importedFrom}.${name}`) &&
+			this.classMemberIndex.get(importedFrom)?.has(name) === true
+		) {
+			const tail = this.callArguments(name, args, lambda, labelled, false);
+			const types = this.reifiedArguments(callee, name, typeArgument, expected);
+			const call = `${this.safe(importedFrom)}.${fieldName(name)}(${[...types, ...tail].join(', ')})`;
+			return this.declaredSuspends.has(name) ? this.awaited(call) : call;
 		}
 
 		// A capitalised bare call is a constructor of a class this build has not
@@ -6388,7 +7047,7 @@ class Emitter {
 					: owner === undefined
 						? this.safe(name)
 						: `${this.safe(owner)}.${name}`;
-			const types = this.reifiedArguments(callee, name, typeArgument);
+			const types = this.reifiedArguments(callee, name, typeArgument, expected);
 			const call = `${target}(${[...types, implicit, ...tail].join(', ')})`;
 			return this.suspendMembers.has(name) ? this.awaited(call) : call;
 		}
@@ -7896,12 +8555,15 @@ class Emitter {
 	 * means the framework's. `pipeline.ts` decides which files those are.
 	 */
 	private safe(name: string): string {
-		return safeName(this.renames.get(name) ?? name);
+		return safeName(this.companionRenames.get(name) ?? this.renames.get(name) ?? name);
 	}
 
 	private read(name: string, node: KNode): string {
 		const local = this.lookup(name);
 		if (local !== null) return local;
+		// Inside an enum: an entry by its bare name, and the entry list.
+		const inEnum = this.enumMember(name);
+		if (inEnum !== null) return inEnum;
 		// After the local, so a variable named like an alias still wins — a
 		// `typealias` is a file-scope declaration and a local shadows one.
 		const alias = this.aliased(name);
@@ -7928,6 +8590,11 @@ class Emitter {
 			} else {
 				return `${this.safe(holder)}.${fieldName(name)}`;
 			}
+		}
+		// A property imported by name from a shared `object`.
+		const importedFrom = this.importedOwner(name);
+		if (importedFrom !== null && this.classFieldIndex.get(importedFrom)?.has(name) === true) {
+			return `${this.safe(importedFrom)}.${fieldName(name)}`;
 		}
 		if (name === 'field') this.refuse(node, 'a `field` backing reference');
 		if (name === 'it') this.refuse(node, 'an `it` with no lambda around it');
@@ -9272,6 +9939,126 @@ function isPlainClass(node: KNode): boolean {
 	if (kinds.has('interface') || kinds.has('enum_class_body')) return false;
 	const modifiers = kids(node).find((child) => child.type === 'modifiers');
 	return !kids(modifiers).some((modifier) => modifier.text === 'data');
+}
+
+/**
+ * A type as written, whitespace dropped and generics kept — `List<Foo>?`.
+ *
+ * `typeName` below strips the arguments, which is right for a name and wrong
+ * for a decoder: `List<Foo>` and `Foo` want different containers.
+ */
+function typeText(node: KNode | undefined): string | null {
+	if (node === undefined || !node.type.endsWith('type')) return null;
+	// A function type is not a shape anything decodes into.
+	if (node.type === 'function_type') return null;
+	return node.text.replace(/\s+/g, '');
+}
+
+/** A function's declared return type, written after its parameter list. */
+function returnTypeText(node: KNode): string | null {
+	let seenParameters = false;
+	for (const child of kids(node)) {
+		if (child.type === 'function_value_parameters') seenParameters = true;
+		else if (seenParameters && child.type.endsWith('type')) return typeText(child);
+		else if (child.type === 'function_body') return null;
+	}
+	return null;
+}
+
+/** An extension function's receiver type as written, generics kept. */
+function receiverText(node: KNode): string | null {
+	for (const child of kids(node)) {
+		if (child.type === 'simple_identifier') return null;
+		if (child.type.endsWith('type')) return typeText(child);
+	}
+	return null;
+}
+
+function isValueParameters(node: KNode): boolean {
+	return node.type === 'function_value_parameters';
+}
+
+/**
+ * The declared type of each value parameter, in order, or null when the list
+ * has a `vararg` — past one, a position no longer names a parameter.
+ */
+function parameterTypesOf(list: KNode | undefined): (string | null)[] | null {
+	if (list === undefined) return null;
+	const out: (string | null)[] = [];
+	for (const child of kids(list)) {
+		if (child.type === 'parameter_modifiers' && /\bvararg\b/.test(child.text)) return null;
+		if (child.type === 'class_parameter' && /\bvararg\b/.test(child.text)) return null;
+		if (child.type !== 'parameter' && child.type !== 'class_parameter') continue;
+		out.push(typeText(kids(child).find((part) => part.type.endsWith('type'))));
+	}
+	return out;
+}
+
+/** The block of `by lazy { … }`, or null for any other delegate. */
+function lazyBlock(delegate: KNode): KNode | null {
+	const call = kids(delegate)[0];
+	if (call?.type !== 'call_expression' || kids(call)[0]?.text !== 'lazy') return null;
+	const suffix = kids(call)[1];
+	const annotated = kids(suffix).find((child) => child.type === 'annotated_lambda');
+	return kids(annotated).find((child) => child.type === 'lambda_literal') ?? null;
+}
+
+/** Where a `return` stops belonging to the function around it. */
+const EXPECTATION_BARRIERS: ReadonlySet<string> = new Set([
+	'function_declaration',
+	'anonymous_function',
+	'class_declaration',
+	'object_declaration',
+	'object_literal',
+	'getter',
+	'setter'
+]);
+
+/** A companion member as it was written out, for `Emitter.companionStatics`. */
+interface CompanionMember {
+	readonly name: string;
+	readonly binding: string;
+	/** A `val X get() = …`, which is a function at module scope. */
+	readonly getter: boolean;
+	/** A `var`, whose static also writes. */
+	readonly mutable?: boolean;
+}
+
+/**
+ * The members every enum entry answers to that its class did not declare.
+ *
+ * `toPrimitive` is what makes `this >= other` compare by ordinal, as Kotlin's
+ * `compareTo` does, while a string built from an entry still reads its name:
+ * JavaScript asks for a *number* in a comparison and a *string* in a template
+ * or a `String()`, and `+` — which in Kotlin is string concatenation on an
+ * enum — asks for neither and gets the name too.
+ */
+function enumMethods(declared: ReadonlySet<string>): string[] {
+	const out: string[] = [];
+	if (!declared.has('toString')) out.push('toString() { return this.name; }');
+	if (!declared.has('compareTo'))
+		out.push('compareTo(other) { return this.ordinal - other.ordinal; }');
+	out.push(
+		"[Symbol.toPrimitive](hint) { return hint === 'number' ? this.ordinal : this.toString(); }"
+	);
+	return out;
+}
+
+/** What `enumTail` puts on every enum class, reachable bare inside one. */
+const ENUM_STATICS: ReadonlySet<string> = new Set(['entries', 'values', 'valueOf']);
+
+/** A function's own properties, which a companion member is not written over. */
+const FUNCTION_OWN_NAMES: ReadonlySet<string> = new Set([
+	'name',
+	'length',
+	'prototype',
+	'caller',
+	'arguments'
+]);
+
+/** See `Emitter.expectedTypes` for why this is not the node itself. */
+function expectationKey(node: KNode): string {
+	return `${node.line}:${node.type}:${node.text}`;
 }
 
 /** The name a type node carries, without its arguments or its nullability. */

@@ -395,6 +395,8 @@ const helpers: Record<string, (...args: never[]) => unknown> = {
 		throw new Error(message ?? 'error');
 	},
 	decode: (_json: Any, _shape: string, body: string) => JSON.parse(body) as Any,
+	// The record is the value; how it copies itself is `kotlin-declarations.spec.ts`'s.
+	dataRecord: (record: Any) => record,
 	pref: (_store: Any, _key: string, fallback: Any) => fallback,
 
 	// One of the helpers that cannot run before a plugin call has entered: the
