@@ -161,7 +161,7 @@ describe('Sora', () => {
 		expect(detail).toEqual({
 			baseUrl: 'https://watch.example.invalid/',
 			searchBaseUrl: 'https://watch.example.invalid/search?q=%s',
-			container: 'hls',
+			streamType: 'HLS',
 			softsub: false
 		});
 	});

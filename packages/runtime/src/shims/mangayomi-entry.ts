@@ -879,9 +879,10 @@ const VIDEO_TERMINAL_METHODS = `  async listEpisodes(sourceMediaId, ctx) {
       const quality = String(row.quality || '').trim();
       sources.push({
         url: url,
-        // Read from the url rather than declared per stream: this format says
-        // nothing about the container, and a wrong guess is a player error.
-        container: /\\.m3u8(\\?|$)/i.test(url) ? 'hls' : (/\\.mpd(\\?|$)/i.test(url) ? 'dash' : 'mp4'),
+        // This format declares nothing about the container, so the url is the
+        // only statement, read by the rule every shim shares; a url that says
+        // nothing is played as a single file, the ABI's value for one.
+        container: __streamContainer({ url: url }, 'mp4'),
         label: quality.length > 0 ? quality : 'Source',
         quality: quality.length > 0 ? quality : undefined,
         heightPx: __height(quality),

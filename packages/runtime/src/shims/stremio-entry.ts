@@ -301,16 +301,26 @@ function __playable(row) {
       ? hints.proxyHeaders.request
       : undefined;
 
-  // The protocol has no container field. \`notWebReady\` is the closest thing:
-  // the spec defines it as "the url does not support https or is not an mp4",
-  // so a stream that omits it is one the addon believes a web player can take
-  // as-is. Everything else falls back to the extension sniff the guards do.
+  // The protocol has no container field, but it states one twice over:
+  // \`behaviorHints.filename\` names the file — the only place a debrid link's
+  // container is written, since its url is an opaque token — and
+  // \`notWebReady\` is defined as "not https, or not an mp4". Both go to the
+  // shared reading (\`__streamContainer\`), with the url between them. The
+  // fallback is \`mp4\` because a stream that states nothing is, by that same
+  // definition, one the addon calls web-ready.
   const label = String(row.name || row.title || '').trim();
   return {
     url: row.url,
     label: label.length > 0 ? label : 'Addon',
     headers: headers,
-    container: __containerOf(row.url),
+    container: __streamContainer(
+      {
+        filename: typeof hints.filename === 'string' ? hints.filename : undefined,
+        url: row.url,
+        webReady: hints.notWebReady !== true
+      },
+      'mp4'
+    ),
     subtitles: __sidecars(row.subtitles)
   };
 }
@@ -319,19 +329,22 @@ function __playable(row) {
  * A stream object that names a torrent, as an acquisition descriptor.
  *
  * \`sources\` carries this protocol's trackers and DHT nodes verbatim. The
- * infohash is lowercased here because that is how it is spelled everywhere it
- * is compared, and a source that returns it uppercase would otherwise start a
- * second engine for a torrent already running.
+ * hash is read by the shared \`__torrentOf\`, which answers 40 lowercase hex
+ * whether the addon wrote hex in either case or base32 — one spelling, so one
+ * torrent is never two engines — and answers nothing for a value that is not
+ * an info hash at all, which a torrent engine could not have joined.
  */
 function __torrent(row) {
   if (!row || typeof row !== 'object') return null;
   if (typeof row.infoHash !== 'string' || row.infoHash.length === 0) return null;
+  const found = __torrentOf({ infoHash: row.infoHash });
+  if (found === null) return null;
 
   const label = String(row.name || row.title || '').trim();
   const idx = Number(row.fileIdx);
   return {
     torrent: {
-      infoHash: row.infoHash.toLowerCase(),
+      infoHash: found.infoHash,
       ...(Number.isFinite(idx) && idx >= 0 ? { fileIdx: idx } : {}),
       ...(Array.isArray(row.sources)
         ? { sources: row.sources.filter(function (one) { return typeof one === 'string'; }) }
@@ -361,10 +374,6 @@ function __sidecars(list) {
     if (track !== null) out.push(track);
   }
   return out.length > 0 ? out : undefined;
-}
-
-function __containerOf(url) {
-  return /\\.m3u8(\\?|$)/i.test(String(url)) ? 'hls' : 'mp4';
 }
 
 /* --- the adapter --------------------------------------------------------- */

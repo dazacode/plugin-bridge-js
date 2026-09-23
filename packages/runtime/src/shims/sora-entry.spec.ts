@@ -15,7 +15,7 @@ import { describe, expect, it } from 'vitest';
 import { soraEntrypoint } from './sora-entry';
 
 /** Evaluates a generated entrypoint the way a sandbox would: as a module. */
-async function load(script: string): Promise<Record<string, unknown>> {
+async function load(script: string, streamType = ''): Promise<Record<string, unknown>> {
 	const directory = await mkdtemp(join(tmpdir(), 'sora-entry-'));
 	const file = join(directory, 'entry.mjs');
 	await writeFile(
@@ -24,7 +24,7 @@ async function load(script: string): Promise<Record<string, unknown>> {
 			pluginId: 'test.sora',
 			script,
 			baseUrl: 'https://example.invalid/',
-			container: 'hls',
+			streamType,
 			softsub: false
 		})
 	);
@@ -328,5 +328,43 @@ describe('fetchv2, with all six of its arguments', () => {
 			)
 		).rejects.toThrow(/utf-16le charset/);
 		expect(context.sent).toHaveLength(0);
+	});
+});
+
+describe('the container a stream is played as', () => {
+	async function containers(streamType: string, urls: string[]): Promise<unknown[]> {
+		const module = await load(
+			`function searchResults() { return '[]'; }
+function extractDetails() { return '[]'; }
+function extractEpisodes() { return '[]'; }
+function extractStreamUrl() { return JSON.stringify({ streams: ${JSON.stringify(
+				urls.map((url) => ({ title: 'x', streamUrl: url }))
+			)} }); }`,
+			streamType
+		);
+		const plugin = module['default'] as {
+			resolve: (id: string, episode: unknown, ctx: unknown) => Promise<{ container: string }[]>;
+		};
+		const sources = await plugin.resolve('https://example.invalid/e/1', null, contextFor().ctx);
+		return sources.map((one) => one.container);
+	}
+
+	it('reads a declared MKV as a single file, where it used to become HLS', async () => {
+		expect(await containers('MKV', ['https://cdn.example.invalid/v/1'])).toEqual(['mp4']);
+	});
+
+	it('believes the declaration ahead of the url, in any case', async () => {
+		expect(await containers('hls', ['https://cdn.example.invalid/v/1.mp4'])).toEqual(['hls']);
+		expect(await containers('Mp4', ['https://cdn.example.invalid/v/1.m3u8'])).toEqual(['mp4']);
+	});
+
+	it('reads the url when the module declares nothing, and HLS when that says nothing', async () => {
+		expect(
+			await containers('', [
+				'https://cdn.example.invalid/v/1.mp4',
+				'https://cdn.example.invalid/v/2.mpd',
+				'https://cdn.example.invalid/v/3'
+			])
+		).toEqual(['mp4', 'dash', 'hls']);
 	});
 });

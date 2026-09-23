@@ -24,8 +24,9 @@
  *   ABI says object is a plugin that fails at the boundary with a useless
  *   message.
  * - `streamType` is per module, not per stream, so a resolved url inherits the
- *   manifest's container rather than being sniffed from its extension —
- *   sniffing is how you get a black screen and no error.
+ *   manifest's container ahead of anything its extension suggests — the module
+ *   author knows what their source serves. It is read case-insensitively by
+ *   the shared rule every shim uses (`__streamContainer`).
  *
  * ## Two index shapes
  *
@@ -98,14 +99,6 @@ function authorName(value: unknown): string {
 }
 
 /**
- * `streamType` to a container we play.
- *
- * Defaults to HLS rather than MP4 because that is what these modules
- * overwhelmingly return, and because an adaptive manifest opened as
- * progressive fails immediately and legibly, where the reverse buffers
- * forever.
- */
-/**
  * Every medium a module is for, from the manifest or from the library that
  * listed it.
  *
@@ -174,10 +167,6 @@ function mediaKindOf(manifest: SoraManifest, category?: string): ForeignMedium {
 	return mediaKindsOf(manifest, category)[0];
 }
 
-function containerOf(streamType: unknown): 'hls' | 'mp4' {
-	return String(streamType ?? '').toLowerCase() === 'mp4' ? 'mp4' : 'hls';
-}
-
 function listingOf(manifest: SoraManifest, indexUrl: string, category?: string): RepositoryPlugin {
 	const scriptUrl = new URL(String(manifest.scriptUrl), indexUrl).toString();
 	const name = String(manifest.sourceName);
@@ -218,7 +207,10 @@ function listingOf(manifest: SoraManifest, indexUrl: string, category?: string):
 			detail: {
 				baseUrl: typeof manifest.baseUrl === 'string' ? manifest.baseUrl : '',
 				searchBaseUrl: typeof manifest.searchBaseUrl === 'string' ? manifest.searchBaseUrl : '',
-				container: containerOf(manifest.streamType),
+				// Verbatim, and read in the bundle by the shared container rule
+				// (`__streamContainer` in stream-guards). Collapsing it here used to
+				// send every value but exactly "mp4" to HLS — `MKV` included.
+				streamType: typeof manifest.streamType === 'string' ? manifest.streamType : '',
 				softsub: manifest.softsub === true
 			}
 		}
@@ -418,7 +410,14 @@ export const soraAdapter: ForeignAdapter = {
 				pluginId: listing.id,
 				script,
 				baseUrl: String(detail['baseUrl'] ?? ''),
-				container: detail['container'] === 'mp4' ? 'mp4' : 'hls',
+				// A listing parsed before `streamType` was carried has the old
+				// collapsed `container` instead, which is still a declaration.
+				streamType:
+					typeof detail['streamType'] === 'string'
+						? detail['streamType']
+						: typeof detail['container'] === 'string'
+							? detail['container']
+							: '',
 				softsub: detail['softsub'] === true
 			})
 		});
