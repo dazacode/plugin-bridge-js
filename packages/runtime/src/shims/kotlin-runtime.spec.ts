@@ -5143,3 +5143,91 @@ describe('HttpUrl.Builder, and android.net.Uri over the same parse', () => {
 		);
 	});
 });
+
+describe('jsoup mutation and statics, as the emitter reaches them', () => {
+	const { Jsoup, Parser, Entities, TextNode, Evaluator, Request } = runtime.globals;
+
+	it('reads a remove() with no argument as jsoup’s, on a selection or one element', () => {
+		// It used to remove `undefined` from the list — nothing — and answer
+		// false, leaving the advert in the synopsis with nothing refused.
+		const doc = Jsoup.parse('<p>keep <span class="ad">ad</span><b>x</b></p>');
+		k.remove(doc.select('span.ad'));
+		k.remove(doc.selectFirst('b'));
+		expect(doc.selectFirst('p').text()).toBe('keep');
+		// A bare array from children() is wrapped rather than misread.
+		const list = Jsoup.parse('<ul><li>1</li><li>2</li></ul>').selectFirst('ul');
+		k.remove(list.children);
+		expect(list.html()).toBe('');
+		// The one-argument form is still a collection's.
+		const items = ['a', 'b'];
+		expect(k.remove(items, 'a')).toBe(true);
+		expect(items).toEqual(['b']);
+		expect(() => k.remove(42)).toThrow(/remove\(\)/);
+	});
+
+	it('applies the Elements mutators to every member and answers the selection', () => {
+		const doc = Jsoup.parse('<div><p>a</p><br><p>b</p></div>', 'https://example.invalid/');
+		const picked = doc.select('p, br');
+		expect(picked.prepend('\\n')).toBe(picked);
+		expect(doc.selectFirst('div').wholeText()).toBe('\\na\\n\\nb');
+		doc.select('p').attr('data-x', 1);
+		expect(doc.select('p').eachAttr('data-x')).toEqual(['1', '1']);
+		expect(doc.select('p').attr('data-x')).toBe('1');
+		expect(doc.select('p').hasText()).toBe(true);
+		expect(doc.select('br').is('div > br')).toBe(true);
+		expect(
+			doc
+				.select('p')
+				.parents()
+				.map((one: { tagName: string }) => one.tagName)
+		).toEqual(['div', 'body', 'html']);
+	});
+
+	it('answers before()/after() for a node, a date and a calendar, and nothing else', () => {
+		const doc = Jsoup.parse('<div><p>x</p></div>');
+		expect(k.after(doc.selectFirst('p'), '<i>y</i>').tagName).toBe('p');
+		expect(doc.selectFirst('div').html()).toBe('<p>x</p><i>y</i>');
+		expect(k.before(new Date(1), new Date(2))).toBe(true);
+		expect(k.after(new Date(1), new Date(2))).toBe(false);
+		const early = runtime.globals.Calendar.getInstance();
+		early.setTimeInMillis(1000);
+		const late = runtime.globals.Calendar.getInstance();
+		late.setTimeInMillis(2000);
+		expect(k.before(early, late)).toBe(true);
+		// Calendar.before(Object) is false for anything that is not a Calendar.
+		expect(k.before(early, new Date(5000))).toBe(false);
+		expect(() => k.before('x', 'y')).toThrow(/neither a jsoup node nor a date/);
+	});
+
+	it('answers head() for a HEAD request and for a document’s <head>', () => {
+		const request = k.head(new Request.Builder().url('https://example.invalid/x')).build();
+		expect(request.method).toBe('HEAD');
+		const doc = Jsoup.parse('<title>t</title><p>x</p>');
+		expect(k.head(doc).selectFirst('title').text()).toBe('t');
+		expect(doc.body().selectFirst('p').text()).toBe('x');
+		expect(k.head([3, 4])).toBe(3);
+	});
+
+	it('defines the jsoup statics the scanner lets through', () => {
+		expect(Parser.unescapeEntities('&eacute;&copy=1', true)).toBe('é&copy=1');
+		expect(Entities.unescape('&eacute;&copy=1')).toBe('é©=1');
+		expect(Jsoup.parse('<p>a</p>', '', Parser.htmlParser()).selectFirst('p').text()).toBe('a');
+		const doc = Jsoup.parse('<div id="c" class="Box"><a>1</a></div>');
+		expect(doc.select(new Evaluator.Tag('a')).size()).toBe(1);
+		expect(doc.selectFirst(Evaluator.Class('box')).id).toBe('c');
+		expect(doc.select('div').select(Evaluator.Id('c')).size()).toBe(1);
+		const a = doc.selectFirst('a');
+		a.replaceWith(new TextNode('<t>'));
+		expect(doc.selectFirst('div').html()).toBe('&lt;t&gt;');
+	});
+
+	it('tells a text node from an element, which it answered true for before', () => {
+		const div = Jsoup.parse('<div>a<br>b</div>').selectFirst('div');
+		const kinds = div.childNodes().map((node: unknown) => k.isType(node, 'TextNode'));
+		expect(kinds).toEqual([true, false, true]);
+		expect(k.isType(TextNode('x'), 'TextNode')).toBe(true);
+		expect(
+			k.isType(Jsoup.parse('<script>s</script>').selectFirst('script').childNodes()[0], 'DataNode')
+		).toBe(true);
+	});
+});

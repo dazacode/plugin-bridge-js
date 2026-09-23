@@ -102,7 +102,7 @@ describe('the runtime contract', () => {
 		expect(EXTENSION_METHODS.get('trimMargin')).toBe('trimMargin');
 		expect(EXTENSION_METHODS.get('encodeToString')).toBe('encodeToString');
 		expect(EXTENSION_METHODS.get('asUriPart')).toBe('asQueryPart');
-		expect(EXTENSION_METHODS.get('head')).toBe('firstOrNull');
+		expect(EXTENSION_METHODS.get('head')).toBe('head');
 		expect(EXTENSION_METHODS.get('toLong')).toBe('toLong');
 		expect(EXTENSION_METHODS.get('countLeadingZeroBits')).toBe('countLeadingZeroBits');
 		expect(GLOBAL_NAMES.has('JsonObject')).toBe(true);

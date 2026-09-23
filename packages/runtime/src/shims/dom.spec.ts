@@ -13,7 +13,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { parseHtml } from './dom';
+import { createTextNode, jsoupEvaluator, parseHtml, unescapeEntities } from './dom';
 
 const BASE = 'https://example.invalid/a/b/index.html';
 
@@ -638,5 +638,211 @@ describe('selectors that do not parse', () => {
 		expect(() => page.select('')).toThrow();
 		expect(() => page.select(':nth-child(q)')).toThrow(/not a recognised pattern/);
 		expect(() => page.select(':eq(x)')).toThrow(/whole number/);
+	});
+});
+
+describe('entities, the way jsoup reads them', () => {
+	it('decodes every HTML 4 name, not only the forty that were listed', () => {
+		// A French or Spanish synopsis is written in these, and every one outside
+		// the old table reached a viewer as the literal `&eacute;`.
+		expect(parseHtml('<p>&eacute;t&eacute; &ntilde; &alpha; &rarr; &hearts;</p>').text()).toBe(
+			'été ñ α → ♥'
+		);
+	});
+
+	it('needs the semicolon except on a legacy name', () => {
+		expect(unescapeEntities('&copy 2020 &hellip &hellip;', false)).toBe('© 2020 &hellip …');
+		expect(unescapeEntities('&notreal; &', false)).toBe('&notreal; &');
+	});
+
+	it('leaves a query string alone inside an attribute', () => {
+		// `?a=1&copy=2` decoded as text is `?a=1©=2`, which is a broken link.
+		const link = parseHtml('<a href="/p?a=1&copy=2&amp;b=3">x</a>').selectFirst('a');
+		expect(link?.attr('href')).toBe('/p?a=1&copy=2&b=3');
+		expect(unescapeEntities('&copy=2', true)).toBe('&copy=2');
+		expect(unescapeEntities('&copy=2', false)).toBe('©=2');
+	});
+
+	it('reads a C1 number as windows-1252 and a bad one as U+FFFD', () => {
+		expect(unescapeEntities('&#150;&#x2014;&#39;', false)).toBe("–—'");
+		expect(unescapeEntities('&#xD800;&#0;&#99999999999;', false)).toBe('���');
+		expect(unescapeEntities('&#;&#x;', false)).toBe('&#;&#x;');
+	});
+});
+
+describe('jsoup evaluators, which select in place of a selector string', () => {
+	const doc = parseHtml(
+		'<div id="Main" class="Comic-List"><a>1</a><A>2</A></div><p id="main">x</p>',
+		BASE
+	);
+
+	it('matches a tag, a class case-insensitively and an id exactly', () => {
+		expect(doc.select(jsoupEvaluator('Tag', 'a'))).toHaveLength(2);
+		expect(doc.selectFirst(jsoupEvaluator('Class', 'comic-list'))?.id).toBe('Main');
+		expect(doc.selectFirst(jsoupEvaluator('Id', 'main'))?.tagName).toBe('p');
+	});
+
+	it('does not lower-case a Tag argument, because jsoup does not', () => {
+		expect(doc.select(jsoupEvaluator('Tag', 'A'))).toHaveLength(0);
+	});
+});
+
+describe('the traversal jsoup answers without a selector', () => {
+	const doc = parseHtml(
+		'<body data-manga-id="7" data-x=""><ul class="L"><li class="a">1</li><li class="b">2</li>' +
+			'<li class="c">3&nbsp;</li></ul><script>var a;</script><noscript><img></noscript></body>',
+		BASE
+	);
+	const middle = doc.selectFirst('li.b');
+
+	it('reads a child by index, and throws past the end as jsoup does', () => {
+		const list = doc.selectFirst('ul');
+		expect(list?.child(2).text()).toBe('3');
+		expect(() => list?.child(3)).toThrow(/child 3/);
+	});
+
+	it('lists parents nearest first, stopping below the document', () => {
+		expect(middle?.parents().map((one) => one.tagName)).toEqual(['ul', 'body', 'html']);
+	});
+
+	it('lists preceding siblings nearest first and following ones in order', () => {
+		const last = doc.selectFirst('li.c');
+		expect(last?.previousElementSiblings().map((one) => one.className)).toEqual(['b', 'a']);
+		expect(
+			doc
+				.selectFirst('li.a')
+				?.nextElementSiblings()
+				.map((one) => one.className)
+		).toEqual(['b', 'c']);
+		expect(last?.elementSiblingIndex()).toBe(2);
+	});
+
+	it('tests a selector against the whole tree, so a combinator can look up', () => {
+		expect(middle?.is('ul > li')).toBe(true);
+		expect(middle?.is('li.a + li')).toBe(true);
+		expect(middle?.is('div li')).toBe(false);
+	});
+
+	it('counts text, not script, and counts a non-breaking space', () => {
+		expect(doc.selectFirst('li.c')?.hasText()).toBe(true);
+		expect(parseHtml('<p> \n </p>').selectFirst('p')?.hasText()).toBe(false);
+		expect(parseHtml('<p>&nbsp;</p>').selectFirst('p')?.hasText()).toBe(true);
+		expect(doc.selectFirst('script')?.hasText()).toBe(false);
+	});
+
+	it('includes the element itself in getElementsByTag and getElementsByClass', () => {
+		const list = doc.selectFirst('ul');
+		expect(list?.getElementsByTag('ul')).toHaveLength(1);
+		expect(list?.getElementsByClass('l')).toHaveLength(1);
+		expect(doc.getElementsByClass('B').map((one) => one.text())).toEqual(['2']);
+	});
+
+	it('answers attributes as pairs and data-* as a map', () => {
+		const body = doc.body();
+		expect(body.attributes()).toEqual([
+			{ key: 'data-manga-id', value: '7' },
+			{ key: 'data-x', value: '' }
+		]);
+		expect(body.dataset().get('manga-id')).toBe('7');
+		expect(body.dataset().has('x')).toBe(true);
+	});
+
+	it('hands out child nodes with names, and text nodes normalised but not trimmed', () => {
+		const div = parseHtml('<div>a  b<br><!--c-->\n</div>').selectFirst('div');
+		const nodes = div?.childNodes() ?? [];
+		expect(nodes.map((node) => node.nodeName())).toEqual(['#text', 'br', '#comment', '#text']);
+		const first = nodes[0] as ReturnType<typeof createTextNode>;
+		expect(first.text()).toBe('a b');
+		expect(first.wholeText).toBe('a  b');
+		expect((nodes[3] as ReturnType<typeof createTextNode>).isBlank()).toBe(true);
+	});
+});
+
+describe('a document a scraper edits before reading it', () => {
+	it('removes an element and an element list, and re-indexes the siblings', () => {
+		const doc = parseHtml('<ul><li>ad</li><li>one</li><li>two</li></ul><p>x <span>y</span></p>');
+		doc.selectFirst('li')?.remove();
+		for (const one of doc.select('span')) one.remove();
+		expect(doc.selectFirst('ul')?.html()).toBe('<li>one</li><li>two</li>');
+		expect(doc.selectFirst('p')?.text()).toBe('x');
+		// `:eq` and `+` read the sibling index, and a stale one is a wrong match.
+		expect(doc.selectFirst('li:eq(0)')?.text()).toBe('one');
+		expect(doc.selectFirst('li + li')?.text()).toBe('two');
+		// Removing a detached element is a no-op, not an error.
+		const gone = doc.selectFirst('li');
+		gone?.remove();
+		expect(() => gone?.remove()).not.toThrow();
+	});
+
+	it('replaces an element with a text node, moving rather than copying it', () => {
+		const doc = parseHtml('<p>a<br>b<a href="/x">t</a></p>', BASE);
+		for (const br of doc.select('br')) br.replaceWith(createTextNode('\n'));
+		const link = doc.selectFirst('a');
+		link?.replaceWith(createTextNode('[t](' + link.absUrl('href') + ')'));
+		expect(doc.selectFirst('p')?.wholeText()).toBe('a\nb[t](https://example.invalid/x)');
+		// The text is characters, never markup and never decoded.
+		expect(doc.selectFirst('p')?.html()).toBe('a\nb[t](https://example.invalid/x)');
+		const bare = parseHtml('<p>x</p>');
+		bare.selectFirst('p')?.replaceWith(createTextNode('<b>&amp;</b>'));
+		expect(bare.body().html()).toBe('&lt;b&gt;&amp;amp;&lt;/b&gt;');
+		expect(() => parseHtml('').createElement('i').replaceWith(createTextNode('x'))).toThrow();
+	});
+
+	it('inserts markup before, after, first and last, parsed in context', () => {
+		const doc = parseHtml('<div><p>x</p></div>');
+		const p = doc.selectFirst('p');
+		p?.before('<i>1</i>').after('\n\n');
+		p?.prepend('<b>0</b>').append('<em>2</em>');
+		expect(doc.selectFirst('div')?.html()).toBe('<i>1</i><p><b>0</b>x<em>2</em></p>\n\n');
+		expect(doc.selectFirst('i + p')).not.toBeNull();
+	});
+
+	it('appends script source into a script as data, not as markup', () => {
+		const doc = parseHtml('<p>x</p>');
+		doc.head().prependElement('script').append('if (a < b) { go("</p>"); }');
+		const script = doc.selectFirst('head > script');
+		expect(script?.data()).toBe('if (a < b) { go("</p>"); }');
+		expect(doc.select('p')).toHaveLength(1);
+	});
+
+	it('keeps a fragment out of <head> and drops the document tags in it', () => {
+		const doc = parseHtml('<div></div>');
+		doc.selectFirst('div')?.append('<body><script>s</script><meta name="m"></body>');
+		expect(doc.selectFirst('div')?.html()).toBe('<script>s</script><meta name="m">');
+	});
+
+	it('writes a void element that was given children with an end tag', () => {
+		const doc = parseHtml('<p>a<br>b</p>');
+		doc.selectFirst('br')?.prepend('\\n');
+		expect(doc.selectFirst('p')?.html()).toBe('a<br>\\n</br>b');
+		expect(doc.selectFirst('p')?.wholeText()).toBe('a\\nb');
+	});
+
+	it('sets attributes, re-reading classes, and answers the element to chain on', () => {
+		const img = parseHtml('<img class="a">', BASE).selectFirst('img');
+		expect(img?.attr('src', '/p.png').attr('abs:src')).toBe('https://example.invalid/p.png');
+		img?.attr('class', 'b');
+		expect(img?.hasClass('b')).toBe(true);
+		expect(img?.hasClass('a')).toBe(false);
+	});
+
+	it('creates an element that resolves against its document before it is placed', () => {
+		const doc = parseHtml('<p></p>', BASE);
+		const a = doc.createElement('A').attr('href', 'x');
+		expect(a.tagName).toBe('a');
+		expect(a.attr('abs:href')).toBe('https://example.invalid/a/b/x');
+		doc.body().appendElement('span').appendText('<t>');
+		expect(doc.body().html()).toBe('<p></p><span>&lt;t&gt;</span>');
+	});
+
+	it('resolves against a base url set after parsing, from that element down', () => {
+		const doc = parseHtml('<div><a href="x">1</a></div><a href="y">2</a>', BASE);
+		doc.selectFirst('div')?.setBaseUri('https://other.invalid/d/');
+		expect(doc.select('a').map((one) => one.attr('abs:href'))).toEqual([
+			'https://other.invalid/d/x',
+			'https://example.invalid/a/b/y'
+		]);
+		doc.setBaseUri('https://third.invalid/');
+		expect(doc.select('a')[1].attr('abs:href')).toBe('https://third.invalid/y');
 	});
 });

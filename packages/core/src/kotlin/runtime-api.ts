@@ -520,6 +520,13 @@ export const RUNTIME_HELPERS = [
 	   than down — `shims/dom.ts` defines them and these reach them. */
 	'closest',
 	'ownerDocument',
+	/* jsoup's `before(…)`/`after(…)` share their names with java.util.Date's
+	   comparisons, and the receiver's type is not known here — the helper
+	   asks the value which one it is. */
+	'before',
+	'after',
+	/* `.head()`: okhttp's HEAD method or jsoup's <head>, by the value. */
+	'head',
 
 	/* `Throwable.printStackTrace()`, which is what `onFailure { … }` almost
 	   always contains. It logs; it must not rethrow. */
@@ -712,6 +719,11 @@ export const RUNTIME_GLOBALS = [
 	'Headers',
 	'FormBody',
 	'Jsoup',
+	/* jsoup's statics and its one hand-built node — see `KOTLIN_JSOUP`. */
+	'Parser',
+	'Entities',
+	'TextNode',
+	'Evaluator',
 	'SAnime',
 	'SEpisode',
 	'Video',
