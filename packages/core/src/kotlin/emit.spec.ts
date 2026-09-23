@@ -5082,6 +5082,28 @@ describe('a local that shadows a name already in scope', () => {
 	});
 });
 
+describe('a parameter that cannot be invoked', () => {
+	it('does not hide a member of the same name from a call', () => {
+		// keiyoushi's `fetchMangaUpdate(…, fetchDetails: Boolean, fetchChapters:
+		// Boolean)`, overridden by Madara, calls the source's own
+		// `fetchChapters(path, id)` with the Boolean in scope. Kotlin resolves
+		// that to the member because a Boolean has no `invoke`; emitted bare, it
+		// called the Boolean. A function-typed parameter is still the callee.
+		const demo = instantiate(
+			inClass(
+				'    fun update(fetchChapters: Boolean, id: String?): String =',
+				'        if (fetchChapters) fetchChapters(id ?: "none") else "skipped"',
+				'    fun through(fetchChapters: (String) -> String): String = fetchChapters("x")',
+				'    private fun fetchChapters(id: String): String = "chapters of " + id'
+			)
+		);
+
+		expect(demo.update(true, '7')).toBe('chapters of 7');
+		expect(demo.update(false, '7')).toBe('skipped');
+		expect(demo.through((id: string) => 'lambda ' + id)).toBe('lambda x');
+	});
+});
+
 describe('a safe assignment', () => {
 	it('writes when the receiver is there, and evaluates nothing when it is not', () => {
 		// `firstOrNull()?.date_upload = time` on an empty list does nothing in

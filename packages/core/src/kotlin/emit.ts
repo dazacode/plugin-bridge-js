@@ -752,7 +752,37 @@ interface Local {
 	readonly receiverArity?: number;
 	/** On such a parameter: whether its type is `suspend`, so a call is awaited. */
 	readonly receiverSuspends?: boolean;
+	/**
+	 * Set on a parameter declared with a type that has no `invoke` — see
+	 * `VALUE_ONLY_TYPES`. Kotlin resolves `name(…)` to a local only when the
+	 * local can be invoked, so a call through this name is a member's.
+	 */
+	readonly valueOnly?: boolean;
 }
+
+/**
+ * Parameter types that cannot be called, so `name(…)` never means the parameter.
+ *
+ * keiyoushi's `fetchMangaUpdate(manga, chapters, fetchDetails: Boolean,
+ * fetchChapters: Boolean)` is overridden by Madara and others, and its body
+ * calls the source's own `fetchChapters(path, id)` with the Boolean in scope.
+ * Kotlin resolves that to the member, because a Boolean has no `invoke`;
+ * emitted as a bare call it called the Boolean — "fetchChapters is not a
+ * function" on the first library refresh, with nothing refused. Only the
+ * standard library's value types are listed: a user type could declare an
+ * `operator fun invoke`, and a function type obviously can.
+ */
+const VALUE_ONLY_TYPES: ReadonlySet<string> = new Set([
+	'Boolean',
+	'String',
+	'Int',
+	'Long',
+	'Short',
+	'Byte',
+	'Float',
+	'Double',
+	'Char'
+]);
 
 /** One `function`-ish emission in progress. */
 interface Frame {
@@ -4793,12 +4823,23 @@ class Emitter {
 				(one): one is { name: string; arity: number; suspends: boolean } =>
 					one.name !== null && one.arity !== null
 			);
+		const valueParams = kids(list)
+			.filter((child) => child.type === 'parameter')
+			.filter((child) => {
+				const type = kids(child).find(
+					(part) => part.type === 'user_type' || part.type === 'nullable_type'
+				);
+				return type !== undefined && VALUE_ONLY_TYPES.has(type.text.replace(/\?$/, ''));
+			})
+			.map((child) => this.nameOf(child))
+			.filter((one): one is string => one !== null);
 		let emitted;
 		try {
 			emitted = this.functionScope('function', null, names, () => {
 				for (const one of receiverParams) {
 					this.declareReceiverLocal(one.name, one.arity, one.suspends);
 				}
+				for (const one of valueParams) this.markValueOnly(one);
 				return this.functionBody(body);
 			});
 		} finally {
@@ -7893,7 +7934,13 @@ class Emitter {
 			const inEnum = this.enumMember(name);
 			if (inEnum !== null) return `${inEnum}(${this.plainArguments(name, args).join(', ')})`;
 		}
-		const local = this.lookup(name);
+		// A parameter that cannot be invoked does not hide a member of the same
+		// name from a call — see `VALUE_ONLY_TYPES`. Asked only when something
+		// the source declares answers to the name, so the call still goes
+		// somewhere real.
+		const bound = this.lookupLocal(name);
+		const local =
+			bound?.valueOnly === true && this.callableMember(name) ? null : (bound?.text ?? null);
 		if (local !== null) {
 			const call = `${local}(${this.callArguments(name, args, lambda, labelled, false).join(', ')})`;
 			return this.localSuspends.has(name) ? this.awaited(call) : call;
@@ -9722,6 +9769,18 @@ class Emitter {
 	 * Whether the class or object being emitted declares `name` itself, or a
 	 * local of that name is in scope. See the free-function check in `bareCall`.
 	 */
+	/**
+	 * Whether a call `name(…)` could reach something other than a local: a
+	 * member of this class or of a template it extends, an `object`'s own
+	 * member, or a file-scope `fun`. See `Local.valueOnly`.
+	 */
+	private callableMember(name: string): boolean {
+		if (this.isSourceMember(name) || this.moduleNames.has(name)) return true;
+		if (this.owner !== null && this.objectMembers.get(name) === this.owner) return true;
+		const base = this.owner === null ? undefined : this.classBaseIndex.get(this.owner);
+		return base !== undefined && this.baseDeclares(base, name);
+	}
+
 	private declaresOwn(name: string): boolean {
 		if (this.lookup(name) !== null) return true;
 		if (this.owner !== null && this.objectMembers.get(name) === this.owner) return true;
@@ -9856,6 +9915,13 @@ class Emitter {
 	/** A local bound under a JavaScript name other than its own. See `localBinding`. */
 	private declareAs(name: string, text: string, mutable: boolean): void {
 		this.scopes[this.scopes.length - 1]?.set(name, { text, mutable });
+	}
+
+	/** See `Local.valueOnly`. Rebinds the innermost binding of `name`, unchanged otherwise. */
+	private markValueOnly(name: string): void {
+		const scope = this.scopes[this.scopes.length - 1];
+		const found = scope?.get(name);
+		if (found !== undefined) scope.set(name, { ...found, valueOnly: true });
 	}
 
 	/** A parameter typed `R.(…) -> T`, taking `arity` arguments besides `R`. */
