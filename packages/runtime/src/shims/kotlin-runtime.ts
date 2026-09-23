@@ -662,8 +662,104 @@ var __TYPES = {
   // JSONObject' after a JSONTokener is how an extension tells an error envelope
   // from a list, so the two have to be distinguishable and an array is not one.
   JSONObject: function (v) { return typeof v === 'object' && !Array.isArray(v) && !(v instanceof Map); },
-  JSONArray: function (v) { return Array.isArray(v); }
+  JSONArray: function (v) { return Array.isArray(v); },
+  // kotlinx's JsonElement family, over the same plain values. JsonNull (and
+  // so JsonPrimitive and JsonElement) is also true of null, which '__isType'
+  // answers before it gets here — see '__jeKind'.
+  JsonElement: function (v) { return __jeKind(v) !== 'other'; },
+  JsonObject: function (v) { return __jeKind(v) === 'object'; },
+  JsonArray: function (v) { return __jeKind(v) === 'array'; },
+  JsonPrimitive: function (v) { return __jeKind(v) === 'primitive'; },
+  JsonNull: function () { return false; }
 };
+
+/**
+ * What a plain value is, read as a kotlinx JsonElement: 'object', 'array',
+ * 'primitive', 'null' (JSON's null, which is JS null — an absent key is
+ * undefined and is Kotlin's null, not JsonNull), or 'other' for anything JSON
+ * cannot hold. A record a '@Serializable' class decoded into is an object; a
+ * Map or a class instance with methods is not JSON.
+ */
+function __jeKind(value) {
+  if (value === null) return 'null';
+  if (value === undefined) return 'other';
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return 'primitive';
+  }
+  if (Array.isArray(value)) return 'array';
+  if (typeof value === 'object' && !(value instanceof Map) && !(value instanceof Set)) return 'object';
+  return 'other';
+}
+
+var __JE_NONE = {};
+
+/**
+ * The receiver's own answer to a property of this name, or __JE_NONE when it
+ * is to be read as JSON.
+ *
+ * A property the receiver has, own or inherited, is its answer. So is a
+ * record's *absent* field for every name but the four that are JSON's alone:
+ * a JsonObject has no 'content' or 'int', so a plain object asked for one is
+ * a DTO whose optional field was not in the payload, and that read answered
+ * undefined before this existed and must still. A value JSON cannot hold — a
+ * Map, a class the runtime built, undefined — is read exactly as it was too.
+ */
+var __JE_OWN_NAMES = { jsonObject: true, jsonArray: true, jsonPrimitive: true, jsonNull: true };
+function __jeOwn(value, name) {
+  if (value !== null && value !== undefined && typeof value === 'object' && name in value) {
+    return value[name];
+  }
+  var kind = __jeKind(value);
+  if (kind === 'other' || (kind === 'object' && __JE_OWN_NAMES[name] !== true)) return value[name];
+  return __JE_NONE;
+}
+
+function __jeWrongKind(value, wanted) {
+  var kind = __jeKind(value);
+  var had = kind === 'null' ? 'JsonNull' : kind === 'object' ? 'JsonObject' :
+    kind === 'array' ? 'JsonArray' : kind === 'primitive' ? 'JsonPrimitive' : 'not JSON';
+  throw new Error('This converted extension read a ' + had + ' as a ' + wanted + '.');
+}
+
+/** A primitive's content, as kotlinx spells it: the literal's text. */
+function __jeContent(value, asked) {
+  var kind = __jeKind(value);
+  if (kind === 'null') return 'null';
+  if (kind !== 'primitive') __jeWrongKind(value, 'JsonPrimitive (for ' + asked + ')');
+  return String(value);
+}
+
+/** '.int', '.doubleOrNull' and the rest: the content, parsed, or null/throw. */
+function __jeNumber(value, name, whole, orNull) {
+  var own = __jeOwn(value, name);
+  if (own !== __JE_NONE) return own;
+  var kind = __jeKind(value);
+  if (kind === 'null') {
+    if (orNull) return null;
+    throw new Error('This converted extension read JsonNull as a number (' + name + ').');
+  }
+  var text = __jeContent(value, name);
+  var number = typeof value === 'number' ? value : (/^\s*$/.test(text) ? NaN : Number(text));
+  var fits = Number.isFinite(number) && (!whole || Number.isInteger(number));
+  if (fits) return number;
+  if (orNull) return null;
+  throw new Error('This converted extension read "' + text.slice(0, 24) + '" as a number (' + name + ').');
+}
+
+/** '.boolean' is kotlinx's toBooleanStrict: exactly "true" or "false". */
+function __jeBoolean(value, name, orNull) {
+  var own = __jeOwn(value, name);
+  if (own !== __JE_NONE) return own;
+  if (__jeKind(value) === 'null') {
+    if (orNull) return null;
+    throw new Error('This converted extension read JsonNull as a boolean.');
+  }
+  var text = __jeContent(value, name);
+  if (text === 'true') return true;
+  if (text === 'false') return false;
+  if (orNull) return null;
+  throw new Error('This converted extension read "' + text.slice(0, 24) + '" as a boolean.');
+}
 
 /**
  * Whether each argument fits its parameter, where this runtime can decide.
@@ -727,6 +823,11 @@ function __knownType(type) {
 }
 
 function __isType(value, type) {
+  // JSON's null is a JsonNull, and so a JsonPrimitive and a JsonElement. It is
+  // JS null here, where Kotlin's null — an absent key — is undefined.
+  if (value === null && (type === 'JsonNull' || type === 'JsonPrimitive' || type === 'JsonElement')) {
+    return true;
+  }
   if (value === null || value === undefined) return false;
   if (typeof type === 'function') return value instanceof type;
   var check = __TYPES[__str(type)];
@@ -5272,6 +5373,81 @@ var __k = {
   /** JsonArray(list) and JsonPrimitive(x), which are the values themselves. */
   jsonArrayOf: function (values) { return __marked(__arr(values).slice()); },
   jsonPrimitiveOf: function (value) { return __jsonOf(value); },
+
+  /**
+   * kotlinx's JsonElement accessors, read as properties: 'el.jsonObject',
+   * 'el.jsonPrimitive.content', 'p.intOrNull'.
+   *
+   * A JsonElement here is the plain value JSON.parse made, so these were
+   * emitted as property reads of that value and every one answered undefined —
+   * 'obj["name"]!!.jsonPrimitive.content' threw on a perfectly good document,
+   * and the '?.' spelling of the same chain answered null with nothing
+   * refused. About a hundred files across the two measured catalogues read
+   * JSON this way, and every JsonTransformingSerializer body does.
+   *
+   * The names are ordinary field names too — a DTO has a 'content', a class
+   * can compute an 'int' — so a receiver that HAS the property, own or on its
+   * prototype, answers it unchanged, and only a value that does not is read as
+   * JSON. That is decisive rather than a guess: a Kotlin JsonObject has no
+   * 'content' and a JsonPrimitive has no fields at all.
+   *
+   * A JSON null is JS null here and an absent key is undefined, so JsonNull
+   * is null: '.jsonPrimitive' of it is itself and its content is the text
+   * "null", as in kotlinx. The mismatches kotlinx throws on
+   * (IllegalArgumentException, NumberFormatException) throw here too, naming
+   * what was asked for.
+   */
+  jeObject: function (value) {
+    var own = __jeOwn(value, 'jsonObject');
+    if (own !== __JE_NONE) return own;
+    if (__jeKind(value) !== 'object') __jeWrongKind(value, 'JsonObject');
+    return value;
+  },
+  jeArray: function (value) {
+    var own = __jeOwn(value, 'jsonArray');
+    if (own !== __JE_NONE) return own;
+    if (__jeKind(value) !== 'array') __jeWrongKind(value, 'JsonArray');
+    return value;
+  },
+  jePrimitive: function (value) {
+    var own = __jeOwn(value, 'jsonPrimitive');
+    if (own !== __JE_NONE) return own;
+    var kind = __jeKind(value);
+    if (kind !== 'primitive' && kind !== 'null') __jeWrongKind(value, 'JsonPrimitive');
+    return value === undefined ? null : value;
+  },
+  jeNull: function (value) {
+    var own = __jeOwn(value, 'jsonNull');
+    if (own !== __JE_NONE) return own;
+    if (__jeKind(value) !== 'null') __jeWrongKind(value, 'JsonNull');
+    return null;
+  },
+  jeContent: function (value) {
+    var own = __jeOwn(value, 'content');
+    if (own !== __JE_NONE) return own;
+    return __jeContent(value, 'content');
+  },
+  jeContentOrNull: function (value) {
+    var own = __jeOwn(value, 'contentOrNull');
+    if (own !== __JE_NONE) return own;
+    return __jeKind(value) === 'null' ? null : __jeContent(value, 'contentOrNull');
+  },
+  jeIsString: function (value) {
+    var own = __jeOwn(value, 'isString');
+    if (own !== __JE_NONE) return own;
+    __jeContent(value, 'isString');
+    return typeof value === 'string';
+  },
+  jeInt: function (value) { return __jeNumber(value, 'int', true, false); },
+  jeIntOrNull: function (value) { return __jeNumber(value, 'intOrNull', true, true); },
+  jeLong: function (value) { return __jeNumber(value, 'long', true, false); },
+  jeLongOrNull: function (value) { return __jeNumber(value, 'longOrNull', true, true); },
+  jeDouble: function (value) { return __jeNumber(value, 'double', false, false); },
+  jeDoubleOrNull: function (value) { return __jeNumber(value, 'doubleOrNull', false, true); },
+  jeFloat: function (value) { return __jeNumber(value, 'float', false, false); },
+  jeFloatOrNull: function (value) { return __jeNumber(value, 'floatOrNull', false, true); },
+  jeBoolean: function (value) { return __jeBoolean(value, 'boolean', false); },
+  jeBooleanOrNull: function (value) { return __jeBoolean(value, 'booleanOrNull', true); },
 
   /* -- the contract functions ---------------------------------------------- */
 

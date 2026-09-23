@@ -1174,7 +1174,30 @@ export const EXTENSION_PROPERTIES: ReadonlyMap<string, string> = new Map([
 	// NaN: the unpacker module's radix parser answered NaN for every word and
 	// returned its packed input unchanged, with nothing refused. The name is
 	// also okhttp's `response.code`, which the helper hands straight back.
-	['code', 'code']
+	['code', 'code'],
+	// kotlinx's JsonElement accessors. A JsonElement is the plain parsed value
+	// here, so every one of these was a property read that answered
+	// `undefined` — `.jsonPrimitive.content` threw on a good document and its
+	// `?.` spelling answered null, nothing refused. Each helper defers to a
+	// receiver that really has the property, because these are ordinary field
+	// names too; see `jeObject` in the runtime.
+	['jsonObject', 'jeObject'],
+	['jsonArray', 'jeArray'],
+	['jsonPrimitive', 'jePrimitive'],
+	['jsonNull', 'jeNull'],
+	['content', 'jeContent'],
+	['contentOrNull', 'jeContentOrNull'],
+	['isString', 'jeIsString'],
+	['int', 'jeInt'],
+	['intOrNull', 'jeIntOrNull'],
+	['long', 'jeLong'],
+	['longOrNull', 'jeLongOrNull'],
+	['double', 'jeDouble'],
+	['doubleOrNull', 'jeDoubleOrNull'],
+	['float', 'jeFloat'],
+	['floatOrNull', 'jeFloatOrNull'],
+	['boolean', 'jeBoolean'],
+	['booleanOrNull', 'jeBooleanOrNull']
 ]);
 
 /**

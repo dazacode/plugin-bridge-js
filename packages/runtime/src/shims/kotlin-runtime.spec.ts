@@ -534,6 +534,81 @@ describe('the digests a request signature is built from', () => {
 	});
 });
 
+describe("kotlinx's JsonElement accessors, over the plain parsed value", () => {
+	// A JsonElement is whatever JSON.parse made, so `el.jsonObject` and
+	// `p.jsonPrimitive.content` were plain property reads that answered
+	// `undefined`: a good document threw at `!!`, and the `?.` spelling
+	// answered null with nothing refused.
+	const doc = JSON.parse(
+		'{"name":"A","n":"12","f":1.5,"b":"true","nul":null,"xs":["a",2,false,null,{}]}'
+	);
+
+	it('answers the element itself for the kind it is, and throws for another', () => {
+		expect(k.jeObject(doc)).toBe(doc);
+		expect(k.jeArray(doc.xs)).toBe(doc.xs);
+		expect(k.jePrimitive('a')).toBe('a');
+		expect(k.jePrimitive(null)).toBeNull();
+		expect(() => k.jeObject(doc.xs)).toThrow(/JsonArray as a JsonObject/);
+		expect(() => k.jeArray('a')).toThrow(/JsonPrimitive as a JsonArray/);
+		expect(() => k.jePrimitive(doc)).toThrow(/JsonObject as a JsonPrimitive/);
+		expect(() => k.jeNull('a')).toThrow(/as a JsonNull/);
+	});
+
+	it("reads a primitive's content the way kotlinx spells it", () => {
+		expect(k.jeContent('A')).toBe('A');
+		expect(k.jeContent(2)).toBe('2');
+		expect(k.jeContent(false)).toBe('false');
+		// JsonNull's content is the text "null"; contentOrNull is null.
+		expect(k.jeContent(null)).toBe('null');
+		expect(k.jeContentOrNull(null)).toBeNull();
+		expect(k.jeIsString('A')).toBe(true);
+		expect(k.jeIsString(2)).toBe(false);
+	});
+
+	it('parses numbers and booleans from the content, strictly', () => {
+		expect(k.jeInt('12')).toBe(12);
+		expect(k.jeInt(7)).toBe(7);
+		expect(k.jeIntOrNull('1.5')).toBeNull();
+		expect(k.jeDouble('1.5')).toBe(1.5);
+		expect(k.jeLongOrNull(null)).toBeNull();
+		expect(() => k.jeInt('x')).toThrow(/as a number/);
+		expect(() => k.jeInt(null)).toThrow(/JsonNull as a number/);
+		expect(k.jeBoolean('true')).toBe(true);
+		expect(k.jeBooleanOrNull('True')).toBeNull();
+		expect(() => k.jeBoolean('yes')).toThrow(/as a boolean/);
+	});
+
+	it('answers a real property unchanged, and an absent DTO field as undefined', () => {
+		// These are ordinary field names too. A record that has one answers
+		// it; a record whose optional field was not in the payload answered
+		// undefined before any of this existed, and must still.
+		expect(k.jeContent({ content: 'body' })).toBe('body');
+		expect(k.jeInt({ int: 3 })).toBe(3);
+		expect(k.jeContent({ title: 'x' })).toBeUndefined();
+		const computed = new (class {
+			get int() {
+				return 9;
+			}
+		})();
+		expect(k.jeInt(computed)).toBe(9);
+		expect(k.jeObject({ jsonObject: 'own' })).toBe('own');
+	});
+
+	it('tells the kinds apart in a type test, JSON null included', () => {
+		expect(k.isType(doc, 'JsonObject')).toBe(true);
+		expect(k.isType(doc.xs, 'JsonArray')).toBe(true);
+		expect(k.isType(doc.xs, 'JsonObject')).toBe(false);
+		expect(k.isType('a', 'JsonPrimitive')).toBe(true);
+		expect(k.isType(doc, 'JsonPrimitive')).toBe(false);
+		// JsonNull is a JsonPrimitive; an absent key (undefined) is no element.
+		expect(k.isType(null, 'JsonNull')).toBe(true);
+		expect(k.isType(null, 'JsonPrimitive')).toBe(true);
+		expect(k.isType(undefined, 'JsonNull')).toBe(false);
+		expect(k.isType('a', 'JsonNull')).toBe(false);
+		expect(k.isType(doc, 'JsonElement')).toBe(true);
+	});
+});
+
 describe('the pieces a vendored unbaser is built out of', () => {
 	it('answers every index of a string or a list', () => {
 		// Kotlin's `indices` has no JavaScript namesake, so before this it read
