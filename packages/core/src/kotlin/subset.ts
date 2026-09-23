@@ -732,6 +732,13 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 	['toLong', 'toLong'],
 	['countLeadingZeroBits', 'countLeadingZeroBits'],
 	['toByte', 'toByte'],
+	// Kotlin's `String?.toBoolean()`: "true" in any case, and false for
+	// anything else *including null*. It was a passthrough onto a method no
+	// JavaScript string has, so every call threw — and the nullable receiver
+	// it is written on, `response.headers["X"].toBoolean()`, threw on null too.
+	['toBoolean', 'toBoolean'],
+	['toBooleanStrict', 'toBooleanStrict'],
+	['toBooleanStrictOrNull', 'toBooleanStrictOrNull'],
 	// `b.toUByte().toInt()`, which is how this ecosystem reads a byte as 0–255.
 	['toUByte', 'toUByte'],
 	['formatBytes', 'formatBytes'],
@@ -1842,7 +1849,6 @@ export const HOST_METHODS: ReadonlySet<string> = new Set([
 	'lastIndexOf',
 	'substring',
 	'toDouble',
-	'toBoolean',
 	'format',
 	'parseLong',
 	'time',

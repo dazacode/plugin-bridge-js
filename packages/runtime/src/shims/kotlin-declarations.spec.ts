@@ -711,6 +711,39 @@ describe('a constructor reference, and a local mutated inside a receiver block',
 	});
 });
 
+describe('three statements the loaded bundles died on', () => {
+	it('reads toBoolean off a nullable string, writes a member of `it` inside apply, and loops on a body local', async () => {
+		// `response.headers["X"].toBoolean()` on an absent header; `state.forEach
+		// { it.state = true }` inside an `apply`; and `do { val page = … } while
+		// (page.hasNext)`, whose condition reads the body's local.
+		const d = await instantiate(
+			'Demo',
+			kt(
+				'class Box(var state: Boolean)',
+				'class Holder(val state: List<Box>)',
+				'class Demo {',
+				'    fun flags(): List<Boolean> = listOf(null, "TRUE", "no").map { it.toBoolean() }',
+				'    fun strict(v: String): Boolean? = v.toBooleanStrictOrNull()',
+				'    fun ticked(): List<Boolean> = Holder(listOf(Box(false), Box(false))).apply { state.forEach { it.state = true } }.state.map { it.state }',
+				'    fun counted(): Int {',
+				'        var n = 0',
+				'        do {',
+				'            val next = n + 1',
+				'            n = next',
+				'        } while (next < 3)',
+				'        return n',
+				'    }',
+				'}'
+			)
+		);
+		expect(d.flags()).toEqual([false, true, false]);
+		expect(d.strict('true')).toBe(true);
+		expect(d.strict('True')).toBeNull();
+		expect(d.ticked()).toEqual([true, true]);
+		expect(d.counted()).toBe(3);
+	});
+});
+
 describe('a lazy property whose block blocks', () => {
 	it('awaits every read, and every member that reads one', async () => {
 		// `override val client by lazy { fetchDomain(); … }` where the helper

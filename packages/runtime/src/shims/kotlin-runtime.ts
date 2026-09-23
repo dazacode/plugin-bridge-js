@@ -2594,6 +2594,28 @@ var __k = {
    * whole idiom ('it.toUByte().toInt()'). Only the conversion into a UByte is
    * here; the UInt/ULong arithmetic that wraps at 2^32 is not modelled.
    */
+  /** Kotlin's 'String?.toBoolean()': "true" ignoring case; null and anything else false. */
+  toBoolean: function (value) {
+    if (value === null || value === undefined) return false;
+    if (typeof value === 'boolean') return value;
+    return __str(value).toLowerCase() === 'true';
+  },
+
+  /** 'toBooleanStrict()': exactly "true" or "false", else IllegalArgumentException. */
+  toBooleanStrict: function (value) {
+    var read = __k.toBooleanStrictOrNull(value);
+    if (read === null) {
+      throw new Error('The string does not represent a boolean value: ' + __str(value));
+    }
+    return read;
+  },
+
+  /** 'toBooleanStrictOrNull()': exactly "true" or "false", else null. */
+  toBooleanStrictOrNull: function (value) {
+    var text = value === null || value === undefined ? null : __str(value);
+    return text === 'true' ? true : text === 'false' ? false : null;
+  },
+
   toUByte: function (value) {
     var number = Number(value);
     if (!Number.isFinite(number)) throw new Error('This converted extension read a non-finite UByte.');

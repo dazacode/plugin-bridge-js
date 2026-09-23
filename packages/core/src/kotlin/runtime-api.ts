@@ -52,6 +52,9 @@ export const RUNTIME_HELPERS = [
 	'bitwiseXor',
 	'toByte',
 	'toUByte',
+	'toBoolean',
+	'toBooleanStrict',
+	'toBooleanStrictOrNull',
 
 	/* Strings. The `substring*` family's two-argument forms return the *whole*
 	   string when the delimiter is absent, which no JavaScript builtin does. */

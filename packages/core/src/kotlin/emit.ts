@@ -6062,7 +6062,38 @@ class Emitter {
 			}
 			case 'do_while_statement': {
 				const body = kids(node).find((child) => child.type === 'control_structure_body') ?? null;
-				return `do ${block(this.loopBody(body))} while (${this.expr(kids(node)[kids(node).length - 1])});`;
+				const condition = kids(node)[kids(node).length - 1];
+				// Kotlin's `do { val document = … } while (document.selectFirst(…)
+				// != null)` reads, in the condition, a name the body declared — its
+				// scope reaches the condition. JavaScript's block scope ends at the
+				// `}`, so emitted as written the condition read a name nothing
+				// declared: "document is not defined" on the first chapter list.
+				// Such a loop is written as the body followed by the test, inside
+				// the block. A `continue` there would skip the test, which in Kotlin
+				// it does not, so that one combination is refused.
+				const declared = new Set(
+					kids(kids(body).find((child) => child.type === 'statements'))
+						.filter((child) => child.type === 'property_declaration')
+						.map((child) => this.propertyName(child))
+						.filter((found): found is string => found !== null)
+				);
+				const reads = [...walk(condition)].some(
+					(part) => part.type === 'simple_identifier' && declared.has(part.text)
+				);
+				if (reads) {
+					if (body !== null && /\bcontinue\b/.test(body.text)) {
+						this.refuse(node, 'a `continue` in a `do … while` whose condition reads the body');
+					}
+					this.loops.push('loop');
+					try {
+						const lines = this.bodyLines(body);
+						const test = this.expr(condition);
+						return `for (;;) ${block([...lines, `if (!(${test})) break;`])}`;
+					} finally {
+						this.loops.pop();
+					}
+				}
+				return `do ${block(this.loopBody(body))} while (${this.expr(condition)});`;
 			}
 			case 'jump_expression':
 				return this.jump(node, detached);
@@ -6787,7 +6818,14 @@ class Emitter {
 				target = backing;
 			} else if (
 				local !== null &&
-				(receiver === null || this.lookupLocal(inner.text)?.mutable === true)
+				(receiver === null ||
+					this.lookupLocal(inner.text)?.mutable === true ||
+					// `state.forEach { it.state = true }` inside an `apply`: the
+					// write is to a member *of* the local, which only reads the
+					// local — and reading a `val` is exactly what one is for. The
+					// argument above is about assigning the name itself. Sent to
+					// the receiver, this wrote `this.it.state` and threw.
+					parts.length > 1)
 			) {
 				target = local;
 			} else if (receiver !== null) {
