@@ -1128,6 +1128,18 @@ export interface Declared {
 	 */
 	readonly aliases: ReadonlyMap<string, string>;
 	readonly aliasTexts: ReadonlyMap<string, string>;
+	/**
+	 * The *computed* properties each class declares — a getter and no backing
+	 * value — which are emitted as a JavaScript `get` on the class's
+	 * prototype rather than assigned in its constructor.
+	 *
+	 * One question needs it: whether an override's `super.popularMangaUrl`
+	 * can be JavaScript's own `super.popularMangaUrl`. For a getter it can —
+	 * the base's getter runs against this instance, which is what Kotlin's
+	 * `super` read does. For a stored property it cannot: the value is on the
+	 * instance, and the override has replaced it.
+	 */
+	readonly classGetters: ReadonlyMap<string, ReadonlySet<string>>;
 }
 
 /**
@@ -1207,7 +1219,8 @@ const EMPTY_DECLARED: Declared = {
 	classFunctions: new Map(),
 	receiverLambdas: new Map(),
 	aliases: new Map(),
-	aliasTexts: new Map()
+	aliasTexts: new Map(),
+	classGetters: new Map()
 };
 
 /** What one parsed file declares, without translating any of it. */
@@ -1240,7 +1253,13 @@ export function mergeDeclared(parts: readonly Declared[]): Declared {
 	const receiverLambdas = new Map<string, ReceiverSlots | null>();
 	const aliases = new Map<string, string>();
 	const aliasTexts = new Map<string, string>();
+	const classGetters = new Map<string, Set<string>>();
 	for (const part of parts) {
+		for (const [owner, names] of part.classGetters) {
+			const into = classGetters.get(owner) ?? new Set<string>();
+			for (const name of names) into.add(name);
+			classGetters.set(owner, into);
+		}
 		for (const [name, head] of part.aliases) if (!aliases.has(name)) aliases.set(name, head);
 		for (const [name, text] of part.aliasTexts)
 			if (!aliasTexts.has(name)) aliasTexts.set(name, text);
@@ -1328,7 +1347,8 @@ export function mergeDeclared(parts: readonly Declared[]): Declared {
 		classFunctions,
 		receiverLambdas,
 		aliases,
-		aliasTexts
+		aliasTexts,
+		classGetters
 	};
 }
 
@@ -1412,6 +1432,11 @@ class Emitter {
 		// A file's own alias still wins over a neighbour's: `registerAlias` runs
 		// after this and overwrites.
 		for (const [name, head] of neighbours.aliases) this.typeAliases.set(name, head);
+		for (const [owner, names] of neighbours.classGetters) {
+			const into = this.classGetterIndex.get(owner) ?? new Set<string>();
+			for (const name of names) into.add(name);
+			this.classGetterIndex.set(owner, into);
+		}
 		for (const [name, text] of neighbours.aliasTexts) this.typeAliasTexts.set(name, text);
 		for (const [name, shapes] of neighbours.overloads) {
 			for (const shape of shapes) this.rememberOverload(name, shape);
@@ -1888,7 +1913,8 @@ class Emitter {
 			classFunctions: this.classFunctionIndex,
 			receiverLambdas: this.receiverLambdas,
 			aliases: this.typeAliases,
-			aliasTexts: this.typeAliasTexts
+			aliasTexts: this.typeAliasTexts,
+			classGetters: this.classGetterIndex
 		};
 	}
 
@@ -1969,6 +1995,23 @@ class Emitter {
 						fields.add(param.name);
 					}
 				}
+				const getters = this.classGetterIndex.get(name) ?? new Set<string>();
+				const bodyMembers = kids(body);
+				for (const [at, member] of bodyMembers.entries()) {
+					// A computed property — a getter and nothing to store — which is
+					// emitted as a real JavaScript `get` on the prototype. See
+					// `Declared.classGetters`.
+					if (
+						member.type === 'property_declaration' &&
+						accessorOf(member, bodyMembers[at + 1], 'getter') !== undefined &&
+						!member.allChildren.some((part) => part.type === '=') &&
+						!kids(member).some((part) => part.type === 'property_delegate')
+					) {
+						const held = this.propertyName(member);
+						if (held !== null) getters.add(held);
+					}
+				}
+				this.classGetterIndex.set(name, getters);
 				for (const member of kids(body)) {
 					// A property's name sits one level down, in its
 					// `variable_declaration`, where `nameOf` does not look — so
@@ -2010,6 +2053,8 @@ class Emitter {
 	private readonly overloadIndex = new Map<string, Map<string, OverloadSignature>>();
 	/** See `Declared.classFunctions`. */
 	private readonly classFunctionIndex = new Map<string, Set<string>>();
+	/** See `Declared.classGetters`. */
+	private readonly classGetterIndex = new Map<string, Set<string>>();
 	private fieldNameCache: Set<string> | null = null;
 
 	private rememberOverload(name: string, shape: OverloadSignature): void {
@@ -2207,6 +2252,20 @@ class Emitter {
 	 * something, and a cycle here would otherwise hang the emitter rather than
 	 * refuse a member.
 	 */
+	/** Whether the nearest class above that declares `name` declares it as a getter. */
+	private inheritedGetter(base: string, name: string): boolean {
+		const seen = new Set<string>();
+		let at: string | undefined = base;
+		while (at !== undefined && !seen.has(at)) {
+			seen.add(at);
+			if (this.classMemberIndex.get(at)?.has(name) === true) {
+				return this.classGetterIndex.get(at)?.has(name) === true;
+			}
+			at = this.classBaseIndex.get(at);
+		}
+		return false;
+	}
+
 	private baseDeclares(base: string, name: string): boolean {
 		const seen = new Set<string>();
 		let at: string | undefined = base;
@@ -9898,6 +9957,22 @@ class Emitter {
 					return `${this.selfReference()}.${property}`;
 				}
 				if (!this.classMembers.has(property)) return `${this.selfReference()}.${property}`;
+				// A *computed* property of the base — `protected open val
+				// popularMangaUrl get() = buildString { … }` — overridden by one
+				// that falls back to it. The base's getter is on its prototype, so
+				// JavaScript's own `super.popularMangaUrl` runs it against this
+				// instance, which is exactly Kotlin's read. Only where `super` is
+				// JavaScript's to use: directly in a method or accessor, not inside
+				// a receiver block emitted as a `function`, where it is a syntax
+				// error at load.
+				if (
+					this.selfClass !== null &&
+					this.selfReference() === 'this' &&
+					this.frames.some((frame) => frame.kind === 'function') &&
+					this.inheritedGetter(this.ownerBase, property)
+				) {
+					return `super.${property}`;
+				}
 			}
 			// Everything else: `__super` holds methods, not fields, and the rest
 			// of the base's state lives on the source object, which `this`

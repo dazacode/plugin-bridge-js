@@ -667,6 +667,47 @@ describe('a reference to a member the template declares', () => {
 	});
 });
 
+describe('`super.` read of a computed property', () => {
+	it('runs the template’s getter against this instance', async () => {
+		// `override val popularMangaUrl get() = if (…) … else super.popularMangaUrl`
+		// over a template's `open val popularMangaUrl get() = buildString { … }`.
+		const sub = await instantiate(
+			'Sub',
+			kt(
+				'open class Base {',
+				'    open val lang = "en"',
+				'    protected open val listUrl: String',
+				'        get() = buildString { append("/list/"); append(lang) }',
+				'}'
+			),
+			kt(
+				'class Sub : Base() {',
+				'    var multi = false',
+				'    override val listUrl get() = if (multi) "/all" else super.listUrl',
+				'    fun url(): String = listUrl',
+				'}'
+			)
+		);
+		expect(sub.url()).toBe('/list/en');
+		sub.multi = true;
+		expect(sub.url()).toBe('/all');
+	});
+
+	it('still refuses one over a stored property the override replaced', () => {
+		expect(
+			refusalNames(
+				kt(
+					'open class Base { open val tag = "a" }',
+					'class Sub : Base() {',
+					'    override val tag = "b"',
+					'    fun both(): String = tag + super.tag',
+					'}'
+				)
+			)
+		).toEqual(['`super.` used as a property']);
+	});
+});
+
 describe('a template method called bare from an extension function', () => {
 	it('calls the source, since the extension receiver does not have it', async () => {
 		// `override fun OkHttpClient.Builder.configureClient() =
@@ -911,6 +952,40 @@ describe('an encode of a @Serializable class, the way kotlinx writes it', () => 
 		expect(JSON.parse(d.list('a'))).toEqual(['a', 'b']);
 		expect(JSON.parse(d.pair())).toEqual({ first: 'a', second: 'NOVEL' });
 		expect(() => d.plain()).toThrow(/no @Serializable registration/);
+	});
+});
+
+describe('core’s date readers and kotlinx’s array builders, called with their names', () => {
+	it('passes a named zone, and builds nested JSON inside an array', async () => {
+		const d = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    private val f = DateTimeFormatter.ofPattern("dd/MM/yyyy")',
+				'    fun at(t: String?, zone: String): Long = f.tryParseDate(t, zone = ZoneId.of(zone))',
+				'    fun time(t: String?): Long = DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm").tryParseDateTime(date = t, zone = ZoneOffset.UTC)',
+				'    fun array(): JsonArray = buildJsonArray { addJsonObject { put("a", 1) }; addJsonArray { add(2) } }',
+				'}'
+			)
+		);
+		expect(d.at('02/01/2024', 'UTC')).toBe(Date.UTC(2024, 0, 2));
+		expect(d.at('02/01/2024', '+02:00')).toBe(Date.UTC(2024, 0, 1, 22));
+		expect(d.at(null, 'UTC')).toBe(0);
+		expect(d.time('02/01/2024 10:30')).toBe(Date.UTC(2024, 0, 2, 10, 30));
+		expect(d.array()).toEqual([{ a: 1 }, [2]]);
+	});
+
+	it('reads a byte as 0–255 through `toUByte()`', async () => {
+		const d = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    fun u(v: Int): List<Int> = listOf(v.toByte(), 5.toByte()).map { it.toUByte().toInt() }',
+				'}'
+			)
+		);
+		expect(d.u(-1)).toEqual([255, 5]);
+		expect(d.u(200)).toEqual([200, 5]);
 	});
 });
 

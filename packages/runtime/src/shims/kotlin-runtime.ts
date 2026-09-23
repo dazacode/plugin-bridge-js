@@ -2588,6 +2588,18 @@ var __k = {
     return wrapped >= 128 ? wrapped - 256 : wrapped;
   },
 
+  /**
+   * Kotlin's 'toUByte()': the low eight bits, read as 0–255. A UByte here is
+   * the plain number, so 'toInt()' after it is the same value, which is the
+   * whole idiom ('it.toUByte().toInt()'). Only the conversion into a UByte is
+   * here; the UInt/ULong arithmetic that wraps at 2^32 is not modelled.
+   */
+  toUByte: function (value) {
+    var number = Number(value);
+    if (!Number.isFinite(number)) throw new Error('This converted extension read a non-finite UByte.');
+    return Math.trunc(number) & 255;
+  },
+
   /* -- strings ------------------------------------------------------------ */
 
   substringAfter: function (value, delimiter, missing) {

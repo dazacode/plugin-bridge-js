@@ -732,6 +732,8 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 	['toLong', 'toLong'],
 	['countLeadingZeroBits', 'countLeadingZeroBits'],
 	['toByte', 'toByte'],
+	// `b.toUByte().toInt()`, which is how this ecosystem reads a byte as 0–255.
+	['toUByte', 'toUByte'],
 	['formatBytes', 'formatBytes'],
 	['now', 'now'],
 	['digitToIntOrNull', 'digitToIntOrNull'],
@@ -1229,6 +1231,11 @@ export const TOLERATED_JSON_FLAGS: ReadonlySet<string> = new Set([
 export const BUILDER_LAMBDA_METHODS: ReadonlySet<string> = new Set([
 	'putJsonObject',
 	'putJsonArray',
+	// Their `JsonArrayBuilder` twins — `buildJsonArray { addJsonObject { put(…) }
+	// }` — which the runtime's array builder already answers with a block run
+	// against a fresh object builder.
+	'addJsonObject',
+	'addJsonArray',
 	// RxJava's two deferring constructors. The lambda *is* the argument here —
 	// `Observable.fromCallable { … }` means "run this when somebody asks" —
 	// which is the same shape the two above have and the reason this table
@@ -2785,6 +2792,11 @@ export const KNOWN_SIGNATURES: ReadonlyMap<string, readonly string[]> = new Map(
 		'extractFromDash',
 		['mpdUrl', 'videoNameGen', 'mpdHeaders', 'videoHeaders', 'referer', 'subtitleList', 'audioList']
 	],
+	// keiyoushi core's `DateTimeFormatter.tryParseDate(date, zone = null)` and
+	// its `…DateTime` sibling, from `utils/Date.kt`: `zone` is the one a caller
+	// names, and it is trailing, so the runtime helpers already take it third.
+	['tryParseDate', ['date', 'zone']],
+	['tryParseDateTime', ['date', 'zone']],
 	// keiyoushi core's GraphQL builders, as `utils/GraphQL.kt` declares them.
 	// This used to read `url, query, variables, headers`, which is no
 	// declaration of it: `graphQLPost(url, headers, query = q)` would have put
