@@ -369,6 +369,8 @@ export const RUNTIME_HELPERS = [
 	'inc',
 	'dec',
 	'groupingBy',
+	/* java.text's StringCharacterIterator. */
+	'charIterator',
 	'eachAttr',
 
 	/* `filterIsInstance<T>()`, which is `filter` plus the type test `isType`

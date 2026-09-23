@@ -3062,6 +3062,33 @@ var __k = {
    * each key to how many elements had it, in first-seen order, as the
    * LinkedHashMap Kotlin answers.
    */
+  /**
+   * java.text.StringCharacterIterator: a cursor over a string. current() is
+   * the character under it, next()/previous() move it and answer the new one,
+   * and walking off either end answers DONE (U+FFFF) as java.text does.
+   */
+  charIterator: function (text) {
+    var value = __str(text);
+    var at = 0;
+    var DONE = '\uffff';
+    var here = function () { return at >= 0 && at < value.length ? value.charAt(at) : DONE; };
+    return {
+      current: here,
+      next: function () { at = Math.min(at + 1, value.length); return here(); },
+      previous: function () {
+        if (at <= 0) return DONE;
+        at -= 1;
+        return here();
+      },
+      first: function () { at = 0; return here(); },
+      last: function () { at = Math.max(0, value.length - 1); return here(); },
+      getIndex: function () { return at; },
+      setIndex: function (index) { at = Number(index); return here(); },
+      getBeginIndex: function () { return 0; },
+      getEndIndex: function () { return value.length; }
+    };
+  },
+
   groupingBy: function (list, keyOf) {
     var items = __arr(list);
     return {
@@ -4316,13 +4343,16 @@ var __k = {
     }
     var at = 0;
     return pattern.replace(
-      /%(%|(?:(0)?(\\d+))?(?:\\.(\\d+))?([sdfxX]))/g,
+      /%(%|(?:(0)?(\\d+))?(?:\\.(\\d+))?([sdfxXc]))/g,
       function (whole, kind, zero, width, precision, verb) {
         if (kind === '%') return '%';
         var value = rest[at];
         at += 1;
         var out;
         if (verb === 's') out = value === null || value === undefined ? 'null' : String(value);
+        // '%c', a Char: YouTube's size formatter writes "%.0f%cb" with the unit
+        // letter. Left out, the pattern kept "%c" in the answer, literally.
+        else if (verb === 'c') out = typeof value === 'number' ? String.fromCharCode(value) : __str(value);
         else if (verb === 'd') out = String(Math.trunc(Number(value)) || 0);
         else if (verb === 'f') out = Number(value).toFixed(precision === undefined ? 6 : Number(precision));
         else {

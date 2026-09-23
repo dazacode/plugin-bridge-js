@@ -1295,6 +1295,8 @@ export const HOST_PROPERTY_METHODS: ReadonlySet<string> = new Set([
 export const HOST_METHODS: ReadonlySet<string> = new Set([
 	// The one terminal of a `groupingBy { }` Grouping this runtime builds.
 	'eachCount',
+	// java.text.CharacterIterator's reads, on the one this runtime builds.
+	'current',
 	// kotlinx's JsonDecoder, as a KSerializer's `deserialize` is handed it by
 	// the typed decoder (`__jsonDecoder` in the runtime). The `encode*` half
 	// is what the same object's `serialize` writes; the runtime never calls
@@ -1938,6 +1940,13 @@ export const FREE_FUNCTIONS: ReadonlyMap<string, string> = new Map([
 	// `List(n) { at -> … }` BUILDS: it is an episode list as often as not, and
 	// an empty array of that length answers undefined for every entry.
 	['List', 'listOfSize'],
+	// `Array(n) { i -> … }` is the same builder under Array's name — Kotlin's
+	// Array constructor always takes the init block — and arrays are lists
+	// here (see `arrayOf`). Cycity builds its year filter this way.
+	['Array', 'listOfSize'],
+	// java.text's `StringCharacterIterator("kMGTPE")`, which a byte-size
+	// formatter walks with `next()` and reads with `current()`. See the helper.
+	['StringCharacterIterator', 'charIterator'],
 
 	['JSONObject', 'jsonObject'],
 	['JSONArray', 'jsonArray'],

@@ -391,6 +391,33 @@ class Demo {
 		expect(firstOfType(tree.root, 'function_declaration')?.line).toBe(9);
 	});
 
+	it('keeps a prefix operator after a binary one to its own operand', async () => {
+		// The grammar let the prefix take everything to its right, with no
+		// error: `start == -1 || end == -1` as `start == -(1 || end == -1)`.
+		const parse = await loadKotlinGrammar(vendorWasm);
+		const tree = parse(`
+class Demo {
+    fun bad(start: Int, end: Int) = start == -1 || end == -1
+    fun none(y: Boolean, list: List<Int>) = y && !list.any { it > 1 } || list.isEmpty()
+}
+`);
+
+		expect(tree.hasError).toBe(false);
+		const top: string[] = [];
+		const visit = (node: KNode): void => {
+			if (node.type === 'disjunction_expression' && !top.some((one) => one.includes(node.text))) {
+				top.push(node.text);
+			}
+			for (const child of node.allChildren) visit(child);
+		};
+		visit(tree.root);
+		// Each `||` is the outermost operator of its function, as in Kotlin.
+		expect(top).toEqual([
+			'start == (-1) || end == -1',
+			'y && (!list.any { it > 1 }) || list.isEmpty()'
+		]);
+	});
+
 	it('leaves a genuine pair of comparisons alone', async () => {
 		// `x + a < b && c > (d)` has the same characters in the same order and is
 		// two comparisons. The angle brackets have to hold nothing but type

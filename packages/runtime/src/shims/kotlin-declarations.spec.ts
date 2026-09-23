@@ -979,6 +979,18 @@ describe('stdlib calls that converted to the wrong thing, or not at all', () => 
 		'    fun urlSafe(text: String) = Base64.getUrlEncoder().withoutPadding().encodeToString(text.toByteArray())',
 		'    fun variables() = json.encodeToString(buildJsonObject { put("page", 2) })',
 		'    fun named(url: String) = Namer().name(url) { it.uppercase() }',
+		'    fun missing(start: Int, end: Int) = start == -1 || end == -1',
+		'    fun guard(y: Boolean, list: List<Int>) = y && !list.any { it > 1 } || list.isEmpty()',
+		'    fun years(current: Int) = Array(current - 2022) { (current - it).toString() }',
+		'    fun size(bits: Long): String {',
+		'        var left = bits',
+		'        val unit: CharacterIterator = StringCharacterIterator("kMGTPE")',
+		'        while (left <= -999950 || left >= 999950) {',
+		'            left /= 1000',
+		'            unit.next()',
+		'        }',
+		'        return java.lang.String.format("%.0f%cb", left / 1000.0, unit.current())',
+		'    }',
 		'}',
 		'class Namer {',
 		'    fun name(url: String, prefix: String = "p:", gen: (String) -> String = { it }): String = prefix + gen(url)',
@@ -1014,5 +1026,12 @@ describe('stdlib calls that converted to the wrong thing, or not at all', () => 
 		// A trailing lambda to a declared method binds its LAST parameter; the
 		// one skipped on the way keeps its default.
 		expect(demo.named('u')).toBe('p:U');
+		// A prefix operator after a binary one keeps to its own operand.
+		expect(demo.missing(3, -1)).toBe(true);
+		expect(demo.missing(3, 4)).toBe(false);
+		expect(demo.guard(false, [])).toBe(true);
+		expect(demo.guard(true, [5])).toBe(false);
+		expect(demo.years(2025)).toEqual(['2025', '2024', '2023']);
+		expect(demo.size(1500000)).toBe('2Mb');
 	});
 });

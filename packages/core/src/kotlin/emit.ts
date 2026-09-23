@@ -410,8 +410,11 @@ const RECEIVER_BUILDERS: ReadonlySet<string> = new Set([
  * okhttp's three spellings of "send this now". Everything else an extension
  * blocks on reaches the network through one of them.
  */
+/** The first segment of a package path, never a name a source declares. */
+const PACKAGE_ROOTS: ReadonlySet<string> = new Set(['java', 'javax', 'android', 'okhttp3', 'okio']);
+
 /** `java.net.URLEncoder`, and the other packages written out in full. */
-const QUALIFIED_GLOBAL = /^(?:java|javax|kotlin|android)\.[\w.]*?\.?(\w+)$/;
+const QUALIFIED_GLOBAL = /^(?:java|javax|kotlin|android|okhttp3|okio)\.[\w.]*?\.?(\w+)$/;
 
 /**
  * `Injekt.get<T>()`, whitespace already squeezed out of the text.
@@ -9155,6 +9158,11 @@ class Emitter {
 		// segment.
 		const qualified = QUALIFIED_GLOBAL.exec(node.text.replace(/\s+/g, ''));
 		if (qualified !== null && GLOBAL_NAMES.has(qualified[1])) return qualified[1];
+		// `java.lang.String.format(…)` is the `String.format(…)` a bare `String`
+		// receiver already reaches: Kotlin's String type, which this runtime
+		// spells as JavaScript's.
+		const spelled = node.text.replace(/\s+/g, '');
+		if (spelled === 'java.lang.String' || spelled === 'kotlin.String') return 'String';
 
 		// The one thing this ecosystem asks the JVM class object for, and the
 		// only reflection in the catalogue that has an answer here.
@@ -9970,6 +9978,12 @@ class Emitter {
 	private read(name: string, node: KNode): string {
 		const local = this.lookup(name);
 		if (local !== null) return local;
+		// The root of a package path — `java.lang.Integer.toHexString(…)` — that
+		// nothing above resolved. Read as a member it became `this.java`, and
+		// the call died on `undefined` at run time with nothing refused.
+		if (PACKAGE_ROOTS.has(name) && !this.classMembers.has(name) && !this.moduleNames.has(name)) {
+			this.refuse(node, `a fully qualified \`${name}.…\` name this build does not know`);
+		}
 		// A bare `quality` naming an extension property is a read through an
 		// implicit receiver — `with(preferences) { quality }` — which this
 		// build does not track. Refused, rather than read off the extension.
