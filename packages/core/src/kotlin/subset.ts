@@ -2535,6 +2535,13 @@ export const KNOWN_SIGNATURES: ReadonlyMap<string, readonly string[]> = new Map(
 	// shape as the four above.
 	['equals', ['other', 'ignoreCase']],
 	['findAnyOf', ['strings', 'startIndex', 'ignoreCase']],
+	// `substringBeforeLast('.', missingDelimiterValue = name)` — what the
+	// four answer when the delimiter is absent, which the runtime's helpers
+	// already take third.
+	['substringBefore', ['delimiter', 'missingDelimiterValue']],
+	['substringBeforeLast', ['delimiter', 'missingDelimiterValue']],
+	['substringAfter', ['delimiter', 'missingDelimiterValue']],
+	['substringAfterLast', ['delimiter', 'missingDelimiterValue']],
 
 	// `AnimesPage(animes = …, hasNextPage = …)`, which a list parse returns by
 	// hand. Both halves are required, so nothing is filled with `undefined`.

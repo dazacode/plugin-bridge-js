@@ -303,6 +303,20 @@ describe('names a third catalogue pass found, run', () => {
 		expect(() => demo.latin('aGVsbG8=')).toThrow(/ISO-8859-1 charset/);
 	});
 
+	it('answers `missingDelimiterValue` when a substring delimiter is absent', async () => {
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    fun f(n: String): String =',
+				'        n.substringBeforeLast(\'.\', missingDelimiterValue = n) + "|" + n.substringAfter("/", missingDelimiterValue = "none")',
+				'}'
+			)
+		);
+		expect(demo.f('a.b.c')).toBe('a.b|none');
+		expect(demo.f('x/y')).toBe('x/y|y');
+	});
+
 	it('formats in the radix `toString(radix)` names, which the plain helper dropped', async () => {
 		const demo = await instantiate('Demo', source);
 		expect(demo.hex(255)).toBe('ff|-a|11111111');
