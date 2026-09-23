@@ -1139,6 +1139,20 @@ describe('one dead mirror must not lose the page', () => {
 		expect(k.catchingFlatMap([1, 2], (n: number) => (n === 1 ? [n] : null))).toEqual([1]);
 		expect(k.catchingMap([1], (n: number) => n)).toEqual([1]);
 	});
+
+	// `parallelCatchingMapNotNull` is read as `catchingMap` with nothing else
+	// done to it, and the shared `Coroutines.kt` ends that one in
+	// `filterNotNull()`. So the null drop is not a tidy-up here: it is the half
+	// of the name that the mapping leans on, and a null that survived would
+	// reach a caller whose Kotlin type promised it none.
+	it('drops a null the lambda returned, as the NotNull spelling it stands for does', async () => {
+		expect(k.catchingMap([1, 2, 3], (n: number) => (n === 2 ? null : n))).toEqual([1, 3]);
+		const out = await k.catchingMap(['a', 'b'], async (m: string) => {
+			if (m === 'a') throw new Error('404');
+			return m === 'b' ? null : m;
+		});
+		expect(out).toEqual([]);
+	});
 });
 
 /* ── properties, types, ranges ────────────────────────────────────────────── */
