@@ -4287,3 +4287,115 @@ describe('what cannot run before a plugin call has entered', () => {
 		expect(() => clean.toByteArray('Salted__', 'UTF-8')).toThrow(/before any plugin call/);
 	});
 });
+
+/* ── keiyoushi core, answered in the runtime ─────────────────────────────── */
+
+/**
+ * The helpers the manga catalogue's shared `core/` declares, which the runtime
+ * implements rather than translating: each is written over a kotlinx or a
+ * reflection API the translator cannot read, and each is small enough to port
+ * from its own source line for line.
+ */
+describe("keiyoushi core's JSON, GraphQL and Next.js helpers", () => {
+	it('reads JsonObject fields the way kotlinx does, including what it throws on', () => {
+		const object = { id: 12, name: 'x', gone: null, list: [1], nested: { a: 1 }, text: '7', flag: 'TRUE' };
+		expect(k.jsonStringOrNull(object, 'id')).toBe('12');
+		expect(k.jsonStringOrNull(object, 'gone')).toBeNull();
+		expect(k.jsonStringOrNull(object, 'absent')).toBeNull();
+		expect(() => k.jsonStringOrNull(object, 'list')).toThrow(/an array/);
+		expect(k.jsonIntOrNull(object, 'text')).toBe(7);
+		expect(k.jsonIntOrNull(object, 'name')).toBeNull();
+		expect(k.jsonBooleanOrNull(object, 'flag')).toBe(true);
+		expect(k.jsonArrayOrNull(object, 'list')).toEqual([1]);
+		expect(k.jsonArrayOrNull(object, 'absent')).toBeNull();
+		// A JSON null is present, and it is not an array.
+		expect(() => k.jsonArrayOrNull(object, 'gone')).toThrow(/array/);
+		expect(k.jsonObjectAt(object, 'nested')).toEqual({ a: 1 });
+		expect(() => k.jsonObjectAt(object, 'absent')).toThrow();
+	});
+
+	it('answers JsonElement extension properties, a real member first', () => {
+		expect(k.jsonProperty({ a: 1 }, 'jsonObject')).toEqual({ a: 1 });
+		expect(k.jsonProperty('12', 'int')).toBe(12);
+		expect(k.jsonProperty('x', 'intOrNull')).toBeNull();
+		expect(() => k.jsonProperty('x', 'int')).toThrow(/int/);
+		expect(k.jsonProperty(null, 'content')).toBe('null');
+		expect(k.jsonProperty(null, 'contentOrNull')).toBeNull();
+		expect(k.jsonProperty(3, 'string')).toBe('3');
+		expect(() => k.jsonProperty([1], 'jsonObject')).toThrow(/an object/);
+		// A DTO with a field of the same name reads the field.
+		expect(k.jsonProperty({ string: 'field' }, 'string')).toBe('field');
+		expect(k.isType({ a: 1 }, 'JsonObject')).toBe(true);
+		expect(k.isType([1], 'JsonObject')).toBe(false);
+		expect(k.isType([1], 'JsonArray')).toBe(true);
+		expect(k.contains({ series: [] }, 'series')).toBe(true);
+		expect(k.contains({ series: [] }, 'other')).toBe(false);
+	});
+
+	it('decodes a GraphQL envelope and throws its errors', () => {
+		expect(k.parseGraphQLAs('{"data":{"title":"t"}}', 'Details')).toEqual({ title: 't' });
+		expect(() => k.parseGraphQLAs('{"errors":[{"message":"one"},{"message":"two"}]}', 'X')).toThrow(
+			'one\ntwo'
+		);
+		expect(() => k.parseGraphQLAs('{"data":null}', 'X')).toThrow(/missing the 'data' field/);
+	});
+
+	it('builds GraphQL requests with the fields kotlinx would encode, and no others', () => {
+		const body = k.graphQLBody('query Q { a }', null, { page: 2 }, undefined);
+		expect(JSON.parse(body.text)).toEqual({ query: 'query Q { a }', variables: { page: 2 } });
+		expect(Object.keys(JSON.parse(body.text))).toEqual(['query', 'variables']);
+		expect(body.contentType).toMatch(/^application\/json/);
+
+		const post = k.graphQLPost('https://example.invalid/g', {}, 'q', 'Op', null, null);
+		expect(post.method).toBe('POST');
+		expect(JSON.parse(post.body.text)).toEqual({ operationName: 'Op', query: 'q' });
+
+		const get = k.graphQLGet('https://example.invalid/g', {}, 'q', null, { a: 1 }, null);
+		expect(get.url).toBe('https://example.invalid/g?query=q&variables=%7B%22a%22%3A1%7D');
+		expect(k.persistedQueryExtension('abc')).toEqual({
+			persistedQuery: { version: 1, sha256Hash: 'abc' }
+		});
+	});
+
+	it('finds App Router flight data, resolving text rows and references', () => {
+		// Row 1 is a text row of 14 UTF-8 bytes — "é" is two of them, so a
+		// character count would cut it short — and row 2 names it and the
+		// outlined model in row 3 by reference.
+		const rows =
+			'1:Te,{"x":"héllo"}\n' +
+			'3:{"cover":"c.png"}\n' +
+			'2:{"series":{"title":"One","cover":"$3:cover","raw":"$1","gone":"$undefined","cash":"$$5"}}\n';
+		const push = JSON.stringify([1, rows]);
+		const html = `<html><head><script>self.__next_f.push(${push})</script></head><body></body></html>`;
+		const document = runtime.globals.Jsoup.parse(html, 'https://example.invalid/');
+
+		const found = k.extractNextJs(document, 'Series', (value: Record<string, unknown>) =>
+			k.isType(value, 'JsonObject') && k.contains(value, 'title')
+		);
+		expect(found).toEqual({
+			title: 'One',
+			cover: 'c.png',
+			raw: '{"x":"héllo"}',
+			gone: null,
+			cash: '$5'
+		});
+	});
+
+	it('falls back to __NEXT_DATA__, and infers the predicate from a registered shape', () => {
+		class NextPropsDto {}
+		k.shape(NextPropsDto, ['mangaId', 'label'], ['label'], {});
+		const html =
+			'<html><body><script id="__NEXT_DATA__" type="application/json">' +
+			'{"props":{"pageProps":{"wrap":{"mangaId":"m-1"}}}}</script></body></html>';
+		const document = runtime.globals.Jsoup.parse(html, 'https://example.invalid/');
+		expect(k.extractNextJs(document, 'NextPropsDto').mangaId).toBe('m-1');
+		expect(() => k.extractNextJs(document, 'NobodyDeclaredThis')).toThrow(/Cannot infer a predicate/);
+	});
+
+	it('reads a raw flight body, and a list type by its first element', () => {
+		class RscItemDto {}
+		k.shape(RscItemDto, ['slug'], [], {});
+		const body = '0:{"a":1}\n1:[{"slug":"x"},{"slug":"y"}]\n';
+		expect(k.extractNextJsRsc(body, 'List<RscItemDto>')).toEqual([{ slug: 'x' }, { slug: 'y' }]);
+	});
+});

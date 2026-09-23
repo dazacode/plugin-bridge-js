@@ -328,6 +328,131 @@ const BLOCKING_CALLS =
 	/\.(?:execute|awaitSuccess|await|doFinal|generateKeyPair|verify)\s*\(|(?<!\bMath)\.sign\s*\(|\bThread\s*\.\s*sleep\s*\(|\b(?:client|[a-z]\w*Client)\s*\.\s*(?:get|post|put|head)\s*\(/;
 
 /**
+ * The extension properties kotlinx.serialization and keiyoushi's core declare
+ * on a `JsonElement`, and the two packages they are imported from. See
+ * `jsonProperty` in the runtime for what each reads.
+ */
+const JSON_ELEMENT_PROPERTIES: ReadonlySet<string> = new Set([
+	'jsonObject',
+	'jsonArray',
+	'jsonPrimitive',
+	'jsonNull',
+	'content',
+	'contentOrNull',
+	'isString',
+	'int',
+	'intOrNull',
+	'long',
+	'longOrNull',
+	'double',
+	'doubleOrNull',
+	'float',
+	'floatOrNull',
+	'boolean',
+	'booleanOrNull',
+	'obj',
+	'array',
+	'string',
+	'stringOrNull'
+]);
+const JSON_PROPERTY_PACKAGES: readonly string[] = ['kotlinx.serialization.json', 'keiyoushi.utils'];
+
+/**
+ * The decodes whose type argument Kotlin infers from the expected type.
+ *
+ * `val list: List<Dto> = response.parseAs()` and `fun f(): Dto =
+ * client.get(url).parseAs()` are ordinary Kotlin: `T` is reified and the
+ * compiler takes it from the declared type the value flows into. Without it the
+ * decode was refused as having no type argument — 39 listings — although the
+ * type is written on the same line.
+ */
+const INFERRED_DECODES: ReadonlySet<string> = new Set([
+	'parseAs',
+	'decodeFromString',
+	'decodeFromJsonElement',
+	'parseGraphQLAs',
+	'extractNextJs',
+	'extractNextJsRsc'
+]);
+
+/** A call's identity across the several façades one raw node can have. */
+function expectationKey(call: KNode): string {
+	return `${call.line}:${call.text}`;
+}
+
+/** The declared type directly under a declaration node, as written. */
+function declaredTypeOf(node: KNode): string | null {
+	const typed = node.children.find(
+		(child) => child.type === 'user_type' || child.type === 'nullable_type'
+	);
+	return typed === undefined ? null : typed.text.replace(/\s+/g, '');
+}
+
+/** Whether a node is a decode written with no type argument. */
+function untypedDecode(node: KNode | undefined): node is KNode {
+	if (node === undefined || node.type !== 'call_expression') return false;
+	const [callee, suffix] = node.children;
+	if (callee === undefined || callee.type !== 'navigation_expression') return false;
+	if (suffix?.children.some((child) => child.type === 'type_arguments') === true) return false;
+	const tail = callee.children[callee.children.length - 1];
+	const name = tail?.children.find((child) => child.type === 'simple_identifier')?.text;
+	return name !== undefined && INFERRED_DECODES.has(name);
+}
+
+/**
+ * Every untyped decode in a member whose type the position it sits in states:
+ * a `val x: T = …` initialiser, a `fun f(): T = …` expression body, and a bare
+ * `return …` inside a `fun f(): T`. Only the whole value — a decode buried in
+ * an argument or a chain has an expected type this cannot read, and stays
+ * refused.
+ *
+ * Keyed by line and text rather than by node, because one raw node can be
+ * reached through more than one façade. Two decodes that share both and
+ * expect different types are dropped rather than guessed between.
+ */
+function expectationsIn(member: KNode): Map<string, string | null> {
+	const out = new Map<string, string | null>();
+	const note = (call: KNode, type: string | null) => {
+		if (type === null) return;
+		const key = expectationKey(call);
+		const known = out.get(key);
+		out.set(key, known === undefined || known === type ? type : null);
+	};
+	const returnsIn = (body: KNode, type: string | null) => {
+		const pending = [...body.children];
+		while (pending.length > 0) {
+			const node = pending.pop() as KNode;
+			// A nested function has its own return type.
+			if (node.type === 'function_declaration' || node.type === 'anonymous_function') continue;
+			if (
+				node.type === 'jump_expression' &&
+				node.allChildren[0]?.type === 'return' &&
+				!node.children.some((child) => child.type === 'label')
+			) {
+				const value = node.children[0];
+				if (untypedDecode(value)) note(value, type);
+			}
+			pending.push(...node.children);
+		}
+	};
+	for (const node of walk(member)) {
+		if (node.type === 'property_declaration') {
+			const variable = node.children.find((child) => child.type === 'variable_declaration');
+			const value = node.children[node.children.length - 1];
+			if (variable !== undefined && untypedDecode(value)) note(value, declaredTypeOf(variable));
+		} else if (node.type === 'function_declaration') {
+			const type = declaredTypeOf(node);
+			const body = node.children.find((child) => child.type === 'function_body');
+			if (type === null || body === undefined) continue;
+			const value = body.children[0];
+			if (untypedDecode(value)) note(value, type);
+			else returnsIn(body, type);
+		}
+	}
+	return out;
+}
+
+/**
  * keiyoushi's suspend verbs on an okhttp client, and what they are called on.
  *
  * See `clientVerb`. The receiver is read by name because that is all the call
@@ -1087,6 +1212,13 @@ class Emitter {
 	 */
 	private initialising: string | null = null;
 	private superSelfRead = false;
+	/**
+	 * The type Kotlin infers for a decode written with no type argument, keyed
+	 * by the call. See `expectationsIn`.
+	 */
+	private expectations = new Map<string, string | null>();
+	/** This file's imports, fully qualified; a wildcard keeps its `.*`. */
+	private readonly imports = new Set<string>();
 
 	private readonly scopes: Map<string, Local>[] = [];
 	private readonly frames: Frame[] = [];
@@ -1652,6 +1784,14 @@ class Emitter {
 
 	file(root: KNode): Emission {
 		const parts: string[] = [];
+		// What this file imports, by fully qualified name — which is the only
+		// thing that says whether `.string` on a value is a DTO's field or the
+		// `JsonElement` extension. See `JSON_ELEMENT_PROPERTIES`.
+		for (const header of walk(root)) {
+			if (header.type !== 'import_header') continue;
+			const written = header.text.replace(/^import\s+/, '').replace(/\s+as\s+\w+$/, '');
+			this.imports.add(written.replace(/\s+/g, ''));
+		}
 		// Registered before anything is emitted: an extension function is
 		// usually declared below the members that call it, and so is the nested
 		// filter class the members above it construct.
@@ -2710,14 +2850,17 @@ class Emitter {
 
 		const previousName = this.memberName;
 		const previousPending = this.pending;
+		const previousExpectations = this.expectations;
 		this.memberName = name;
 		this.pending = [];
+		this.expectations = expectationsIn(node);
 
 		const obstacles = scanObstacles(node, name);
 		if (obstacles.length > 0) {
 			this.refusals.push({ member: name, obstacles });
 			this.memberName = previousName;
 			this.pending = previousPending;
+			this.expectations = previousExpectations;
 			return null;
 		}
 
@@ -2753,6 +2896,7 @@ class Emitter {
 		} finally {
 			this.memberName = previousName;
 			this.pending = previousPending;
+			this.expectations = previousExpectations;
 			this.scopes.length = scopeDepth;
 			this.frames.length = frameDepth;
 			this.localSuspends.clear();
@@ -5244,7 +5388,12 @@ class Emitter {
 
 		const { callee, args, lambda, labelled, typeArgument } = this.flatten(node);
 		if (callee.type === 'navigation_expression') {
-			return this.methodCall(callee, args, lambda, labelled, typeArgument);
+			// `val list: List<Dto> = response.parseAs()` — the type argument is
+			// inferred from where the value goes, which `expectationsIn` read
+			// before this member was emitted.
+			const inferred =
+				typeArgument === null ? (this.expectations.get(expectationKey(node)) ?? null) : null;
+			return this.methodCall(callee, args, lambda, labelled, typeArgument ?? inferred);
 		}
 		if (callee.type === 'simple_identifier') {
 			return this.bareCall(callee, args, lambda, labelled, typeArgument);
@@ -5414,6 +5563,36 @@ class Emitter {
 			// ecosystem reaches for when negating something already parenthesised:
 			// `text.contains(x).not()`.
 			return `!(${this.expr(receiver)})`;
+		}
+
+		if (
+			(name === 'extractNextJs' || name === 'extractNextJsRsc') &&
+			!this.extensionFunctions.has(name)
+		) {
+			// keiyoushi's Next.js flight-data reader. `T` is what the match is
+			// decoded as and, with no predicate, what the predicate is inferred
+			// from — so it has to be a type this conversion translated and
+			// registered a shape for, or there is nothing to infer from.
+			if (typeArgument === null) this.refuse(suffix, `\`.${name}()\` with no type argument`);
+			const predicate = this.callArguments(name, args, lambda, labelled, false);
+			if (predicate.length > 1) this.refuse(suffix, `\`.${name}()\` with a deserializer`);
+			if (predicate.length === 0) {
+				const element = /^(?:List|MutableList)<(.+)>\??$/.exec(typeArgument)?.[1] ?? typeArgument;
+				const bare = element.replace(/\?$/, '').replace(/^.*\./, '');
+				if (!this.declaredTypes.has(bare)) {
+					this.refuse(suffix, `\`.${name}()\` inferring a predicate from a type this build did not read`);
+				}
+			}
+			return `${this.helper(name)}(${[this.expr(receiver), JSON.stringify(typeArgument), ...predicate].join(', ')})`;
+		}
+
+		if (name === 'parseGraphQLAs' && lambda === null && !this.extensionFunctions.has(name)) {
+			// keiyoushi's `response.parseGraphQLAs<T>()`: decode the GraphQL
+			// envelope, throw its `errors` if it has any, and hand back `data`
+			// as `T`. The optional `Json` argument is the configuration every
+			// decode here already ignores.
+			if (typeArgument === null) this.refuse(suffix, `\`.${name}()\` with no type argument`);
+			return `${this.helper('parseGraphQLAs')}(${this.expr(receiver)}, ${JSON.stringify(typeArgument)})`;
 		}
 
 		if (DECODING_METHODS.has(name)) {
@@ -6572,6 +6751,20 @@ class Emitter {
 			return `${this.helper('sc')}(${this.expr(receiver)}, (__r) => ${this.helper(helper)}(__r))`;
 		}
 
+		// `element.jsonObject["title"]!!.jsonPrimitive.content`, and keiyoushi's
+		// shorter `element.obj["title"]!!.string`: extension properties on a
+		// JSON value, which this runtime holds as a plain one. Read as written
+		// they were property reads off a string or an object that has no such
+		// field — `undefined` as a title, with nothing refused. Only where the
+		// file imports the extension, because the same names are ordinary DTO
+		// fields everywhere else; and the runtime still answers a real member of
+		// the same name first, which is how Kotlin resolves the two.
+		if (JSON_ELEMENT_PROPERTIES.has(name) && this.importsJsonProperty(name)) {
+			const read = (target: string) => `${this.helper('jsonProperty')}(${target}, '${name}')`;
+			if (!safe) return read(this.expr(receiver));
+			return `${this.helper('sc')}(${this.expr(receiver)}, (__r) => ${read('__r')})`;
+		}
+
 		// Property *reads* are passthrough where method calls are not: a DTO's
 		// fields are unbounded — `item.file`, `item.label` — and an allowlist of
 		// them could only ever be a list of the ones already seen.
@@ -7328,6 +7521,13 @@ class Emitter {
 			return `${this.receiverParam}.${name}`;
 		}
 		return `${this.selfReference()}.${name}`;
+	}
+
+	/** Whether this file imports `name` as a kotlinx or keiyoushi JSON extension. */
+	private importsJsonProperty(name: string): boolean {
+		return JSON_PROPERTY_PACKAGES.some(
+			(pkg) => this.imports.has(`${pkg}.${name}`) || this.imports.has(`${pkg}.*`)
+		);
 	}
 
 	private isSourceMember(name: string): boolean {

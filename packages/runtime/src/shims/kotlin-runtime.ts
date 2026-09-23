@@ -620,7 +620,26 @@ var __TYPES = {
   // JSONObject' after a JSONTokener is how an extension tells an error envelope
   // from a list, so the two have to be distinguishable and an array is not one.
   JSONObject: function (v) { return typeof v === 'object' && !Array.isArray(v) && !(v instanceof Map); },
-  JSONArray: function (v) { return Array.isArray(v); }
+  JSONArray: function (v) { return Array.isArray(v); },
+
+  // kotlinx.serialization's JsonElement family, which this runtime also holds
+  // as plain values. 'it is JsonObject && "series" in it' is how a Next.js
+  // predicate picks its object, and an undecided name answers false — so
+  // every such predicate matched nothing and the page decoded as null, with
+  // nothing refused. JsonNull is the one member left out: it is null here, and
+  // null is never an instance of anything in __isType.
+  JsonObject: function (v) {
+    return typeof v === 'object' && !Array.isArray(v) && !(v instanceof Map) && !(v instanceof Set) &&
+      typeof v.select !== 'function';
+  },
+  JsonArray: function (v) { return Array.isArray(v); },
+  JsonPrimitive: function (v) {
+    return typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean';
+  },
+  JsonElement: function (v) {
+    return Array.isArray(v) || typeof v === 'string' || typeof v === 'number' ||
+      typeof v === 'boolean' || (typeof v === 'object' && !(v instanceof Map) && typeof v.select !== 'function');
+  }
 };
 
 /** Whether each argument fits its parameter, where this runtime can decide the type. */
@@ -2220,6 +2239,17 @@ var __k = {
     }
     if (haystack instanceof Set) return haystack.has(needle);
     if (haystack instanceof Map) return haystack.has(needle);
+    // A JsonObject is a Map in Kotlin and a plain object here, so '"series" in
+    // it' asks for a key. Read as a sequence it was a list of one — the object
+    // itself — and every such check answered false, which is how a Next.js
+    // predicate matched nothing and a page decoded as null.
+    if (
+      typeof haystack === 'object' && !Array.isArray(haystack) &&
+      typeof haystack.toArray !== 'function' && typeof haystack.select !== 'function' &&
+      typeof haystack[Symbol.iterator] !== 'function' && typeof haystack.length !== 'number'
+    ) {
+      return Object.prototype.hasOwnProperty.call(haystack, __str(needle));
+    }
     var items = __arr(haystack);
     for (var i = 0; i < items.length; i += 1) if (items[i] === needle) return true;
     return false;
@@ -5032,6 +5062,96 @@ var __k = {
     return __str(__jsonRequired(value, key));
   },
 
+  /**
+   * keiyoushi core's JsonObject readers: getStringOrNull(key) and its siblings.
+   *
+   * Each is 'get(key)?.jsonPrimitive?.xOrNull' there, which pins three cases a
+   * plain property read would blur. An absent key and a JSON null are both
+   * null. A primitive is read as its content — a number's text for the string
+   * reader, and nothing for the int reader when the text is not a whole
+   * number. An object or an array under the key is not a primitive at all, and
+   * kotlinx THROWS there rather than answering null, so this does too.
+   */
+  jsonStringOrNull: function (value, key) {
+    var found = __jsonPrimitiveAt(value, key);
+    return found === null ? null : __str(found);
+  },
+  jsonIntOrNull: function (value, key) {
+    var found = __jsonPrimitiveAt(value, key);
+    if (found === null || typeof found === 'boolean') return null;
+    if (typeof found === 'number') return Number.isInteger(found) ? found : null;
+    var text = __str(found).trim();
+    return /^[-+]?\\d+$/.test(text) ? Number(text) : null;
+  },
+  jsonBooleanOrNull: function (value, key) {
+    var found = __jsonPrimitiveAt(value, key);
+    if (found === null) return null;
+    if (typeof found === 'boolean') return found;
+    var text = __str(found).toLowerCase();
+    return text === 'true' ? true : text === 'false' ? false : null;
+  },
+  /* getArrayOrNull / getObjectOrNull: 'get(key)?.jsonArray', which is null only
+     for an absent key — a JSON null there is not an array and throws. */
+  jsonArrayOrNull: function (value, key) {
+    var found = __jsonAt(value, key);
+    return found === undefined ? null : __jsonExpect(found, key, 'array');
+  },
+  jsonObjectOrNull: function (value, key) {
+    var found = __jsonAt(value, key);
+    return found === undefined ? null : __jsonExpect(found, key, 'object');
+  },
+  /* getArray / getObject: 'getValue(key)', which throws for an absent key. */
+  jsonArrayAt: function (value, key) {
+    return __jsonExpect(__jsonRequired(value, key), key, 'array');
+  },
+  jsonObjectAt: function (value, key) {
+    return __jsonExpect(__jsonRequired(value, key), key, 'object');
+  },
+
+  /**
+   * A JsonElement extension property — kotlinx's jsonObject, jsonPrimitive,
+   * content, intOrNull and the rest, and keiyoushi's obj, array, string and
+   * friends — over the plain value this runtime holds a JsonElement as.
+   *
+   * A real member of the same name is answered first, which is Kotlin's own
+   * rule: a DTO with a field called 'string' reads the field. JsonNull is null
+   * here, and its content is the text "null" exactly as kotlinx's is; the
+   * throwing readers throw where kotlinx's throw, because a value of the wrong
+   * shape is a page the extension did not expect, not a default.
+   */
+  jsonProperty: function (value, name) {
+    if (value !== null && value !== undefined && typeof value === 'object' && name in value) {
+      return value[name];
+    }
+    var isObject = value !== null && typeof value === 'object' && !Array.isArray(value);
+    var isPrimitive = value === null || typeof value === 'string' || typeof value === 'number' ||
+      typeof value === 'boolean';
+    var fail = function (what) {
+      throw new Error('This converted extension read a JSON value as ' + what + ', and it is not one.');
+    };
+    if (name === 'jsonObject' || name === 'obj') return isObject ? value : fail('an object');
+    if (name === 'jsonArray' || name === 'array') return Array.isArray(value) ? value : fail('an array');
+    if (name === 'jsonPrimitive') return isPrimitive ? value : fail('a primitive');
+    if (name === 'jsonNull') return value === null ? null : fail('null');
+    if (!isPrimitive) return fail('a primitive');
+    if (name === 'isString') return typeof value === 'string';
+    if (name === 'content' || name === 'string') return value === null ? 'null' : __str(value);
+    if (name === 'contentOrNull' || name === 'stringOrNull') return value === null ? null : __str(value);
+    var text = value === null ? 'null' : __str(value).trim();
+    var orNull = /OrNull$/.test(name);
+    var base = orNull ? name.slice(0, name.length - 6) : name;
+    var parsed = null;
+    if (base === 'int' || base === 'long') {
+      parsed = /^[-+]?\\d+$/.test(text) ? Number(text) : null;
+    } else if (base === 'double' || base === 'float') {
+      parsed = text.length > 0 && Number.isFinite(Number(text)) ? Number(text) : null;
+    } else if (base === 'boolean') {
+      parsed = text.toLowerCase() === 'true' ? true : text.toLowerCase() === 'false' ? false : null;
+    }
+    if (parsed === null && !orNull) fail('a ' + base);
+    return parsed;
+  },
+
   /** getInt(key), truncating — and throwing for a value that is not a number. */
   jsonGetInt: function (value, key) {
     return Math.trunc(__jsonRequiredNumber(value, key));
@@ -5497,6 +5617,28 @@ function __jsonAt(value, key) {
   }
   if (typeof value !== 'object') return undefined;
   return Object.prototype.hasOwnProperty.call(value, key) ? value[key] : undefined;
+}
+
+/** A primitive under a key, null for absent or JSON null, throwing for a container. */
+function __jsonPrimitiveAt(value, key) {
+  var found = __jsonAt(value, key);
+  if (found === undefined || found === null) return null;
+  if (typeof found === 'object') {
+    throw new Error('This converted extension read "' + __str(key) + '" as a value, and it is ' +
+      (Array.isArray(found) ? 'an array' : 'an object') + '.');
+  }
+  return found;
+}
+
+/** A container of the kind asked for, or the throw kotlinx's jsonArray/jsonObject makes. */
+function __jsonExpect(found, key, kind) {
+  var fits = kind === 'array'
+    ? Array.isArray(found)
+    : found !== null && typeof found === 'object' && !Array.isArray(found);
+  if (!fits) {
+    throw new Error('This converted extension read "' + __str(key) + '" as an ' + kind + ', and it is not one.');
+  }
+  return found;
 }
 
 /** opt-readers for numbers: a value that is not one answers the fallback. */
@@ -7672,6 +7814,424 @@ __k.decode = function (a, b, c, d) {
   // renamed a field or computes one registered itself beside its declaration,
   // and until this ran neither survived the parse. See 'shape'.
   return __applyShapes(__decodeValue(descriptor, parsed, 'response'), 0);
+};
+
+/* --- keiyoushi core's Next.js extraction ---------------------------------- */
+
+/**
+ * keiyoushi core's extractNextJs<T>() and extractNextJsRsc<T>(), ported.
+ *
+ * A Next.js page carries its data as React Flight rows: pushed into
+ * 'self.__next_f' by inline scripts (the App Router), or as one JSON document
+ * in 'script#__NEXT_DATA__' (the Pages Router), or as the raw 'text/x-component'
+ * body of a client navigation. The helper finds the rows, resolves the
+ * references between them, walks the result depth-first and decodes the first
+ * object or array its predicate accepts as T.
+ *
+ * Ported from the repository's own core/utils/NextJs.kt line for line, because
+ * every choice in it is a fact about React Flight's wire format: which '$'
+ * markers mean what, that a 'T' row's length is in UTF-8 bytes rather than
+ * characters, and that a React element tuple is walked by 'type'/'key'/'props'.
+ * A JsonElement here is a plain value, as it is everywhere else in this
+ * runtime; the two JSON parsers agree on every document these rows hold.
+ */
+var __NEXT_F = /self\\.__next_f\\.push\\(\\s*(\\[.*])\\s*\\)\\s*;?\\s*$/s;
+
+function __nextIsContainer(value) {
+  return value !== null && typeof value === 'object';
+}
+
+function __nextHas(value, key) {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function __nextFind(payload, predicate) {
+  if (!__nextIsContainer(payload)) return undefined;
+  if (predicate(payload) === true) return payload;
+  var children = Array.isArray(payload)
+    ? payload
+    : Object.keys(payload).map(function (key) { return payload[key]; });
+  for (var i = 0; i < children.length; i += 1) {
+    var found = __nextFind(children[i], predicate);
+    if (found !== undefined) return found;
+  }
+  return undefined;
+}
+
+function __nextResolve(element, chunks, models, resolving) {
+  if (Array.isArray(element)) {
+    return element.map(function (item) { return __nextResolve(item, chunks, models, resolving); });
+  }
+  if (__nextIsContainer(element)) {
+    var out = {};
+    for (var key in element) {
+      if (__nextHas(element, key)) out[key] = __nextResolve(element[key], chunks, models, resolving);
+    }
+    return out;
+  }
+  if (typeof element !== 'string' || element.charAt(0) !== '$' || element.length < 2) return element;
+  if (element === '$undefined') return null;
+  if (element === '$Infinity' || element === '$-Infinity' || element === '$NaN' || element === '$-0') {
+    return element.substring(1);
+  }
+  var marker = element.charAt(1);
+  var resolved;
+  if (marker === '$') return element.substring(1);
+  if (marker === 'D' || marker === 'n') return element.substring(2);
+  if (marker === 'Q') resolved = __nextMapRef(element.substring(2), chunks, models, resolving);
+  else if (marker === 'W') resolved = __nextSetRef(element.substring(2), chunks, models, resolving);
+  else if (marker === 'L' || marker === '@') {
+    resolved = __nextModelRef(element.substring(2), chunks, models, resolving);
+  } else resolved = __nextModelRef(element.substring(1), chunks, models, resolving);
+  return resolved === null ? element : resolved;
+}
+
+function __nextModelRef(reference, chunks, models, resolving) {
+  var segments = reference.split(':');
+  var id = segments[0];
+  if (segments.length === 1 && __nextHas(chunks, id)) return chunks[id];
+  if (resolving.indexOf(id) !== -1) return null;
+  var guard = resolving.concat([id]);
+  if (!__nextHas(models, id)) return null;
+  var value = models[id];
+  for (var i = 1; i < segments.length; i += 1) {
+    if (typeof value === 'string' && value.charAt(0) === '$') {
+      value = __nextResolve(value, chunks, models, guard);
+    }
+    value = __nextWalk(value, segments[i]);
+    if (value === undefined) return null;
+  }
+  return __nextResolve(value, chunks, models, guard);
+}
+
+function __nextIndex(value, segment) {
+  if (!/^[-+]?\\d+$/.test(segment)) return undefined;
+  var at = Number(segment);
+  return at >= 0 && at < value.length ? value[at] : undefined;
+}
+
+function __nextWalk(value, segment) {
+  if (Array.isArray(value)) {
+    if (value.length >= 4 && value[0] === '$') {
+      if (segment === 'type') return value[1];
+      if (segment === 'key') return value[2];
+      if (segment === 'props') return value[3];
+    }
+    return __nextIndex(value, segment);
+  }
+  if (__nextIsContainer(value)) return __nextHas(value, segment) ? value[segment] : undefined;
+  return undefined;
+}
+
+function __nextMapRef(id, chunks, models, resolving) {
+  if (resolving.indexOf(id) !== -1) return null;
+  var entries = __nextHas(models, id) ? models[id] : null;
+  if (!Array.isArray(entries)) return null;
+  var resolved = __nextResolve(entries, chunks, models, resolving.concat([id]));
+  if (!Array.isArray(resolved)) return null;
+  var out = {};
+  for (var i = 0; i < resolved.length; i += 1) {
+    var pair = resolved[i];
+    if (!Array.isArray(pair) || pair.length !== 2) continue;
+    var key = __nextIsContainer(pair[0]) ? JSON.stringify(pair[0]) : String(pair[0]);
+    out[key] = pair[1];
+  }
+  return out;
+}
+
+function __nextSetRef(id, chunks, models, resolving) {
+  if (resolving.indexOf(id) !== -1) return null;
+  var values = __nextHas(models, id) ? models[id] : null;
+  if (!Array.isArray(values)) return null;
+  return __nextResolve(values, chunks, models, resolving.concat([id]));
+}
+
+/** A JSON value starting at 'start', and where it ends; element null when it did not parse. */
+function __nextJsonAt(body, start) {
+  if (start >= body.length) return [null, start];
+  var depth = 0;
+  var inString = false;
+  var escape = false;
+  var i = start;
+  while (i < body.length) {
+    var c = body.charAt(i);
+    i += 1;
+    if (escape) { escape = false; continue; }
+    if (c === '\\\\' && inString) { escape = true; continue; }
+    if (c === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (c === '{' || c === '[') depth += 1;
+    else if (c === '}' || c === ']') {
+      depth -= 1;
+      if (depth === 0) {
+        try {
+          return [JSON.parse(body.substring(start, i)), i];
+        } catch (error) {
+          return [null, i];
+        }
+      }
+    }
+    if (depth === 0 && /\\s/.test(c)) {
+      try {
+        return [JSON.parse(body.substring(start, i - 1)), i];
+      } catch (error) {
+        return [null, i];
+      }
+    }
+  }
+  return [null, i];
+}
+
+function __nextRscPayloads(body, chunks, models) {
+  var results = [];
+  var pos = 0;
+  while (pos < body.length) {
+    var colon = body.indexOf(':', pos);
+    if (colon === -1) break;
+    var id = body.substring(pos, colon);
+    if (!/^[0-9a-fA-F]+$/.test(id)) {
+      pos += 1;
+      continue;
+    }
+    pos = colon + 1;
+    if (pos >= body.length) break;
+
+    if (body.charAt(pos) === 'T') {
+      // A text row: 'T<hex byte length>,<content>'. The length counts UTF-8
+      // bytes, so a character outside ASCII is two or three of them and a
+      // surrogate pair is four.
+      pos += 1;
+      var comma = body.indexOf(',', pos);
+      if (comma === -1) break;
+      var lengthText = body.substring(pos, comma);
+      if (!/^[-+]?[0-9a-fA-F]+$/.test(lengthText)) break;
+      var byteLength = parseInt(lengthText, 16);
+      pos = comma + 1;
+      var bytes = 0;
+      var start = pos;
+      while (pos < body.length && bytes < byteLength) {
+        var code = body.charCodeAt(pos);
+        if (code < 0x80) bytes += 1;
+        else if (code < 0x800) bytes += 2;
+        else if (code >= 0xd800 && code <= 0xdbff) {
+          bytes += 4;
+          pos += 1;
+        } else bytes += 3;
+        pos += 1;
+      }
+      var content = body.substring(start, pos);
+      chunks[id] = content;
+      try {
+        results.push(JSON.parse(content));
+      } catch (error) {
+        /* A text row that is not JSON is still a chunk a reference can name. */
+      }
+    } else {
+      var parsed = __nextJsonAt(body, pos);
+      if (parsed[0] !== null) {
+        results.push(parsed[0]);
+        models[id] = parsed[0];
+      }
+      pos = parsed[1];
+    }
+  }
+  return results;
+}
+
+function __nextAppRouter(document, chunks, models) {
+  var out = [];
+  var scripts = __arr(document.select('script'));
+  for (var i = 0; i < scripts.length; i += 1) {
+    if (scripts[i].hasAttr('src')) continue;
+    var script = __str(scripts[i].data());
+    if (script.indexOf('self.__next_f.push') === -1) continue;
+    try {
+      var found = __NEXT_F.exec(script);
+      if (found === null) continue;
+      var row = JSON.parse(found[1]);
+      if (!Array.isArray(row)) continue;
+      var content = row.length > 1 ? row[1] : null;
+      if (content === null || content === undefined || __nextIsContainer(content)) continue;
+      out = out.concat(__nextRscPayloads(String(content), chunks, models));
+    } catch (error) {
+      /* A script this cannot read contributes nothing, as upstream's does. */
+    }
+  }
+  return out;
+}
+
+function __nextPagesRouter(document) {
+  var script = document.selectFirst('script#__NEXT_DATA__');
+  if (script === null || script === undefined) return [];
+  try {
+    var root = JSON.parse(__str(script.data()));
+    if (!__nextIsContainer(root) || Array.isArray(root)) return [];
+    var props = root.props;
+    // A JSON null there is not an object, and upstream's jsonObject throws on it.
+    if (props === null) return [];
+    if (props !== undefined && (!__nextIsContainer(props) || Array.isArray(props))) return [];
+    var pageProps = props === undefined || props === null ? undefined : props.pageProps;
+    return pageProps === undefined || pageProps === null ? [root] : [pageProps, root];
+  } catch (error) {
+    return [];
+  }
+}
+
+/**
+ * The predicate upstream infers from T: every field that is neither optional
+ * nor nullable is present, under its own name or an alternative one. Read off
+ * the shape the emitter registered for T, and refused rather than guessed when
+ * there is none — a predicate that matched anything would decode the page's
+ * first object as the title.
+ */
+function __nextInferred(type) {
+  var text = __str(type).trim().replace(/\\?$/, '');
+  var list = /^(?:[\\w.]*\\.)?(?:List|MutableList|ArrayList)\\s*<(.*)>$/.exec(text);
+  var element = (list === null ? text : list[1]).trim().replace(/\\?$/, '').replace(/^.*\\./, '');
+  var shape = null;
+  for (var s = 0; s < __SHAPES.length; s += 1) {
+    var ctor = __SHAPES[s].ctor;
+    if (typeof ctor !== 'function' || ctor.name !== element) continue;
+    if (shape !== null) throw new Error('Cannot infer a predicate for ' + element + ': two classes share its name.');
+    shape = __SHAPES[s];
+  }
+  if (shape === null) {
+    throw new Error('Cannot infer a predicate for ' + element + ': this conversion has no @Serializable declaration of it.');
+  }
+  var required = [];
+  for (var f = 0; f < shape.fields.length; f += 1) {
+    var field = shape.fields[f];
+    if (shape.optional.indexOf(field) !== -1) continue;
+    var names = [field];
+    for (var alias in shape.aliases) {
+      if (__nextHas(shape.aliases, alias) && shape.aliases[alias] === field) names.push(alias);
+    }
+    required.push(names);
+  }
+  if (required.length === 0) {
+    throw new Error(
+      'Cannot infer a predicate for ' + element +
+      ': all fields are optional or nullable. Provide an explicit predicate instead.'
+    );
+  }
+  var fits = function (value) {
+    if (!__nextIsContainer(value) || Array.isArray(value)) return false;
+    return required.every(function (names) {
+      return names.some(function (name) { return __nextHas(value, name); });
+    });
+  };
+  return list === null
+    ? fits
+    : function (value) { return Array.isArray(value) && value.length > 0 && fits(value[0]); };
+}
+
+function __nextDecode(payloads, chunks, models, type, predicate) {
+  var test = typeof predicate === 'function' ? predicate : __nextInferred(type);
+  for (var i = 0; i < payloads.length; i += 1) {
+    var resolved = __nextResolve(payloads[i], chunks, models, []);
+    var found = __nextFind(resolved, function (value) { return test(value) === true; });
+    if (found !== undefined) return __applyShapes(__decodeValue(__typeKind(type, undefined), found, 'data'), 0);
+  }
+  return null;
+}
+
+/** String.extractNextJsRsc<T>(predicate?): a raw 'text/x-component' body. */
+__k.extractNextJsRsc = function (body, type, predicate) {
+  var chunks = {};
+  var models = {};
+  var payloads = __nextRscPayloads(__str(body), chunks, models);
+  return __nextDecode(payloads, chunks, models, type, predicate);
+};
+
+/**
+ * Document.extractNextJs<T>(predicate?) and Response.extractNextJs<T>(predicate?).
+ *
+ * A Response is dispatched on its Content-Type exactly as upstream does: a
+ * flight body as one, an HTML page as a document, anything else refused by
+ * name rather than parsed as whichever it looked more like.
+ */
+__k.extractNextJs = function (receiver, type, predicate) {
+  if (receiver === null || receiver === undefined) {
+    throw new Error('This converted extension looked for Next.js data in nothing.');
+  }
+  if (typeof receiver.select !== 'function' && receiver.body !== undefined) {
+    var headers = receiver.headers;
+    var contentType = headers && typeof headers.get === 'function' ? __str(headers.get('Content-Type') || '') : '';
+    if (contentType.indexOf('text/x-component') !== -1) {
+      return __k.extractNextJsRsc(receiver.body.string(), type, predicate);
+    }
+    if (contentType.indexOf('text/html') === -1) {
+      throw new Error('Unsupported Content-Type for Next.js extraction: ' + contentType);
+    }
+    receiver = __k.asJsoup(receiver);
+  }
+  var chunks = {};
+  var models = {};
+  var payloads = __nextAppRouter(receiver, chunks, models);
+  if (payloads.length === 0) payloads = __nextPagesRouter(receiver);
+  return __nextDecode(payloads, chunks, models, type, predicate);
+};
+
+/**
+ * keiyoushi core's parseGraphQLAs<T>(): the GraphQL envelope, decoded.
+ *
+ * Its 'errors' are thrown, joined by newline, when there are any — a server
+ * that answers 200 with an error list is a failure the extension wanted to
+ * surface, not an empty page — and a missing 'data' is thrown too. What is
+ * left is decoded as T exactly as a parseAs<T>() would decode it.
+ */
+__k.parseGraphQLAs = function (receiver, type) {
+  var text = typeof receiver === 'string' ? receiver : __jsonText(receiver);
+  var envelope;
+  try {
+    envelope = JSON.parse(text === null ? '' : text);
+  } catch (error) {
+    throw new Error('This converted extension expected a GraphQL response, and this source did not answer with JSON.');
+  }
+  var errors = envelope !== null && typeof envelope === 'object' ? envelope.errors : null;
+  if (Array.isArray(errors) && errors.length > 0) {
+    throw new Error(errors.map(function (one) { return __str(one && one.message); }).join('\\n'));
+  }
+  var data = envelope !== null && typeof envelope === 'object' ? envelope.data : null;
+  if (data === null || data === undefined) {
+    throw new Error("GraphQL response is missing the 'data' field");
+  }
+  return __applyShapes(__decodeValue(__typeKind(type, undefined), data, 'data'), 0);
+};
+
+/**
+ * keiyoushi core's GraphQL request builders.
+ *
+ * The body is the request class kotlinx would encode: its four fields in
+ * declaration order, each left out when null because none of them encodes a
+ * default. The variables are encoded the way toJsonElement encodes a
+ * @Serializable value, so a renamed field goes out under its wire name.
+ */
+__k.graphQLBody = function (query, operationName, variables, extensions) {
+  var payload = {};
+  if (operationName !== null && operationName !== undefined) payload.operationName = __str(operationName);
+  if (query !== null && query !== undefined) payload.query = __str(query);
+  if (variables !== null && variables !== undefined) payload.variables = __k.toJsonElement(variables);
+  if (extensions !== null && extensions !== undefined) payload.extensions = extensions;
+  return { __kBody: true, contentType: 'application/json; charset=utf-8', text: JSON.stringify(payload) };
+};
+__k.graphQLPost = function (url, headers, query, operationName, variables, extensions) {
+  return POST(url, headers, __k.graphQLBody(query, operationName, variables, extensions));
+};
+__k.graphQLGet = function (url, headers, query, operationName, variables, extensions) {
+  var builder = __httpUrlOf(url).newBuilder();
+  if (operationName !== null && operationName !== undefined) builder.addQueryParameter('operationName', operationName);
+  if (query !== null && query !== undefined) builder.addQueryParameter('query', query);
+  if (variables !== null && variables !== undefined) {
+    builder.addQueryParameter('variables', JSON.stringify(__k.toJsonElement(variables)));
+  }
+  if (extensions !== null && extensions !== undefined) {
+    builder.addQueryParameter('extensions', JSON.stringify(extensions));
+  }
+  return GET(builder.build(), headers);
+};
+__k.persistedQueryExtension = function (hash, version) {
+  return { persistedQuery: { version: version === undefined ? 1 : version, sha256Hash: __str(hash) } };
 };
 
 /**

@@ -146,7 +146,20 @@ describe('the runtime contract', () => {
 			'subtitleList',
 			'audioList'
 		]);
-		expect(KNOWN_SIGNATURES.get('graphQLPost')).toEqual(['url', 'query', 'variables', 'headers']);
+		// keiyoushi core's own declaration, which both repositories now ship.
+		// The old entry put `query` second, so an all-named call — which is
+		// how every use in both catalogues is written — sent the query where
+		// the headers belong.
+		expect(KNOWN_SIGNATURES.get('graphQLPost')).toEqual([
+			'url',
+			'headers',
+			'query',
+			'operationName',
+			'variables',
+			'extensions',
+			'cache',
+			'json'
+		]);
 	});
 
 	it('does not claim to know an extractor signature this ecosystem reuses', () => {

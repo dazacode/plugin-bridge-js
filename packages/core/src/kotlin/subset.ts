@@ -801,6 +801,18 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 	['execute', 'executeCall'],
 	['awaitSuccess', 'awaitSuccess'],
 
+	// keiyoushi core's `JsonObject` readers. `getString(key)` and the other
+	// one-argument getters already reach the org.json readers, which throw
+	// for an absent key exactly as `getValue(key)` does.
+	['getStringOrNull', 'jsonStringOrNull'],
+	['getIntOrNull', 'jsonIntOrNull'],
+	['getLongOrNull', 'jsonIntOrNull'],
+	['getBooleanOrNull', 'jsonBooleanOrNull'],
+	['getArrayOrNull', 'jsonArrayOrNull'],
+	['getObjectOrNull', 'jsonObjectOrNull'],
+	['getArray', 'jsonArrayAt'],
+	['getObject', 'jsonObjectAt'],
+
 	// All four getters collapse onto one helper: what separates them is the
 	// type of the answer, and the call site's own fallback already states it.
 	['getString', 'pref'],
@@ -1473,6 +1485,12 @@ export const AWAITED_HOST_METHODS: ReadonlySet<string> = new Set([
  * call that is neither is refused.
  */
 export const FREE_FUNCTIONS: ReadonlyMap<string, string> = new Map([
+	// keiyoushi core's GraphQL builders; `KNOWN_SIGNATURES` orders their
+	// named arguments.
+	['graphQLBody', 'graphQLBody'],
+	['graphQLPost', 'graphQLPost'],
+	['graphQLGet', 'graphQLGet'],
+	['persistedQueryExtension', 'persistedQueryExtension'],
 	['listOf', 'listOf'],
 	['mutableListOf', 'mutableListOf'],
 	['arrayListOf', 'mutableListOf'],
@@ -2160,7 +2178,19 @@ export const KNOWN_SIGNATURES: ReadonlyMap<string, readonly string[]> = new Map(
 		'extractFromDash',
 		['mpdUrl', 'videoNameGen', 'mpdHeaders', 'videoHeaders', 'referer', 'subtitleList', 'audioList']
 	],
-	['graphQLPost', ['url', 'query', 'variables', 'headers']]
+	// keiyoushi core's GraphQL builders, in their declared order. Every
+	// parameter after the first one or two is optional and passed by name,
+	// which is the whole reason they are here.
+	['graphQLBody', ['query', 'operationName', 'variables', 'extensions', 'json']],
+	[
+		'graphQLPost',
+		['url', 'headers', 'query', 'operationName', 'variables', 'extensions', 'cache', 'json']
+	],
+	[
+		'graphQLGet',
+		['url', 'headers', 'query', 'operationName', 'variables', 'extensions', 'cache', 'json']
+	],
+	['persistedQueryExtension', ['hash', 'version']]
 	// `videosFromUrl` and `videoFromUrl` were here, and both were wrong.
 	//
 	// Every one of the 37 extractor declarations in this ecosystem puts `url`
