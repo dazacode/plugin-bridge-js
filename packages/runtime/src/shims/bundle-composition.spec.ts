@@ -33,8 +33,11 @@
 import { describe, expect, it } from 'vitest';
 
 import { aniyomiEntrypoint } from './aniyomi-entry';
+import { hayaseEntrypoint } from './hayase-entry';
 import { mangayomiEntrypoint } from './mangayomi-entry';
+import { nuvioEntrypoint } from './nuvio-entry';
 import { soraEntrypoint } from './sora-entry';
+import { stremioEntrypoint } from './stremio-entry';
 
 /** Module-scope declarations, by name, with how many times each was declared. */
 function declarationsIn(source: string): Map<string, number> {
@@ -82,8 +85,36 @@ const BUNDLES: readonly (readonly [string, () => string])[] = [
 				pluginId: 'app.yorozo.converted.sora.example',
 				script: 'async function searchResults(q) { return "[]"; }',
 				baseUrl: 'https://example.invalid',
-				container: 'hls',
+				streamType: 'HLS',
 				softsub: false
+			})
+	],
+	[
+		'stremio',
+		() =>
+			stremioEntrypoint({
+				pluginId: 'app.yorozo.converted.stremio.example',
+				baseUrl: 'https://example.invalid',
+				types: ['movie'],
+				resources: ['stream'],
+				searchable: [],
+				config: []
+			})
+	],
+	[
+		'nuvio',
+		() =>
+			nuvioEntrypoint({
+				pluginId: 'app.yorozo.converted.nuvio.example',
+				script: 'module.exports = { getStreams: async function () { return []; } };'
+			})
+	],
+	[
+		'hayase',
+		() =>
+			hayaseEntrypoint({
+				pluginId: 'app.yorozo.converted.hayase.example',
+				script: 'export default new class { async single() { return []; } }();'
 			})
 	]
 ];

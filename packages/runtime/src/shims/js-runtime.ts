@@ -71,46 +71,126 @@ function __host() {
   return __ctx;
 }
 
-/** Normalises the several call shapes foreign hosts accept for one request. */
-function __request(url, a, b, c) {
+/**
+ * Normalises the several call shapes foreign hosts accept for one request.
+ *
+ * The positional shape is Sora's, and it has six arguments, not four:
+ * \`fetchv2(url, headers, method, body, redirect, encoding)\`. The last two used
+ * to be read by nobody, which is the one outcome neither of them may have:
+ *
+ * - **\`redirect\`** is whether to follow one. \`false\` is a module asking to
+ *   read the 3xx itself — the \`Location\` is the answer it wants — and a
+ *   request that followed anyway handed it the page the redirect pointed at.
+ *   The host port says exactly this with \`follow: false\` (\`ABI.md\` §2), so
+ *   it is passed through. The fetch-shaped call spells it \`redirect:
+ *   'manual'\`, and means the same.
+ * - **\`encoding\`** is the charset to read the body in. See \`__charset\`.
+ */
+function __request(url, a, b, c, d, e) {
   var headers = {};
   var method = 'GET';
   var body = null;
+  var follow = true;
+  var charset = null;
 
-  if (a && typeof a === 'object' && (a.headers || a.method || a.body)) {
-    // fetch(url, { method, headers, body })
+  if (a && typeof a === 'object' && (a.headers || a.method || a.body || a.redirect)) {
+    // fetch(url, { method, headers, body, redirect })
     headers = a.headers || {};
     method = a.method || 'GET';
     body = a.body === undefined ? null : a.body;
+    if (a.redirect !== undefined && a.redirect !== 'follow') {
+      if (a.redirect !== 'manual') {
+        throw new Error('This module asked fetch for redirect: "' + String(a.redirect) + '", which this build does not implement.');
+      }
+      follow = false;
+    }
   } else {
-    // fetchv2(url, headers, method, body)
+    // fetchv2(url, headers, method, body, redirect, encoding)
     headers = a || {};
     method = b || 'GET';
     body = c === undefined ? null : c;
+    if (d !== undefined && d !== null) {
+      if (typeof d !== 'boolean') {
+        throw new Error('This module passed fetchv2 a redirect argument that is not true or false: ' + String(d) + '.');
+      }
+      follow = d;
+    }
+    charset = __charset(e);
   }
 
   if (body !== null && typeof body !== 'string') body = JSON.stringify(body);
-  return { method: String(method).toUpperCase(), headers: headers, body: body };
+  var request = { method: String(method).toUpperCase(), headers: headers, body: body };
+  if (follow === false) request.follow = false;
+  return { request: request, charset: charset };
+}
+
+/**
+ * The charset a module asked the body to be read in, or null for UTF-8.
+ *
+ * The host reads every body as UTF-8 before a plugin sees it (\`ctx.http\`
+ * hands over text, not bytes), so a body in another charset has already been
+ * decoded the wrong way by the time this runs, and nothing here can undo that.
+ * What *can* be said exactly is when it made no difference: every charset below
+ * agrees with ASCII on bytes under 0x80, so a body that came through as pure
+ * ASCII is the same text in all of them. \`__response\` checks for that and
+ * throws, naming the charset, when it is not so.
+ *
+ * A charset outside the list is refused before the request is made. UTF-16 and
+ * ISO-2022-JP are the reason there is a list: neither agrees with ASCII, so not
+ * even an all-ASCII body could be vouched for.
+ */
+function __charset(value) {
+  if (value === undefined || value === null || value === '') return null;
+  var label = String(value).trim().toLowerCase();
+  if (label === 'utf-8' || label === 'utf8' || label === 'unicode-1-1-utf-8') return null;
+  if (/^(?:us-ascii|ascii|iso-?8859-\\d{1,2}|iso_8859-\\d{1,2}|latin-?[1-9]|l[1-9]|windows-12[5][0-8]|cp12[5][0-8]|windows-874|koi8-[ru]|ibm866|cp866|macintosh|x-mac-cyrillic|shift[_-]?jis|sjis|euc-jp|euc-kr|gbk|gb2312|gb18030|big5)$/.test(label)) {
+    return label;
+  }
+  throw new Error(
+    'This module asked for its response in the ' + String(value) + ' charset, which this build ' +
+      'cannot read: the host decodes every response as UTF-8.'
+  );
+}
+
+/**
+ * The body, checked against the charset the module asked for.
+ *
+ * Only reached for a charset \`__charset\` accepted, and only an all-ASCII body
+ * passes, because that is the one case where the host's UTF-8 reading is
+ * provably the text the module asked for.
+ */
+function __inCharset(text, charset) {
+  if (charset === null) return text;
+  if (!/[^\\u0000-\\u007f]/.test(text)) return text;
+  throw new Error(
+    'This module asked for its response in ' + charset + ', and the response has characters ' +
+      'outside ASCII. The host reads every response as UTF-8, so this text would be wrong, and ' +
+      'it is refused rather than handed over.'
+  );
 }
 
 /**
  * The response shape these modules expect: text() and json() as promises,
  * plus the status they occasionally branch on.
  */
-function __response(raw) {
+function __response(raw, charset) {
   return {
     status: raw.status,
     url: raw.url,
     headers: raw.headers,
     ok: raw.status >= 200 && raw.status < 300,
-    text: function () { return raw.text(); },
-    json: function () { return raw.json(); }
+    text: async function () { return __inCharset(await raw.text(), charset); },
+    json: async function () {
+      if (charset === null) return raw.json();
+      return JSON.parse(__inCharset(await raw.text(), charset));
+    }
   };
 }
 
-async function fetchv2(url, a, b, c) {
-  var raw = await __host().http.send(String(url), __request(url, a, b, c));
-  return __response(raw);
+async function fetchv2(url, a, b, c, d, e) {
+  var asked = __request(url, a, b, c, d, e);
+  var raw = await __host().http.send(String(url), asked.request);
+  return __response(raw, asked.charset);
 }
 
 /** Some modules were written against a plain fetch, and mean the same thing. */

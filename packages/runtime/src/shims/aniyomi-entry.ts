@@ -1073,7 +1073,8 @@ export default {
       const quality = String(made.video.videoTitle || made.video.quality || '').trim();
       sources.push({
         url: url,
-        container: /\\.m3u8(\\?|$)/i.test(url) ? 'hls' : (/\\.mpd(\\?|$)/i.test(url) ? 'dash' : 'mp4'),
+        // A Video declares no container; the url is read by the shared rule.
+        container: __streamContainer({ url: url }, 'mp4'),
         label: __streamLabel(quality, entry.hoster),
         quality: quality.length > 0 ? quality : undefined,
         headers: made.video.headers && typeof made.video.headers === 'object'

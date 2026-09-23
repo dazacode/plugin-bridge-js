@@ -55,6 +55,7 @@
  */
 
 import { JS_RUNTIME } from './js-runtime';
+import { STREAM_GUARDS } from './stream-guards';
 import { DOM_RUNTIME_SOURCE } from './generated/dom-source';
 
 export interface NuvioEntrypointOptions {
@@ -92,6 +93,7 @@ export function nuvioEntrypoint(options: NuvioEntrypointOptions): string {
 
 	return `${DOM_RUNTIME_SOURCE}
 ${JS_RUNTIME}
+${STREAM_GUARDS}
 ${constants}
 
 /* --- the runtime these were written for ---------------------------------- */
@@ -299,15 +301,14 @@ function __reference(sourceMediaId) {
   return { type: endpoint === 'tv' || endpoint === 'series' ? 'tv' : 'movie', id: raw.slice(cut + 1) };
 }
 
-/** Which container an address plays as, read from the address. */
-function __container(url) {
-  var value = String(url || '').toLowerCase();
-  if (value.indexOf('.m3u8') !== -1) return 'hls';
-  if (value.indexOf('.mpd') !== -1) return 'dash';
-  return 'mp4';
-}
-
-/** One row as a playback source, or null when it carries nothing playable. */
+/**
+ * One row as a playback source, or null when it carries nothing playable.
+ *
+ * Through the guards every other shim uses, which this one used to skip. That
+ * mattered in the one direction that costs a viewer: a scraper that has given
+ * up answers with a bare origin or a placeholder host, and without
+ * \`__isPlayable\` that became a stream the install check counted as found.
+ */
 function __playable(row) {
   if (!row || typeof row !== 'object') return null;
   var url = String(row.url || row.link || '');
@@ -317,18 +318,22 @@ function __playable(row) {
   var quality = row.quality === undefined || row.quality === null ? '' : String(row.quality).trim();
 
   // A magnet is a URL-shaped value no fetch can open. It travels as a torrent
-  // descriptor or not at all — the same division the other two ecosystems use.
-  var magnet = /^magnet:\\?/i.test(url) ? /xt=urn:btih:([0-9a-zA-Z]+)/i.exec(url) : null;
-  if (magnet !== null) {
-    var hash = String(magnet[1]).toLowerCase();
-    if (!/^[0-9a-f]{40}$/.test(hash)) return null;
-    return { torrent: { infoHash: hash }, label: label.length > 0 ? label : 'Torrent' };
+  // descriptor or not at all — the same division the other two ecosystems use,
+  // read by the same helper, so a base32 hash is a torrent here as it is there.
+  if (/^magnet:\\?/i.test(url)) {
+    var torrent = __torrentOf({ magnet: url });
+    if (torrent === null) return null;
+    var descriptor = { infoHash: torrent.infoHash };
+    if (torrent.trackers.length > 0) descriptor.sources = torrent.trackers;
+    return { torrent: descriptor, label: label.length > 0 ? label : 'Torrent' };
   }
-  if (!/^https?:/i.test(url)) return null;
+  if (!__isPlayable(url)) return null;
 
   var source = {
     url: url,
-    container: __container(url),
+    // These rows declare no container, so the address is read by the shared
+    // rule; one that states nothing is played as a single file.
+    container: __streamContainer({ url: url }, 'mp4'),
     label: label.length > 0 ? label : (quality.length > 0 ? quality : 'Source')
   };
   if (quality.length > 0) source.quality = quality;

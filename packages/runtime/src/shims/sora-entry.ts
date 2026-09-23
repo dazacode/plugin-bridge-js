@@ -19,9 +19,22 @@
  * forever.
  *
  * **Container.** `streamType` is declared once per module, not per stream, so
- * every resolved url inherits it. That is better than it sounds: sniffing a
- * container from a url's extension is how a player ends up with a black screen
- * and no error, and the module author knows what their source serves.
+ * every resolved url inherits it, ahead of anything the url's extension says:
+ * the module author knows what their source serves. It is read by the shared
+ * rule (`__streamContainer`), without regard to case — `MKV` is a progressive
+ * file, where an earlier mapping sent every value but exactly `mp4` to HLS. A
+ * module that declares nothing gets its url's extension, and then HLS, because
+ * that is what these modules overwhelmingly return and because an adaptive
+ * manifest opened as progressive fails at once and legibly, where the reverse
+ * buffers forever.
+ *
+ * ## What the host lends in place of the globals these were written for
+ *
+ * `fetchv2` is the shared runtime's, and reads all six of its arguments —
+ * including whether to follow a redirect and which charset the body is in
+ * (`js-runtime.ts`). `crypto` is a WebCrypto-shaped façade over `ctx.crypto`
+ * (`web-crypto.ts`), declared at module scope where a module's free `crypto`
+ * finds it.
  *
  * ## Identity
  *
@@ -33,6 +46,8 @@
 
 import { JS_RUNTIME } from './js-runtime';
 import { STREAM_GUARDS } from './stream-guards';
+import { DIGESTS } from './digests';
+import { WEB_CRYPTO } from './web-crypto';
 
 export interface SoraEntrypointOptions {
 	/** Must equal the manifest id, or the sandbox refuses to load the bundle. */
@@ -40,7 +55,8 @@ export interface SoraEntrypointOptions {
 	/** The module's own script, embedded verbatim. */
 	readonly script: string;
 	readonly baseUrl: string;
-	readonly container: 'hls' | 'mp4';
+	/** The manifest's own `streamType`, verbatim; '' when it declares none. */
+	readonly streamType: string;
 	readonly softsub: boolean;
 }
 
@@ -120,12 +136,14 @@ export function soraEntrypoint(options: SoraEntrypointOptions): string {
 	const constants = [
 		`const __PLUGIN_ID = ${JSON.stringify(options.pluginId)};`,
 		`const __BASE_URL = ${JSON.stringify(options.baseUrl)};`,
-		`const __CONTAINER = ${JSON.stringify(options.container)};`,
+		`const __STREAM_TYPE = ${JSON.stringify(options.streamType)};`,
 		`const __SOFTSUB = ${JSON.stringify(options.softsub)};`
 	].join('\n');
 
 	return `${JS_RUNTIME}
 ${STREAM_GUARDS}
+${DIGESTS}
+${WEB_CRYPTO}
 ${constants}
 ${HOST_GATE}
 
@@ -366,7 +384,7 @@ export default {
       if (!__isPlayable(url)) continue;
       sources.push({
         url: url,
-        container: __CONTAINER,
+        container: __streamContainer({ declared: __STREAM_TYPE, url: url }, 'hls'),
         label: item.label && item.label.length > 0 ? item.label : 'Source',
         headers: item.headers,
         // The manifest's "softsub" flag says the module *can* return subtitles,

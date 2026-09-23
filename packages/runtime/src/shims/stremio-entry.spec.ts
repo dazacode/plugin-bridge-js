@@ -192,9 +192,11 @@ describe('an addon that serves streams and nothing else', () => {
 });
 
 describe('resolving a stream', () => {
+	/** Info hashes are forty hex digits; anything shorter is not one. */
+	const HASH = '0123456789abcdef0123456789abcdef01234567';
 	const STREAMS = {
 		streams: [
-			{ infoHash: 'abc', name: 'A torrent' },
+			{ infoHash: HASH, name: 'A torrent' },
 			{
 				url: 'https://cdn.example.invalid/one.m3u8',
 				name: '1080p',
@@ -234,7 +236,7 @@ describe('resolving a stream', () => {
 		const sources = await resolved(ctx);
 
 		expect(sources).toHaveLength(2);
-		expect(sources[0].torrent).toEqual({ infoHash: 'abc' });
+		expect(sources[0].torrent).toEqual({ infoHash: HASH });
 		expect(sources[1].url).toBe('https://cdn.example.invalid/one.m3u8');
 		expect(sources[1].container).toBe('hls');
 	});
@@ -242,23 +244,76 @@ describe('resolving a stream', () => {
 	it('lowercases the infohash, so one torrent is not two engines', async () => {
 		plugin = await load();
 		const { ctx } = context({
-			'/stream/movie/tt2.json': { streams: [{ infoHash: 'ABCDEF', fileIdx: 3, sources: ['tr'] }] }
+			'/stream/movie/tt2.json': {
+				streams: [{ infoHash: HASH.toUpperCase(), fileIdx: 3, sources: ['tr'] }]
+			}
 		});
 
 		const sources = await plugin.resolve('movie:tt2', null, ctx);
 
-		expect(sources[0].torrent).toEqual({ infoHash: 'abcdef', fileIdx: 3, sources: ['tr'] });
+		expect(sources[0].torrent).toEqual({ infoHash: HASH, fileIdx: 3, sources: ['tr'] });
+	});
+
+	it('reads a base32 infohash as the same torrent its hex spelling is', async () => {
+		// Twenty bytes, as base32 and as hex. Two spellings of one swarm must be
+		// one descriptor, or the host starts a second engine for it.
+		plugin = await load();
+		const { ctx } = context({
+			'/stream/movie/tt2.json': { streams: [{ infoHash: 'AERUKZ4JVPG66AJDIVTYTK6N54ASGRLH' }] }
+		});
+
+		const sources = await plugin.resolve('movie:tt2', null, ctx);
+
+		expect(sources[0].torrent).toEqual({ infoHash: HASH });
+	});
+
+	it('drops an infohash that is not one, which no engine could join', async () => {
+		plugin = await load();
+		const { ctx } = context({ '/stream/movie/tt2.json': { streams: [{ infoHash: 'abc' }] } });
+
+		await expect(plugin.resolve('movie:tt2', null, ctx)).rejects.toThrow(/unrecognised/);
 	});
 
 	it('leaves out a file index the source did not state', async () => {
 		// Absent is a real answer: an engine picking the largest video beats a
 		// source guessing an index it never read.
 		plugin = await load();
-		const { ctx } = context({ '/stream/movie/tt2.json': { streams: [{ infoHash: 'aa' }] } });
+		const { ctx } = context({ '/stream/movie/tt2.json': { streams: [{ infoHash: HASH }] } });
 
 		const sources = await plugin.resolve('movie:tt2', null, ctx);
 
 		expect(sources[0].torrent).not.toHaveProperty('fileIdx');
+	});
+
+	it('reads the container from the file name the addon states', async () => {
+		// A debrid link is an opaque token, and the addon writes the file name
+		// beside it; the url alone used to make both of these \`mp4\` by default.
+		plugin = await load();
+		const { ctx } = context({
+			'/stream/movie/tt2.json': {
+				streams: [
+					{
+						url: 'https://cdn.example.invalid/dl/9f8e7d',
+						behaviorHints: { filename: 'Title.2020.mkv', notWebReady: true }
+					},
+					{
+						url: 'https://cdn.example.invalid/play/abc',
+						behaviorHints: { filename: 'master.m3u8', notWebReady: true }
+					},
+					{
+						url:
+							'https://proxy.example.invalid/stream?d=' +
+							encodeURIComponent('https://origin.example.invalid/x/index.m3u8')
+					}
+				]
+			}
+		});
+
+		const sources = await plugin.resolve('movie:tt2', null, ctx);
+
+		// The first is still \`mp4\`: a single file, which is the ABI's only
+		// value for one, Matroska or not.
+		expect(sources.map((one) => one.container)).toEqual(['mp4', 'hls', 'hls']);
 	});
 
 	it('carries the headers the addon says the stream needs', async () => {
@@ -301,14 +356,16 @@ describe('resolving a stream', () => {
 		// question about the device it happened to be running on.
 		const plugin = await load();
 		const { ctx } = context({
-			'/stream/movie/tt2.json': { streams: [{ infoHash: 'a' }, { infoHash: 'b' }] }
+			'/stream/movie/tt2.json': {
+				streams: [{ infoHash: HASH }, { infoHash: HASH.replace(/^0/, 'f') }]
+			}
 		});
 
 		const sources = await plugin.resolve('movie:tt2', null, ctx);
 
 		expect(sources.map((one) => (one.torrent as { infoHash: string }).infoHash)).toEqual([
-			'a',
-			'b'
+			HASH,
+			HASH.replace(/^0/, 'f')
 		]);
 	});
 

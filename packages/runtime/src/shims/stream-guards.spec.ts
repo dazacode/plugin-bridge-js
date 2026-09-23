@@ -128,3 +128,95 @@ describe('the stream guard this one is modelled on', () => {
 		expect(guards.__isPlayable('')).toBe(false);
 	});
 });
+
+const shared = new Function(
+	`${declarationOf(JS_RUNTIME, '__absolute')}
+${STREAM_GUARDS}
+return { __streamContainer: __streamContainer, __torrentOf: __torrentOf };`
+)() as {
+	__streamContainer: (
+		evidence: { declared?: unknown; filename?: unknown; url?: unknown; webReady?: boolean },
+		fallback: string
+	) => string;
+	__torrentOf: (row: unknown) => { infoHash: string; trackers: string[] } | null;
+};
+
+describe('the container, from the strongest statement about it', () => {
+	const container = shared.__streamContainer;
+
+	it('believes a declared type, whatever its case', () => {
+		expect(container({ declared: 'HLS', url: 'https://cdn.test/a.mp4' }, 'mp4')).toBe('hls');
+		expect(container({ declared: 'mp4' }, 'hls')).toBe('mp4');
+		expect(container({ declared: 'DASH' }, 'mp4')).toBe('dash');
+		expect(container({ declared: 'application/x-mpegURL' }, 'mp4')).toBe('hls');
+	});
+
+	it('reads a declared MKV as a single file, not as HLS', () => {
+		// The mapping this replaced sent every value but exactly "mp4" to HLS,
+		// so a Matroska module was opened as a manifest and failed to play.
+		expect(container({ declared: 'MKV' }, 'hls')).toBe('mp4');
+		expect(container({ declared: 'webm' }, 'hls')).toBe('mp4');
+	});
+
+	it('reads a stated file name ahead of an opaque url', () => {
+		// A debrid link is a token; the file name beside it is the statement.
+		expect(
+			container({ filename: 'Title.S01E01.mkv', url: 'https://cdn.test/dl/9f8e7d' }, 'hls')
+		).toBe('mp4');
+		expect(container({ filename: 'master.m3u8', url: 'https://cdn.test/t/1' }, 'mp4')).toBe('hls');
+	});
+
+	it("reads the url's own extension, ignoring its query", () => {
+		expect(container({ url: 'https://cdn.test/a/index.m3u8?token=1' }, 'mp4')).toBe('hls');
+		expect(container({ url: 'https://cdn.test/a/manifest.mpd#t=3' }, 'mp4')).toBe('dash');
+		expect(container({ url: 'https://cdn.test/a/file.MKV' }, 'hls')).toBe('mp4');
+		// `?type=.m3u8` names nothing about a file; only a value that is a path does.
+		expect(container({ url: 'https://cdn.test/a?type=m3u8' }, 'mp4')).toBe('mp4');
+	});
+
+	it('reads a proxied address carried in the query when the path says nothing', () => {
+		const proxied =
+			'https://proxy.test/stream?d=' +
+			encodeURIComponent('https://origin.test/hls/master.m3u8?x=1');
+		expect(container({ url: proxied }, 'mp4')).toBe('hls');
+	});
+
+	it('takes web-ready as a statement of mp4, and falls back only when nothing spoke', () => {
+		expect(container({ url: 'https://cdn.test/opaque', webReady: true }, 'hls')).toBe('mp4');
+		expect(container({ url: 'https://cdn.test/opaque', webReady: false }, 'mp4')).toBe('mp4');
+		expect(container({ url: 'https://cdn.test/opaque' }, 'hls')).toBe('hls');
+	});
+});
+
+describe('a torrent, from whichever spelling a row carries it in', () => {
+	const HEX = '0123456789abcdef0123456789abcdef01234567';
+	const BASE32 = 'AERUKZ4JVPG66AJDIVTYTK6N54ASGRLH';
+	const torrent = shared.__torrentOf;
+
+	it('reads a declared hash in hex of either case, or base32', () => {
+		expect(torrent({ hash: HEX.toUpperCase() })?.infoHash).toBe(HEX);
+		expect(torrent({ infoHash: BASE32 })?.infoHash).toBe(HEX);
+	});
+
+	it("reads a magnet's hash and its trackers", () => {
+		const magnet = `magnet:?xt=urn:btih:${BASE32}&dn=x&tr=${encodeURIComponent('udp://t.test:1')}&tr=http%3A%2F%2Fu.test%2Fa`;
+		expect(torrent({ magnet })).toEqual({
+			infoHash: HEX,
+			trackers: ['udp://t.test:1', 'http://u.test/a']
+		});
+		// The same magnet under the field names the other ecosystems use.
+		expect(torrent({ link: magnet })?.infoHash).toBe(HEX);
+		expect(torrent({ url: magnet })?.infoHash).toBe(HEX);
+	});
+
+	it('reads a link that is itself a bare hash', () => {
+		expect(torrent({ link: HEX })?.infoHash).toBe(HEX);
+	});
+
+	it('answers nothing for a value that is not an info hash', () => {
+		expect(torrent({ infoHash: 'abc' })).toBeNull();
+		expect(torrent({ link: 'https://example.invalid/a.torrent' })).toBeNull();
+		expect(torrent({ magnet: 'magnet:?xt=urn:btih:tooshort' })).toBeNull();
+		expect(torrent(null)).toBeNull();
+	});
+});
