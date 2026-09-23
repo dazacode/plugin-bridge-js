@@ -1624,6 +1624,7 @@ export const HOST_METHODS: ReadonlySet<string> = new Set([
 	'setTimeZone',
 	'getTimeZone',
 	// okhttp's CacheControl.Builder, whose every setting the host decides.
+	'maxAge',
 	'maxStale',
 	'minFresh',
 	'onlyIfCached',

@@ -1654,6 +1654,33 @@ describe('what the runtime is asked for', () => {
 	});
 });
 
+describe('a template property that used to be pruned', () => {
+	it("converts okhttp's CacheControl.Builder().maxAge(...), which the host decides", async () => {
+		// Three anime templates keep a lazy `cacheControl` and pass it to every
+		// GET. Pruned as unreachable, it went unread and loaded; once reaching a
+		// class reached its base (and so its properties), it was translated and
+		// refused on `maxAge` alone, the one builder setting missing from the
+		// list its siblings are on. The runtime's builder already answers it.
+		const result = await convertKotlin(
+			[
+				{
+					path: 'Demo.kt',
+					source: kt(
+						'class Demo : ParsedAnimeHttpSource() {',
+						'    private val cacheControl by lazy { CacheControl.Builder().maxAge(1.hours).build() }',
+						'    override fun popularAnimeRequest(page: Int) = GET("$baseUrl/hot", headers, cacheControl)',
+						'}'
+					)
+				}
+			],
+			{ parser }
+		);
+
+		expect(result.refusals).toEqual([]);
+		expect(result.complete).toBe(true);
+	});
+});
+
 /**
  * Cookies, split down the middle.
  *
