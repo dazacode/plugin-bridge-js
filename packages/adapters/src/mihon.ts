@@ -71,6 +71,7 @@ import {
 import { packageBundle } from '@plugin-bridge/core/package';
 import { gunzip, isGzip, ProtobufError, ProtoMessage } from '@plugin-bridge/core/protobuf';
 import { obstacleSites } from '@plugin-bridge/core/obstacles';
+import { newSharedCache } from '@plugin-bridge/core/source-repo';
 import { readMihonBuildFile } from './mihon-build-file';
 import type { ForeignFormat } from '@plugin-bridge/core/formats';
 import type { RepositoryIndex, RepositoryPlugin } from '@plugin-bridge/core/repository-index';
@@ -81,6 +82,7 @@ const INDEX_PB = /\.pb$/i;
 /** The two placeholder rows the deprecated `index.min.json` still serves. */
 const STUB_NAMES = new Set(['Outdated App', 'Update to Mihon 0.20.1+']);
 const STUB_PACKAGE_SUFFIXES = ['.extension.all.keiyoushi', '.extension.all.mihon'];
+const SHARED = newSharedCache();
 
 function stubRowName(row: Record<string, unknown>): string {
 	return typeof row['name'] === 'string' ? row['name'] : '';
@@ -589,7 +591,8 @@ export const mihonAdapter: ForeignAdapter = {
 		const source = await fetchExtensionSource(
 			{ repositoryUrl, lang, directory },
 			services.listFiles,
-			services.getText
+			services.getText,
+			SHARED
 		);
 		if (source.kotlinFiles.size === 0) {
 			throw new ForeignFormatError(
@@ -628,8 +631,12 @@ export const mihonAdapter: ForeignAdapter = {
 			.flatMap(([name, files]) =>
 				[...files].map(([path, text]) => ({ path: `lib/${name}/${path}`, source: text }))
 			);
+		const core = [...source.coreFiles].map(([path, text]) => ({
+			path: `core/${path}`,
+			source: text
+		}));
 
-		const kotlin = [...own, ...theme, ...modules];
+		const kotlin = [...own, ...theme, ...modules, ...core];
 		const { translateKotlin } = await import('@plugin-bridge/core/kotlin/translate-host');
 		const conversion = await translateKotlin(kotlin, {
 			wasm: services.loadWasm,

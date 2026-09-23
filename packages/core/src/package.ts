@@ -147,8 +147,13 @@ const ENTRYPOINT = 'source';
  *     extension converts to changed in both directions — members now emitted,
  *     and bundles that imported but could not run now refused — so a row
  *     installed before this keeps its old bundle until it is converted again.
+ *
+ * 50: imported repository-wide core objects used as receivers are now read
+ *     with the extension. They previously remained undeclared and were
+ *     refused. This widens the converted bundle, so existing installations
+ *     need another conversion to include those helpers.
  */
-export const CONVERTER_VERSION = 49;
+export const CONVERTER_VERSION = 50;
 
 export interface BundleInput {
 	readonly id: string;

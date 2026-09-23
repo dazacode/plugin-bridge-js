@@ -482,6 +482,7 @@ describe('fetching one located extension', () => {
 			themePackage: null,
 			themeFiles: new Map(),
 			libModules: new Map(),
+			coreFiles: new Map(),
 			resources: new Map(),
 			resolvedRef: null
 		});
@@ -638,6 +639,34 @@ describe('fetching the template and the modules an extension shares', () => {
 
 		expect([...source.libModules.keys()].sort()).toEqual(['dslmodule', 'groovymodule']);
 		expect([...(source.libModules.get('dslmodule') ?? [])]).toEqual([['src/Two.kt', kotlin]]);
+	});
+
+	it('reads a used core object once without pulling in unrelated native helpers', async () => {
+		const coreDir = `${RAW}/main/core/`;
+		const urlUtils = 'package keiyoushi.utils\nobject UrlUtils { fun fixUrl(url: String) = url }';
+		const { getText, listFiles, asked } = fakeRepository({
+			[`${dir}build.gradle`]: gradleFor(null, []),
+			[`${dir}src/A.kt`]:
+				'package org.example\nimport keiyoushi.utils.UrlUtils\nimport keiyoushi.utils.extractNextJs\nclass A { fun url() = UrlUtils.fixUrl("x") }',
+			[`${coreDir}src/main/kotlin/keiyoushi/utils/UrlUtils.kt`]: urlUtils,
+			[`${coreDir}src/main/kotlin/keiyoushi/utils/NextJs.kt`]:
+				'package keiyoushi.utils\nfun <T> Response.extractNextJs(): T? = null',
+			[`${coreDir}src/main/kotlin/keiyoushi/utils/WebView.kt`]:
+				'package keiyoushi.utils\nobject WebView',
+			[`${coreDir}src/test/kotlin/keiyoushi/utils/UrlUtilsTest.kt`]:
+				'package keiyoushi.utils\nobject UrlUtilsTest'
+		});
+		const cache = newSharedCache();
+
+		const first = await fetchExtensionSource(location, listFiles, getText, cache);
+		const afterFirst = asked.length;
+		const second = await fetchExtensionSource(location, listFiles, getText, cache);
+
+		expect([...first.coreFiles]).toEqual([
+			['src/main/kotlin/keiyoushi/utils/UrlUtils.kt', urlUtils]
+		]);
+		expect([...second.coreFiles]).toEqual([...first.coreFiles]);
+		expect(asked.slice(afterFirst).some((url) => url.includes('/core/'))).toBe(false);
 	});
 
 	it('does not fetch a module the build file commented out', async () => {
