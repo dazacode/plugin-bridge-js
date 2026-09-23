@@ -1394,6 +1394,13 @@ class Emitter {
 	/** See `Declared.reified`. */
 	private readonly reifiedMembers = new Map<string, readonly string[]>();
 	/**
+	 * The enum whose body is being emitted, and its entries' names.
+	 *
+	 * Inside an enum a bare `SINGLE` is an entry, a bare `entries` its list and
+	 * a bare `values()` its copy — all reached through the class here.
+	 */
+	private enumScope: { owner: string; entries: ReadonlySet<string> } | null = null;
+	/**
 	 * Companion members written out under a name other than their own, while
 	 * the class holding them is emitted. See `registerCompanionNames`.
 	 */
@@ -2072,14 +2079,15 @@ class Emitter {
 		);
 
 		if (kinds.has('interface')) return this.interfaceDeclaration(node, name);
-		if (kinds.has('enum_class_body')) return this.enumDeclaration(node, name);
+		// An enum is a class with a fixed set of instances — see `enumTail`.
+		const isEnum = kinds.has('enum_class_body');
 		if (modifiers.has('data')) return this.dataDeclaration(node, name);
 
 		// The header — everything but the body — must parse cleanly. A recovered
 		// base-class name or constructor call means every member below it is
 		// being read against a guess, so the whole file goes.
 		for (const child of kids(node)) {
-			if (child.type === 'class_body') continue;
+			if (child.type === 'class_body' || child.type === 'enum_class_body') continue;
 			if (child.hasError) {
 				this.fileRefusal =
 					`This extension's \`${name}\` class header did not parse. Yorozo will not ` +
@@ -2115,6 +2123,7 @@ class Emitter {
 		// the adapter sorts the class `build.gradle` names there. Elsewhere the
 		// old rule stands.
 		const claims =
+			!isEnum &&
 			rename === undefined &&
 			(base === null || this.entryFile) &&
 			(this.className === null || (invoked !== null && !this.entryConstructsBase));
@@ -2126,10 +2135,21 @@ class Emitter {
 			return this.declineMember(name, node, `a base class \`${invoked.type}\` this build has not`);
 		}
 
-		const body = kids(node).find((child) => child.type === 'class_body') ?? null;
-		const members = body === null ? [] : kids(body);
+		const body =
+			kids(node).find((child) => child.type === 'class_body' || child.type === 'enum_class_body') ??
+			null;
+		const members = body === null ? [] : kids(body).filter((child) => child.type !== 'enum_entry');
+		const enumEntries =
+			body === null ? [] : kids(body).filter((child) => child.type === 'enum_entry');
 		const outerOwner = this.owner;
 		const outerBase = this.ownerBase;
+		const outerEnum = this.enumScope;
+		if (isEnum) {
+			this.enumScope = {
+				owner: name,
+				entries: new Set(enumEntries.map((entry) => this.nameOf(entry) ?? ''))
+			};
+		}
 		// Saved with them, and for the same reason. A nested class — this
 		// ecosystem writes `protected class SMangaDto(…)` inside the template it
 		// belongs to — replaced the enclosing class's member table and never
@@ -2212,9 +2232,13 @@ class Emitter {
 		this.companionMembers = [];
 
 		const hoisted: string[] = [];
-		const ctorLines: string[] = constructorParams
-			.filter((param) => param.isProperty)
-			.map((param) => `this.${param.name} = ${this.safe(param.name)};`);
+		const enumCompanion: string[] = [];
+		const ctorLines: string[] = [
+			...(isEnum ? ['this.name = __name;', 'this.ordinal = __ordinal;'] : []),
+			...constructorParams
+				.filter((param) => param.isProperty)
+				.map((param) => `this.${param.name} = ${this.safe(param.name)};`)
+		];
 		const memberLines: string[] = [];
 		const dispatched = new Set<string>();
 
@@ -2296,7 +2320,10 @@ class Emitter {
 					break;
 				}
 				case 'companion_object':
-					hoisted.push(...this.companion(child));
+					// An enum's companion is initialised after its entries, and
+					// commonly reads one (`val default = SINGLE`), so it follows
+					// them rather than preceding the class.
+					(isEnum ? enumCompanion : hoisted).push(...this.companion(child));
 					break;
 				case 'object_declaration': {
 					const declared = this.nameOf(child) ?? 'object';
@@ -2351,16 +2378,24 @@ class Emitter {
 		// a *wrong value* rather than a missing one, which is the failure this
 		// file exists to refuse rather than emit. `dataDeclaration` already did
 		// this; a plain class did not.
-		const ctorParams = this.constructorSignature(constructorParams);
+		const ctorParams = [
+			...(isEnum ? ['__name', '__ordinal'] : []),
+			...this.constructorSignature(constructorParams)
+		];
 
 		const ctor =
 			superLine.length > 0 || constructorParams.length > 0 || ctorLines.length > 0
 				? [`constructor(${ctorParams.join(', ')}) ` + block([...superLine, ...ctorLines])]
 				: [];
+		if (isEnum) memberLines.push(...enumMethods(this.classMembers));
+		// Built before the scope is taken down: an entry's arguments are read
+		// with the enum's own names in reach, as Kotlin reads them.
+		const enumLines = isEnum ? this.enumTail(name, node, enumEntries, members) : [];
 
 		nested.restore();
 		this.owner = outerOwner;
 		this.ownerBase = outerBase;
+		this.enumScope = outerEnum;
 		this.classMembers = outerMembers;
 		this.suspendMembers = outerSuspends;
 		const companionMembers = this.companionMembers;
@@ -2368,6 +2403,22 @@ class Emitter {
 		this.companionMembers = outerCompanion;
 		const heritage = base === null ? '' : `extends ${base} `;
 		const statics = this.companionStatics(name, companionMembers);
+		if (isEnum) {
+			// One piece, in Kotlin's initialisation order: the class, its
+			// entries, then its companion — and frozen last, so nothing
+			// reassigns an entry.
+			const cls = `class ${this.safe(name)} ${heritage}${block([...ctor, ...memberLines])}`;
+			return orderClasses([
+				...hoisted,
+				[
+					cls,
+					...enumLines,
+					...enumCompanion,
+					...(statics.length > 0 ? [statics] : []),
+					`Object.freeze(${this.safe(name)});`
+				].join('\n')
+			]).join('\n\n');
+		}
 		const cls =
 			`class ${this.safe(name)} ${heritage}${block([...ctor, ...memberLines])}` +
 			(statics.length > 0 ? `\n${statics}` : '');
@@ -2718,31 +2769,79 @@ class Emitter {
 		});
 	}
 
-	/** `enum class E { A, B }` → a frozen map, so `E.A` reads and nothing mutates. */
-	private enumDeclaration(node: KNode, name: string): string | null {
-		return this.member(name, node, () => {
-			const body = kids(node).find((child) => child.type === 'enum_class_body');
-			const params = this.primaryConstructorParams(node);
-			const entries: string[] = [];
-			let ordinal = 0;
-
-			for (const child of kids(body)) {
-				if (child.type !== 'enum_entry') this.refuse(child, 'a member on an `enum class`');
-				const entryName = this.nameOf(child) ?? 'entry';
-				const args = kids(child).find((inner) => inner.type === 'value_arguments');
-				const fields = [`name: ${JSON.stringify(entryName)}`, `ordinal: ${ordinal}`];
-				for (const [index, arg] of kids(args).entries()) {
-					const key = params[index]?.name;
-					if (key === undefined) this.refuse(arg, 'an enum entry with unnamed state');
-					fields.push(`${JSON.stringify(key)}: ${this.expr(this.argumentValue(arg))}`);
-				}
-				entries.push(`${JSON.stringify(entryName)}: Object.freeze({ ${fields.join(', ')} })`);
-				ordinal += 1;
+	/**
+	 * An enum's entries, and the three things Kotlin gives every enum class.
+	 *
+	 * `enum class Layout(val prefix: String) { SLUG(""), ROOT("/") ; fun
+	 * url(slug) = … }` is a class with a fixed set of instances, and is emitted
+	 * as one: each entry is `new Layout("SLUG", 0, "")`, so a method or a
+	 * computed property on the enum is an ordinary method on the class. It was
+	 * a frozen map of frozen records before, which could hold state but no
+	 * behaviour — every member was refused — and which had no `entries`,
+	 * `values()` or `valueOf()` either: `Layout.entries.map { … }` read
+	 * undefined and mapped over nothing, in extensions that loaded and
+	 * reported nothing refused.
+	 *
+	 * An entry with a body of its own is a subclass per entry, and is refused.
+	 * So is one whose arguments read the enum's companion: Kotlin initialises
+	 * entries first, and a companion `const` it inlined would here be a binding
+	 * not yet written.
+	 */
+	private enumTail(
+		name: string,
+		node: KNode,
+		entries: readonly KNode[],
+		members: readonly KNode[]
+	): string[] {
+		const owner = this.safe(name);
+		const companionNames = new Set<string>();
+		for (const member of members) {
+			if (member.type !== 'companion_object') continue;
+			const inner = kids(member).find((part) => part.type === 'class_body');
+			for (const part of kids(inner)) {
+				const declared =
+					part.type === 'property_declaration'
+						? this.propertyName(part)
+						: part.type === 'function_declaration'
+							? this.nameOf(part)
+							: null;
+				if (declared !== null) companionNames.add(declared);
 			}
-
-			this.moduleNames.add(name);
-			return `const ${this.safe(name)} = Object.freeze(${block(entries.map(comma))});`;
+		}
+		// Under the enum's own name, so a refusal here is one the members that
+		// mention the enum are held to.
+		const emitted = this.member(name, node, () => {
+			const lines: string[] = [];
+			for (const [ordinal, entry] of entries.entries()) {
+				const entryName = this.nameOf(entry);
+				if (entryName === null) this.refuse(entry, 'an enum entry with no name');
+				if (kids(entry).some((part) => part.type === 'class_body')) {
+					this.refuse(entry, 'an enum entry with a body of its own');
+				}
+				const args = kids(kids(entry).find((part) => part.type === 'value_arguments')).filter(
+					(part) => part.type === 'value_argument'
+				);
+				for (const arg of args) {
+					for (const found of walk(arg)) {
+						if (found.type === 'simple_identifier' && companionNames.has(found.text)) {
+							this.refuse(found, 'an enum entry reading its own companion');
+						}
+					}
+				}
+				const passed = this.plainArguments(name, args);
+				lines.push(
+					`${owner}.${entryName} = new ${owner}(${[JSON.stringify(entryName), String(ordinal), ...passed].join(', ')});`
+				);
+			}
+			const listed = entries.map((entry) => `${owner}.${this.nameOf(entry) ?? ''}`);
+			lines.push(`${owner}.entries = Object.freeze([${listed.join(', ')}]);`);
+			lines.push(`${owner}.values = function () { return ${owner}.entries.slice(); };`);
+			lines.push(
+				`${owner}.valueOf = function (value) { for (const entry of ${owner}.entries) if (entry.name === value) return entry; throw new Error(${JSON.stringify(`No enum constant ${name}.`)} + value); };`
+			);
+			return lines.join('\n');
 		});
+		return emitted === null ? [] : [emitted];
 	}
 
 	/** `object X { … }` → a frozen literal at module scope. */
@@ -3711,6 +3810,15 @@ class Emitter {
 				this.reifiedFunctions.set(member, reified);
 			}
 		}
+	}
+
+	/** A bare name inside an enum's body or companion that means the enum's own. */
+	private enumMember(name: string): string | null {
+		const scope = this.enumScope;
+		if (scope === null || this.lookup(name) !== null) return null;
+		if (this.classMembers.has(name)) return null;
+		const known = scope.entries.has(name) || ENUM_STATICS.has(name);
+		return known ? `${this.safe(scope.owner)}.${name}` : null;
 	}
 
 	/** The object an imported `name` is reached through, unless something closer declares it. */
@@ -6518,6 +6626,10 @@ class Emitter {
 			return suspends ? this.awaited(call) : call;
 		}
 
+		if ((name === 'values' || name === 'valueOf') && lambda === null) {
+			const inEnum = this.enumMember(name);
+			if (inEnum !== null) return `${inEnum}(${this.plainArguments(name, args).join(', ')})`;
+		}
 		const local = this.lookup(name);
 		if (local !== null) {
 			const call = `${local}(${this.callArguments(name, args, lambda, labelled, false).join(', ')})`;
@@ -7924,6 +8036,9 @@ class Emitter {
 	private read(name: string, node: KNode): string {
 		const local = this.lookup(name);
 		if (local !== null) return local;
+		// Inside an enum: an entry by its bare name, and the entry list.
+		const inEnum = this.enumMember(name);
+		if (inEnum !== null) return inEnum;
 		// After the local, so a variable named like an alias still wins — a
 		// `typealias` is a file-scope declaration and a local shadows one.
 		const alias = this.aliased(name);
@@ -9256,6 +9371,29 @@ interface CompanionMember {
 	/** A `var`, whose static also writes. */
 	readonly mutable?: boolean;
 }
+
+/**
+ * The members every enum entry answers to that its class did not declare.
+ *
+ * `toPrimitive` is what makes `this >= other` compare by ordinal, as Kotlin's
+ * `compareTo` does, while a string built from an entry still reads its name:
+ * JavaScript asks for a *number* in a comparison and a *string* in a template
+ * or a `String()`, and `+` — which in Kotlin is string concatenation on an
+ * enum — asks for neither and gets the name too.
+ */
+function enumMethods(declared: ReadonlySet<string>): string[] {
+	const out: string[] = [];
+	if (!declared.has('toString')) out.push('toString() { return this.name; }');
+	if (!declared.has('compareTo'))
+		out.push('compareTo(other) { return this.ordinal - other.ordinal; }');
+	out.push(
+		"[Symbol.toPrimitive](hint) { return hint === 'number' ? this.ordinal : this.toString(); }"
+	);
+	return out;
+}
+
+/** What `enumTail` puts on every enum class, reachable bare inside one. */
+const ENUM_STATICS: ReadonlySet<string> = new Set(['entries', 'values', 'valueOf']);
 
 /** A function's own properties, which a companion member is not written over. */
 const FUNCTION_OWN_NAMES: ReadonlySet<string> = new Set([

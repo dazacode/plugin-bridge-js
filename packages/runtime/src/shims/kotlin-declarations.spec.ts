@@ -373,3 +373,66 @@ describe('a companion object, which belongs to its class', () => {
 		expect(demo.run()).toBe('key:made:42');
 	});
 });
+
+describe('an enum class, which is a class with fixed instances', () => {
+	const source = kt(
+		'enum class Layout(private val prefix: String, val label: String) {',
+		'    SLUG("", "Slug"),',
+		'    NESTED("/comic/", "Nested"),',
+		'    ROOT("/", "Root"),',
+		'    ;',
+		'    fun url(slug: String): String = "$prefix$slug"',
+		'    val shouting get() = label.uppercase()',
+		'    fun atLeast(other: Layout): Boolean = this >= other',
+		'    companion object {',
+		'        const val PREF_KEY = "layout"',
+		'        val default = NESTED',
+		'        fun fromKey(key: String) = entries.find { it.name == key } ?: default',
+		'        fun byLabel(label: String) = values().first { it.label == label }',
+		'    }',
+		'}',
+		'class Demo {',
+		'    fun urls() = Layout.entries.map { it.url("x") }',
+		'    fun count() = Layout.values().size',
+		'    fun parsed() = Layout.valueOf("ROOT").ordinal',
+		'    fun companion() = Layout.PREF_KEY + ":" + Layout.fromKey("nope").name + ":" + Layout.byLabel("Root").shouting',
+		'    fun compare() = listOf(Layout.ROOT.atLeast(Layout.SLUG), Layout.SLUG.atLeast(Layout.ROOT))',
+		'    fun text() = "layout " + Layout.SLUG + " is ${Layout.ROOT}"',
+		'    fun picked() = pick(Layout.valueOf("NESTED"))',
+		'    fun pick(layout: Layout) = when (layout) {',
+		'        Layout.SLUG -> 1',
+		'        Layout.NESTED -> 2',
+		'        Layout.ROOT -> 3',
+		'    }',
+		'}'
+	);
+
+	it('runs the members an enum declares, on each entry', async () => {
+		const demo = await instantiate('Demo', source);
+		expect(demo.urls()).toEqual(['x', '/comic/x', '/x']);
+		expect(demo.companion()).toBe('layout:NESTED:ROOT');
+	});
+
+	it('answers entries, values() and valueOf() as Kotlin does', async () => {
+		// All three read undefined off the frozen map an enum used to be.
+		const demo = await instantiate('Demo', source);
+		expect(demo.count()).toBe(3);
+		expect(demo.parsed()).toBe(2);
+		expect(demo.picked()).toBe(2);
+	});
+
+	it('compares by ordinal and prints by name', async () => {
+		const demo = await instantiate('Demo', source);
+		expect(demo.compare()).toEqual([true, false]);
+		expect(demo.text()).toBe('layout SLUG is ROOT');
+	});
+
+	it('refuses an entry with a body of its own', () => {
+		// A subclass per entry, which this emission has no shape for.
+		expect(
+			refusalNames(
+				kt('enum class Mode {', '    A { override fun toString() = "a" },', '    B,', '}')
+			)
+		).not.toEqual([]);
+	});
+});
