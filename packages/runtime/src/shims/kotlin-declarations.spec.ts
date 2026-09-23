@@ -1797,6 +1797,45 @@ describe('detached accessors and minimal declarations', () => {
 	});
 });
 
+describe('file-scope state', () => {
+	// A file-scope `var` came out as a `const`, and a bare write to it from
+	// inside a class went to `this.<name>`: the fetched list never replaced
+	// the empty one, and nothing was refused.
+	const filters = kt(
+		'private var fetchAttempts = 0',
+		'internal var genreList: List<String> = emptyList()',
+		'var lastQuery: String = ""',
+		'    private set',
+		'fun remember(query: String) { lastQuery = query }',
+		'object Counter {',
+		'    var count = 0',
+		'        private set',
+		'    fun bump() { count += 1 }',
+		'}'
+	);
+
+	it('is written from a class next door and a function beside it, and read back', async () => {
+		const demo = await instantiate(
+			'Demo',
+			filters,
+			kt(
+				'class Demo {',
+				'    fun fetch(): String {',
+				'        fetchAttempts++',
+				'        fetchAttempts += 1',
+				'        genreList = listOf("a", "b")',
+				'        remember("q")',
+				'        Counter.bump()',
+				'        return "$fetchAttempts ${genreList.size} $lastQuery ${Counter.count}"',
+				'    }',
+				'}'
+			)
+		);
+		expect(demo.fetch()).toBe('2 2 q 1');
+		expect(demo.fetch()).toBe('4 2 q 2');
+	});
+});
+
 describe('a nested type with a top-level namesake further down', () => {
 	// `Chapter.Branch` nested above a top-level `Branch`: the nested one took
 	// the bare name because it was written first, the top-level one was
