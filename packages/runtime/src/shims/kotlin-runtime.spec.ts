@@ -612,6 +612,24 @@ describe("kotlinx's JsonElement accessors, over the plain parsed value", () => {
 		expect(k.jeGetStringOrNull(new Map([['id', 7]]), 'id')).toBe('7');
 	});
 
+	it("reads keiyoushi's shorter spellings as the accessors they abbreviate", () => {
+		// `el.obj`, `el.array`, `el.string`, `el.stringOrNull` from core's
+		// JsonElement.kt. A plain read off a string answered undefined.
+		expect(k.jeObj(doc)).toBe(doc);
+		expect(k.jeArr(doc.xs)).toBe(doc.xs);
+		expect(k.jeString('A')).toBe('A');
+		expect(k.jeString(12)).toBe('12');
+		expect(k.jeString(null)).toBe('null');
+		expect(k.jeStringOrNull(null)).toBeNull();
+		expect(k.jeStringOrNull(false)).toBe('false');
+		expect(() => k.jeObj(doc.xs)).toThrow(/JsonArray as a JsonObject/);
+		expect(() => k.jeArr(doc)).toThrow(/JsonObject as a JsonArray/);
+		expect(() => k.jeString(doc.xs)).toThrow(/JsonArray as a JsonPrimitive/);
+		// A record with a real field of the name answers the field.
+		expect(k.jeString({ string: 'field' })).toBe('field');
+		expect(k.jeArr({ array: [1] })).toEqual([1]);
+	});
+
 	it('refuses a keyed read from something that is not a JsonObject', () => {
 		// Typed on JsonObject upstream. An absent `memo` or an absent DTO
 		// field answering null here would walk into the source's fallback

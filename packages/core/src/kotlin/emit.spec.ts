@@ -5448,6 +5448,33 @@ describe('file annotations, and a serializer on a type argument', () => {
 		).toEqual(['`getLocalStorage` from `keiyoushi.utils`, which this build did not read']);
 	});
 
+	it("reads keiyoushi's `.string` and `.obj` as JSON only where the file imports them", () => {
+		// `memo["id"]!!.string` read `undefined` off a string and put it in a
+		// URL. Without the import these are a DTO's own fields, and stay so.
+		const imported = translate(
+			kt(
+				'import keiyoushi.utils.obj',
+				'import keiyoushi.utils.string',
+				'import keiyoushi.utils.stringOrNull',
+				'class Demo : Source() {',
+				'    fun id(el: JsonElement): String = el.obj["id"]!!.string',
+				'    fun maybe(el: JsonElement?): String? = el?.stringOrNull',
+				'}'
+			)
+		);
+		expect(imported.refusals).toEqual([]);
+		expect(imported.js).toContain('__k.jeObj(el)');
+		expect(imported.js).toMatch(/__k\.jeString\(/);
+		expect(imported.js).toMatch(/__k\.jeStringOrNull\(__r\)/);
+
+		const plain = translate(
+			kt('class Demo : Source() {', '    fun id(dto: Dto): String = dto.string + dto.obj', '}')
+		);
+		expect(plain.js).toContain('dto.string');
+		expect(plain.js).not.toContain('jeString');
+		expect(plain.js).not.toContain('jeObj');
+	});
+
 	it('does not count a returned interceptor as blocking its builder', () => {
 		// One measured source: `…Decrypt.createInterceptor()` returns the lambda that
 		// proceeds; it does not proceed itself. Counted as blocking across

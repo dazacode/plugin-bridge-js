@@ -101,6 +101,7 @@ import {
 	DECODING_METHODS,
 	EXTENSION_METHODS,
 	EXTENSION_PROPERTIES,
+	KEIYOUSHI_JSON_PROPERTIES,
 	FREE_FUNCTIONS,
 	GLOBAL_NAMES,
 	JSOUP_STATICS,
@@ -10418,7 +10419,14 @@ class Emitter {
 			return `${this.helper('initialized')}(${target})`;
 		}
 
-		const helper = EXTENSION_PROPERTIES.get(name);
+		// keiyoushi's `el.obj`/`el.string` only where the file imports them;
+		// see `KEIYOUSHI_JSON_PROPERTIES`. The helper still answers a receiver
+		// that has a real property of the name, as Kotlin's member would win.
+		const helper =
+			EXTENSION_PROPERTIES.get(name) ??
+			(this.keiyoushiImports.get(name) === 'keiyoushi.utils'
+				? KEIYOUSHI_JSON_PROPERTIES.get(name)
+				: undefined);
 		if (helper !== undefined) {
 			if (!safe) return `${this.helper(helper)}(${this.expr(receiver)})`;
 			return `${this.helper('sc')}(${this.expr(receiver)}, (__r) => ${this.helper(helper)}(__r))`;
