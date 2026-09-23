@@ -134,8 +134,21 @@ const ENTRYPOINT = 'source';
  *     it across a whole repository. Bumped because members that were refused
  *     are now emitted, so a row installed before this keeps the smaller bundle
  *     until it is converted again.
+ *
+ * 49: the convert-everything pass, measured against yuzono (Aniyomi) and
+ *     keiyoushi (Mihon) and driven through browse, chapter list and read
+ *     rather than counted at import. Kotlin overloads get a JavaScript method
+ *     per signature behind a dispatcher (they collapsed to the last one and
+ *     recursed or received the other's argument); a string's text no longer
+ *     names an obstacle; a capitalised receiver nothing declares is refused
+ *     rather than left to throw; the mihon driver attaches the source's
+ *     client; plus the grammar, declaration, control-flow, runtime-library
+ *     and extractor-library passes merged with it. Bumped because what an
+ *     extension converts to changed in both directions — members now emitted,
+ *     and bundles that imported but could not run now refused — so a row
+ *     installed before this keeps its old bundle until it is converted again.
  */
-export const CONVERTER_VERSION = 48;
+export const CONVERTER_VERSION = 49;
 
 export interface BundleInput {
 	readonly id: string;
