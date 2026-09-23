@@ -101,6 +101,9 @@ const helpers: Record<string, (...args: never[]) => unknown> = {
 	// about the two spellings is asserting. The real one reads the files the
 	// conversion fetched; here it need only be the same object twice.
 	classLoader: () => stubLoader,
+	// The real one also answers strings and errors; a fixture here only ever
+	// hands it an instance of a class it declared.
+	simpleName: (value: Any) => (value as { constructor: { name: string } }).constructor.name,
 
 	cast: (value: Any) => value,
 	castOrNull: (value: Any, name: string) =>
@@ -4591,11 +4594,179 @@ describe('the class loader', () => {
 	});
 
 	it('still refuses the JVM class object asked for anything else', () => {
-		// A class *path* has an answer here and a class *name* does not. The
-		// exemption is the length of the one chain and no further.
-		expect(refusalNames(inClass('    val tag = javaClass.simpleName'))).toContain(
-			'the JVM class object'
+		// A class *path* and a class *name* have answers here; a resource read
+		// off the class object does not. Each exemption is the length of its
+		// one chain and no further.
+		expect(
+			refusalNames(inClass('    val script = javaClass.getResource("/assets/a.js")!!.readText()'))
+		).toContain('the JVM class object');
+	});
+});
+
+describe('the shared playlist module’s signatures', () => {
+	// Each of these is a shape `PlaylistUtils` is written in, and each was
+	// emitted without a refusal and wrong: the request went out with the wrong
+	// headers or referer, which reads to a viewer as a hoster being down.
+
+	it('lets a parameter default read the parameters before it', () => {
+		const demo = instantiate(
+			inClass(
+				'    fun referer(url: String, ref: String = url.substringBefore("/v/")) = ref',
+				'    fun shown(): String = referer("https://h.example.invalid/v/1")'
+			)
 		);
+
+		expect(demo.shown()).toBe('https://h.example.invalid');
+	});
+
+	it('passes a bare `::member` every argument the member needs', () => {
+		// `masterHeadersGen: (Headers, String) -> Headers = ::generateMasterHeaders`
+		const demo = instantiate(
+			inClass(
+				'    fun join(a: String, b: String, c: String = "!"): String = a + b + c',
+				'    fun apply(f: (String, String) -> String = ::join): String = f("x", "y")',
+				'    fun one(): List<String> = listOf("q").map(::single)',
+				'    fun single(a: String, b: String = "-"): String = a + b'
+			)
+		);
+
+		expect(demo.apply()).toBe('xy!');
+		// Still one argument where the member needs one: the runtime's `map`
+		// passes an index too, and it must not land in `b`.
+		expect(demo.one()).toEqual(['q-']);
+	});
+
+	it('keeps a constructor default that is a bare name', () => {
+		const shown = evaluate(
+			kt(
+				'val FALLBACK = "none"',
+				'class Utils(private val client: String, val headers: String = FALLBACK)',
+				'data class Pair2(val a: String, val b: String = a)'
+			),
+			'[new Utils("c").headers, Pair2("z").b]'
+		);
+
+		expect(shown).toEqual(['none', 'z']);
+	});
+
+	it('asks the receiver first when a converted class declares a helper’s name', () => {
+		// The unpacker module's `SubstringExtractor.substringBefore` is a member,
+		// and a member beats the stdlib extension in Kotlin. Which one a call
+		// means depends on a receiver this build cannot type, so it is asked.
+		const emitted = translate(
+			kt(
+				'class Cursor(private val text: String) {',
+				'    fun substringBefore(s: String): String = text',
+				'}',
+				'class Demo : Source() {',
+				'    fun a(c: Cursor): String = c.substringBefore("x")',
+				'    fun b(): Char = "ab"[0]',
+				"    fun n(ch: Char): Int = ch.code - '0'.code",
+				'}'
+			)
+		);
+
+		expect(emitted.refusals).toEqual([]);
+		expect(emitted.js).toContain('__k.ownOr(c, "substringBefore", "substringBefore", \'x\')');
+		// Through Kotlin's `-` (`__k.minus`), which subtracts two numbers
+		// exactly as the operator does; see `additive`.
+		expect(emitted.js).toContain("__k.minus(__k.code(ch), __k.code('0'))");
+	});
+
+	it('reads kotlin.math called bare as the runtime’s, not as a member', () => {
+		// `STANDARD_QUALITIES.minByOrNull { abs(it - intQuality) }` came out
+		// `this.abs(…)`, unrefused, and threw on every HLS extraction.
+		const emitted = translate(
+			inClass(
+				'    fun near(a: Int, b: Int): Int = abs(a - b) + min(a, b) + maxOf(a, b, 3)',
+				'    fun max(a: Int): Int = a',
+				'    fun own(): Int = max(4)'
+			)
+		);
+
+		expect(emitted.refusals).toEqual([]);
+		expect(emitted.js).toContain('__k.mathAbs(__k.minus(a, b))');
+		expect(emitted.js).toContain('__k.mathMin(a, b)');
+		expect(emitted.js).toContain('__k.mathMaxOf(a, b, 3)');
+		// The class's own `max` is still the one it calls.
+		expect(emitted.js).toContain('this.max(4)');
+	});
+
+	it('calls an object’s own member over the runtime function of that name', () => {
+		const shown = evaluate(
+			kt(
+				'object Packer {',
+				'    fun unpack(vararg blocks: String): List<String> = blocks.toList()',
+				'    fun combine(block: String): String = unpack(block, block).joinToString("+")',
+				'}'
+			),
+			'Packer.combine("a")'
+		);
+
+		expect(shown).toBe('a+a');
+	});
+});
+
+describe('a class’s simple name', () => {
+	it('answers a final class with its own name, and an object with its', () => {
+		// `private val tag by lazy { javaClass.simpleName }` is the whole idiom.
+		const demo = instantiate(
+			kt(
+				'object Helper { val tag = javaClass.simpleName }',
+				'class Demo : Source() {',
+				'    private val tag by lazy { javaClass.simpleName }',
+				'    private val eager = this.javaClass.simpleName',
+				'    fun tags(): String = tag + "/" + eager + "/" + Helper.tag',
+				'}'
+			)
+		);
+
+		expect(demo.tags()).toBe('Demo/Demo/Helper');
+	});
+
+	it('answers an open class with the name of the instance’s own class', () => {
+		// A template's tag is its subclass's, which is why an open class asks the
+		// instance rather than writing its own name down.
+		const demo = instantiate(
+			kt(
+				'open class Base { val tag by lazy { javaClass.simpleName } }',
+				'class Leaf : Base()',
+				'class Demo : Source() {',
+				'    fun both(): String = Base().tag + "/" + Leaf().tag',
+				'}'
+			)
+		);
+
+		expect(demo.both()).toBe('Base/Leaf');
+	});
+
+	it('answers a value only inside a log line', () => {
+		// Exceptions are erased to Error here, so a caught one's name is not the
+		// Kotlin answer; in a diagnostic that costs a word, anywhere else a branch.
+		const logged = translate(
+			inClass(
+				'    fun run(e: Exception) {',
+				'        Log.w("Demo", "failed: ${e.javaClass.simpleName}: ${e.message}")',
+				'    }'
+			)
+		);
+		expect(logged.refusals).toEqual([]);
+		expect(logged.js).toContain('__k.simpleName(e)');
+
+		expect(refusalNames(inClass('    fun kind(e: Exception) = e.javaClass.simpleName'))).toContain(
+			'`javaClass.simpleName` of a value outside a log line'
+		);
+	});
+
+	it('refuses where the implicit receiver is not the class', () => {
+		// Inside `run {}` on a string, `javaClass` is the string's.
+		expect(
+			refusalNames(inClass('    fun r(): String = "a".run { javaClass.simpleName }'))
+		).toContain('`javaClass` of a receiver that is not the class');
+		// A companion's members are hoisted out; its `javaClass` is `Companion`.
+		expect(
+			refusalNames(inClass('    companion object { val TAG = javaClass.simpleName }'))
+		).toContain('`javaClass` where no named class is `this`');
 	});
 });
 

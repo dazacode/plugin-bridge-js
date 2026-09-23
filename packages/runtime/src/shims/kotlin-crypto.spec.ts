@@ -436,6 +436,55 @@ describe('java.security.SecureRandom', () => {
 	});
 });
 
+/* ── RC4 ──────────────────────────────────────────────────────────────────── */
+
+describe('RC4, which the runtime computes itself', () => {
+	// The idiom as the catalogue writes it, `cipher.parameters` and all: RC4
+	// has none, the JCE answers null, and init is handed that null back.
+	const rc4 = () =>
+		instantiate(
+			inClass(
+				'    fun run(keyHex: String, data: ByteArray, mode: Int): ByteArray {',
+				'        val key = SecretKeySpec(keyHex.decodeHex(), "RC4")',
+				'        val cipher = Cipher.getInstance("RC4")',
+				'        cipher.init(mode, key, cipher.parameters)',
+				'        return cipher.doFinal(data)',
+				'    }',
+				'    fun text(key: String, plain: String): ByteArray {',
+				'        val cipher = Cipher.getInstance("ARCFOUR")',
+				'        cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(key.toByteArray(), "ARCFOUR"), cipher.getParameters())',
+				'        return cipher.doFinal(plain.toByteArray())',
+				'    }'
+			)
+		);
+
+	it('produces RFC 6229’s keystream for its 40-bit key', async () => {
+		// Encrypting zeros yields the keystream itself; offsets 0 and 16 of the
+		// vector for key 0x0102030405.
+		const demo = await rc4();
+		const stream = await demo.run('0102030405', new Array(32).fill(0), 1);
+
+		expect(hex(stream)).toBe(
+			'b2396305f03dc027ccc3524a0a1118a8' + '6982944f18fc82d589c403a47a0d0919'
+		);
+	});
+
+	it('matches the classic plaintext vectors and decrypts what it encrypts', async () => {
+		const demo = await rc4();
+
+		// The textbook `Key`/`Plaintext` vector is three bytes of key, which
+		// SunJCE rejects (40 bits is its floor), and so does this.
+		await expect(demo.text('Key', 'Plaintext')).rejects.toThrow(/3-byte key/);
+		expect(hex(await demo.text('Secret', 'Attack at dawn'))).toBe('45a01f645fc35b383552544b9bf5');
+
+		// Decryption is the same XOR, and each doFinal starts from the key's
+		// initial state, so the second call is not a continuation of the first.
+		const sealed = await demo.text('Secret', 'Attack at dawn');
+		const opened = await demo.run(Buffer.from('Secret').toString('hex'), sealed, 2);
+		expect(Buffer.from(unsigned(opened)).toString()).toBe('Attack at dawn');
+	});
+});
+
 /* ── what still refuses ───────────────────────────────────────────────────── */
 
 describe('the algorithms that have no WebCrypto equivalent', () => {
@@ -446,7 +495,7 @@ describe('the algorithms that have no WebCrypto equivalent', () => {
 		['a bare AES', 'AES', 'the `AES` cipher'],
 		['DES', 'DES/CBC/PKCS5Padding', 'the `DES/CBC/PKCS5Padding` cipher'],
 		['triple DES', 'DESede/CBC/PKCS5Padding', 'the `DESede/CBC/PKCS5Padding` cipher'],
-		['RC4', 'RC4', 'the `RC4` cipher'],
+		['RC4 with a mode', 'RC4/CBC/NoPadding', 'the `RC4/CBC/NoPadding` cipher'],
 		['raw RSA', 'RSA/ECB/NoPadding', 'the `RSA/ECB/NoPadding` cipher'],
 		['CBC without padding', 'AES/CBC/NoPadding', 'the `AES/CBC/NoPadding` cipher'],
 		['CTR', 'AES/CTR/NoPadding', 'the `AES/CTR/NoPadding` cipher']

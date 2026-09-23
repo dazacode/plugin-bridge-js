@@ -233,6 +233,59 @@ describe('what the emitter is promised', () => {
 		expect(k.javaClass).toBeUndefined();
 	});
 
+	it('answers kotlin.math the way Kotlin does, round included', () => {
+		expect(k.mathAbs(-3)).toBe(3);
+		expect(k.mathMin(2, 5)).toBe(2);
+		expect(k.mathMax(2, 5)).toBe(5);
+		expect(Number.isNaN(k.mathMax(Number.NaN, 1))).toBe(true);
+		expect(k.mathCeil(1.2)).toBe(2);
+		expect(k.mathFloor(-1.2)).toBe(-2);
+		expect(k.mathLog10(1000)).toBe(3);
+		// Ties to even, unlike Math.round — and unlike roundToInt.
+		expect(k.mathRound(2.5)).toBe(2);
+		expect(k.mathRound(3.5)).toBe(4);
+		expect(k.mathRound(-2.5)).toBe(-2);
+		expect(k.mathRound(2.4)).toBe(2);
+		expect(k.mathMaxOf(1, 9, 4)).toBe(9);
+		expect(k.mathMinOf('b', 'a')).toBe('a');
+	});
+
+	it('reads a Char’s code, and any other .code as the property it is', () => {
+		expect(k.code('A')).toBe(65);
+		expect(k.code('0')).toBe(48);
+		expect(k.code({ code: 404 })).toBe(404);
+		expect(k.code(null)).toBe(null);
+	});
+
+	it('lets an instance that declares a helper’s name answer for itself', () => {
+		// A converted class's member wins, as Kotlin's member-over-extension
+		// rule says; a string, a list, a Map and a plain object keep the helper.
+		class Cursor {
+			substringBefore(delimiter: string) {
+				return 'own:' + delimiter;
+			}
+		}
+		expect(k.ownOr(new Cursor(), 'substringBefore', 'substringBefore', ',')).toBe('own:,');
+		expect(k.ownOr('a,b', 'substringBefore', 'substringBefore', ',')).toBe('a');
+		expect(k.ownOr(['x'], 'first', 'first')).toBe('x');
+		expect(k.ownOr({ first: () => 'own' }, 'first', 'first')).not.toBe('own');
+	});
+
+	it('names a class by the instance’s own constructor, and an error by its name', () => {
+		// The emitter writes each Kotlin class as a JavaScript class of the same
+		// name, so a subclass instance answers with the subclass. An error answers
+		// with what it is here — exceptions are erased, so this is only let
+		// through inside a log line; see SIMPLE_NAME in subset.ts.
+		class Base {}
+		class Leaf extends Base {}
+		expect(k.simpleName(new Base())).toBe('Base');
+		expect(k.simpleName(new Leaf())).toBe('Leaf');
+		expect(k.simpleName(new TypeError('x'))).toBe('TypeError');
+		expect(k.simpleName('text')).toBe('String');
+		expect(k.simpleName(Object.create(null))).toBe('Object');
+		expect(() => k.simpleName(null)).toThrow(/null value/);
+	});
+
 	it('always emits the stdlib, because everything else assigns onto it', async () => {
 		const only = await load(['models']);
 		expect(typeof only.k.nn).toBe('function');

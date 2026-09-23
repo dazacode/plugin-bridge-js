@@ -199,7 +199,19 @@ const RESOURCE_PATHS = /^assets\/i18n\/[\w.-]+\.properties$/;
  * their total.
  */
 export const MAX_THEME_FILES = 48;
-export const MAX_LIB_MODULES = 12;
+/**
+ * Measured, which the rest here are not yet. It was 12, and over one real
+ * video catalogue (256 listings) 30 extensions declare more than that once
+ * their template's own modules are counted: the `pelisplus` template alone
+ * names 19 extractors, and the module every one of those extractors shares —
+ * `playlistutils` — is a dependency *of* a dependency, so it was queued last
+ * and cut. What that looked like was not a truncation but a refusal of the
+ * extension for `PlaylistUtils(…)` and `.extractFromHls()`, names nothing had
+ * fetched. 24 covers every listing but one, which wants 44 at depth two and
+ * is not what a per-listing bound should be sized for. The file and byte
+ * budgets below are untouched and still what bounds the total.
+ */
+export const MAX_LIB_MODULES = 24;
 export const MAX_LIB_FILES = 16;
 export const MAX_SOURCE_FILES = 160;
 export const MAX_SOURCE_BYTES = 4 * 1024 * 1024;

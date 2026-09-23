@@ -597,7 +597,30 @@ export const RUNTIME_HELPERS = [
 	   conversion fetched from the extension's own repository — see
 	   `CLASS_LOADER` in `subset.ts` for the two spellings that reach it, and
 	   `__RESOURCES` in the entry point for where the files come from. */
-	'classLoader'
+	'classLoader',
+	/* A class's simple name — see `SIMPLE_NAME` in `subset.ts` for the two
+	   chains that reach it and why a value only reaches it inside a log line. */
+	'simpleName',
+	/* A call whose name is both a stdlib helper and a method some converted
+	   class declares: the receiver's own method when it has one. See
+	   `__k.ownOr` and the helper path of `methodCall` in `emit.ts`. */
+	'ownOr',
+	/* `.code`: a Char's code unit, or the property of that name on anything
+	   else. See `EXTENSION_PROPERTIES` in `subset.ts`. */
+	'code',
+	/* kotlin.math's free functions, and the free maxOf/minOf; see the table in
+	   `subset.ts`. Kept apart from the collection helpers by the prefix. */
+	'mathAbs',
+	'mathMin',
+	'mathMax',
+	'mathCeil',
+	'mathFloor',
+	'mathRound',
+	'mathSqrt',
+	'mathLog10',
+	'mathSign',
+	'mathMaxOf',
+	'mathMinOf'
 ] as const;
 
 export type RuntimeHelper = (typeof RUNTIME_HELPERS)[number];
@@ -741,6 +764,10 @@ export const RUNTIME_GLOBALS = [
 	/* okhttp's `CacheControl`, named as the third argument of `GET`. Carried
 	   rather than refused; see the value for why. */
 	'CacheControl',
+	/* keiyoushi.utils.commonEmptyHeaders — the default `headers` of the shared
+	   extractor modules' constructors. A lowercase name the emitter would
+	   otherwise read as a member of the source, which is undefined. */
+	'commonEmptyHeaders',
 	/* `TimeZone.getTimeZone("UTC")`, which 115 sources set on a date format,
 	   and `Regex.escape(literal)`, which is the companion rather than the
 	   constructor. Both are capitalised receivers the emitter passes through, so

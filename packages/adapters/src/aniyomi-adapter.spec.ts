@@ -622,6 +622,39 @@ class ExampleAnime : ParsedAnimeHttpSource() {
 		expect(bundle.hosts).toContain('watch.example.invalid');
 	}, 60_000);
 
+	it('reads a base url off the class the conversion chose, below a factory in one file', async () => {
+		// The token reader describes the first class in the entry file; here that
+		// is the factory, with no base url, and the class the emitter picks sits
+		// under it in the same file.
+		const files = new Map(repositoryFactory());
+		files.delete('src/en/example/ExampleAnime.kt');
+		files.set(
+			'src/en/example/ExampleAnimeFactory.kt',
+			[
+				`package ${PACKAGE}`,
+				'',
+				'class ExampleAnimeFactory : AnimeSourceFactory {',
+				'    override fun createSources() = listOf(ExampleAnime())',
+				'}',
+				'',
+				'class ExampleAnime : ParsedAnimeHttpSource() {',
+				'    override val name = "Example Anime"',
+				'    override val lang = "en"',
+				'    override val baseUrl = "https://watch.example.invalid"',
+				'    override val supportsLatest = false',
+				'    override fun popularAnimeRequest(page: Int) = GET("$baseUrl/hot?page=$page", headers)',
+				'    override fun popularAnimeSelector() = "li.card"',
+				'    override fun popularAnimeNextPageSelector() = "a.next"',
+				'}'
+			].join('\n')
+		);
+		const bundle = await openPluginArchive(
+			await aniyomiAdapter.convert(await listing(), services(files))
+		);
+
+		expect(bundle.hosts).toContain('watch.example.invalid');
+	}, 60_000);
+
 	it('carries the upstream licence, read and identified rather than guessed', async () => {
 		const bundle = await openPluginArchive(await convert(EXTENSION_KT));
 

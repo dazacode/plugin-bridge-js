@@ -270,6 +270,16 @@ function __firstIndex(items, predicate) {
   return -1;
 }
 
+/** Whether a value is an instance of a converted class with this method. See __k.ownOr. */
+function __ownsMethod(receiver, name) {
+  if (receiver === null || typeof receiver !== 'object') return false;
+  if (Array.isArray(receiver) || receiver instanceof Map || receiver instanceof Set) return false;
+  if (receiver instanceof Date || receiver instanceof RegExp || receiver instanceof Promise) return false;
+  var proto = Object.getPrototypeOf(receiver);
+  if (proto === null || proto === Object.prototype) return false;
+  return typeof receiver[name] === 'function';
+}
+
 function __str(value) {
   return value === null || value === undefined ? '' : String(value);
 }
@@ -2897,6 +2907,19 @@ var __k = {
    * one in this ecosystem does with it, and it is what __k.range and __k.until
    * already answer.
    */
+  /**
+   * Char.code, and every other .code read, which is the same spelling.
+   *
+   * A Char is a one-character string here, so its code is the character's own
+   * code unit; a String has no .code in Kotlin, so a one-character string
+   * reaching this is always a Char. Anything else — okhttp's response.code, a
+   * DTO field — is handed back as the property it is.
+   */
+  code: function (value) {
+    if (__isChar(value)) return value.charCodeAt(0);
+    return value === null || value === undefined ? value : value.code;
+  },
+
   indices: function (value) {
     var length = typeof value === 'string' ? value.length : __arr(value).length;
     var out = [];
@@ -2951,6 +2974,55 @@ var __k = {
    * one that keeps it gets a double where Kotlin had a float. The difference
    * shows up past 2^24, which no base-62 unbaser reaches.
    */
+  /*
+   * kotlin.math, called bare. JavaScript's Math agrees with Kotlin on every one
+   * of these for the doubles and ints a scraper handles — NaN propagates the
+   * same way through min and max — except round, which is below.
+   */
+  mathAbs: function (value) { return Math.abs(Number(value)); },
+  mathMin: function (a, b) { return Math.min(Number(a), Number(b)); },
+  mathMax: function (a, b) { return Math.max(Number(a), Number(b)); },
+  mathCeil: function (value) { return Math.ceil(Number(value)); },
+  mathFloor: function (value) { return Math.floor(Number(value)); },
+  mathSqrt: function (value) { return Math.sqrt(Number(value)); },
+  mathLog10: function (value) { return Math.log10(Number(value)); },
+  mathSign: function (value) { return Math.sign(Number(value)); },
+
+  /**
+   * kotlin.math.round, which rounds a tie to the EVEN neighbour: round(2.5) is
+   * 2.0 and round(3.5) is 4.0. Math.round sends every tie up, which is what
+   * roundToInt does and not what this does.
+   */
+  mathRound: function (value) {
+    var x = Number(value);
+    if (!Number.isFinite(x)) return x;
+    var floor = Math.floor(x);
+    var diff = x - floor;
+    if (diff < 0.5) return floor;
+    if (diff > 0.5) return floor + 1;
+    return floor % 2 === 0 ? floor : floor + 1;
+  },
+
+  /**
+   * The free maxOf(a, b, …) and minOf(a, b, …), over numbers or anything
+   * comparable. Kotlin answers the first of equal values, and NaN for a NaN
+   * among doubles, which Math.max/min already do.
+   */
+  mathMaxOf: function () {
+    var values = Array.prototype.slice.call(arguments);
+    if (values.every(function (v) { return typeof v === 'number'; })) return Math.max.apply(null, values);
+    var best = values[0];
+    for (var i = 1; i < values.length; i += 1) if (values[i] > best) best = values[i];
+    return best;
+  },
+  mathMinOf: function () {
+    var values = Array.prototype.slice.call(arguments);
+    if (values.every(function (v) { return typeof v === 'number'; })) return Math.min.apply(null, values);
+    var best = values[0];
+    for (var i = 1; i < values.length; i += 1) if (values[i] < best) best = values[i];
+    return best;
+  },
+
   pow: function (value, exponent) {
     return Math.pow(Number(value), Number(exponent));
   },
@@ -5460,6 +5532,47 @@ var __k = {
    */
   classLoader: function () { return __theClassLoader; },
 
+  /**
+   * A class's simple name, for the two uses the emitter lets reach here.
+   *
+   * On an instance of a converted class the answer is exact: the emitter
+   * writes each Kotlin class as a JavaScript class of the same name, so the
+   * constructor's name is the subclass's when a template asks for its own tag.
+   * On anything else — a caught exception above all — it is what this runtime
+   * has, which is not always the Kotlin answer: exceptions are plain Errors
+   * here, so an IOException reads 'Error'. The emitter only lets a value that
+   * is not the class itself reach this inside the arguments of a Log call,
+   * where the difference is a word in a diagnostic and never a branch taken.
+   */
+  /**
+   * A stdlib helper's name called on a receiver that may declare it itself.
+   *
+   * Kotlin resolves a member before an extension, so 'parser.substringBefore(x)'
+   * on a converted class that declares substringBefore is that method, and on
+   * a String it is the stdlib's. The emitter cannot type the receiver, and
+   * only routes a call here when some converted class declares the name; the
+   * instance then answers for itself. The built-in collections, strings and
+   * plain objects never do — their methods are JavaScript's, not Kotlin
+   * members — so they keep the helper.
+   */
+  ownOr: function (receiver, name, helper) {
+    var rest = Array.prototype.slice.call(arguments, 3);
+    if (__ownsMethod(receiver, name)) return receiver[name].apply(receiver, rest);
+    return __k[helper].apply(null, [receiver].concat(rest));
+  },
+
+  simpleName: function (value) {
+    if (value === null || value === undefined) {
+      throw new Error('This converted extension asked for the class of a null value.');
+    }
+    if (typeof value === 'string') return 'String';
+    if (typeof value === 'boolean') return 'Boolean';
+    if (value instanceof Error) return value.name;
+    var proto = Object.getPrototypeOf(value);
+    var ctor = proto === null ? null : proto.constructor;
+    return typeof ctor === 'function' && ctor.name ? ctor.name : 'Object';
+  },
+
   /** Map.containsKey(k), over a Map, a plain object, or a shim that has its own. */
   containsKey: function (value, key) {
     if (value === null || value === undefined) return false;
@@ -6477,6 +6590,14 @@ var Headers = {
     return __headersObject(pairs);
   }
 };
+
+/**
+ * keiyoushi.utils.commonEmptyHeaders, which the shared modules take as a
+ * constructor default: 'class PlaylistUtils(client, headers: Headers =
+ * commonEmptyHeaders)'. It is Headers.Builder().build() there, and a module
+ * built without headers sends none of its own — the host's still apply.
+ */
+var commonEmptyHeaders = Headers.Builder().build();
 
 var FormBody = {
   Builder: function () {
@@ -8983,7 +9104,7 @@ function __sha256(bytes) {
  *
  * ## What refuses, and why each one has to
  *
- * WebCrypto has no ECB, no DES, no RC4 and no raw RSA, so an extension naming
+ * WebCrypto has no ECB, no DES and no raw RSA, so an extension naming
  * one is refused at CONVERSION time by the algorithm string it wrote (see
  * 'cryptoObstacle' in subset.ts). That is the refusal that matters, and it is
  * why the scanner also reads the argument of a getInstance call rather than
@@ -9129,6 +9250,17 @@ function __cipherSpec(transformation) {
   var mode = parts.length > 1 ? __str(parts[1]).toUpperCase() : '';
   var padding = parts.length > 2 ? __str(parts[2]).toUpperCase() : '';
 
+  // RC4 is a stream cipher with no mode, no padding and no IV, and it is
+  // computed here rather than by the host: WebCrypto does not have it, and it
+  // is a few lines of arithmetic with published test vectors (RFC 6229), which
+  // is the one kind of cipher it is honest to carry. SunJCE spells it both
+  // ways, and accepts the ECB/NoPadding suffix as a no-op for either.
+  if (algorithm === 'RC4' || algorithm === 'ARCFOUR') {
+    if ((mode === '' || mode === 'ECB' || mode === 'NONE') && (padding === '' || padding === 'NOPADDING')) {
+      return { mode: 'RC4' };
+    }
+    __cryptoRefuse('the ' + text + ' cipher');
+  }
   if (algorithm !== 'AES' || mode === '') __cryptoRefuse('the ' + text + ' cipher');
   if (mode === 'CBC') {
     if (padding !== 'PKCS5PADDING' && padding !== 'PKCS7PADDING') {
@@ -9143,7 +9275,36 @@ function __cipherSpec(transformation) {
   __cryptoRefuse('the ' + text + ' cipher');
 }
 
-/** javax.crypto.Cipher, over the two AES modes WebCrypto has. */
+/**
+ * RC4 over a key and a message, both byte arrays: the key schedule, then the
+ * keystream XORed over the input. Checked against RFC 6229 in the spec.
+ */
+function __rc4(key, data) {
+  var state = new Array(256);
+  var i;
+  var j = 0;
+  for (i = 0; i < 256; i += 1) state[i] = i;
+  for (i = 0; i < 256; i += 1) {
+    j = (j + state[i] + (key[i % key.length] & 0xff)) & 0xff;
+    var swap = state[i];
+    state[i] = state[j];
+    state[j] = swap;
+  }
+  var out = new Uint8Array(data.length);
+  i = 0;
+  j = 0;
+  for (var n = 0; n < data.length; n += 1) {
+    i = (i + 1) & 0xff;
+    j = (j + state[i]) & 0xff;
+    var held = state[i];
+    state[i] = state[j];
+    state[j] = held;
+    out[n] = (data[n] & 0xff) ^ state[(state[i] + state[j]) & 0xff];
+  }
+  return out;
+}
+
+/** javax.crypto.Cipher, over the two AES modes WebCrypto has and RC4. */
 var Cipher = {
   ENCRYPT_MODE: 1,
   DECRYPT_MODE: 2,
@@ -9154,12 +9315,24 @@ var Cipher = {
     var iv = null;
     var tagBits = null;
     return {
+      // RC4 has no algorithm parameters; the JCE answers null, and the idiom
+      // passes that straight back into init.
+      parameters: null,
+      getParameters: function () { return null; },
       init: function (mode, secret, parameters) {
         direction = Number(mode) === 2 ? 'decrypt' : 'encrypt';
         if (secret === null || secret === undefined || secret.__secretKey !== true) {
           __cryptoRefuse('a cipher key this build cannot read');
         }
         key = secret.bytes;
+        if (spec.mode === 'RC4') {
+          // SunJCE's bounds: 40 to 1024 bits. It throws InvalidKeyException
+          // outside them, and so does this.
+          if (key.length < 5 || key.length > 128) {
+            throw new Error('This converted extension gave RC4 a ' + key.length + '-byte key.');
+          }
+          return this;
+        }
         iv = parameters === null || parameters === undefined ? null : parameters.__iv;
         tagBits =
           parameters === null || parameters === undefined || parameters.__tagBits === null
@@ -9182,6 +9355,9 @@ var Cipher = {
       },
       doFinal: async function (data) {
         if (direction === null) __cryptoRefuse('a cipher used before init()');
+        // Each doFinal starts from the key's initial state, as the JCE resets a
+        // cipher to its last init; encryption and decryption are one XOR.
+        if (spec.mode === 'RC4') return __cryptoArray(__rc4(key, __bytesOf(data)));
         var out = await __host().crypto.aes(
           direction,
           spec.mode,

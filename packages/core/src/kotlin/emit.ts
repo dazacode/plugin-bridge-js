@@ -115,6 +115,7 @@ import {
 	BASE_CONSTANTS,
 	ARGUMENT_LAMBDA_METHODS,
 	CLASS_LOADER,
+	SIMPLE_NAME,
 	BUILDER_LAMBDA_METHODS,
 	TOLERATED_JSON_FLAGS,
 	VARARG_OPTIONS,
@@ -405,6 +406,14 @@ const INJEKT_GET = /^Injekt\.get<(\w+)>\(\)$/;
  * JVM's name for the file's facade class — which a module has no use for.
  */
 const INERT_FILE_ANNOTATION = /^@file:(?:Suppress|OptIn|JvmName|JvmMultifileClass|SuppressLint)\b/;
+
+/**
+ * `android.util.Log` at any of its levels, whitespace squeezed out.
+ *
+ * The runtime's `Log` writes to the host log and returns 0, so what is passed
+ * to it is text nobody reads back. That is what licenses `inLogLine`.
+ */
+const LOG_CALL = /^Log\.(?:v|d|i|w|e|wtf)$/;
 
 /**
  * The calls that make a member `async` whether or not it said `suspend`.
@@ -1368,6 +1377,12 @@ class Emitter {
 	/** Signatures under the class that declares them, as `Owner.method`. */
 	private readonly qualifiedSignatures = new Map<string, readonly string[]>();
 	/**
+	 * The parameters without a default, under `Owner.method`; `null` for an
+	 * overloaded name. This file's classes only — a neighbour's are not needed,
+	 * because a bare `::name` can only name a member of the class it is in.
+	 */
+	private readonly requiredArities = new Map<string, number | null>();
+	/**
 	 * Types declared with `object`, whose `::member` is bound and not unbound.
 	 *
 	 * `Obj::method` in Kotlin already has its receiver — the object — so it is
@@ -1466,6 +1481,30 @@ class Emitter {
 	private readonly graph: MemberEdges[] = [];
 	/** The class or object whose members are being emitted. */
 	private owner: string | null = null;
+	/**
+	 * What `javaClass.simpleName` means here: the Kotlin name of the class
+	 * whose `this` is in scope, and whether that name is the whole answer.
+	 *
+	 * Not `owner`, for three reasons that each gave a wrong name. `owner` can be
+	 * a module-scope *rename* of a nested type, where Kotlin's simple name is
+	 * the identifier as written; it survives into a companion, whose members
+	 * are hoisted out and whose `javaClass` is `Companion`; and it survives into
+	 * an anonymous `object :`, whose simple name is empty. Null in all of those,
+	 * so the chain is refused there rather than answered with a neighbour's.
+	 *
+	 * `exact` is false for an open or abstract class, where the instance may be
+	 * a subclass's — a template's `tag` is the extension's name — and the
+	 * runtime is asked instead. See `SIMPLE_NAME` in `subset.ts`.
+	 */
+	private selfClass: { readonly name: string; readonly exact: boolean } | null = null;
+	/**
+	 * True while the arguments of an `android.util.Log` call are being emitted.
+	 *
+	 * The one place a value's class name is answered with whatever the runtime
+	 * has, because text that only ever reaches the host log cannot change what
+	 * a plugin does. See `SIMPLE_NAME`.
+	 */
+	private inLogLine = false;
 	/**
 	 * Extension functions declared in this file, and where they live.
 	 *
@@ -1720,6 +1759,17 @@ class Emitter {
 					// calling whenever the receiver is a construction of one.
 					if (owner !== null) {
 						this.qualifiedSignatures.set(`${owner}.${name}`, this.parameterNames(child));
+						// And how many of those a caller must supply, for a bare
+						// `::name` handed on as a value; see `callableReference`.
+						// Two declarations under one key are an overload, and an
+						// overload has no one arity — kept as `null`.
+						const key = `${owner}.${name}`;
+						const required = requiredParameterCount(child);
+						const seen = this.requiredArities.get(key);
+						this.requiredArities.set(
+							key,
+							seen === undefined || seen === required ? required : null
+						);
 					}
 				}
 				continue;
@@ -2369,9 +2419,14 @@ class Emitter {
 		const outerMembers = this.classMembers;
 		const outerSuspends = this.suspendMembers;
 		const outerLabel = this.ownerLabel;
+		const outerSelf = this.selfClass;
 		this.owner = name;
 		this.ownerLabel = this.nameOf(node) ?? name;
 		this.ownerBase = base;
+		this.selfClass = {
+			name: this.nameOf(node) ?? name,
+			exact: !modifiers.has('open') && !modifiers.has('abstract') && !modifiers.has('sealed')
+		};
 
 		this.classMembers = new Set(
 			members
@@ -2610,6 +2665,7 @@ class Emitter {
 		this.ownerLabel = outerLabel;
 		this.ownerBase = outerBase;
 		this.enumScope = outerEnum;
+		this.selfClass = outerSelf;
 		this.classMembers = outerMembers;
 		this.suspendMembers = outerSuspends;
 		const companionMembers = this.companionMembers;
@@ -2903,8 +2959,11 @@ class Emitter {
 			// two receivers it meant, which is the one thing that made it clear.
 			const outerOwner = this.owner;
 			const outerLabel = this.ownerLabel;
+			const outerSelf = this.selfClass;
 			this.owner = name;
 			this.ownerLabel = this.nameOf(node) ?? name;
+			// A `data class` is final, so its own name is the whole answer.
+			this.selfClass = { name: this.nameOf(node) ?? name, exact: true };
 			this.pushScope();
 			// Declared out here because `finally` has to give the nested-type
 			// names back, and a `const` inside the `try` is not in its scope.
@@ -2987,6 +3046,7 @@ class Emitter {
 				this.popScope();
 				this.owner = outerOwner;
 				this.ownerLabel = outerLabel;
+				this.selfClass = outerSelf;
 			}
 		});
 	}
@@ -3098,8 +3158,11 @@ class Emitter {
 			const sharedConstants = this.siblingConstants(members);
 
 			const outerOwner = this.owner;
+			const outerSelf = this.selfClass;
 			this.owner = name;
 			const dispatched = new Set<string>();
+			// An `object` is its own only instance.
+			this.selfClass = { name: this.nameOf(node) ?? name, exact: true };
 			try {
 				for (const [index, child] of members.entries()) {
 					if (child.type === 'property_declaration') {
@@ -3190,6 +3253,7 @@ class Emitter {
 				}
 			} finally {
 				this.owner = outerOwner;
+				this.selfClass = outerSelf;
 			}
 
 			// The object's plain names, resolved against the object itself
@@ -3219,6 +3283,17 @@ class Emitter {
 	 * is refused rather than silently shadowing the first.
 	 */
 	private companion(node: KNode): string[] {
+		// Hoisted to module scope, with no `this` of the class's: see `selfClass`.
+		const outerSelf = this.selfClass;
+		this.selfClass = null;
+		try {
+			return this.companionBody(node);
+		} finally {
+			this.selfClass = outerSelf;
+		}
+	}
+
+	private companionBody(node: KNode): string[] {
 		const body = kids(node).find((child) => child.type === 'class_body');
 		const out: string[] = [];
 
@@ -4702,42 +4777,58 @@ class Emitter {
 				);
 			}
 			names.push(pending.name);
+			// In scope for the defaults after it. `fun extractFromHls(playlistUrl:
+			// String, referer: String = playlistUrl.toDefaultReferer())` is how
+			// PlaylistUtils — the module most extractors share — writes its
+			// signature, and a default reads the parameters *before* it. Without
+			// this the name resolved as a member and came out
+			// `this.toDefaultReferer(this.playlistUrl)`: a field nothing sets, so
+			// every stream went out with an empty Referer and nothing refused.
+			// JavaScript defaults see earlier parameters exactly as Kotlin's do.
+			this.declare(pending.name);
 			pending = null;
 		};
 
-		for (const child of list?.allChildren ?? []) {
-			if (COMMENT_KINDS.has(child.type)) continue;
-			if (child.type === '(' || child.type === ')') continue;
-			if (child.type === ',') {
-				flush(null);
-				continue;
-			}
-			if (expectingDefault) {
-				expectingDefault = false;
-				flush(child);
-				continue;
-			}
-			if (child.type === '=') {
-				expectingDefault = true;
-				continue;
-			}
-			if (child.type === ':') continue;
-			if (child.type.endsWith('type') || child.type === 'type_arguments') continue;
-			if (child.type === 'parameter_modifiers') {
-				// A modifier list is a sibling too, and it comes *before* the
-				// parameter it modifies.
-				spread = this.readParameterModifiers(child);
-				continue;
-			}
-			if (child.type !== 'parameter') this.refuse(child, spoken(child));
+		// Its own scope, so the names declared above end with the signature;
+		// the body declares them again inside `functionScope`.
+		this.pushScope();
+		try {
+			for (const child of list?.allChildren ?? []) {
+				if (COMMENT_KINDS.has(child.type)) continue;
+				if (child.type === '(' || child.type === ')') continue;
+				if (child.type === ',') {
+					flush(null);
+					continue;
+				}
+				if (expectingDefault) {
+					expectingDefault = false;
+					flush(child);
+					continue;
+				}
+				if (child.type === '=') {
+					expectingDefault = true;
+					continue;
+				}
+				if (child.type === ':') continue;
+				if (child.type.endsWith('type') || child.type === 'type_arguments') continue;
+				if (child.type === 'parameter_modifiers') {
+					// A modifier list is a sibling too, and it comes *before* the
+					// parameter it modifies.
+					spread = this.readParameterModifiers(child);
+					continue;
+				}
+				if (child.type !== 'parameter') this.refuse(child, spoken(child));
 
+				flush(null);
+				const name = this.nameOf(child);
+				if (name === null) this.refuse(child, 'an unnamed parameter');
+				pending = { name, spread, node: child };
+				spread = false;
+			}
 			flush(null);
-			const name = this.nameOf(child);
-			if (name === null) this.refuse(child, 'an unnamed parameter');
-			pending = { name, spread, node: child };
-			spread = false;
+		} finally {
+			this.popScope();
 		}
-		flush(null);
 
 		// Kotlin lets a `vararg` sit anywhere and names the parameters after it
 		// at the call site; JavaScript's rest parameter has to be last, and
@@ -4809,14 +4900,19 @@ class Emitter {
 			if (param.type !== 'class_parameter') continue;
 			const name = kids(param).find((child) => child.type === 'simple_identifier')?.text;
 			if (name === undefined) continue;
+			// The default is whatever follows the `=`, read by position. It was
+			// read by *kind* — the first child that was not a modifier, a type
+			// or an identifier — and so a default that IS an identifier vanished:
+			// `class PlaylistUtils(client, headers: Headers = commonEmptyHeaders)`
+			// came out `constructor(client, headers)`, and `PlaylistUtils(client)`
+			// — how most extractors build it — handed every request an undefined
+			// `headers`. `data class D(val a: String, val b: String = a)` the same.
+			const all = param.allChildren;
+			const equals = all.findIndex((child) => child.type === '=');
 			const fallback =
-				kids(param).find(
-					(child) =>
-						child.type !== 'modifiers' &&
-						child.type !== 'binding_pattern_kind' &&
-						child.type !== 'simple_identifier' &&
-						!child.type.endsWith('type')
-				) ?? null;
+				equals === -1
+					? null
+					: (all.slice(equals + 1).find((child) => !COMMENT_KINDS.has(child.type)) ?? null);
 			out.push({
 				name,
 				isProperty: kids(param).some((child) => child.type === 'binding_pattern_kind'),
@@ -6491,6 +6587,27 @@ class Emitter {
 					return `(...__a) => ${this.helper(extension)}(...__a)`;
 				}
 			}
+			// As many arguments as the function needs, and no more.
+			//
+			// One was the rule, and it is right for the commonest use —
+			// `.map(::fixUrl)` — where the runtime's collection helpers pass an
+			// index as well, and forwarding every argument would hand it to a
+			// parameter with a default. It is wrong for a reference that stands
+			// in for a wider function type: PlaylistUtils writes
+			// `masterHeadersGen: (Headers, String) -> Headers =
+			// ::generateMasterHeaders`, and with one argument forwarded every
+			// HLS request that took the default went out built from `referer =
+			// undefined`. Nothing refused it. The required count is exact for
+			// both: the function type supplies at least that many, and a
+			// parameter with a default is one Kotlin fills in itself.
+			const arity =
+				this.owner !== null && this.classMembers.has(member.text)
+					? (this.requiredArities.get(`${this.owner}.${member.text}`) ?? null)
+					: null;
+			if (arity !== null && arity > 1) {
+				const names = Array.from({ length: arity }, (_, index) => `__a${index}`).join(', ');
+				return `(${names}) => ${this.read(member.text, member)}(${names})`;
+			}
 			return `(__a) => ${this.read(member.text, member)}(__a)`;
 		}
 
@@ -6615,19 +6732,26 @@ class Emitter {
 			this.refuse(node, 'a bare `this` inside an anonymous `object :`');
 		}
 		const fields: string[] = [];
-		for (const child of kids(body)) {
-			if (child.type === 'getter' || child.type === 'setter') continue;
-			if (child.type === 'function_declaration') {
-				const name = this.nameOf(child) ?? 'fun';
-				fields.push(`${JSON.stringify(name)}: ${this.functionDeclaration(child, 'local')}`);
-				continue;
+		// An anonymous class has no simple name to give; see `selfClass`.
+		const outerSelf = this.selfClass;
+		this.selfClass = null;
+		try {
+			for (const child of kids(body)) {
+				if (child.type === 'getter' || child.type === 'setter') continue;
+				if (child.type === 'function_declaration') {
+					const name = this.nameOf(child) ?? 'fun';
+					fields.push(`${JSON.stringify(name)}: ${this.functionDeclaration(child, 'local')}`);
+					continue;
+				}
+				if (child.type === 'property_declaration') {
+					const name = this.propertyName(child) ?? 'val';
+					fields.push(`${JSON.stringify(name)}: ${this.propertyValue(child, name)}`);
+					continue;
+				}
+				this.refuse(child, spoken(child));
 			}
-			if (child.type === 'property_declaration') {
-				const name = this.propertyName(child) ?? 'val';
-				fields.push(`${JSON.stringify(name)}: ${this.propertyValue(child, name)}`);
-				continue;
-			}
-			this.refuse(child, spoken(child));
+		} finally {
+			this.selfClass = outerSelf;
 		}
 		return `(${block(fields.map(comma))})`;
 	}
@@ -6635,6 +6759,25 @@ class Emitter {
 	/* ── calls ───────────────────────────────────────────────────────────── */
 
 	private call(node: KNode): string {
+		// `Log.w(TAG, "…${e.javaClass.simpleName}…")`: the arguments are text
+		// for the host log and nothing else. See `inLogLine`. Only the runtime's
+		// own `Log` — an extension that declares something called `Log` gets
+		// no such licence.
+		if (
+			!this.inLogLine &&
+			LOG_CALL.test(kids(node)[0]?.text.replace(/\s+/g, '') ?? '') &&
+			this.lookup('Log') === null &&
+			!this.moduleNames.has('Log') &&
+			!this.declaredTypes.has('Log')
+		) {
+			this.inLogLine = true;
+			try {
+				return this.call(node);
+			} finally {
+				this.inLogLine = false;
+			}
+		}
+
 		// `Injekt.get<Application>()` — the container reached for the one object
 		// the runtime already owns. `subset.ts` lets exactly this idiom past the
 		// Injekt refusal; here it resolves to the same bundle-scope name that
@@ -7161,13 +7304,30 @@ class Emitter {
 			if (TYPED_HELPERS.has(helper) && typeArgument !== null && args.length === 0) {
 				tail.push(this.typeReference(typeArgument));
 			}
+			// A class in this conversion declares a method under the same name,
+			// so the receiver may be one of its instances — and a member beats an
+			// extension in Kotlin. `parser.substringBefore("',")` on the unpacker
+			// module's own `SubstringExtractor` went to the string helper, which
+			// read the extractor as "[object Object]" and unpacked nothing. The
+			// receiver's type is not known here, so the runtime asks it: see
+			// `__k.ownOr`. Only for names something declares, so no other call
+			// changes.
+			const ambiguous = !indexed && this.declaredMethods.has(name);
+			const invoke = (subject: string): string =>
+				ambiguous
+					? `${this.helper('ownOr')}(${[subject, JSON.stringify(name), JSON.stringify(helper), ...tail].join(', ')})`
+					: `${this.helper(helper)}(${[subject, ...tail].join(', ')})`;
+			if (ambiguous) this.helper(helper);
 			const call = safe
 				? // `a?.substringAfter("x")` cannot use JavaScript's own `?.`: the
 					// helper takes the receiver as an argument and would be handed
 					// the null, and a conditional would evaluate it twice.
-					`${this.helper('sc')}(${receiverText}, (__r) => ${this.helper(helper)}(${['__r', ...tail].join(', ')}))`
-				: `${this.helper(helper)}(${[receiverText, ...tail].join(', ')})`;
-			const suspends = AWAITING_HELPERS.has(helper) || this.asyncLambdas > before;
+					`${this.helper('sc')}(${receiverText}, (__r) => ${invoke('__r')})`
+				: invoke(receiverText);
+			const suspends =
+				AWAITING_HELPERS.has(helper) ||
+				this.asyncLambdas > before ||
+				(ambiguous && this.declaredSuspends.has(name));
 			return suspends ? this.awaited(call) : call;
 		}
 
@@ -7461,12 +7621,23 @@ class Emitter {
 		}
 
 		// A name the source declares for itself — a local, a member, a file-scope
-		// `fun` — outranks the standard library's, as it does in Kotlin: an
-		// extension's own `check(url)` is not `kotlin.check`.
-		const free =
-			this.lookup(name) === null && !this.isSourceMember(name) && !this.moduleNames.has(name)
+		// `fun`, or a member of the enclosing class or object — outranks the
+		// standard library's, as it does in Kotlin: an extension's own
+		// `check(url)` is not `kotlin.check`, and `JsUnpacker`'s own
+		// `unpack(vararg)` called bare from `unpackAndCombine` is not the
+		// runtime's one-argument `unpack` (read as that, every extractor built
+		// on it answered garbage with nothing refused).
+		//
+		// kotlin.math never takes a block: a bare `maxOf { … }` inside a
+		// receiver block is the receiver's collection `maxOf`, not the free one.
+		const listed =
+			this.lookup(name) === null &&
+			!this.isSourceMember(name) &&
+			!this.moduleNames.has(name) &&
+			!this.declaresOwn(name)
 				? FREE_FUNCTIONS.get(name)
 				: undefined;
+		const free = listed?.startsWith('math') === true && lambda !== null ? undefined : listed;
 		if (free !== undefined) {
 			const before = this.asyncLambdas;
 			const tail = this.provenance(
@@ -8322,6 +8493,11 @@ class Emitter {
 		// `subset.ts` refuses reflection for, and this is a class *path*.
 		if (CLASS_LOADER.test(node.text.replace(/\s+/g, ''))) return `${this.helper('classLoader')}()`;
 
+		// The other chain through the class object with an answer: a class's
+		// simple name. See `SIMPLE_NAME` in `subset.ts` for both halves.
+		const simple = SIMPLE_NAME.exec(node.text.replace(/\s+/g, ''));
+		if (simple !== null) return this.simpleName(node, simple[1] ?? null);
+
 		const receiver = kids(node)[0];
 		if (receiver.type === 'super_expression') {
 			// `override val client = super.client.newBuilder()…` — by far the
@@ -9133,8 +9309,15 @@ class Emitter {
 		if (hoisted !== undefined) return this.safe(hoisted);
 		// A member of the `object` this code is being emitted into, reached the
 		// way a frozen literal's members are reached.
+		//
+		// Not when the class being emitted declares the name itself. The table
+		// is file-wide, so without this a `private val tag` on the source read
+		// as `Helper.tag` whenever an `object Helper` in the same file also had
+		// one — a different value, silently, with nothing refused. Kotlin
+		// resolves the innermost declaration first, and outside the object that
+		// is the class's own. Inside the object (`owner` is it) its member wins.
 		const holder = this.objectMembers.get(name);
-		if (holder !== undefined) {
+		if (holder !== undefined && (holder === this.owner || !this.classMembers.has(name))) {
 			// From another property of the same object, through the hoisted const
 			// — the literal is not bound yet. From anywhere else, through the
 			// object, which by then is.
@@ -9276,6 +9459,35 @@ class Emitter {
 	 * its receiver is a `const` — so `this` is still the source and no capture
 	 * is needed. Getting that backwards emits a `__self` nobody declared.
 	 */
+	private simpleName(node: KNode, value: string | null): string {
+		if (value !== null) {
+			// `e.javaClass.simpleName`: whatever the runtime can say about the
+			// value, and only where what it says is a diagnostic.
+			if (!this.inLogLine)
+				this.refuse(node, '`javaClass.simpleName` of a value outside a log line');
+			const receiver = kids(kids(node)[0])[0];
+			return `${this.helper('simpleName')}(${this.expr(receiver)})`;
+		}
+		// Inside `apply {}` or `fun String.x()` the implicit receiver is not the
+		// class, and `javaClass` is the receiver's. Neither is tracked by type.
+		if (this.receiverAlias() !== null || this.receiverParam !== null) {
+			this.refuse(node, '`javaClass` of a receiver that is not the class');
+		}
+		if (this.selfClass === null) this.refuse(node, '`javaClass` where no named class is `this`');
+		if (this.selfClass.exact) return JSON.stringify(this.selfClass.name);
+		return `${this.helper('simpleName')}(${this.selfReference()})`;
+	}
+
+	/**
+	 * Whether the class or object being emitted declares `name` itself, or a
+	 * local of that name is in scope. See the free-function check in `bareCall`.
+	 */
+	private declaresOwn(name: string): boolean {
+		if (this.lookup(name) !== null) return true;
+		if (this.owner !== null && this.objectMembers.get(name) === this.owner) return true;
+		return this.owner !== null && this.classMembers.has(name);
+	}
+
 	private selfReference(): string {
 		for (let index = this.frames.length - 1; index >= 0; index -= 1) {
 			const kind = this.frames[index].kind;
@@ -10849,6 +11061,25 @@ const ASSIGNABLE_HEADS: ReadonlySet<string> = new Set([
 	'this_expression',
 	'parenthesized_expression'
 ]);
+
+/**
+ * How many of a function's value parameters have no default.
+ *
+ * Read off the parameter list as the grammar gives it: a `parameter` followed
+ * by `=` has a default, and every other one must be supplied by the caller.
+ */
+function requiredParameterCount(node: KNode): number {
+	const list = kids(node).find((child) => child.type === 'function_value_parameters');
+	const children = list?.allChildren ?? [];
+	let count = 0;
+	for (const [index, child] of children.entries()) {
+		if (child.type !== 'parameter') continue;
+		let next = index + 1;
+		while (next < children.length && COMMENT_KINDS.has(children[next].type)) next += 1;
+		if (children[next]?.type !== '=') count += 1;
+	}
+	return count;
+}
 
 /**
  * The `reified` type parameters a function declares, in order.
