@@ -93,6 +93,64 @@ function refusalNames(source: string): string[] {
 	return emission.refusals.flatMap((one) => one.obstacles.map((obstacle) => obstacle.kind));
 }
 
+describe('the collection members a catalogue pass named, run', () => {
+	// Each was refused by name, or — `lastIndex` — read as a property a JS
+	// array does not have and answered undefined with nothing refused.
+	const source = kt(
+		'class Demo {',
+		'    fun pop(items: List<String>): String {',
+		'        val list = items.toMutableList()',
+		'        val last = list.removeAt(list.lastIndex)',
+		'        list.reverse()',
+		'        return last + "|" + list.joinToString(",") + "|" + "abc".lastIndex',
+		'    }',
+		'    fun popEmpty(): String = mutableListOf<String>().removeAt(0)',
+		'    fun value(m: Map<String, Int?>, k: String): Int? = m.getValue(k)',
+		'    fun flipped(): String = StringBuilder("ab").append("c").reverse().toString()',
+		'    fun date(text: String?): Long = text?.let(Instant::parseOrNull)?.toEpochMilliseconds() ?: 0L',
+		'}'
+	);
+
+	it('pops, reverses in place, and reads the last index', async () => {
+		const demo = await instantiate('Demo', source);
+		expect(demo.pop(['a', 'b', 'c'])).toBe('c|b,a|2');
+		expect(() => demo.popEmpty()).toThrow(/removed index 0 of a list of length 0/);
+		expect(demo.flipped()).toBe('cba');
+	});
+
+	it('reads a map value, a held null included, and throws only for absence', async () => {
+		const demo = await instantiate('Demo', source);
+		expect(demo.value(new Map([['x', 1]]), 'x')).toBe(1);
+		expect(demo.value({ y: null }, 'y')).toBeNull();
+		expect(() => demo.value(new Map(), 'z')).toThrow(/"z", which is missing/);
+	});
+
+	it('calls a runtime type’s member through a `::` reference', async () => {
+		const demo = await instantiate('Demo', source);
+		expect(demo.date('2024-05-20T10:15:30Z')).toBe(Date.UTC(2024, 4, 20, 10, 15, 30));
+		expect(demo.date('not a date')).toBe(0);
+		expect(demo.date(null)).toBe(0);
+	});
+
+	it('decodes `decodeFromStream(body.byteStream())` from the body text', async () => {
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    private val json = Json { ignoreUnknownKeys = true }',
+				'    private inline fun <reified T> Response.decode(): T = json.decodeFromStream(body.byteStream())',
+				'    fun names(r: Response): List<String> = r.decode()',
+				'}'
+			)
+		);
+		expect(demo.names({ body: { string: () => '["a","b"]' } })).toEqual(['a', 'b']);
+		// Anywhere else it is a stream of bytes this runtime does not keep.
+		expect(
+			refusalNames(kt('class Demo {', '    fun raw(r: Response) = r.body.byteStream()', '}'))
+		).toEqual(['`.byteStream()`']);
+	});
+});
+
 describe('a Kotlin Map, as a JS Map and as a JsonObject', () => {
 	// A Map iterated as bare [k, v] arrays, so `it.key` was undefined, and its
 	// `keys`/`values`/`entries` were property reads of a JS Map's *methods*; a
@@ -361,6 +419,40 @@ describe('a decode whose type is written where the value goes', () => {
 		// Inside the helper the type is the *call site's* — `List<String>` —
 		// and not the letter `T`, which names nothing and decoded as "any".
 		expect(demo.viaHelper('"single"')).toEqual(['single']);
+	});
+
+	it('reads the type through a `use`, `let` or `run` whose value is the block', async () => {
+		// `private inline fun <reified T> Response.parseAs(): T = use {
+		// json.decodeFromString(it.body.string()) }` — the block is the value,
+		// so Kotlin infers its result from the return type. `also` answers its
+		// receiver, so a type is not pushed into its block.
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    private val json = Json { ignoreUnknownKeys = true }',
+				'    fun viaLet(text: String): List<String> = text.parseLet()',
+				'    private inline fun <reified T> String.parseLet(): T = let { json.decodeFromString(it) }',
+				'    fun viaRun(text: String): List<Int> = text.run { json.decodeFromString(this) }',
+				'    fun viaUse(text: String): String = text.let { it.trim() }.let {',
+				'        json.decodeFromString(it)',
+				'    }',
+				'}'
+			)
+		);
+		expect(demo.viaLet('"single"')).toEqual(['single']);
+		expect(demo.viaRun('[1,2]')).toEqual([1, 2]);
+		expect(demo.viaUse(' 42 ')).toBe('42');
+		expect(
+			refusalNames(
+				kt(
+					'class Demo {',
+					'    private val json = Json { ignoreUnknownKeys = true }',
+					'    fun kept(text: String): String = text.also { json.decodeFromString(it) }',
+					'}'
+				)
+			)
+		).toEqual(['`.decodeFromString()` with no type argument']);
 	});
 
 	it('still refuses a decode with nowhere to read its type from', () => {

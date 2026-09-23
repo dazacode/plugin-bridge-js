@@ -1056,6 +1056,12 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 	// receiver must be a JsonObject, and `getArrayOrNull` over a JSON null
 	// throws as upstream does. The one-argument `getString`/`getInt`/… reach
 	// org.json's `jsonGet*`, which agree with upstream's `getValue(k)` forms.
+	// MutableList's in-place pair and Map's throwing read. `reverse` is not
+	// JavaScript's: Kotlin's answers Unit and `reversed()` is the copy, and a
+	// StringBuilder has one of its own — see the helper for both.
+	['removeAt', 'removeAt'],
+	['reverse', 'reverseInPlace'],
+	['getValue', 'mapGetValue'],
 	['getStringOrNull', 'jeGetStringOrNull'],
 	['getIntOrNull', 'jeGetIntOrNull'],
 	['getLongOrNull', 'jeGetLongOrNull'],
@@ -1195,6 +1201,10 @@ export const EXTENSION_PROPERTIES: ReadonlyMap<string, string> = new Map([
 	// `undefined`, and handed that to whatever iterated it. A refusal would have
 	// been the honest outcome; silence was not. See `indices` in the runtime.
 	['indices', 'indices'],
+	// `List.lastIndex` and `CharSequence.lastIndex`, the same gap one name
+	// over: `list.removeAt(list.lastIndex)` read undefined and removed nothing
+	// it named, and `x < segments.lastIndex` compared against undefined.
+	['lastIndex', 'lastIndex'],
 	['groupValues', 'groupValues'],
 	['destructured', 'destructured'],
 	// `Char.code`. A Char is a one-character string here, so the read came out

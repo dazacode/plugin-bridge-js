@@ -3263,6 +3263,19 @@ var __k = {
     return out;
   },
 
+  /**
+   * List.lastIndex / CharSequence.lastIndex: size minus one, so -1 for an
+   * empty one, as Kotlin's. It is also an ordinary field name, so a receiver
+   * that is neither a string nor a list and has the property answers it.
+   */
+  lastIndex: function (value) {
+    if (typeof value === 'string' || Array.isArray(value)) return value.length - 1;
+    if (value !== null && value !== undefined && typeof value === 'object' && 'lastIndex' in value) {
+      return value.lastIndex;
+    }
+    return __arr(value).length - 1;
+  },
+
   /** associateBy: the lambda answers the key, and the item is the value. */
   /**
    * flatMapIndexed { index, item -> … }, which hands the INDEX first.
@@ -5341,6 +5354,68 @@ var __k = {
     return removed;
   },
 
+  /**
+   * MutableList.removeAt(index): takes the element out and answers it, and
+   * THROWS for an index outside the list — the '.removeAt(list.lastIndex)'
+   * that pops a sentinel off a page's results is written against a list the
+   * extension knows is not empty, and an empty one is an error there, not an
+   * undefined carried on. A receiver with its own removeAt answers for itself.
+   */
+  removeAt: function (list, index) {
+    if (list !== null && list !== undefined && !Array.isArray(list) &&
+        typeof list.removeAt === 'function') {
+      return list.removeAt(index);
+    }
+    if (!Array.isArray(list)) {
+      throw new Error('This converted extension removed an element from something that is not a list.');
+    }
+    var at = Number(index);
+    if (!Number.isInteger(at) || at < 0 || at >= list.length) {
+      throw new Error(
+        'This converted extension removed index ' + String(index) + ' of a list of length ' +
+        list.length + '.'
+      );
+    }
+    return list.splice(at, 1)[0];
+  },
+
+  /**
+   * MutableList.reverse(), in place and answering nothing — which is where it
+   * differs from 'reversed()', a new list. 'chapters.reverse()' on its own
+   * line is how an extension flips a page it read oldest-first; answering a
+   * reversed copy there would leave the list the next line reads unchanged.
+   * A StringBuilder or anything else with its own reverse answers for itself.
+   */
+  reverseInPlace: function (list) {
+    if (list !== null && list !== undefined && !Array.isArray(list) &&
+        typeof list.reverse === 'function') {
+      return list.reverse();
+    }
+    if (!Array.isArray(list)) {
+      throw new Error('This converted extension reversed something that is not a list.');
+    }
+    list.reverse();
+    return undefined;
+  },
+
+  /**
+   * Map.getValue(key): the value, or NoSuchElementException for a key the map
+   * does not hold. A key held with a null value answers null, as Kotlin's
+   * does; only absence throws. A JSON object is a map here, and a receiver
+   * with its own getValue answers for itself.
+   */
+  mapGetValue: function (map, key) {
+    if (map instanceof Map) {
+      if (map.has(key)) return map.get(key);
+    } else if (map !== null && map !== undefined && typeof map === 'object' && !Array.isArray(map)) {
+      if (!__mapLike(map) && typeof map.getValue === 'function') return map.getValue(key);
+      if (Object.prototype.hasOwnProperty.call(map, key)) return map[key];
+    } else {
+      throw new Error('This converted extension read a key from something that is not a map.');
+    }
+    throw new Error('This converted extension asked for key "' + __str(key) + '", which is missing in the map.');
+  },
+
   /* -- Result, past getOrNull ---------------------------------------------- */
 
   /**
@@ -5392,6 +5467,8 @@ var __k = {
         return builder;
       },
       clear: function () { parts = []; return builder; },
+      // By code point, as Java's keeps a surrogate pair in order.
+      reverse: function () { parts = [Array.from(parts.join('')).reverse().join('')]; return builder; },
       isEmpty: function () { return parts.join('').length === 0; },
       isNotEmpty: function () { return parts.join('').length > 0; },
       toString: function () { return parts.join(''); }

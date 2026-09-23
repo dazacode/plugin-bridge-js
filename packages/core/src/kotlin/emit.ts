@@ -4682,6 +4682,13 @@ class Emitter {
 				const key = expectationKey(node);
 				const known = this.expectedTypes.get(key);
 				this.expectedTypes.set(key, known === undefined || known === type ? type : null);
+				// `= use { json.decodeFromString(it.body.string()) }` — a scope
+				// function whose value IS its block's, so Kotlin infers the
+				// block's result from the same expected type. Only the three that
+				// answer the block: `also`/`apply` answer their receiver, and a
+				// type pushed into their block would be a wrong one.
+				const block = valueScopeBlock(node);
+				if (block !== null) this.expectLast(block, type);
 				return;
 			}
 		}
@@ -6867,6 +6874,16 @@ class Emitter {
 				return `(...__a) => ${this.helper(helper)}(${[receiver, '...__a'].join(', ')})`;
 			}
 			if (!this.declaredMethods.has(member.text) && !HOST_METHODS.has(member.text)) {
+				// `createdAt?.let(Instant::parseOrNull)` — a reference to a
+				// member of a type the runtime defines by name, which is the
+				// companion's function and the same call `Instant.parseOrNull(x)`
+				// is, and that call passes through for a runtime global. One
+				// argument, not all of them: a collection helper hands a lambda
+				// the index too, and `Instant.parse(text, format)` would take it
+				// as the format.
+				if (/^[A-Z]/.test(owner.text) && GLOBAL_NAMES.has(owner.text)) {
+					return `(__a) => ${receiver}.${member.text}(__a)`;
+				}
 				this.refuse(node, `\`::${member.text}\` on \`${owner.text}\``);
 			}
 			return `(...__a) => ${receiver}.${member.text}(...__a)`;
@@ -7370,7 +7387,16 @@ class Emitter {
 				const withBlock = this.callArguments(name, args, lambda, labelled, false);
 				return `${this.helper('decodeWith')}(${[this.expr(receiver), this.decodeType(shape), ...withBlock].join(', ')})`;
 			}
-			const tail = this.plainArguments(name, args);
+			// `json.decodeFromStream(body.byteStream())` reads the whole body as
+			// the document, which is what the body's text already is here. Only
+			// that argument, read straight off a body: `.byteStream()` anywhere
+			// else is a stream of image bytes this runtime does not keep.
+			const streamed =
+				name === 'decodeFromStream' && args.length === 1
+					? okioStreamOf(this.argumentValue(args[0]), 'byteStream')
+					: null;
+			const tail =
+				streamed !== null ? [`${this.expr(streamed)}.string()`] : this.plainArguments(name, args);
 			return `${this.helper('decode')}(${[this.expr(receiver), this.decodeType(shape), ...tail].join(', ')})`;
 		}
 
@@ -10369,6 +10395,11 @@ function receiverArity(parameter: KNode): number | null {
  * See the `asResponseBody` case in `methodCall`.
  */
 function okioSourceOf(node: KNode): KNode | null {
+	return okioStreamOf(node, 'source');
+}
+
+/** `x` in `x.<name>()`, zero arguments and not safe, or null. */
+function okioStreamOf(node: KNode, name: string): KNode | null {
 	if (node.type !== 'call_expression') return null;
 	const [callee, suffix] = kids(node);
 	if (callee?.type !== 'navigation_expression' || suffix?.type !== 'call_suffix') return null;
@@ -10376,8 +10407,32 @@ function okioSourceOf(node: KNode): KNode | null {
 	const args = kids(suffix).find((part) => part.type === 'value_arguments');
 	if (args !== undefined && kids(args).length > 0) return null;
 	const [inner, step] = kids(callee);
-	if (step?.type !== 'navigation_suffix' || step.text !== '.source') return null;
+	if (step?.type !== 'navigation_suffix' || step.text !== `.${name}`) return null;
 	return inner ?? null;
+}
+
+/**
+ * The block of `x.use { … }`, `x.let { … }` or `x.run { … }`, the receiver
+ * written or implicit — the scope functions whose value is the block's last
+ * expression — or null. Only a call whose single argument is that trailing
+ * block, so `let(::f)` and a `use` with parentheses are not read as one.
+ */
+const VALUE_SCOPE_FUNCTIONS: ReadonlySet<string> = new Set(['use', 'let', 'run']);
+function valueScopeBlock(call: KNode): KNode | null {
+	const [callee, suffix] = kids(call);
+	if (suffix?.type !== 'call_suffix' || kids(suffix).length !== 1) return null;
+	const name =
+		callee?.type === 'simple_identifier'
+			? callee.text
+			: callee?.type === 'navigation_expression'
+				? kids(kids(callee)[1] ?? callee)[0]?.text
+				: undefined;
+	// Bare is the implicit receiver's: `fun String.parseAs(): T = let { … }`.
+	if (name === undefined || !VALUE_SCOPE_FUNCTIONS.has(name)) return null;
+	const lambda = kids(kids(suffix)[0])[0];
+	return kids(suffix)[0].type === 'annotated_lambda' && lambda?.type === 'lambda_literal'
+		? lambda
+		: null;
 }
 
 /** See `ReceiverSlots`. Null for a function with no function-typed parameter. */

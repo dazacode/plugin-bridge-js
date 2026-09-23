@@ -179,6 +179,7 @@ export const RUNTIME_HELPERS = [
 	'associate',
 	'associateBy',
 	'indices',
+	'lastIndex',
 	/* kotlinx's JsonElement accessors, read as properties — see `jeObject`. */
 	'jeObject',
 	'jeArray',
@@ -197,6 +198,10 @@ export const RUNTIME_HELPERS = [
 	'jeFloatOrNull',
 	'jeBoolean',
 	'jeBooleanOrNull',
+	/* MutableList.removeAt/reverse and Map.getValue — see each in the runtime. */
+	'removeAt',
+	'reverseInPlace',
+	'mapGetValue',
 	/* keiyoushi's keyed JsonObject readers from core/ — see `jeGetStringOrNull`. */
 	'jeGetStringOrNull',
 	'jeGetIntOrNull',
