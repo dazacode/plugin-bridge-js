@@ -1416,7 +1416,15 @@ class Emitter {
 				this.classFieldIndex.set(name, fields);
 				this.classFunctionIndex.set(name, functions);
 			}
-			this.registerSignatures(kids(body), name, isPlainClass(child));
+			// An `object`'s functions too: its literal has one key per name, so
+			// `JsUnpacker.unpack(String)` beside `unpack(Collection)` kept the
+			// last and every extractor that unpacks one script got the list
+			// version run over its characters.
+			this.registerSignatures(
+				kids(body),
+				name,
+				isPlainClass(child) || child.type === 'object_declaration'
+			);
 		}
 	}
 
@@ -2456,6 +2464,7 @@ class Emitter {
 
 			const outerOwner = this.owner;
 			this.owner = name;
+			const dispatched = new Set<string>();
 			try {
 				for (const [index, child] of members.entries()) {
 					if (child.type === 'property_declaration') {
@@ -2516,12 +2525,20 @@ class Emitter {
 					if (child.type === 'getter' || child.type === 'setter') continue;
 					if (child.type === 'function_declaration') {
 						const fnName = this.nameOf(child) ?? 'fun';
+						// See `overloadsOf`, and the dispatcher written after the loop.
+						const key =
+							this.overloadsOf(fnName) === null
+								? fnName
+								: `${fnName}$${this.signatureOf(child).key}`;
 						const emitted = this.member(
 							fnName,
 							child,
-							() => `${JSON.stringify(fnName)}: ${this.functionDeclaration(child, 'anonymous')}`
+							() => `${JSON.stringify(key)}: ${this.functionDeclaration(child, 'anonymous')}`
 						);
-						if (emitted !== null) fields.push(emitted);
+						if (emitted !== null) {
+							fields.push(emitted);
+							if (key !== fnName) dispatched.add(fnName);
+						}
 						continue;
 					}
 					// A `object Filters { class GenreFilter … }` holds types, not
@@ -2540,7 +2557,21 @@ class Emitter {
 				this.owner = outerOwner;
 			}
 
-			return `const ${this.safe(name)} = Object.freeze(${block(fields.map(comma))});`;
+			// The object's plain names, resolved against the object itself
+			// rather than `this`: a function taken off it as a value — passed to
+			// `map`, say — arrives with no receiver, and the object is a
+			// singleton, so naming it is exact.
+			const self = this.safe(name);
+			const ownFields = this.classFieldIndex.get(name) ?? new Set<string>();
+			for (const fnName of dispatched) {
+				if (ownFields.has(fnName)) continue;
+				const shapes = this.overloadsOf(fnName) ?? [];
+				fields.push(
+					`${JSON.stringify(fnName)}: function (...__a) { return ${this.helper('overload')}(${self}, ${self}, ${JSON.stringify(fnName)}, __a, ${overloadTable(fnName, shapes)}, () => __super); }`
+				);
+			}
+
+			return `const ${self} = Object.freeze(${block(fields.map(comma))});`;
 		});
 	}
 

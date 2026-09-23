@@ -142,6 +142,28 @@ class Ext : Theme()
 		expect(ext.covers(document.select('video'))).toBe('none');
 	});
 
+	it('dispatches an object\u2019s overloads, including one taken off it as a value', async () => {
+		// `JsUnpacker.unpack(String)` beside `unpack(Collection)`: an object is a
+		// frozen literal, and a literal keeps the last of two keys. (`decode`
+		// here because the runtime has a free `unpack` of its own.)
+		const { exported } = await run(
+			`
+object Unpacker {
+    fun decode(script: String): String = "one:" + script
+    fun decode(scripts: Collection<String>): String = scripts.joinToString(",") { decode(it) }
+}
+class Ext : ParsedHttpSource() {
+    fun both(): String = Unpacker.decode("a") + " | " + Unpacker.decode(listOf("b", "c"))
+    fun mapped(): List<String> = listOf("d").map(Unpacker::decode)
+}
+`,
+			['Ext']
+		);
+		const ext = new exported.Ext();
+		expect(ext.both()).toBe('one:a | one:b,one:c');
+		expect(ext.mapped()).toEqual(['one:d']);
+	});
+
 	it('falls back to the driver base when no translated declaration accepts the call', async () => {
 		const { exported } = await run(
 			`
