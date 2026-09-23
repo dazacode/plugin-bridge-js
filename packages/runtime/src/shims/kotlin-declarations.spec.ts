@@ -667,6 +667,62 @@ describe('a reference to a member the template declares', () => {
 	});
 });
 
+describe('a lazy property whose block blocks', () => {
+	it('awaits every read, and every member that reads one', async () => {
+		// `override val client by lazy { fetchDomain(); … }` where the helper
+		// makes a request: the memo held a Promise and `client.newCall(…)` was
+		// called on it.
+		const d = await instantiate(
+			'Demo',
+			kt(
+				'class Box(val value: String) { fun execute(): Box = this }',
+				'class Demo {',
+				'    var calls = 0',
+				'    private fun fetchToken(): String { calls += 1; return Box("t").execute().value }',
+				'    private val token by lazy { fetchToken() + "1" }',
+				'    private fun header() = "Bearer $token"',
+				'    fun twice(): String = token + this.token',
+				'    fun bearer(): String = header()',
+				'}'
+			)
+		);
+		expect(await d.twice()).toBe('t1t1');
+		expect(await d.bearer()).toBe('Bearer t1');
+		// Memoised, as `lazy` promises: the block ran once.
+		expect(d.calls).toBe(1);
+	});
+
+	it('refuses the read in a member the host calls synchronously', () => {
+		expect(
+			refusalNames(
+				kt(
+					'class Box(val value: String) { fun execute(): Box = this }',
+					'class Demo : HttpSource() {',
+					'    private val token by lazy { Box("t").execute().value }',
+					'    override fun headersBuilder() = super.headersBuilder().set("X-Token", token)',
+					'}'
+				)
+			)
+		).toContain(
+			'a read of `token`, which is fetched, from `headersBuilder`, which the host calls synchronously'
+		);
+		// A getter cannot be async either; one reading it is refused as a
+		// getter that suspends, which it now is.
+		expect(
+			refusalNames(
+				kt(
+					'class Box(val value: String) { fun execute(): Box = this }',
+					'class Demo {',
+					'    private val token by lazy { Box("t").execute().value }',
+					'    private val header get() = "Bearer $token"',
+					'    fun bearer(): String = header',
+					'}'
+				)
+			)
+		).toContain('a suspending getter');
+	});
+});
+
 describe('`super.` read of a computed property', () => {
 	it('runs the template’s getter against this instance', async () => {
 		// `override val popularMangaUrl get() = if (…) … else super.popularMangaUrl`

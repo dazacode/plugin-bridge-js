@@ -461,6 +461,13 @@ const LOG_CALL = /^Log\.(?:v|d|i|w|e|wtf)$/;
 const BLOCKING_CALLS =
 	/\.(?:execute|awaitSuccess|await|doFinal|generateKeyPair|verify|proceed)\s*\(|(?<!\bMath)\.sign\s*\(|\bThread\s*\.\s*sleep\s*\(|\b(?:client|[a-z]\w*Client)\s*\.\s*(?:get|post|put|head)\s*\(/;
 
+/**
+ * Members the host calls synchronously, which therefore cannot be emitted
+ * `async`: the headers are built inside every request the extension writes,
+ * `GET(url, headers)`, with no await anywhere to put.
+ */
+const SYNC_HOST_MEMBERS: ReadonlySet<string> = new Set(['headersBuilder', 'configureHeaders']);
+
 /** `BLOCKING_CALLS` less `.proceed(`, for a member called from another file. */
 const CROSS_FILE_BLOCKING_CALLS = new RegExp(
 	BLOCKING_CALLS.source.replace('|verify|proceed)', '|verify)'),
@@ -1848,6 +1855,12 @@ class Emitter {
 	private ownerLabel: string | null = null;
 	private classMembers = new Set<string>();
 	private suspendMembers = new Set<string>();
+	/**
+	 * Properties of the class being emitted whose value is a Promise here: a
+	 * `by lazy { … }` or a getter whose body blocks — see `blockingProperties`.
+	 * A read of one is awaited, as a call to a blocking member is.
+	 */
+	private asyncProperties = new Set<string>();
 	private readonly signatures = new Map<string, readonly string[]>(KNOWN_SIGNATURES);
 	private readonly ambiguousSignatures = new Set<string>();
 	/** See `ReceiverSlots`. Declared here and next door, merged by name. */
@@ -2671,6 +2684,7 @@ class Emitter {
 		// forty lines further down.
 		const outerMembers = this.classMembers;
 		const outerSuspends = this.suspendMembers;
+		const outerAsyncProperties = this.asyncProperties;
 		const outerLabel = this.ownerLabel;
 		const outerSelf = this.selfClass;
 		const outerExtensionProperties = this.extensionProperties;
@@ -2745,6 +2759,7 @@ class Emitter {
 				.filter((found): found is string => found !== null)
 		);
 		for (const name of this.blockingMembers(members)) this.suspendMembers.add(name);
+		this.asyncProperties = this.blockingProperties(members, this.suspendMembers);
 
 		this.registerExtensions(members, 'method');
 		// A companion's members hoist to module scope, so an extension function
@@ -2972,6 +2987,7 @@ class Emitter {
 		this.selfClass = outerSelf;
 		this.classMembers = outerMembers;
 		this.suspendMembers = outerSuspends;
+		this.asyncProperties = outerAsyncProperties;
 		this.extensionProperties = outerExtensionProperties;
 		this.extensionSetters = outerSetters;
 		this.preferenceStores = outerStores;
@@ -3215,6 +3231,80 @@ class Emitter {
 			}
 		}
 		return blocking;
+	}
+
+	/**
+	 * Properties whose value is a Promise here, and the members that read one.
+	 *
+	 * Kotlin's \`lazy\` blocks: \`override val client by lazy {
+	 * fetchedDomainUrl(); network.client.newBuilder()… }\`, where the helper
+	 * makes a request. The thunk is emitted \`async\`, the memo holds its
+	 * Promise, and every read was \`this.client.newCall(…)\` on the Promise —
+	 * "newCall is not a function" at the first search, out of a bundle that
+	 * reported nothing refused. Measured: sixteen loaded bundles across both
+	 * catalogues held one, and not one read of any was awaited.
+	 *
+	 * So such a property is found the way \`blockingMembers\` finds a method —
+	 * off its source text, a lazy block or a getter that blocks or calls a
+	 * member that does — and every read of it is awaited. A member that reads
+	 * one is itself async, so it joins \`suspends\` and its callers await it
+	 * too; the two grow together to a fixpoint. A read from a property
+	 * initialiser still cannot be awaited, and is refused where it is, as a
+	 * suspending initialiser always was.
+	 */
+	private blockingProperties(members: readonly KNode[], suspends: Set<string>): Set<string> {
+		const properties = new Map<string, string>();
+		for (const [index, child] of members.entries()) {
+			if (child.type !== 'property_declaration') continue;
+			const name = this.propertyName(child);
+			if (name === null) continue;
+			const delegate = kids(child).find((part) => part.type === 'property_delegate');
+			const lazy = delegate !== undefined && /^by\s+lazy\b/.test(delegate.text);
+			const getter = accessorOf(child, members[index + 1], 'getter');
+			if (!lazy && getter === undefined) continue;
+			properties.set(
+				name,
+				getter !== undefined && !kids(child).includes(getter)
+					? `${child.text}\n${getter.text}`
+					: child.text
+			);
+		}
+		const found = new Set<string>();
+		if (properties.size === 0) return found;
+		const functions = new Map<string, string>();
+		for (const child of members) {
+			if (child.type !== 'function_declaration') continue;
+			const name = this.nameOf(child);
+			if (name !== null) functions.set(name, child.text);
+		}
+		const calls = (text: string, name: string) => new RegExp(`\\b${name}\\s*\\(`).test(text);
+		const reads = (text: string, name: string) =>
+			new RegExp(`(?:^|[^\\w.]|this\\.)${name}\\b(?!\\s*[(=])`).test(text);
+		for (let grew = true; grew;) {
+			grew = false;
+			for (const [name, text] of properties) {
+				if (found.has(name)) continue;
+				const blocks =
+					BLOCKING_CALLS.test(text) ||
+					[...suspends].some((other) => calls(text, other)) ||
+					[...found].some((other) => other !== name && reads(text, other));
+				if (blocks) {
+					found.add(name);
+					grew = true;
+				}
+			}
+			for (const [name, text] of functions) {
+				// The host builds these synchronously, so they cannot become
+				// async by reading one; the read is refused there instead — see
+				// `awaitedProperty`.
+				if (suspends.has(name) || SYNC_HOST_MEMBERS.has(name)) continue;
+				if ([...found].some((other) => reads(text, other))) {
+					suspends.add(name);
+					grew = true;
+				}
+			}
+		}
+		return found;
 	}
 
 	/**
@@ -10041,6 +10131,17 @@ class Emitter {
 			return safe ? `${this.helper('sc')}(${this.expr(receiver)}, (__r) => ${read})` : read;
 		}
 
+		// `this.token` over a property whose value is a Promise here — the
+		// written-out spelling of the bare read `read` already awaits.
+		if (
+			this.asyncProperties.has(name) &&
+			!safe &&
+			(receiver.type === 'this_expression' || receiver.text === 'this')
+		) {
+			const self = this.expr(receiver);
+			if (self === this.selfReference()) return this.awaitedProperty(self, name, node);
+		}
+
 		return this.propertyAccess(this.expr(receiver), name, safe);
 	}
 
@@ -10889,6 +10990,9 @@ class Emitter {
 		if (this.receiverParam !== null && !this.isSourceMember(name)) {
 			return `${this.receiverParam}.${name}`;
 		}
+		// A property whose value is a Promise here — see `blockingProperties`.
+		if (this.asyncProperties.has(name))
+			return this.awaitedProperty(this.selfReference(), name, node);
 		return `${this.selfReference()}.${name}`;
 	}
 
@@ -11283,6 +11387,22 @@ class Emitter {
 	 * An inlined block has no `function` of its own to be made `async`, so the
 	 * mark travels out to whichever one is actually emitting the `await`.
 	 */
+	/**
+	 * A read of a property whose value is a Promise here, awaited — unless the
+	 * member reading it is one the host calls synchronously, where awaiting is
+	 * not available and the unawaited value is a Promise in a header. Refused
+	 * there by name: `headersBuilder()` reading a token fetched in a `lazy`.
+	 */
+	private awaitedProperty(self: string, name: string, node: KNode): string {
+		if (this.memberName !== null && SYNC_HOST_MEMBERS.has(this.memberName)) {
+			this.refuse(
+				node,
+				`a read of \`${name}\`, which is fetched, from \`${this.memberName}\`, which the host calls synchronously`
+			);
+		}
+		return this.awaited(`${self}.${name}`);
+	}
+
 	private awaited(expression: string): string {
 		for (let index = this.frames.length - 1; index >= 0; index -= 1) {
 			if (this.frames[index].kind === 'inline') continue;
