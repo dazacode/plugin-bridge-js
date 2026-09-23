@@ -2599,6 +2599,37 @@ function scanInto(node: KNode, memberName: string, found: Untranslatable[]): voi
 		return;
 	}
 
+	// And `scope.launch { … }`, which the emitter now writes as a block started
+	// and not awaited (see `__k.launch`). The name table refuses the `launch`
+	// leaf because a leaf cannot tell a launch on a named scope from a bare
+	// `launch` inside `coroutineScope { }` — a child its scope waits for, which
+	// is not what the emitter writes. The call can, by its receiver. Only the
+	// callee's name is forgiven: the receiver, the arguments and the block are
+	// scanned like anything else.
+	if (node.type === 'call_expression') {
+		// `scope.launch(Dispatchers.IO) { … }` arrives as a call whose callee is
+		// the call carrying the arguments, so one level is unwound.
+		let callee = node.children[0];
+		const suffixes = [node.children[1]];
+		if (callee?.type === 'call_expression') {
+			suffixes.unshift(callee.children[1]);
+			callee = callee.children[0];
+		}
+		const step = callee?.type === 'navigation_expression' ? callee.children[1] : undefined;
+		const last = suffixes[suffixes.length - 1];
+		if (
+			step?.type === 'navigation_suffix' &&
+			step.children[0]?.text === 'launch' &&
+			last?.type === 'call_suffix' &&
+			last.children.some((part) => part.type === 'annotated_lambda')
+		) {
+			const receiver = callee?.children[0];
+			if (receiver !== undefined) scanInto(receiver, memberName, found);
+			for (const suffix of suffixes) if (suffix !== undefined) scanInto(suffix, memberName, found);
+			return;
+		}
+	}
+
 	// The third of the same shape, and the emitter's other half: see
 	// `CLASS_LOADER`. Returning rather than descending is what keeps the
 	// `javaClass` leaf below from being refused, and keeps the exemption exactly

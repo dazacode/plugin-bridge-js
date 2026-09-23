@@ -333,6 +333,14 @@ export const RUNTIME_HELPERS = [
 	'isJump',
 	'jumpValue',
 
+	/* `scope.launch { … }`: a block started and not awaited, on a scope that
+	   remembers whether a failure has cancelled it. See the helpers. */
+	'coroutineScope',
+	'launch',
+
+	/* `UUID.randomUUID()`, as the text of a version-4 UUID. */
+	'randomUUID',
+
 	/* `buildString { append(…) }`: the block is called with a string
 	   accumulator as its receiver, and the accumulated text comes back. */
 	'buildString',

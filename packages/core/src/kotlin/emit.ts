@@ -1186,6 +1186,8 @@ class Emitter {
 	private readonly scopes: Map<string, Local>[] = [];
 	private readonly frames: Frame[] = [];
 	private temporaries = 0;
+	/** Bumped per local renamed apart from a name it shadows; see `freshLocal`. */
+	private shadows = 0;
 	/** What an unlabelled `break` here would land on; see `loopBody`. */
 	private readonly loops: ('loop' | 'barrier')[] = [];
 	/** Bumped per captured receiver; see `Frame.capture`. */
@@ -3120,6 +3122,15 @@ class Emitter {
 	private readsBaseMember(node: KNode): boolean {
 		for (const found of walk(node)) {
 			if (found.type !== 'simple_identifier') continue;
+			// `private val imageHeaders = headersBuilder().set(…).build()` — a
+			// member the driver's base supplies, called rather than read. The
+			// call lands on `__super`, which the bundle declares after the
+			// source is constructed, so run in the constructor it was
+			// "Cannot access '__super' before initialization" at load. An
+			// override the class declares itself is no different: it is
+			// written to call `super.headersBuilder()`, which is the same
+			// `__super`. Deferring one that does not is only later, not wrong.
+			if (SUPER_MEMBERS.has(found.text)) return true;
 			if (!BASE_SOURCE_MEMBERS.has(found.text)) continue;
 			if (this.classMembers.has(found.text)) continue;
 			return true;
@@ -4332,14 +4343,24 @@ class Emitter {
 
 		const name = this.propertyName(node);
 		if (name === null) this.refuse(node, 'an unnamed local');
+		// Kotlin lets a local shadow a parameter or a local of an outer block —
+		// `suspend fun fetchMangaUpdate(manga: SManga, …) { val manga =
+		// createManga() … }` — and JavaScript forbids a `const` naming what the
+		// same function scope already binds: a SyntaxError that fails the whole
+		// bundle at load. So a name already bound here gets a fresh spelling,
+		// and every read after this line finds it through the scope. The
+		// initialiser is emitted *before* the new name is declared, because in
+		// Kotlin it is not yet in scope there: `val chapters = if (f) … else
+		// chapters` reads the parameter.
+		const text = this.freshLocal(name);
 
 		const guarded = this.elvisJump(initialiser);
 		if (guarded !== null) {
 			const value = this.expr(guarded.value);
-			this.declare(name, mutable);
+			this.declare(name, mutable, text);
 			return [
-				`${keyword} ${this.safe(name)} = ${value};`,
-				`if (${this.safe(name)} == null) ${this.stmt(guarded.jump, this.jumpValues.get(guarded.jump))}`
+				`${keyword} ${text} = ${value};`,
+				`if (${text} == null) ${this.stmt(guarded.jump, this.jumpValues.get(guarded.jump))}`
 			].join('\n');
 		}
 
@@ -4347,24 +4368,34 @@ class Emitter {
 			// `val x = try { … } catch { return … }`: the `return` belongs to the
 			// enclosing function, so the `try` becomes a statement that assigns and
 			// the `return` stays a real return.
-			this.declare(name, mutable);
-			return [`let ${this.safe(name)};`, this.tail(initialiser, { target: this.safe(name) })].join(
-				'\n'
-			);
+			const lines = [`let ${text};`, this.tail(initialiser, { target: text })];
+			this.declare(name, mutable, text);
+			return lines.join('\n');
 		}
 
 		if (this.needsInlining(initialiser)) {
 			// `val x = response.use { … return … }`: same argument as the `try`
 			// above, one construct along. The block is emitted into this function
 			// rather than into a callback, so the `return` is this function's.
-			const lines = this.deliver(initialiser, { target: this.safe(name) });
-			this.declare(name, mutable);
-			return [`let ${this.safe(name)};`, ...lines].join('\n');
+			const lines = this.deliver(initialiser, { target: text });
+			this.declare(name, mutable, text);
+			return [`let ${text};`, ...lines].join('\n');
 		}
 
 		const value = this.expr(initialiser);
-		this.declare(name, mutable);
-		return `${keyword} ${this.safe(name)} = ${value};`;
+		this.declare(name, mutable, text);
+		return `${keyword} ${text} = ${value};`;
+	}
+
+	/**
+	 * The JavaScript name for a new local `name` in the innermost scope: its
+	 * own, unless that scope already binds it, and then a fresh one.
+	 */
+	private freshLocal(name: string): string {
+		const plain = this.safe(name);
+		if (this.scopes[this.scopes.length - 1]?.has(name) !== true) return plain;
+		this.shadows += 1;
+		return `${plain}__${this.shadows}`;
 	}
 
 	private assignment(node: KNode): string {
@@ -4413,7 +4444,15 @@ class Emitter {
 				!this.isIndexedTarget(swallowed) &&
 				this.elvisJump(value) === null
 			) {
-				const write = `${this.assignable(swallowed)} = ${this.expr(value)};`;
+				// `if (x) headers["k"] = v` — the swallowed target is an *index*,
+				// which inside the `if` the grammar reads as an ordinary
+				// `indexing_expression` rather than an assignable one. Handed to
+				// `assignable` it became `__k.index(headers, 'k') = v`, which is
+				// not JavaScript: the bundle would not load.
+				const write =
+					swallowed.type === 'indexing_expression'
+						? this.swallowedIndexWrite(swallowed, value)
+						: `${this.assignable(swallowed)} = ${this.expr(value)};`;
 				return `if (${this.expr(condition)}) ${block([write])}`;
 			}
 		}
@@ -4504,6 +4543,14 @@ class Emitter {
 		return write(this.expr(value));
 	}
 
+	/** `receiver[key] = value` where the target arrived as an `indexing_expression`. */
+	private swallowedIndexWrite(target: KNode, value: KNode): string {
+		const receiver = kids(target)[0];
+		const key = kids(kids(target)[1])[0];
+		if (receiver === undefined || key === undefined) this.refuse(target, 'an empty index');
+		return `${this.helper('setIndex')}(${this.expr(receiver)}, ${this.expr(key)}, ${this.expr(value)});`;
+	}
+
 	/** True when an assignment target's last step is `[…]` rather than `.name`. */
 	private isIndexedTarget(node: KNode): boolean {
 		if (node.type !== 'directly_assignable_expression') return false;
@@ -4569,7 +4616,15 @@ class Emitter {
 		// the assignable rule does not reach over a call. Handing that to `expr`
 		// emitted an immediately-invoked function on the left of an `=`, which is
 		// a JavaScript syntax error in a bundle that reported nothing refused.
-		if (node.type !== 'directly_assignable_expression') return this.expr(node);
+		if (node.type !== 'directly_assignable_expression') {
+			// Only the two shapes whose emitted text is itself assignable. An
+			// index or a call emits a helper call, and a call on the left of an
+			// `=` is a SyntaxError that takes the whole bundle down at load.
+			if (node.type !== 'simple_identifier' && node.type !== 'navigation_expression') {
+				this.refuse(node, `an assignment target this build cannot read (\`${node.type}\`)`);
+			}
+			return this.expr(node);
+		}
 		const parts = kids(node);
 		const inner = parts[0];
 		if (inner === undefined) this.refuse(node, 'an empty assignment target');
@@ -5751,6 +5806,25 @@ class Emitter {
 			return SUPER_SUSPEND_MEMBERS.has(name) ? this.awaited(call) : call;
 		}
 
+		// `scope.launch { … }`: a block started and never awaited. See
+		// `__k.launch` for what that means here and what it deliberately does
+		// not. A bare `launch` inside `coroutineScope { }` is a different
+		// thing — a child the scope waits for — and stays refused by the
+		// scanner; only a launch on a named scope reaches this.
+		if (name === 'launch' && lambda !== null && receiver.type !== 'super_expression') {
+			const context = args.map((arg) => arg.text.replace(/\s+/g, ''));
+			if (context.length > 1 || context.some((part) => !/^Dispatchers\.\w+$/.test(part))) {
+				this.refuse(suffix, 'a `launch` given a context this build does not model');
+			}
+			const started = this.lambda(lambda, false, labelled ?? name, false);
+			if (receiver.text.trim() === 'GlobalScope')
+				return `${this.helper('launch')}(null, ${started})`;
+			const scope = this.expr(receiver);
+			return safe
+				? `${this.helper('sc')}(${scope}, (__r) => ${this.helper('launch')}(__r, ${started}))`
+				: `${this.helper('launch')}(${scope}, ${started})`;
+		}
+
 		if (name === 'not' && args.length === 0 && lambda === null && !safe) {
 			// `Boolean.not()` is the operator written as a call, which this
 			// ecosystem reaches for when negating something already parenthesised:
@@ -5820,6 +5894,19 @@ class Emitter {
 			// to the source, and dropping it turns a spaced-out retry into a
 			// source being hammered.
 			return this.awaited(`${this.helper('delay')}(${this.plainArguments(name, args).join(', ')})`);
+		}
+
+		// `UUID.randomUUID()` — a session id, in the one shape this ecosystem
+		// writes, and always turned straight into its text. Passed through as
+		// written it named a `UUID` nothing defines and died at load.
+		if (
+			name === 'randomUUID' &&
+			receiver.type === 'simple_identifier' &&
+			receiver.text === 'UUID' &&
+			args.length === 0 &&
+			lambda === null
+		) {
+			return `${this.helper('randomUUID')}()`;
 		}
 
 		if (
@@ -6208,6 +6295,19 @@ class Emitter {
 			return 'Json';
 		}
 
+		// `CoroutineScope(Dispatchers.IO + SupervisorJob())` — what a `launch`
+		// is started on. The dispatcher names a thread pool, and there is one
+		// thread here, so it is dropped; the Job decides what a failure does to
+		// the scope, so it is kept. See `__k.coroutineScope`. Anything else in
+		// the context — an exception handler, a name — is behaviour this does
+		// not model, and keeps the refusal it had.
+		if (name === 'CoroutineScope' && lambda === null && args.length === 1) {
+			const parts = args[0].text.replace(/\s+/g, '').split('+');
+			if (parts.every((part) => COROUTINE_CONTEXT.test(part))) {
+				return `${this.helper('coroutineScope')}(${parts.includes('SupervisorJob()')})`;
+			}
+		}
+
 		const free = FREE_FUNCTIONS.get(name);
 		if (free !== undefined) {
 			const before = this.asyncLambdas;
@@ -6388,7 +6488,14 @@ class Emitter {
 			collided === null
 				? `${self}.${name}(${tail.join(', ')})`
 				: this.overloadCall(self, self, name, tail, collided);
-		if (lambda !== null && this.isSourceMember(name)) {
+		// Declared by the class being emitted, or by a translated base class it
+		// really `extends` — `launchIO { countViews(document) }` in an extension
+		// on a theme that declares `launchIO`. Either way the method exists on
+		// the prototype chain and takes the block as its last parameter; only
+		// a name nothing in reach declares is the passthrough that cannot
+		// carry one.
+		const inherited = this.ownerBase !== null && this.baseDeclares(this.ownerBase, name);
+		if (lambda !== null && (this.isSourceMember(name) || inherited)) {
 			const withLambda = `${this.callArguments(name, args, lambda, labelled, false).join(', ')}`;
 			return `${self}.${name}(${withLambda})`;
 		}
@@ -7890,11 +7997,8 @@ class Emitter {
 		this.scopes.pop();
 	}
 
-	private declare(name: string, mutable = false): void {
-		this.scopes[this.scopes.length - 1]?.set(name, {
-			text: this.safe(name),
-			mutable
-		});
+	private declare(name: string, mutable = false, text = this.safe(name)): void {
+		this.scopes[this.scopes.length - 1]?.set(name, { text, mutable });
 	}
 
 	private lookup(name: string): string | null {
@@ -8149,6 +8253,10 @@ const ANY_MODEL_FIELD: ReadonlySet<string> = new Set([
 	...[...MODEL_FIELDS.values()].flatMap((fields) => [...fields]),
 	'memo'
 ]);
+
+/** One term of a `CoroutineScope(…)` context the runtime models. */
+const COROUTINE_CONTEXT =
+	/^(?:Dispatchers\.(?:IO|Default|Main|Unconfined)|SupervisorJob\(\)|Job\(\))$/;
 
 const PROPERTY_PARTS: ReadonlySet<string> = new Set([
 	'modifiers',

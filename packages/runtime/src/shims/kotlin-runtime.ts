@@ -3109,6 +3109,100 @@ var __k = {
     return promise;
   },
 
+  /**
+   * 'CoroutineScope(Dispatchers.IO)', and whether it is a supervisor.
+   *
+   * The dispatcher is a thread pool, and there is one thread here, so it is
+   * dropped. The Job is not: under a plain Job one failed child cancels the
+   * whole scope, and every launch after it never runs; under a SupervisorJob a
+   * failure is its child's alone. The emitter reads which was written.
+   */
+  coroutineScope: function (supervisor) {
+    return { supervisor: supervisor === true, cancelled: false };
+  },
+
+  /**
+   * 'scope.launch { … }' — started, not awaited.
+   *
+   * On Android this is a block handed to another thread while the caller
+   * carries on, and the caller never sees its result. Here it is the same
+   * block started as a promise nobody awaits: it begins once the caller has
+   * yielded, runs concurrently with whatever the caller does next, and a
+   * request it makes goes out through the host like any other. That is the
+   * whole of what 'launch' promises; how many threads carry it is not.
+   *
+   * A failure is logged, never thrown: a launched block has nobody to throw
+   * to, and on Android an uncaught one is an app crash, which a host must not
+   * reproduce. A plain-Job scope is then cancelled, as Kotlin's would be, so
+   * a later launch on it does not run. 'scope' is null for GlobalScope, which
+   * nothing cancels.
+   *
+   * Cancelling a running job is refused rather than faked: Kotlin stops the
+   * block at its next suspension point, and a promise cannot be stopped, so a
+   * 'cancel' that answered would let the block go on making requests and
+   * writing state while the caller believed it had stopped.
+   */
+  launch: function (scope, block) {
+    var job = {
+      isActive: true,
+      isCompleted: false,
+      isCancelled: false,
+      cancel: function () {
+        throw new Error('This converted extension cancelled a launched coroutine, which cannot be stopped here.');
+      }
+    };
+    var scoped = scope !== null && typeof scope === 'object';
+    if (scoped && scope.cancelled === true) {
+      job.isActive = false;
+      job.isCompleted = true;
+      job.isCancelled = true;
+      job.done = Promise.resolve();
+      job.join = function () { return job.done; };
+      return job;
+    }
+    job.done = Promise.resolve()
+      .then(function () { return block(); })
+      .then(
+        function () {
+          job.isActive = false;
+          job.isCompleted = true;
+        },
+        function (error) {
+          job.isActive = false;
+          job.isCompleted = true;
+          job.isCancelled = true;
+          if (scoped && scope.supervisor !== true) scope.cancelled = true;
+          __k.printStackTrace(error);
+        }
+      );
+    job.join = function () { return job.done; };
+    return job;
+  },
+
+  /**
+   * java.util.UUID.randomUUID(), as its text: 122 random bits in the
+   * version-4 layout. What an extension does with one is send it as a session
+   * id, and a site can check its shape but not where the bits came from, so
+   * the platform's secure generator is used where there is one and
+   * Math.random where there is not.
+   */
+  randomUUID: function () {
+    var bytes = [];
+    var secure = typeof crypto !== 'undefined' && crypto !== null && typeof crypto.getRandomValues === 'function';
+    if (secure) {
+      var buffer = new Uint8Array(16);
+      crypto.getRandomValues(buffer);
+      for (var i = 0; i < 16; i += 1) bytes.push(buffer[i]);
+    } else {
+      for (var j = 0; j < 16; j += 1) bytes.push(Math.floor(Math.random() * 256));
+    }
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    var hex = bytes.map(function (b) { return (b < 16 ? '0' : '') + b.toString(16); }).join('');
+    return hex.slice(0, 8) + '-' + hex.slice(8, 12) + '-' + hex.slice(12, 16) + '-' +
+      hex.slice(16, 20) + '-' + hex.slice(20);
+  },
+
   awaitAll: function (list) {
     var items = __arr(list);
     var pending = [];

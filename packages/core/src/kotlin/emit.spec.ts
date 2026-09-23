@@ -455,6 +455,16 @@ const helpers: Record<string, (...args: never[]) => unknown> = {
 	},
 	jumpValue: (error: Any) => (error as { value: Any }).value,
 
+	coroutineScope: (supervisor: boolean) => ({ supervisor, cancelled: false }),
+	launch: (_scope: Any, block: () => Any) => {
+		const done = Promise.resolve()
+			.then(() => block())
+			.then(
+				() => undefined,
+				() => undefined
+			);
+		return { join: () => done };
+	},
 	await: (value: Any) => Promise.resolve(value),
 	awaitAll: (values: Any[]) => Promise.all(values),
 	async: (fn: () => Any) => Promise.resolve().then(fn),
@@ -4811,5 +4821,46 @@ describe("Kotlin `+` and `-`, which are not JavaScript's", () => {
 		);
 
 		expect(found).toEqual([14, 'c']);
+	});
+});
+
+describe('a block launched and not awaited', () => {
+	it('starts `scope.launch { }` after the caller carries on, through a declared helper', async () => {
+		// The theme's own `launchIO`, called with a block from the extension —
+		// the shape a whole family of templates fetches its genres with.
+		const demo = instantiate(
+			inClass(
+				'    private var genres: List<String> = emptyList()',
+				'    private val scope = CoroutineScope(Dispatchers.IO)',
+				'    protected fun launchIO(block: () -> Unit) = scope.launch { block() }',
+				'    fun filters(): List<String> {',
+				'        launchIO { genres = listOf("a", "b") }',
+				'        return genres',
+				'    }'
+			)
+		);
+
+		expect(demo.filters()).toEqual([]);
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(demo.filters()).toEqual(['a', 'b']);
+	});
+
+	it('keeps a bare `launch` inside `coroutineScope` refused, which is a child it waits for', () => {
+		expect(
+			refusalNames(
+				inClass(
+					'    suspend fun all(): Unit = coroutineScope {',
+					'        launch { println("x") }',
+					'    }'
+				)
+			)
+		).toContain('launch {}');
+	});
+
+	it('refuses a launch given an exception handler it cannot model', () => {
+		expect(
+			refusalNames(inClass('    fun go() { scope.launch(handler) { println("x") } }'))
+		).toContain('a `launch` given a context this build does not model');
 	});
 });

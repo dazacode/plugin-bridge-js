@@ -1123,6 +1123,61 @@ describe('the parts of Kotlin that have no JavaScript spelling', () => {
 		expect(k.minus([1, 2, 3], [2])).toEqual([1, 3]);
 	});
 
+	it('starts a launched block without awaiting it, and swallows what it throws', async () => {
+		const ran: string[] = [];
+		const job = k.launch(k.coroutineScope(true), async () => {
+			ran.push('block');
+		});
+		// Not yet: the caller carries on first, as it would past a launch.
+		expect(ran).toEqual([]);
+		await job.join();
+		expect(ran).toEqual(['block']);
+		expect(job.isCompleted).toBe(true);
+
+		const failed = k.launch(k.coroutineScope(true), () => {
+			throw new Error('site down');
+		});
+		await expect(failed.join()).resolves.toBeUndefined();
+		expect(failed.isCancelled).toBe(true);
+		// Cancelling a running block cannot be done honestly, so it says so.
+		expect(() => job.cancel()).toThrow(/cannot be stopped/);
+	});
+
+	it('cancels a plain-Job scope on a failure, and leaves a supervisor alone', async () => {
+		const plain = k.coroutineScope(false);
+		await k
+			.launch(plain, () => {
+				throw new Error('first');
+			})
+			.join();
+		let later = false;
+		await k
+			.launch(plain, () => {
+				later = true;
+			})
+			.join();
+		expect(later).toBe(false);
+
+		const supervised = k.coroutineScope(true);
+		await k
+			.launch(supervised, () => {
+				throw new Error('first');
+			})
+			.join();
+		await k
+			.launch(supervised, () => {
+				later = true;
+			})
+			.join();
+		expect(later).toBe(true);
+	});
+
+	it('answers `UUID.randomUUID()` as the text of a version-4 UUID', () => {
+		const one = k.randomUUID();
+		expect(one).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+		expect(k.randomUUID()).not.toBe(one);
+	});
+
 	it('reads the infix `matches` from whichever side holds the Regex', () => {
 		expect(k.regexMatches(k.regex('a+'), 'aaa')).toBe(true);
 		expect(k.regexMatches('aaa', k.regex('a+'))).toBe(true);
@@ -3812,6 +3867,14 @@ describe('the syntax whose JavaScript namesake is wrong', () => {
 		k.setIndex(list, 1, 'c');
 		expect(list[1]).toBe('c');
 		expect(() => k.setIndex(null, 'k', 'v')).toThrow(/was null/);
+	});
+
+	it('writes `headers["k"] = v` through the builder\'s own `set`', () => {
+		// Kotlin's indexed write is the receiver's `operator fun set`. As a
+		// property write the builder grew a field and the header never went.
+		const builder = runtime.globals.Headers.Builder();
+		k.setIndex(builder, 'Referer', 'https://example.invalid/');
+		expect(builder.build().get('Referer')).toBe('https://example.invalid/');
 	});
 
 	it('runs a synchronized block and answers with its value', () => {
