@@ -3543,6 +3543,14 @@ var __k = {
       }
       return value[at];
     }
+    // Kotlin's a[k] is a.get(k) on any type that declares operator get, and
+    // this runtime's own objects declare it where their Kotlin namesakes do:
+    // Calendar.getInstance()[Calendar.YEAR] is Calendar.get, and reading it as
+    // a property answered undefined, so a comic source listing one entry per
+    // year from the current one down to 2012 listed nothing at all. A
+    // translated class with an operator get emits a get method, which is the
+    // same rule.
+    if (typeof value.get === 'function') return value.get(key);
     return value[key];
   },
 
@@ -3591,6 +3599,9 @@ var __k = {
       throw new Error('This converted extension assigned into a value that was null.');
     }
     if (value instanceof Map) value.set(key, next);
+    // The mirror of index: a[k] = v is a.set(k, v) on a type declaring operator
+    // set — Headers.Builder, a Calendar, a translated class.
+    else if (!Array.isArray(value) && typeof value.set === 'function') value.set(key, next);
     else value[key] = next;
     return next;
   },

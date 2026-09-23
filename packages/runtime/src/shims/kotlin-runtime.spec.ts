@@ -3749,6 +3749,22 @@ describe('the syntax whose JavaScript namesake is wrong', () => {
 		expect(k.index({ title: 'One' }, 'title')).toBe('One');
 	});
 
+	it('reads and writes through operator get and set, the way Kotlin spells a[k]', () => {
+		// `Calendar.getInstance()[Calendar.YEAR]` is `Calendar.get`, and was read
+		// as a property: undefined, so a list of years down to 2012 was empty.
+		const year = k.index(runtime.globals.Calendar.getInstance(), runtime.globals.Calendar.YEAR);
+		expect(year).toBe(new Date().getFullYear());
+
+		const store = new Map<string, string>();
+		const operator = {
+			get: (key: string) => store.get(key) ?? 'absent',
+			set: (key: string, value: string) => void store.set(key, value)
+		};
+		k.setIndex(operator, 'a', 'b');
+		expect(k.index(operator, 'a')).toBe('b');
+		expect(k.index(operator, 'z')).toBe('absent');
+	});
+
 	it('writes into a Map and into a list', () => {
 		const table = k.mutableMapOf();
 		k.setIndex(table, 'k', 'v');
