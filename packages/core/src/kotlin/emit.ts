@@ -9108,6 +9108,24 @@ class Emitter {
 			this.refuse(callee, `\`${name}\` from \`${imported}\`, which this build did not read`);
 		}
 
+		// Inside an `object`, nothing is the base class's. A Kotlin object — a
+		// companion included — has no outer instance to call into, so a bare
+		// name that is not the object's own member (or its translated base's)
+		// is one this build never read. The fallback below wrote it as
+		// `this.name(…)` all the same: in a property initialiser that is
+		// `this` at module scope, which is undefined, and the whole bundle died
+		// at load — `override val descriptor = buildClassSerialDescriptor("X")`
+		// on a hand-written KSerializer did exactly that — and in a function
+		// member it was a TypeError at the first call. Both converted as
+		// complete. Refused by name instead.
+		if (
+			this.owner !== null &&
+			this.declaredObjects.has(this.owner) &&
+			!this.baseDeclares(this.owner, name)
+		) {
+			this.refuse(callee, `\`${name}(…)\`, which nothing this build read declares`);
+		}
+
 		// The source object, reached from wherever this call sits: inside a
 		// receiver block that is `__self`, and everywhere else it is `this`.
 		// Written as a literal `this`, a call to a member of the extension made

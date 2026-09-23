@@ -1799,3 +1799,44 @@ describe('skip markers on a video', () => {
 		expect(() => demo.parsed('two')).toThrow(/as a number/);
 	});
 });
+
+describe('a bare call inside an object', () => {
+	it('refuses a name the object does not declare, rather than calling it on `this`', () => {
+		// A Kotlin `object` has no outer instance, so the "a base class supplies
+		// it" fallback cannot apply. Written as `this.name(…)` it was undefined
+		// at module scope — the bundle died at load — or a TypeError at the call.
+		expect(
+			refusalNames(
+				kt(
+					'object Serializer {',
+					'    val descriptor = somethingUnread("X")',
+					'    fun read(): Int = alsoUnread(2)',
+					'}'
+				)
+			)
+		).toEqual([
+			'`somethingUnread(…)`, which nothing this build read declares',
+			'`alsoUnread(…)`, which nothing this build read declares'
+		]);
+	});
+
+	it('still calls its own members, and answers an empty sequence', async () => {
+		// The shared unpacker's `if (!detect(s)) emptySequence() else …` —
+		// which came out `this.emptySequence()` and threw on every plain script.
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'object ScriptPacker {',
+				'    fun detect(s: String): Boolean = s.startsWith("eval")',
+				'    fun unpack(s: String): Sequence<String> = if (!detect(s)) emptySequence() else sequenceOf(s)',
+				'}',
+				'class Demo {',
+				'    fun plain(): List<String> = ScriptPacker.unpack("var a").toList()',
+				'    fun packed(): List<String> = ScriptPacker.unpack("eval(x)").toList()',
+				'}'
+			)
+		);
+		expect(demo.plain()).toEqual([]);
+		expect(demo.packed()).toEqual(['eval(x)']);
+	});
+});

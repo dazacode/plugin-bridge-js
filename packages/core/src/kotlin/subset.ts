@@ -1994,6 +1994,12 @@ export const FREE_FUNCTIONS: ReadonlyMap<string, string> = new Map([
 	['booleanArrayOf', 'listOf'],
 	['charArrayOf', 'listOf'],
 	['emptyArray', 'emptyList'],
+	// A Sequence is an array here (`asSequence` is the identity), so an empty
+	// one is an empty list. The shared JS unpacker returns one for a script
+	// that is not packed; it came out `this.emptySequence()` on an `object`,
+	// and every unpack of a plain script threw.
+	['emptySequence', 'emptyList'],
+	['sequenceOf', 'listOf'],
 	['hashMapOf', 'mapOf'],
 	['linkedMapOf', 'mapOf'],
 	['sortedMapOf', 'mapOf'],
