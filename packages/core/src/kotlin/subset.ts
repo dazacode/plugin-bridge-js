@@ -2596,7 +2596,25 @@ function scanInto(node: KNode, memberName: string, found: Untranslatable[]): voi
 	// Type names are exempt: nothing here emits a type, so a parameter declared
 	// `screen: PreferenceScreen` mentions the preference framework without
 	// touching it. Matching on a type refuses a member for its signature.
-	if (node.children.length === 0 && node.type !== 'type_identifier') {
+	//
+	// A string's own text is exempt from the name table too, and only from the
+	// name table. `throw Exception("Log in via WebView and retry")` is the
+	// single commonest way a manga extension *mentions* WebView — it is the
+	// message a reader sees when a site wants a login — and matching the prose
+	// refused it as a WebView user: 60-odd keiyoushi listings sat in the native
+	// column for a sentence. Code interpolated into a string is a node of its
+	// own (`${x.webView}` is a navigation expression, not `string_content`),
+	// so it is still scanned. What a string *is* the only place for is a JCE
+	// transformation — `Cipher.getInstance("AES/ECB/PKCS5Padding")` has its mode
+	// nowhere else, including when the string sits in a constant — so the
+	// algorithm question is still asked of it.
+	if (node.type === 'string_content') {
+		const algorithm = cryptoObstacle(node.text);
+		if (algorithm !== null) {
+			found.push({ kind: algorithm, line: node.line, memberName });
+			return;
+		}
+	} else if (node.children.length === 0 && node.type !== 'type_identifier') {
 		const named = namedObstacle(node.text);
 		if (named !== null) {
 			found.push({ kind: named, line: node.line, memberName });

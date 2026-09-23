@@ -3252,32 +3252,37 @@ describe('a name declared somewhere the emitter had not looked', () => {
 		expect(demo.minus(2, 5)).toBe(3);
 	});
 
-	it('refuses a member the parser had to guess at, even with no ERROR node', () => {
+	it('takes the right branch of `in` entries the parser used to guess at', () => {
 		// tree-sitter is error-TOLERANT: it recovers, and a recovery does not
-		// always leave an ERROR node behind. The vendored grammar mis-parses a
-		// `when` whose entry body runs on past the newline — it reports
-		// `hasError` on the `when_expression` while every node under it has an
-		// ordinary type — so a scan for the ERROR *type* saw nothing.
+		// always leave an ERROR node behind. This `when` was the case that proved
+		// it — the vendored grammar continued the first entry's body across the
+		// newline as an infix `in`, reported `hasError` on the `when_expression`
+		// with every node under it ordinarily typed, and a scan for the ERROR
+		// *type* saw nothing. The member translated against the guess and
+		// emitted JavaScript that took the wrong branch while the conversion
+		// reported complete. `scanInto` now refuses any unrepaired `hasError`.
 		//
-		// The member then translated against the guess and emitted JavaScript
-		// that both took the wrong branch and could not be parsed, while the
-		// conversion reported complete with no refusal. A plugin that looks like
-		// it works is the one outcome this translator exists to prevent.
-		const source = kt(
-			'class Demo : Source() {',
-			'    fun rot(c: Char): Int = when (c) {',
-			"        in 'A'..'Z' -> 1",
-			"        in 'a'..'z' -> 2",
-			'        else -> 0',
-			'    }',
-			'}'
+		// `grammar.ts` (`whenInConditions`) since repairs this shape before the
+		// tree is read, so what is asserted here is the other half of the same
+		// promise: that the repaired member does not merely convert, it answers
+		// the way Kotlin does for every entry, including the ones the guess had
+		// swallowed.
+		const demo = instantiate(
+			inClass(
+				'    fun band(n: Int): Int = when (n) {',
+				'        in 1..5 -> 1',
+				'        in 10..20 -> 2',
+				'        else -> 0',
+				'    }'
+			)
 		);
 
-		const emitted = translate(source);
-		expect(emitted.refusals.map((refusal) => refusal.member)).toEqual(['rot']);
-		expect(emitted.refusals[0].obstacles.map((one) => one.kind)).toContain(
-			'a passage this build could not parse'
-		);
+		// Integer ranges, because this file's stub runtime builds numeric ranges
+		// only; the character ranges `rot13` uses are the real runtime's
+		// (`__charRange`), and the emitted shape is the same.
+		expect(demo.band(3)).toBe(1);
+		expect(demo.band(12)).toBe(2);
+		expect(demo.band(7)).toBe(0);
 	});
 
 	it('awaits a plain `fun` that blocks on a request', () => {
@@ -3610,6 +3615,35 @@ describe('refusing by name', () => {
 		]
 	])('refuses %s and names it', (_label, source, expected) => {
 		expect(refusalNames(source)).toContain(expected);
+	});
+
+	it('does not refuse a string for the words in it', () => {
+		// The message a reader sees when a site wants a login is the commonest
+		// way a manga extension *mentions* WebView, and matching the prose put
+		// dozens of listings in the native column for a sentence.
+		const demo = instantiate(
+			inClass(
+				'    fun locked(): String = throw Exception("Log in via WebView to read this chapter")',
+				'    val note = """Open in WebView, then Thread back"""'
+			)
+		);
+		expect(demo.note).toBe('Open in WebView, then Thread back');
+		expect(() => demo.locked()).toThrow('Log in via WebView');
+
+		// Code interpolated into a string is still code, and is still scanned.
+		expect(refusalNames(inClass('    fun f() = "a ${WebView(context).url} b"'))).toContain(
+			'WebView'
+		);
+		// A string is the only place a JCE transformation's mode is written, so
+		// the algorithm question is still asked of one — here in a constant.
+		expect(
+			refusalNames(
+				inClass(
+					'    private val mode = "AES/ECB/PKCS5Padding"',
+					'    fun c() = Cipher.getInstance(mode)'
+				)
+			)
+		).not.toEqual([]);
 	});
 
 	it('translates a hand-written interceptor lambda, binding `it` to the chain', () => {
