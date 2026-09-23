@@ -1342,6 +1342,27 @@ export const EXTENSION_PROPERTIES: ReadonlyMap<string, string> = new Map([
 ]);
 
 /**
+ * keiyoushi core's shorter spellings of the JsonElement accessors, from
+ * `utils/JsonElement.kt`: `el.obj` is `el.jsonObject`, `el.string` is
+ * `el.jsonPrimitive.content`, and so on.
+ *
+ * Kept apart from `EXTENSION_PROPERTIES` because these four are ordinary DTO
+ * field names in a way `jsonPrimitive` is not — a response with a `string` or
+ * an `array` in it is unremarkable — so they are only read this way in a file
+ * that imports them from `keiyoushi.utils`, which is also the only way Kotlin
+ * would reach them. Everywhere else they stayed plain property reads, which is
+ * what they are there. In a file that does import them, a plain read was
+ * `undefined` off a string: `memo["mangaId"]!!.string` built a chapter URL
+ * with the word "undefined" in it, and nothing was refused.
+ */
+export const KEIYOUSHI_JSON_PROPERTIES: ReadonlyMap<string, string> = new Map([
+	['obj', 'jeObj'],
+	['array', 'jeArr'],
+	['string', 'jeString'],
+	['stringOrNull', 'jeStringOrNull']
+]);
+
+/**
  * jsoup methods the runtime answers with a property of the same name.
  *
  * jsoup spells all of these as calls — `element.parent()`, `element.id()` — and
@@ -3567,6 +3588,7 @@ export function referencedHelpers(): string[] {
 	const names = new Set<string>([
 		...EXTENSION_METHODS.values(),
 		...EXTENSION_PROPERTIES.values(),
+		...KEIYOUSHI_JSON_PROPERTIES.values(),
 		...FREE_FUNCTIONS.values(),
 		...SYNTAX_HELPERS
 	]);

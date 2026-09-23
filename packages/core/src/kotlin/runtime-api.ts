@@ -209,6 +209,12 @@ export const RUNTIME_HELPERS = [
 	'jeFloatOrNull',
 	'jeBoolean',
 	'jeBooleanOrNull',
+	/* keiyoushi core's shorter spellings of four of them — see
+	   `KEIYOUSHI_JSON_PROPERTIES` in `subset.ts`. */
+	'jeObj',
+	'jeArr',
+	'jeString',
+	'jeStringOrNull',
 	/* An exception built as a value, not thrown — see `exception`. */
 	'exception',
 	/* MutableList.removeAt/reverse and Map.getValue — see each in the runtime. */

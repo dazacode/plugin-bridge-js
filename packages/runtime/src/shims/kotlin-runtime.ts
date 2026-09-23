@@ -837,7 +837,11 @@ var __JE_NONE = {};
  * undefined before this existed and must still. A value JSON cannot hold — a
  * Map, a class the runtime built, undefined — is read exactly as it was too.
  */
-var __JE_OWN_NAMES = { jsonObject: true, jsonArray: true, jsonPrimitive: true, jsonNull: true };
+var __JE_OWN_NAMES = { jsonObject: true, jsonArray: true, jsonPrimitive: true, jsonNull: true,
+  // keiyoushi's 'obj' and 'array', which the emitter only routes here in a
+  // file that imports them — and there a record with no such field is the
+  // JsonObject being asked for, not a DTO missing one.
+  obj: true, array: true };
 function __jeOwn(value, name) {
   if (value !== null && value !== undefined && typeof value === 'object' && name in value) {
     return value[name];
@@ -6695,6 +6699,35 @@ var __k = {
   jeFloatOrNull: function (value) { return __jeNumber(value, 'floatOrNull', false, true); },
   jeBoolean: function (value) { return __jeBoolean(value, 'boolean', false); },
   jeBooleanOrNull: function (value) { return __jeBoolean(value, 'booleanOrNull', true); },
+
+  /**
+   * keiyoushi core's 'obj', 'array', 'string' and 'stringOrNull': in its own
+   * words 'jsonObject', 'jsonArray', 'jsonPrimitive.content' and
+   * 'jsonPrimitive.contentOrNull'. The same readers under their own names, so
+   * a receiver with a real property of the name still answers it.
+   */
+  jeObj: function (value) {
+    var own = __jeOwn(value, 'obj');
+    if (own !== __JE_NONE) return own;
+    if (__jeKind(value) !== 'object') __jeWrongKind(value, 'JsonObject');
+    return value;
+  },
+  jeArr: function (value) {
+    var own = __jeOwn(value, 'array');
+    if (own !== __JE_NONE) return own;
+    if (__jeKind(value) !== 'array') __jeWrongKind(value, 'JsonArray');
+    return value;
+  },
+  jeString: function (value) {
+    var own = __jeOwn(value, 'string');
+    if (own !== __JE_NONE) return own;
+    return __jeContent(value, 'string');
+  },
+  jeStringOrNull: function (value) {
+    var own = __jeOwn(value, 'stringOrNull');
+    if (own !== __JE_NONE) return own;
+    return __jeKind(value) === 'null' ? null : __jeContent(value, 'stringOrNull');
+  },
 
   /**
    * keiyoushi's JsonObject readers from 'core/', by key: 'obj.getStringOrNull(k)'
