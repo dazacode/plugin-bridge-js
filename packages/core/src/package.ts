@@ -25,6 +25,7 @@
 
 import type { ForeignOrigin } from './formats';
 import { parseSettingDescriptors, type SettingDescriptor } from '@plugin-bridge/core/settings';
+import { measurementGrants } from './kotlin/grants';
 
 /** Kept well below `zip.ts`'s own caps, which apply when this is read back. */
 const MAX_ENTRYPOINT_BYTES = 4 * 1024 * 1024;
@@ -232,6 +233,12 @@ export interface BundleInput {
 	readonly license?: string;
 	/** The upstream `LICENSE`, carried verbatim into `licenses/`. */
 	readonly licenseText?: string;
+	/**
+	 * Files from the source repository embedded verbatim that are not the
+	 * extension's Kotlin — today only `lib/synchrony`'s prebuilt script — by
+	 * their path in that repository. Listed in `licenses/EMBEDDED.txt`.
+	 */
+	readonly embedded?: readonly string[];
 	/** Where the source this was built from lives. https only. */
 	readonly repository?: string;
 	/** The original author's own page, when the foreign metadata names one. */
@@ -422,6 +429,43 @@ export async function packageBundle(input: BundleInput): Promise<Uint8Array> {
 			'licenses/UPSTREAM.txt',
 			encoder.encode(`${licenseText}
 `)
+		);
+	}
+
+	// Built with a boundary set aside, to count what the boundary costs
+	// (`kotlin/grants.ts`). Said inside the archive, where the integrity check
+	// covers it, and `openPluginArchive` will not open it outside a process
+	// that is measuring too.
+	const grants = measurementGrants();
+	if (grants.length > 0) {
+		files.set(
+			'measurement.json',
+			encoder.encode(`${JSON.stringify({ measurementGrants: grants }, null, 2)}\n`)
+		);
+	}
+
+	// A file carried verbatim that is not the extension's own code may be under
+	// terms other than the repository's `LICENSE` — the prebuilt deobfuscator
+	// states none in the file itself. So the bundle says what it carries and
+	// where from, and asserts nothing about the terms, for the same reason the
+	// manifest writes `NOASSERTION` rather than a guess.
+	const embedded = [...new Set(input.embedded ?? [])].sort();
+	if (embedded.length > 0) {
+		files.set(
+			'licenses/EMBEDDED.txt',
+			encoder.encode(
+				[
+					'This bundle embeds the following files verbatim from the source repository,',
+					'in addition to code translated from its Kotlin:',
+					'',
+					...embedded.map((path) => `  ${path}`),
+					'',
+					'They are distributed under the terms that apply to them upstream. Those',
+					'terms may differ from the repository licence in UPSTREAM.txt, and this',
+					'conversion neither restates nor asserts them.',
+					''
+				].join('\n')
+			)
 		);
 	}
 

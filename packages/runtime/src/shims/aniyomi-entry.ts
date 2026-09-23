@@ -89,6 +89,8 @@ import { DOM_RUNTIME_SOURCE } from './generated/dom-source';
 import { JS_RUNTIME } from './js-runtime';
 import { kotlinRuntime } from './kotlin-runtime';
 import { STREAM_GUARDS } from './stream-guards';
+import { synchronyPrelude } from './synchrony';
+import { measurementPrelude } from './measurement';
 
 export interface AniyomiEntrypointOptions {
 	/** Must equal the manifest id, or the sandbox refuses to load the bundle. */
@@ -119,6 +121,12 @@ export interface AniyomiEntrypointOptions {
 	 * every read answers whatever default its own call site carried.
 	 */
 	readonly settingIds?: Readonly<Record<string, string>>;
+	/**
+	 * `lib/synchrony`'s prebuilt script, when the conversion calls the
+	 * deobfuscator (`adapters/src/library-shims.ts`). Absent otherwise, and
+	 * the bundle is then byte-identical to one built before it existed.
+	 */
+	readonly synchronyScript?: string;
 }
 
 /**
@@ -980,6 +988,8 @@ const __rt = globalThis.__yorozoRuntime;
 ${settingIds}
 ${kotlinRuntime()}
 ${constants}
+${synchronyPrelude(options.synchronyScript)}
+${measurementPrelude()}
 
 /* --- the translated extension ---------------------------------------------- */
 

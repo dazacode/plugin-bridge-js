@@ -56,6 +56,7 @@ import { attributionFrom } from '@plugin-bridge/core/attribution';
 import { namesCookieJar, packageBundle } from '@plugin-bridge/core/package';
 import { settingKeyMap } from '@plugin-bridge/core/preferences';
 import { aniyomiPreferences } from './aniyomi-preferences';
+import { libraryFileSource, synchronyScriptOf } from './library-shims';
 import {
 	extensionDirectory,
 	fetchExtensionSource,
@@ -413,12 +414,14 @@ export const aniyomiAdapter: ForeignAdapter = {
 			conversion.constants.stringConstants
 		);
 
+		const synchrony = synchronyScriptOf(conversion.js, source.resources);
 		const entrypointSource = aniyomiEntrypoint({
 			pluginId: listing.id,
 			translatedSource: conversion.js,
 			className: conversion.className,
 			settingIds: settingKeyMap(settings),
-			baseUrl
+			baseUrl,
+			synchronyScript: synchrony?.text
 		});
 
 		// Over the *emitted* module, not the Kotlin: the emitter has already
@@ -471,6 +474,7 @@ export const aniyomiAdapter: ForeignAdapter = {
 			usesCookies: formatProfile('aniyomi').implicitCookies || namesCookieJar(conversion.js),
 			license: credit.license,
 			licenseText: source.licenseText ?? undefined,
+			embedded: synchrony === undefined ? [] : [synchrony.path],
 			repository: credit.repository,
 			authorUrl: credit.authorUrl
 		});
@@ -680,6 +684,8 @@ async function readExtensionSource(
 ): Promise<{
 	files: { path: string; source: string }[];
 	licenseText: string | null;
+	/** Non-Kotlin files the modules ship; see `library-shims.ts`. */
+	resources: ReadonlyMap<string, string>;
 } | null> {
 	// The repository's own file list, fetched once and shared by every listing in
 	// it. Two things come out of it, and both used to cost requests per listing:
@@ -724,7 +730,7 @@ async function readExtensionSource(
 			.flatMap(([name, files]) =>
 				[...files].map(([path, source]) => ({
 					path: `lib/${name}/${path}`,
-					source
+					source: libraryFileSource(name, path, source)
 				}))
 			);
 		const core = [...found.coreFiles].map(([path, source]) => ({
@@ -756,7 +762,8 @@ async function readExtensionSource(
 
 		return {
 			files: [...own, ...theme, ...modules, ...core],
-			licenseText: await readLicence(repositoryUrl, services, index)
+			licenseText: await readLicence(repositoryUrl, services, index),
+			resources: found.resources
 		};
 	}
 	return null;

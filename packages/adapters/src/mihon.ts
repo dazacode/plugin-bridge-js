@@ -73,6 +73,7 @@ import { gunzip, isGzip, ProtobufError, ProtoMessage } from '@plugin-bridge/core
 import { obstacleSites } from '@plugin-bridge/core/obstacles';
 import { newSharedCache } from '@plugin-bridge/core/source-repo';
 import { readMihonBuildFile } from './mihon-build-file';
+import { isClasspathResource, libraryFileSource, synchronyScriptOf } from './library-shims';
 import type { ForeignFormat } from '@plugin-bridge/core/formats';
 import type { RepositoryIndex, RepositoryPlugin } from '@plugin-bridge/core/repository-index';
 
@@ -629,7 +630,10 @@ export const mihonAdapter: ForeignAdapter = {
 		const modules = [...source.libModules]
 			.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
 			.flatMap(([name, files]) =>
-				[...files].map(([path, text]) => ({ path: `lib/${name}/${path}`, source: text }))
+				[...files].map(([path, text]) => ({
+					path: `lib/${name}/${path}`,
+					source: libraryFileSource(name, path, text)
+				}))
 			);
 		const core = [...source.coreFiles].map(([path, text]) => ({
 			path: `core/${path}`,
@@ -694,6 +698,7 @@ export const mihonAdapter: ForeignAdapter = {
 		}
 
 		const { mihonEntrypoint } = await import('@plugin-bridge/runtime/shims/mihon-entry');
+		const synchrony = synchronyScriptOf(conversion.js, source.resources);
 		const entrypointSource = mihonEntrypoint({
 			pluginId: listing.id,
 			translatedSource: conversion.js,
@@ -709,7 +714,10 @@ export const mihonAdapter: ForeignAdapter = {
 			// beside its Kotlin, which `Intl` reads through the classloader. An
 			// extension with none passes an empty map and the classpath is
 			// empty, which is what it was before they were fetched at all.
-			resources: Object.fromEntries(source.resources)
+			resources: Object.fromEntries(
+				[...source.resources].filter(([path]) => isClasspathResource(path))
+			),
+			synchronyScript: synchrony?.text
 		});
 
 		// Over the emitted module rather than the Kotlin: the emitter has
@@ -725,7 +733,8 @@ export const mihonAdapter: ForeignAdapter = {
 			author: listing.author,
 			hosts,
 			origin,
-			entrypointSource
+			entrypointSource,
+			embedded: synchrony === undefined ? [] : [synchrony.path]
 		});
 	}
 };

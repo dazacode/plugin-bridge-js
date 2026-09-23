@@ -55,6 +55,7 @@ import { detectRepository } from '@plugin-bridge/core/detect';
 import { FOREIGN_ADAPTERS } from '@plugin-bridge/adapters';
 import { checkKey, loadChecks, saveChecks, type CheckResult } from '@plugin-bridge/core/check';
 import { CONVERTER_VERSION } from '@plugin-bridge/core/package';
+import { BOUNDARY_GRANTS, setMeasurementGrants } from '@plugin-bridge/core/kotlin/grants';
 import { createTreeLister } from '@plugin-bridge/core/git-trees';
 import { formatPreflight, runPreflight } from './preflight';
 import type { RepositoryPlugin } from '@plugin-bridge/core/repository-index';
@@ -69,6 +70,7 @@ interface Options {
 	readonly dataDir: string | undefined;
 	readonly fresh: boolean;
 	readonly why: boolean;
+	readonly grants: readonly string[];
 }
 
 const USAGE = `Usage: bun tool/check-catalogue.ts <index-url> [options]
@@ -80,6 +82,10 @@ const USAGE = `Usage: bun tool/check-catalogue.ts <index-url> [options]
   --fresh           ignore remembered verdicts and check everything again
   --why             after the table, print every failure with the file, member
                     and line that stopped it
+  --grant <list>    measure with these boundaries set aside, comma-separated:
+                    ${BOUNDARY_GRANTS.join(', ')}. What is counted then is what
+                    the boundary costs; nothing it builds is a plugin, and no
+                    verdict from it is remembered
 
 Ctrl-C stops scheduling new checks, lets the ones in flight finish, and still
 writes the report. Nothing is installed and nothing is downloaded twice.
@@ -93,6 +99,7 @@ function parseArgs(argv: readonly string[]): Options | null {
 	let dataDir: string | undefined;
 	let fresh = false;
 	let why = false;
+	let grants: string[] = [];
 
 	for (let at = 0; at < argv.length; at += 1) {
 		const argument = argv[at];
@@ -103,13 +110,17 @@ function parseArgs(argv: readonly string[]): Options | null {
 		else if (argument === '--data-dir') dataDir = next();
 		else if (argument === '--fresh') fresh = true;
 		else if (argument === '--why') why = true;
+		else if (argument === '--grant')
+			grants = next()
+				.split(',')
+				.filter((one) => one.length > 0);
 		else if (argument === '--help' || argument === '-h') return null;
 		else if (argument.startsWith('-')) return null;
 		else indexUrl = argument;
 	}
 
 	if (!indexUrl.startsWith('https://')) return null;
-	return { indexUrl, atATime, limit, json, dataDir, fresh, why };
+	return { indexUrl, atATime, limit, json, dataDir, fresh, why, grants };
 }
 
 /** Everything about this run that a later reader would need in order to trust it. */
@@ -125,6 +136,8 @@ interface Report {
 		readonly runtime: string;
 		readonly containment: string;
 		readonly converterVersion: number;
+		/** Boundaries set aside for this run; see `kotlin/grants.ts`. */
+		readonly measurementGrants: readonly string[];
 	};
 	readonly run: {
 		readonly listings: number;
@@ -223,6 +236,11 @@ async function run(): Promise<void> {
 		process.exit(2);
 	}
 
+	// Before anything converts. A misspelled grant throws here, rather than
+	// reporting the baseline under the grant's name.
+	setMeasurementGrants(options.grants);
+	const measuring = options.grants.length > 0;
+
 	const host = headlessPluginHost({ dataDir: options.dataDir });
 	const isolate = await sandboxReport();
 	if (isolate === null) {
@@ -320,7 +338,11 @@ async function run(): Promise<void> {
 		process.exit(1);
 	}
 
-	const remembered = options.fresh ? new Map<string, CheckResult>() : loadChecks(host.kv);
+	// A verdict reached with a boundary set aside says nothing about the plugin
+	// a viewer would install, so a measuring run neither reads remembered
+	// verdicts nor leaves any behind.
+	const remembered =
+		options.fresh || measuring ? new Map<string, CheckResult>() : loadChecks(host.kv);
 	const results = new Map<string, CheckResult>(remembered);
 
 	let stopped = false;
@@ -368,7 +390,7 @@ async function run(): Promise<void> {
 			results.set(key, result);
 			// Written after every answer rather than at the end, so a run that is
 			// killed outright still keeps what it learned.
-			saveChecks(host.kv, results);
+			if (!measuring) saveChecks(host.kv, results);
 			process.stderr.write(`  ${liveLine(listing.name, result)}\n`);
 		}
 	);
@@ -405,7 +427,8 @@ async function run(): Promise<void> {
 		host: {
 			runtime: runtimeName(),
 			containment: isolate.containment,
-			converterVersion: CONVERTER_VERSION
+			converterVersion: CONVERTER_VERSION,
+			measurementGrants: options.grants
 		},
 		run: {
 			listings: listings.length,

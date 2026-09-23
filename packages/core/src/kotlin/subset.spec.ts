@@ -298,14 +298,9 @@ describe('naming the obstacle rather than the category', () => {
 		// passthrough allowlist because both had a way past it — a declared
 		// method for the first, a capitalised receiver for the second.
 		['loadForRequest(url)', 'reading a cookie jar'],
-		['CookieManager.getInstance()', 'the WebView cookie store'],
-		// An *application* interceptor translates now — `__proceed` in the
-		// runtime runs the chain — so `Interceptor` is no longer a refused name.
-		// The network variant is, and at the one line that installs it.
-		[
-			'client.newBuilder().addNetworkInterceptor { it.proceed(it.request()) }',
-			'an okhttp network interceptor'
-		]
+		['CookieManager.getInstance()', 'the WebView cookie store']
+		// Neither interceptor is a refused name any more: `__proceed` runs the
+		// application chain and the network one after it. See `emit.spec.ts`.
 	])('names %s as %s', (text, expected) => {
 		expect(namedObstacle(text)).toBe(expected);
 	});

@@ -27,6 +27,7 @@
 
 import { parseSettingDescriptors, type SettingDescriptor } from './settings';
 import { readZip, ZipError } from './zip';
+import { measurementGrants } from './kotlin/grants';
 
 export type PluginRejection =
 	| 'unreadable'
@@ -39,7 +40,8 @@ export type PluginRejection =
 	| 'badSignature'
 	| 'unsigned'
 	| 'malformedManifest'
-	| 'manifestMismatch';
+	| 'manifestMismatch'
+	| 'measurementBuild';
 
 /** A refusal, with a reason a person can act on. */
 export class PluginArchiveError extends Error {
@@ -203,6 +205,19 @@ export async function openPluginArchive(
 		throw new PluginArchiveError(
 			'corruptDigest',
 			'This archive’s integrity record contradicts itself.'
+		);
+	}
+
+	// 4b. A bundle built to measure a boundary (`kotlin/grants.ts`). It loads
+	// and cannot work, by construction, and it opens only in a process that is
+	// itself measuring. `measurement.json` is hashed above like every other
+	// member, so dropping it breaks the integrity record; rewriting that record
+	// is rebuilding the bundle, which is what a signature (step 5) is for.
+	if (files.has('measurement.json') && measurementGrants().length === 0) {
+		throw new PluginArchiveError(
+			'measurementBuild',
+			'This bundle was built to measure what a boundary costs, with that boundary set aside. ' +
+				'It is not a plugin and cannot be installed.'
 		);
 	}
 

@@ -1021,6 +1021,9 @@ export const RUNTIME_GLOBALS = [
 	'Protocol',
 	'Unpacker',
 	'JsUnpacker',
+	// `lib/synchrony`'s deobfuscator, answered by the script the bundle embeds
+	// from the extension's own repository (`shims/synchrony.ts`).
+	'SynchronyEngine',
 	'Unbaser',
 
 	/* The boxed numeric limits, which this ecosystem reads to mean "last" and

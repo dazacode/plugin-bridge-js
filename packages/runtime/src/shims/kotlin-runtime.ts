@@ -9112,28 +9112,6 @@ function __hasHeader(headers, name) {
 }
 
 /**
- * A NETWORK interceptor is refused, loudly. An application interceptor is not
- * — see '__proceed', which runs the chain.
- *
- * The two are not the same hook. An application interceptor wraps one call and
- * is handed the request and the response, both of which this runtime has. A
- * network interceptor sits between the client and each individual hop of a
- * redirect chain, and sees the raw connection: the host follows redirects
- * itself and reports only the destination, so there is nothing here for one to
- * sit between. Accepting it and running it once over the final hop would leave
- * an extension believing it had rewritten every hop when it had rewritten one.
- */
-function __noInterceptor(name) {
-  return function () {
-    throw new Error(
-      'This converted extension installs an okhttp ' + name + '. Yorozo lets the host follow ' +
-      'redirects and reports only where they ended, so there are no per-hop connections for a ' +
-      'network interceptor to wrap. An ordinary addInterceptor { } does run.'
-    );
-  };
-}
-
-/**
  * okhttp's CookieJar, as much of it as the host can honour.
  *
  * The host keeps a per-plugin, per-host, in-memory jar and attaches it to every
@@ -9174,9 +9152,10 @@ var __cookieJar = {
  * changed. The flag is therefore carried into the request, where ctx.http turns
  * it into the host's 'follow: false'.
  */
-function __clientBuilder(follow, inherited, inheritedCookies) {
+function __clientBuilder(follow, inherited, inheritedCookies, inheritedNetwork) {
   var redirects = follow;
   var chain = (inherited || []).slice();
+  var network = (inheritedNetwork || []).slice();
   var cookies = (inheritedCookies || []).slice();
   var builder = {
     /*
@@ -9215,7 +9194,33 @@ function __clientBuilder(follow, inherited, inheritedCookies) {
       chain.push(interceptor);
       return builder;
     },
-    addNetworkInterceptor: __noInterceptor('network interceptor'),
+    /*
+     * okhttp's NETWORK interceptors, kept apart from the application ones
+     * because they run after all of them, whatever order the two were added
+     * in: an application interceptor sees the call, a network interceptor
+     * sees what goes on the wire, including what the application ones added.
+     *
+     * Upstream also runs a network interceptor once per hop of a redirect,
+     * and per connection attempt. The host follows redirects itself and
+     * reports only where they ended, so here it runs once, around the whole
+     * exchange, and sees the final response. For what these are used for in
+     * this ecosystem — a header on every request, a response rewritten
+     * before anything reads it — that is the same result. It differs only for
+     * one that inspects an intermediate 3xx, which never reaches it here —
+     * unless the client set followRedirects(false), when the 3xx is the
+     * response, and both lists see it exactly as upstream's would.
+     */
+    addNetworkInterceptor: function (interceptor) {
+      if (interceptor === null || interceptor === undefined) return builder;
+      if (typeof interceptor !== 'function' && typeof interceptor.intercept !== 'function') {
+        throw new Error(
+          'This converted extension installed something as an okhttp network interceptor that ' +
+          'has no intercept(chain).'
+        );
+      }
+      network.push(interceptor);
+      return builder;
+    },
     connectTimeout: function () { return builder; },
     readTimeout: function () { return builder; },
     writeTimeout: function () { return builder; },
@@ -9242,8 +9247,10 @@ function __clientBuilder(follow, inherited, inheritedCookies) {
       /* The shared client only when nothing was changed: an extension that
          built one to install an interceptor must not get the one everything
          else uses. */
-      if (redirects !== false && chain.length === 0 && cookies.length === 0) return client;
-      return __clientWith(redirects !== false, chain, cookies);
+      if (redirects !== false && chain.length === 0 && network.length === 0 && cookies.length === 0) {
+        return client;
+      }
+      return __clientWith(redirects !== false, chain, cookies, network);
     }
   };
   return builder;
@@ -9360,11 +9367,15 @@ function __sourceHost() {
 }
 
 /** A client, and the redirect policy every call it makes carries. */
-function __clientWith(follow, interceptors, cookieRules) {
-  var chain = interceptors || [];
+function __clientWith(follow, interceptors, cookieRules, networkInterceptors) {
+  var application = interceptors || [];
+  var network = networkInterceptors || [];
+  /* One chain, application interceptors first, as okhttp orders them. */
+  var chain = application.concat(network);
   var cookies = cookieRules || [];
   var made = {
-    interceptors: chain,
+    interceptors: application,
+    networkInterceptors: network,
     newCall: function (request) {
       return {
         execute: function () { return __proceed(request, chain, 0, follow, cookies); },
@@ -9389,7 +9400,7 @@ function __clientWith(follow, interceptors, cookieRules) {
         stop: function () {}
       };
     },
-    newBuilder: function () { return __clientBuilder(follow, chain, cookies); },
+    newBuilder: function () { return __clientBuilder(follow, application, cookies, network); },
     cookieJar: __cookieJar
   };
   return made;
@@ -13893,6 +13904,38 @@ Unpacker.prototype.unpack = function () {
   return __k.unpack(this.source);
 };
 var JsUnpacker = Unpacker;
+
+/**
+ * The synchrony deobfuscator that a shared library module ships as a fixed
+ * script beside its Kotlin ('lib/synchrony/assets/synchrony-<version>.js').
+ *
+ * Upstream runs that script in an embedded QuickJS, and QuickJS is a boundary
+ * here — but only because an embedded engine is usually asked to run what a
+ * *site* sent. This one runs a file from the extension's own repository, read
+ * at conversion time and carried in the bundle like the rest of its code; the
+ * site's script is its input, parsed and rewritten as data, never run. That is
+ * the "narrow, named unpacker" the capability map allows, and it needs no
+ * engine because the bundle already is one.
+ *
+ * '__synchronyFactory' is null unless the adapter embedded the script, which
+ * it does only when the conversion included the module (see
+ * 'synchronyPrelude'). With no script, or one whose export line is not the
+ * shape the upstream wrapper rewrites, 'deobfuscate' answers null — exactly
+ * what the upstream 'deobfuscateScript' returns in both cases, and what every
+ * caller already checks for.
+ */
+var __synchronyFactory = null;
+var __synchronyModule = null;
+var SynchronyEngine = {
+  deobfuscate: function (source) {
+    if (__synchronyModule === null) {
+      if (__synchronyFactory === null) return null;
+      __synchronyModule = __synchronyFactory();
+    }
+    var result = new __synchronyModule.Deobfuscator().deobfuscateSource(__str(source));
+    return typeof result === 'string' ? result : null;
+  }
+};
 
 /**
  * Radix decoder used by generic packed-script unpackers. This is deliberately

@@ -131,6 +131,7 @@ import {
 	type Refusal,
 	type Untranslatable
 } from './subset';
+import { granted } from './grants';
 import { HOST_BACKED_HELPERS, type RuntimeHelper } from './runtime-api';
 
 /**
@@ -1722,6 +1723,8 @@ class Emitter {
 	private extensionSetters = new Set<string>();
 	/** What the settings store is called in the class being emitted. */
 	private preferenceStores = new Set<string>(['preferences']);
+	/** What a measurement grant set aside instead of refusing; see `grants.ts`. */
+	private setAside: Untranslatable[] = [];
 	/** Members translated with a boundary-reaching tail cut off; see `recoveryCut`. */
 	private readonly deferred: Refusal[] = [];
 	/**
@@ -4070,7 +4073,12 @@ class Emitter {
 
 		// The node alone when there is no cut, as before it: a setter written
 		// beside its property is scanned where it is emitted, not here.
-		const obstacles = (scope ?? [node]).flatMap((one) => scanObstacles(one, name));
+		const scanned = (scope ?? [node]).flatMap((one) => scanObstacles(one, name));
+		// Under a measurement grant, what the grant covers is set aside rather
+		// than refused, and remembered, so `memberWithRecovery` decides exactly
+		// as it would have without the grant (`grants.ts`).
+		this.setAside.push(...scanned.filter((one) => granted(one.kind)));
+		const obstacles = scanned.filter((one) => !granted(one.kind));
 		if (obstacles.length > 0) {
 			this.refusals.push({ member: name, obstacles });
 			this.memberName = previousName;
@@ -4161,16 +4169,21 @@ class Emitter {
 		run: () => string
 	): string | null {
 		const refusalsBefore = this.refusals.length;
+		const setAsideBefore = this.setAside.length;
 		const graphAt = this.graph.length;
 		const first = this.member(name, node, run);
 		if (first !== null || candidate === null) return first;
 
 		const refusal = this.refusals[this.refusals.length - 1];
 		if (this.refusals.length !== refusalsBefore + 1 || refusal.member !== name) return null;
-		const late = refusal.obstacles.every((one) => one.line >= candidate.tailLine);
+		// Read with whatever a measurement grant set aside on the first attempt
+		// put back, so a grant never turns a cut member into a refused one: the
+		// boundary it covers is still what the tail was for.
+		const considered = [...refusal.obstacles, ...this.setAside.slice(setAsideBefore)];
+		const late = considered.every((one) => one.line >= candidate.tailLine);
 		const kinds = [
 			...new Set(
-				refusal.obstacles
+				considered
 					.map((one) => RECOVERY_BOUNDARIES.get(one.kind))
 					.filter((one): one is string => one !== undefined)
 			)
@@ -4203,6 +4216,9 @@ class Emitter {
 	}
 
 	private declineMember(name: string, node: KNode, kind: string): null {
+		// Under a measurement grant the member is left out rather than refused,
+		// and reaching for it throws naming the grant (`grants.ts`).
+		if (granted(kind)) return null;
 		// Named the way its author would recognise it wherever there is a name;
 		// a bare grammar kind in a message helps nobody read their own source.
 		const spoken = OUT_OF_SCOPE_KINDS.get(kind) ?? kind;
@@ -7477,6 +7493,17 @@ class Emitter {
 				return this.cast(node);
 			case 'prefix_expression': {
 				const operator = node.allChildren[0]?.type ?? '';
+				// `@Suppress("DEPRECATION") x.length` — an annotation on an
+				// expression, which the grammar reads as a prefix operator. It
+				// tells the compiler something and changes nothing at run time,
+				// so the value is the operand's. The operand is the last child:
+				// several annotations stack in front of it.
+				if (operator === 'annotation') {
+					const operand = kids(node).filter((child) => child.type !== 'annotation');
+					const last = operand[operand.length - 1];
+					if (last === undefined) this.refuse(node, 'an annotation on nothing');
+					return this.expr(last);
+				}
 				// `if (++iterations > MAX) break` — increment, then read. The grammar
 				// hangs the operator over the whole comparison, as it does `-` and
 				// `!`, so it goes through `prefixOver` to reach its operand; see
@@ -9455,16 +9482,25 @@ class Emitter {
 		// `configureClient() = addCookie { listOf("age" to "18") }` — the same
 		// call the written-receiver form already makes, on the builder that is
 		// the implicit receiver, with the block as an ordinary argument (the
-		// cookies, asked for per request). Only `addCookie`: the other
-		// argument-lambda method is `addInterceptor`, and an interceptor lambda
-		// is a boundary this path must not open by the back door.
+		// cookies, asked for per request). The two interceptor installers take
+		// their block the same way, as the chain's function, and translate
+		// exactly as `client.newBuilder().addInterceptor { … }` already does.
+		//
+		// An interceptor's block is async when it proceeds, and that must not
+		// make the *installer* async: adding an interceptor to a builder
+		// returns the builder, now, and a `client` property awaited on that
+		// account would be a Promise where the host expects a client. The
+		// lambda keeps its own `async`; only the count the enclosing member
+		// reads is put back.
 		if (
 			implicit !== null &&
 			lambda !== null &&
-			name === 'addCookie' &&
+			(name === 'addCookie' || name === 'addInterceptor' || name === 'addNetworkInterceptor') &&
 			!this.isSourceMember(name)
 		) {
+			const before = this.asyncLambdas;
 			const withLambda = this.callArguments(name, args, lambda, labelled, false);
+			if (name !== 'addCookie') this.asyncLambdas = before;
 			return `${implicit}.${name}(${withLambda.join(', ')})`;
 		}
 		// `configureClient() = rateLimit(3)`: the builder is the implicit
@@ -10276,13 +10312,12 @@ class Emitter {
 	 * given by their own signature, so they translate onto the request policy
 	 * exactly as the extension function does.
 	 *
-	 * Returning null rather than refusing is the point: **everything else stays
-	 * refused** by the passthrough rule below, which is where a hand-written
-	 * `addInterceptor { chain -> … }` lands. `adr/0006-local-http-server.md` §5
-	 * is the rule — recognising what an arbitrary body *means* is exactly the
-	 * intent-recognition this converter will not do, and the measured value of
-	 * doing it anyway is zero listings, because a body that does something
-	 * worth recognising also reaches for `.proceed()` and a cookie.
+	 * Returning null rather than recognising more is the point: every other
+	 * interceptor — a hand-written `addInterceptor { chain -> … }` included —
+	 * goes through the passthrough below and is *translated*, body and all,
+	 * and run as a chain by the runtime's `__proceed`. Nothing here decides
+	 * what an arbitrary body means (`adr/0006-local-http-server.md` §5); only
+	 * these two, whose meaning is their signature, become request policy.
 	 */
 	private declarativeInterceptor(suffix: KNode, receiver: KNode, arg: KNode): string | null {
 		const value = this.argumentValue(arg);
@@ -11792,6 +11827,13 @@ class Emitter {
 	}
 
 	private refuse(node: KNode, kind: string): never {
+		// Under a measurement grant the construct becomes a call that throws
+		// naming the boundary, so the rest of the member translates and the
+		// bundle can be counted — and cannot pass for one that works.
+		if (granted(kind)) {
+			this.setAside.push({ kind, line: node.line, memberName: this.memberName });
+			return `__grantedBoundary(${JSON.stringify(kind)})` as never;
+		}
 		this.pending.push({ kind, line: node.line, memberName: this.memberName });
 		throw new Refused(kind);
 	}

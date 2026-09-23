@@ -2098,7 +2098,11 @@ describe('okhttp, over the host', () => {
 	// What the runtime hands an interceptor. Declared here because this file
 	// drives an *emitted module*, so nothing it calls has a type of its own.
 	interface Chain {
-		request(): { url: string };
+		request(): {
+			url: string;
+			header(name: string): string | null;
+			newBuilder(): { header(name: string, value: string): { build(): unknown } };
+		};
 		proceed(request: unknown): Promise<{
 			code: number;
 			body: { string(): string };
@@ -2192,12 +2196,49 @@ describe('okhttp, over the host', () => {
 		expect(response.body.string()).toBe('rewritten');
 	});
 
-	it('refuses a NETWORK interceptor, which has no per-hop connection to wrap', () => {
-		// The host follows redirects itself and reports only where they ended,
-		// so there is nothing here for one to sit between. Running it once over
-		// the final hop would leave an extension believing it had rewritten
-		// every hop when it had rewritten one.
-		expect(() => runtime.client.newBuilder().addNetworkInterceptor(() => {})).toThrow(
+	it('runs NETWORK interceptors after every application one, whatever order they were added', async () => {
+		// okhttp's ordering: the network chain is inside the application
+		// chain, so a network interceptor sees what the application ones sent.
+		// Once around the exchange rather than per redirect hop, because the
+		// host follows redirects itself — see the runtime's comment.
+		const { ctx } = context();
+		runtime.enter(ctx);
+		const order: string[] = [];
+		const seen: (string | null)[] = [];
+		const client = runtime.client
+			.newBuilder()
+			.addNetworkInterceptor(function (chain: Chain) {
+				order.push('network');
+				seen.push(chain.request().header('X-App'));
+				return chain.proceed(chain.request());
+			})
+			.addInterceptor(function (chain: Chain) {
+				order.push('application');
+				return chain.proceed(chain.request().newBuilder().header('X-App', 'set').build());
+			})
+			.build();
+
+		await client.newCall(runtime.globals.GET('https://example.invalid/a')).execute();
+
+		expect(order).toEqual(['application', 'network']);
+		expect(seen).toEqual(['set']);
+		expect(client.networkInterceptors.length).toBe(1);
+		// A builder made from it keeps the two chains apart, so an application
+		// interceptor added later still runs before the network one.
+		const later = client
+			.newBuilder()
+			.addInterceptor(function (chain: Chain) {
+				order.push('later');
+				return chain.proceed(chain.request());
+			})
+			.build();
+		order.length = 0;
+		await later.newCall(runtime.globals.GET('https://example.invalid/b')).execute();
+		expect(order).toEqual(['application', 'later', 'network']);
+	});
+
+	it('refuses something installed as an interceptor that has no intercept', () => {
+		expect(() => runtime.client.newBuilder().addNetworkInterceptor({})).toThrow(
 			/network interceptor/
 		);
 		// A timeout is a no-op, not a refusal: extensions set them idly.
@@ -4287,12 +4328,6 @@ describe('followRedirects(false), which is an answer and not a detour', () => {
 		// The module-scope client was never mutated by any of that.
 		await runtime.client.newCall(runtime.globals.GET(REDIRECT)).execute();
 		expect('follow' in requests[2]).toBe(false);
-	});
-
-	it('still refuses a network interceptor, which has no per-hop connection', () => {
-		expect(() => runtime.client.newBuilder().addNetworkInterceptor(() => {})).toThrow(
-			/network interceptor/
-		);
 	});
 });
 

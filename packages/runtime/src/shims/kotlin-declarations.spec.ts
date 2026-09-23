@@ -2679,3 +2679,21 @@ describe('an Iterable delegation followed by a class body', () => {
 		expect(demo.counted(chapter)).toBe(2);
 	});
 });
+
+describe('an annotation on an expression', () => {
+	it('reads as the value it annotates, however many are stacked', async () => {
+		// The grammar hangs `@Suppress(…)` over the expression as a prefix
+		// operator; it was refused as "a prefix `annotation`".
+		const d = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    fun length(x: String): Int = @Suppress("DEPRECATION") x.length',
+				'    fun both(x: String): String = @Suppress("A") @Suppress("B") x.uppercase()',
+				'}'
+			)
+		);
+		expect(d.length('four')).toBe(4);
+		expect(d.both('ab')).toBe('AB');
+	});
+});

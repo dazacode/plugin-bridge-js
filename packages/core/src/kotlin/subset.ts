@@ -333,16 +333,15 @@ const NAMED_OBSTACLES: readonly {
 	// `Interceptor` was here, refused by name. It is not refused any more: an
 	// okhttp *application* interceptor wraps one call, and `__proceed` in the
 	// runtime runs the chain inside the sandbox with the same reach the plugin
-	// already had.
+	// already had. `addNetworkInterceptor` followed it: the runtime runs one
+	// after every application interceptor, once around the exchange rather
+	// than once per redirect hop, and says where that differs.
 	//
-	// A **network** interceptor is a different hook and is still refused. It
-	// sits between the client and each individual hop of a redirect chain; the
-	// host follows redirects itself and reports only where they ended, so there
-	// are no per-hop connections here for one to wrap. Refused at the line that
-	// installs it rather than at the runtime, because it can never run: a
-	// conversion that succeeds and then throws on the first request is the
-	// outcome this file exists to avoid.
-	{ pattern: /\baddNetworkInterceptor\b/, name: 'an okhttp network interceptor' },
+	// What neither reaches is a request the plugin does not make. Page images
+	// and stream segments are fetched by the host (`ABI.md` §8.3, §4), so an
+	// interceptor written to rewrite *those* is installed and never called.
+	// That is a gap in what the host lends, not in the translation, and it is
+	// counted rather than guessed at: `docs/measurements.md`.
 	// Narrowed rather than deleted when `ctx.crypto` arrived. What is left is
 	// the part of javax.crypto that still has no honest answer:
 	//
@@ -1284,6 +1283,7 @@ export const BUILDER_LAMBDA_METHODS: ReadonlySet<string> = new Set([
  */
 export const ARGUMENT_LAMBDA_METHODS: ReadonlySet<string> = new Set([
 	'addInterceptor',
+	'addNetworkInterceptor',
 	// keiyoushi's `addCookie { listOf("k" to v) }`: the lambda is the cookies,
 	// asked for at each request so a preference can change them.
 	'addCookie',
@@ -1675,6 +1675,9 @@ export const HOST_METHODS: ReadonlySet<string> = new Set([
 
 	// http
 	'post',
+	// `Request.Builder().method("PUT", body)`, the spelling for a verb with no
+	// method of its own, and how an interceptor rebuilds a request unchanged.
+	'method',
 	'newCall',
 	'execute',
 	// Reaches the property branch below, which drops the parentheses.
@@ -1749,11 +1752,12 @@ export const HOST_METHODS: ReadonlySet<string> = new Set([
 	'headers',
 	'header',
 	'request',
-	// `client.newBuilder().addInterceptor(…)`, the one line that installs one.
-	// The network variant is here too so that it reaches the runtime, which
-	// refuses it by name with a sentence about redirects — a refusal a reader
-	// can act on, rather than one about the word `Interceptor` appearing.
+	// `client.newBuilder().addInterceptor(…)`, the one line that installs one,
+	// and its network twin, which the runtime runs after every application
+	// interceptor once around the exchange (see `addNetworkInterceptor` in the
+	// runtime for the one way that differs from a per-hop run).
 	'addInterceptor',
+	'addNetworkInterceptor',
 	// The okhttp interceptor chain: `chain.request()` reads what it was handed
 	// and `chain.proceed(request)` runs the rest. `intercept` is the member an
 	// extension's own `Interceptor` class declares, called by name from the
@@ -2370,6 +2374,9 @@ export const GLOBAL_NAMES: ReadonlySet<string> = new Set([
 	'Protocol',
 	'Unpacker',
 	'JsUnpacker',
+	// `lib/synchrony`'s deobfuscator, answered by the script the bundle embeds
+	// from the extension's own repository (`shims/synchrony.ts`).
+	'SynchronyEngine',
 	'Unbaser',
 
 	// The boxed numeric limits. `Float.MAX_VALUE` is how this ecosystem says

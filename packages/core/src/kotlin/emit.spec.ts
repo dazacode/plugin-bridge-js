@@ -3827,19 +3827,6 @@ describe('refusing by name', () => {
 		['a dependency container', inClass('    val app = Injekt.get<Application>()'), 'Injekt.get'],
 		['a WebView', inClass('    fun solve() = WebView(context).loadUrl(baseUrl)'), 'WebView'],
 		[
-			// The interceptor hook that has nothing here to hook into. An
-			// *application* interceptor wraps one call and runs; a network one
-			// sits between the client and each redirect hop, and the host follows
-			// redirects itself.
-			'an okhttp network interceptor',
-			inClass(
-				'    val tapped = client.newBuilder()',
-				'        .addNetworkInterceptor { chain -> chain.proceed(chain.request()) }',
-				'        .build()'
-			),
-			'an okhttp network interceptor'
-		],
-		[
 			'a key derivation',
 			inClass('    fun key() = KeyGenerator.getInstance("AES").generateKey()'),
 			'javax.crypto'
@@ -5213,8 +5200,7 @@ describe("okio's source, which is only ever the same body under another type", (
 describe("keiyoushi's addCookie block on an implicit builder", () => {
 	it('passes the block to the builder `configureClient` receives', () => {
 		// The written-receiver form already did this; the implicit one refused
-		// the block. The runtime half is in mihon-conversion.spec.ts. An
-		// interceptor block on the same path stays refused.
+		// the block. The runtime half is in mihon-conversion.spec.ts.
 		const emission = translate(
 			inClass(
 				'    override fun OkHttpClient.Builder.configureClient() = addCookie { listOf("age" to "18") }'
@@ -5222,13 +5208,24 @@ describe("keiyoushi's addCookie block on an implicit builder", () => {
 		);
 		expect(emission.refusals).toEqual([]);
 		expect(emission.js).toContain('return __recv.addCookie((it) => {');
-		expect(
-			refusalNames(
-				inClass(
-					'    override fun OkHttpClient.Builder.configureClient() = addInterceptor { it.proceed(it.request()) }'
-				)
+	});
+
+	it('passes an interceptor block the same way, without making the installer async', () => {
+		// Refused until the application and network chains both ran; the
+		// written-receiver form had translated for some time. The block
+		// proceeds, so it is async — the member that installs it is not.
+		const emission = translate(
+			inClass(
+				'    override fun OkHttpClient.Builder.configureClient() = addInterceptor { it.proceed(it.request()) }',
+				'    override val client = network.client.newBuilder().apply {',
+				'        addNetworkInterceptor { chain -> chain.proceed(chain.request()) }',
+				'    }.build()'
 			)
-		).toContain('a lambda passed to `addInterceptor`');
+		);
+		expect(emission.refusals).toEqual([]);
+		expect(emission.js).toContain('return __recv.addInterceptor(async (it) => {');
+		expect(emission.js).toContain('.addNetworkInterceptor(async (chain) => {');
+		expect(emission.js).not.toContain('await __recv.addInterceptor');
 	});
 });
 
