@@ -8677,6 +8677,20 @@ class Emitter {
 			// than here, where a sentence can be written about it.
 			this.refuse(suffix, `\`.${name}()\``);
 		}
+		// `builder.tag(SearchParams::class.java, params)` and
+		// `response.request.tag(SearchParams::class.java)` — okhttp's per-request
+		// label, keyed by a Class. The runtime keeps tags already, keyed by
+		// whatever the key's value is; `::class` is refused everywhere else as
+		// reflection, and a class here is only ever compared with itself. So the
+		// class becomes its own name, the same string at the set and the read,
+		// which is the one property of a Class a tag key uses.
+		if (name === 'tag' && lambda === null && (args.length === 1 || args.length === 2)) {
+			const key = classTagKey(this.argumentValue(args[0]));
+			if (key !== null) {
+				const rest = args.slice(1).map((arg) => this.expr(this.argumentValue(arg)));
+				return `${receiverText}${safe ? '?.' : '.'}tag(${[JSON.stringify(`class:${key}`), ...rest].join(', ')})`;
+			}
+		}
 		const argumentLambda = ARGUMENT_LAMBDA_METHODS.has(name);
 		const builderLambda = lambda !== null && (BUILDER_LAMBDA_METHODS.has(name) || argumentLambda);
 		const trailing =
@@ -12722,6 +12736,15 @@ function declaredTypeName(children: readonly KNode[]): string | null {
 	if (type === undefined) return null;
 	const parts = kids(type);
 	return parts.length === 1 && parts[0].type === 'type_identifier' ? parts[0].text : null;
+}
+
+/**
+ * `X::class.java`, `X::class.javaObjectType` or `X::class`, as the class's name
+ * — or null for anything else. See the `tag` call in `methodCall`.
+ */
+function classTagKey(node: KNode): string | null {
+	const match = /^([A-Z]\w*)::class(?:\.java(?:ObjectType)?)?$/.exec(node.text.replace(/\s+/g, ''));
+	return match === null ? null : match[1];
 }
 
 /**

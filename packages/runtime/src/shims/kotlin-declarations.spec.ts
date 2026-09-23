@@ -1955,3 +1955,28 @@ describe('java.math.BigDecimal', () => {
 		expect(() => demo.raw('7', '2')).toThrow(/arithmetic operator on a BigDecimal/);
 	});
 });
+
+describe('a request tag keyed by a class', () => {
+	it('reads back what was set under the same class, and nothing under another', async () => {
+		// `.tag(SearchParams::class.java, params)` in the request builder and
+		// `response.request.tag(SearchParams::class.java)` in the parser — how a
+		// source carries its filter state across without an instance field.
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class SearchParams(val query: String = "")',
+				'class Other(val x: Int = 0)',
+				'class Demo {',
+				'    fun build(q: String): Request = GET("https://example.invalid/s").newBuilder()',
+				'        .tag(SearchParams::class.java, SearchParams(q))',
+				'        .build()',
+				'    fun query(r: Request): String = r.tag(SearchParams::class.java)?.query ?: "none"',
+				'    fun other(r: Request): String = if (r.tag(Other::class.java) == null) "absent" else "present"',
+				'}'
+			)
+		);
+		const request = demo.build('one');
+		expect(demo.query(request)).toBe('one');
+		expect(demo.other(request)).toBe('absent');
+	});
+});
