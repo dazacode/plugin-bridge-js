@@ -1377,6 +1377,37 @@ class Emitter {
 	private readonly reifiedFunctions = new Map<string, readonly string[]>();
 	/** The reified parameters in scope, bound to the arguments carrying them. */
 	private reifiedTypes: ReadonlyMap<string, string> | null = null;
+	/**
+	 * What a reified function's type parameter is *read off*, when a call site
+	 * names no type argument: its declared return type, or its receiver.
+	 *
+	 * `inline fun <reified T> Document.extractAstroProp(key): T` is called as
+	 * `val data: MangaDto = doc.extractAstroProp("manga")` — Kotlin infers `T`
+	 * from the type the value is going to, and `inline fun <reified T : Any>
+	 * T.toJsonRequestBody()` infers it from the value it is called on. Only a
+	 * return type or receiver that *is* the parameter, written bare, is kept:
+	 * `List<T>` would need unifying, and that is a type checker.
+	 */
+	private readonly reifiedFrom = new Map<string, { returns: boolean; receiver: boolean }>();
+	/**
+	 * The type a call's value is going to, where the source writes it down.
+	 *
+	 * `val list: List<MangaDto> = response.parseAs()` names the shape once, on
+	 * the left, and Kotlin carries it into the call as its type argument. This
+	 * is that inference and nothing more general: the positions a declared type
+	 * reaches a value *by being written there* — a typed `val`, a function's
+	 * declared return type (its expression body, or a `return` in its block
+	 * body), an `as`, an assignment to a typed local, and an argument to a
+	 * function this file declares. Each is followed through the constructs that
+	 * hand a value on unchanged — parentheses, `!!`, both sides of `?:`, each
+	 * branch of an `if`/`when`/`try` — and stops everywhere else.
+	 *
+	 * Keyed by line, kind and text rather than by node, because `ast.ts` wraps
+	 * a node afresh on each access. Two positions with the same key and
+	 * different types record `null`, which the reader treats as unknown and
+	 * refuses — a guessed shape drops fields without saying so.
+	 */
+	private readonly expectedTypes = new Map<string, string | null>();
 	/** The receiver parameter of the extension function being emitted. */
 	private receiverParam: string | null = null;
 	private classMembers = new Set<string>();
@@ -1803,6 +1834,7 @@ class Emitter {
 		this.registerExtensions(kids(root), 'module');
 		this.registerTypes(kids(root), true);
 		this.registerSignatures(kids(root));
+		this.registerExpectedTypes(root);
 
 		const top = kids(root);
 		for (const [index, child] of top.entries()) {
@@ -3524,6 +3556,229 @@ class Emitter {
 		}
 	}
 
+	/* ── expected types ─────────────────────────────────────────────────── */
+
+	/** See `expectedTypes`. One walk over the file, before anything is emitted. */
+	private registerExpectedTypes(root: KNode): void {
+		// Parameter types of the functions and classes this file declares, by
+		// name — dropped the moment two declarations disagree, because an
+		// argument to the wrong overload would be given the wrong shape.
+		const parameterTypes = new Map<string, (string | null)[] | null>();
+		const note = (name: string | null, types: (string | null)[] | null): void => {
+			if (name === null || types === null) return;
+			const known = parameterTypes.get(name);
+			if (known === undefined) parameterTypes.set(name, types);
+			else if (known === null || known.join('|') !== types.join('|')) {
+				parameterTypes.set(name, null);
+			}
+		};
+		for (const node of walk(root)) {
+			if (node.type === 'function_declaration') {
+				note(this.nameOf(node), parameterTypesOf(kids(node).find(isValueParameters)));
+				const name = this.nameOf(node);
+				const reified = reifiedParams(node);
+				if (name !== null && reified.length === 1) {
+					const [only] = reified;
+					this.reifiedFrom.set(name, {
+						returns: returnTypeText(node) === only,
+						receiver: receiverOf(node) === only && !/[<?]/.test(receiverText(node) ?? '')
+					});
+				}
+			} else if (node.type === 'class_declaration') {
+				const constructor = kids(node).find((child) => child.type === 'primary_constructor');
+				const parameters = kids(constructor).find((child) => child.type === 'class_parameters');
+				if (parameters !== undefined) note(this.nameOf(node), parameterTypesOf(parameters));
+			}
+		}
+
+		for (const node of walk(root)) {
+			switch (node.type) {
+				case 'property_declaration': {
+					const declaration = kids(node).find((child) => child.type === 'variable_declaration');
+					const type = typeText(kids(declaration).find((child) => child.type.endsWith('type')));
+					if (type === null) break;
+					const delegate = kids(node).find((child) => child.type === 'property_delegate');
+					if (delegate !== undefined) {
+						// `val covers: Map<…> by lazy { … .parseAs() }` — the block's
+						// last value is the property's value.
+						const lazy = lazyBlock(delegate);
+						if (lazy !== null) this.expectLast(lazy, type);
+						break;
+					}
+					const getter = kids(node).find((child) => child.type === 'getter');
+					if (getter !== undefined) {
+						this.expectBody(
+							kids(getter).find((child) => child.type === 'function_body'),
+							type
+						);
+						break;
+					}
+					this.expect(
+						kids(node).find((child) => !PROPERTY_PARTS.has(child.type)),
+						type
+					);
+					break;
+				}
+				case 'function_declaration':
+					this.expectBody(
+						kids(node).find((child) => child.type === 'function_body'),
+						returnTypeText(node)
+					);
+					break;
+				case 'as_expression': {
+					const [value, type] = [kids(node)[0], kids(node)[kids(node).length - 1]];
+					if (value !== type) this.expect(value, typeText(type));
+					break;
+				}
+				case 'call_expression': {
+					const callee = kids(node)[0];
+					if (callee?.type !== 'simple_identifier') break;
+					const types = parameterTypes.get(callee.text);
+					if (types === undefined || types === null) break;
+					const suffix = kids(node)[1];
+					const values = kids(kids(suffix).find((child) => child.type === 'value_arguments'));
+					for (const [index, arg] of values.entries()) {
+						if (arg.type !== 'value_argument') continue;
+						if (arg.allChildren.some((child) => child.type === '=')) break;
+						const value = kids(arg)[kids(arg).length - 1];
+						this.expect(value, types[index] ?? null);
+					}
+					break;
+				}
+				case 'statements':
+					this.expectAssignments(node);
+					break;
+			}
+		}
+	}
+
+	/**
+	 * `x = …` where `x` is a local declared with a type in the same block.
+	 *
+	 * `lateinit var dto: ChapterListDto` then `dto = if (…) response.parseAs()
+	 * else …` is the shape. Only a plain name declared among the *same*
+	 * statements is followed; anything else answers nothing.
+	 */
+	private expectAssignments(statements: KNode): void {
+		const locals = new Map<string, string | null>();
+		for (const statement of kids(statements)) {
+			if (statement.type !== 'property_declaration') continue;
+			const declaration = kids(statement).find((child) => child.type === 'variable_declaration');
+			const name = kids(declaration).find((child) => child.type === 'simple_identifier')?.text;
+			const type = typeText(kids(declaration).find((child) => child.type.endsWith('type')));
+			if (name === undefined) continue;
+			locals.set(name, locals.has(name) ? null : type);
+		}
+		if (locals.size === 0) return;
+		for (const node of walk(statements)) {
+			if (node.type !== 'assignment') continue;
+			const operator = node.allChildren.find((child) => child.type.endsWith('='));
+			if (operator?.type !== '=') continue;
+			const target = kids(node)[0];
+			const name = target?.type === 'directly_assignable_expression' ? kids(target) : [];
+			if (name.length !== 1 || name[0].type !== 'simple_identifier') continue;
+			const type = locals.get(name[0].text);
+			if (type === undefined || type === null) continue;
+			this.expect(kids(node)[kids(node).length - 1], type);
+		}
+	}
+
+	/** A function body's value: its expression, or every unlabelled `return` in it. */
+	private expectBody(body: KNode | undefined, type: string | null): void {
+		if (body === undefined || type === null) return;
+		if (!body.allChildren.some((child) => child.type === '{')) {
+			this.expect(kids(body)[0], type);
+			return;
+		}
+		const visit = (node: KNode): void => {
+			for (const child of kids(node)) {
+				// A nested function, class or object returns to itself.
+				if (EXPECTATION_BARRIERS.has(child.type)) continue;
+				if (child.type === 'jump_expression' && /^return(?![@\w])/.test(child.text)) {
+					this.expect(kids(child)[0], type);
+				}
+				visit(child);
+			}
+		};
+		visit(body);
+	}
+
+	/** The last statement of a block-shaped node, which is its value. */
+	private expectLast(node: KNode, type: string): void {
+		const statements = kids(node).find((child) => child.type === 'statements');
+		const all = kids(statements);
+		this.expect(all[all.length - 1], type);
+	}
+
+	private expect(node: KNode | undefined, type: string | null): void {
+		if (node === undefined || type === null) return;
+		switch (node.type) {
+			case 'parenthesized_expression':
+				this.expect(kids(node)[0], type);
+				return;
+			case 'postfix_expression':
+				if (node.allChildren.some((child) => child.type === '!!')) this.expect(kids(node)[0], type);
+				return;
+			case 'elvis_expression':
+				this.expect(kids(node)[0], type);
+				this.expect(kids(node)[kids(node).length - 1], type);
+				return;
+			case 'control_structure_body':
+				if (node.allChildren.some((child) => child.type === '{')) this.expectLast(node, type);
+				else this.expect(kids(node)[0], type);
+				return;
+			case 'if_expression':
+				for (const child of kids(node)) {
+					if (child.type === 'control_structure_body') this.expect(child, type);
+				}
+				return;
+			case 'when_expression':
+				for (const entry of kids(node)) {
+					if (entry.type !== 'when_entry') continue;
+					this.expect(
+						kids(entry).find((child) => child.type === 'control_structure_body'),
+						type
+					);
+				}
+				return;
+			case 'try_expression':
+				this.expectLast(node, type);
+				for (const child of kids(node)) {
+					if (child.type === 'catch_block') this.expectLast(child, type);
+				}
+				return;
+			case 'call_expression': {
+				const key = expectationKey(node);
+				const known = this.expectedTypes.get(key);
+				this.expectedTypes.set(key, known === undefined || known === type ? type : null);
+				return;
+			}
+		}
+	}
+
+	/** The type a call's value is going to, if `registerExpectedTypes` found one. */
+	private expectedOf(node: KNode): string | null {
+		return this.expectedTypes.get(expectationKey(node)) ?? null;
+	}
+
+	/**
+	 * A type as a decoder is handed it: the text, or — inside `inline fun
+	 * <reified T>` — the argument carrying the type the call site named.
+	 *
+	 * `json.decodeFromString<T>(text)` in a reified helper used to hand the
+	 * runtime the *letter* `T`, which names nothing, so a helper called as
+	 * `parseAs<List<String>>()` decoded as "whatever the payload holds" and
+	 * lost the container. The carried argument is text when the call site
+	 * wrote a type the runtime reads by name and a class when it wrote one this
+	 * module declares; `typeText` answers the text of either.
+	 */
+	private decodeType(type: string): string {
+		const bare = type.replace(/\?$/, '');
+		const bound = this.reifiedTypes?.get(bare);
+		if (bound !== undefined) return `${this.helper('typeText')}(${bound})`;
+		return JSON.stringify(type);
+	}
+
 	/** The type annotation on a property declaration, if it carries one. */
 	private declaredType(node: KNode): string | null {
 		const declaration = kids(node).find((child) => child.type === 'variable_declaration');
@@ -5054,9 +5309,23 @@ class Emitter {
 	 * and the filter list the helper was reading would come back empty with
 	 * nothing anywhere saying so.
 	 */
-	private reifiedArguments(at: KNode, name: string, written: string | null): string[] {
+	private reifiedArguments(
+		at: KNode,
+		name: string,
+		typed: string | null,
+		expected: string | null = null,
+		receiverType: string | null = null
+	): string[] {
 		const reified = this.reifiedFunctions.get(name);
 		if (reified === undefined || reified.length === 0) return [];
+		// Kotlin infers an omitted argument; this follows it only where the
+		// parameter *is* the return type or the receiver type — see
+		// `reifiedFrom` — and the other side of it is written down.
+		const from = this.reifiedFrom.get(name);
+		const written =
+			typed ??
+			(from?.returns === true ? expected : null) ??
+			(from?.receiver === true ? receiverType : null);
 		if (written === null) {
 			this.refuse(at, `\`.${name}()\` with no type argument for its \`reified\` parameter`);
 		}
@@ -5395,11 +5664,12 @@ class Emitter {
 		if (letGuarded !== null) return this.hoistedGuard(node, letGuarded);
 
 		const { callee, args, lambda, labelled, typeArgument } = this.flatten(node);
+		const expected = typeArgument === null ? this.expectedOf(node) : null;
 		if (callee.type === 'navigation_expression') {
-			return this.methodCall(callee, args, lambda, labelled, typeArgument);
+			return this.methodCall(callee, args, lambda, labelled, typeArgument, expected);
 		}
 		if (callee.type === 'simple_identifier') {
-			return this.bareCall(callee, args, lambda, labelled, typeArgument);
+			return this.bareCall(callee, args, lambda, labelled, typeArgument, expected);
 		}
 		if (callee.type === 'callable_reference') {
 			if (lambda !== null) this.refuse(lambda, 'a lambda passed to a callable reference');
@@ -5476,7 +5746,8 @@ class Emitter {
 		args: KNode[],
 		lambda: KNode | null,
 		labelled: string | null,
-		typeArgument: string | null
+		typeArgument: string | null,
+		expected: string | null = null
 	): string {
 		const receiver = kids(callee)[0];
 		const suffix = kids(callee)[kids(callee).length - 1];
@@ -5562,16 +5833,22 @@ class Emitter {
 			// The shape being decoded is named in the type argument, not the
 			// arguments. Without one the runtime would have to guess a
 			// descriptor, and a guessed descriptor silently drops fields.
-			if (typeArgument === null) this.refuse(suffix, `\`.${name}()\` with no type argument`);
+			//
+			// Kotlin infers an omitted one from where the value is going —
+			// `val list: List<Foo> = response.parseAs()` — and so does this,
+			// through `expectedTypes`, which only answers where the type is
+			// written down. Nowhere to read it from is still a refusal.
+			const shape = typeArgument ?? expected;
+			if (shape === null) this.refuse(suffix, `\`.${name}()\` with no type argument`);
 			if (lambda !== null) {
 				// `parseAs<T> { it.substringAfter("…") }` — the block runs BEFORE
 				// the parse, and what it digs out is a JSON document embedded in
 				// an HTML attribute. Dropping it would hand the parser a page.
 				const withBlock = this.callArguments(name, args, lambda, labelled, false);
-				return `${this.helper('decodeWith')}(${[this.expr(receiver), JSON.stringify(typeArgument), ...withBlock].join(', ')})`;
+				return `${this.helper('decodeWith')}(${[this.expr(receiver), this.decodeType(shape), ...withBlock].join(', ')})`;
 			}
 			const tail = this.plainArguments(name, args);
-			return `${this.helper('decode')}(${[this.expr(receiver), JSON.stringify(typeArgument), ...tail].join(', ')})`;
+			return `${this.helper('decode')}(${[this.expr(receiver), this.decodeType(shape), ...tail].join(', ')})`;
 		}
 
 		if (RESULT_MEMBERS.has(name) && !safe && runCatchingOf(receiver) !== null) {
@@ -5808,7 +6085,13 @@ class Emitter {
 					: owner === undefined
 						? this.safe(name)
 						: `${this.safe(owner)}.${name}`;
-			const types = this.reifiedArguments(suffix, name, typeArgument);
+			const types = this.reifiedArguments(
+				suffix,
+				name,
+				typeArgument,
+				expected,
+				this.receiverTypeOf(receiver)
+			);
 			const tail = this.callArguments(name, args, lambda, labelled, false);
 			const call = `${callee}(${[...types, receiverText, ...tail].join(', ')})`;
 			if (!safe) {
@@ -5894,7 +6177,8 @@ class Emitter {
 		args: KNode[],
 		lambda: KNode | null,
 		labelled: string | null,
-		typeArgument: string | null = null
+		typeArgument: string | null = null,
+		expected: string | null = null
 	): string {
 		const name = callee.text;
 
@@ -6085,7 +6369,7 @@ class Emitter {
 					: owner === undefined
 						? this.safe(name)
 						: `${this.safe(owner)}.${name}`;
-			const types = this.reifiedArguments(callee, name, typeArgument);
+			const types = this.reifiedArguments(callee, name, typeArgument, expected);
 			const call = `${target}(${[...types, implicit, ...tail].join(', ')})`;
 			return this.suspendMembers.has(name) ? this.awaited(call) : call;
 		}
@@ -8650,6 +8934,84 @@ function isPlainClass(node: KNode): boolean {
 	if (kinds.has('interface') || kinds.has('enum_class_body')) return false;
 	const modifiers = kids(node).find((child) => child.type === 'modifiers');
 	return !kids(modifiers).some((modifier) => modifier.text === 'data');
+}
+
+/**
+ * A type as written, whitespace dropped and generics kept — `List<Foo>?`.
+ *
+ * `typeName` below strips the arguments, which is right for a name and wrong
+ * for a decoder: `List<Foo>` and `Foo` want different containers.
+ */
+function typeText(node: KNode | undefined): string | null {
+	if (node === undefined || !node.type.endsWith('type')) return null;
+	// A function type is not a shape anything decodes into.
+	if (node.type === 'function_type') return null;
+	return node.text.replace(/\s+/g, '');
+}
+
+/** A function's declared return type, written after its parameter list. */
+function returnTypeText(node: KNode): string | null {
+	let seenParameters = false;
+	for (const child of kids(node)) {
+		if (child.type === 'function_value_parameters') seenParameters = true;
+		else if (seenParameters && child.type.endsWith('type')) return typeText(child);
+		else if (child.type === 'function_body') return null;
+	}
+	return null;
+}
+
+/** An extension function's receiver type as written, generics kept. */
+function receiverText(node: KNode): string | null {
+	for (const child of kids(node)) {
+		if (child.type === 'simple_identifier') return null;
+		if (child.type.endsWith('type')) return typeText(child);
+	}
+	return null;
+}
+
+function isValueParameters(node: KNode): boolean {
+	return node.type === 'function_value_parameters';
+}
+
+/**
+ * The declared type of each value parameter, in order, or null when the list
+ * has a `vararg` — past one, a position no longer names a parameter.
+ */
+function parameterTypesOf(list: KNode | undefined): (string | null)[] | null {
+	if (list === undefined) return null;
+	const out: (string | null)[] = [];
+	for (const child of kids(list)) {
+		if (child.type === 'parameter_modifiers' && /\bvararg\b/.test(child.text)) return null;
+		if (child.type === 'class_parameter' && /\bvararg\b/.test(child.text)) return null;
+		if (child.type !== 'parameter' && child.type !== 'class_parameter') continue;
+		out.push(typeText(kids(child).find((part) => part.type.endsWith('type'))));
+	}
+	return out;
+}
+
+/** The block of `by lazy { … }`, or null for any other delegate. */
+function lazyBlock(delegate: KNode): KNode | null {
+	const call = kids(delegate)[0];
+	if (call?.type !== 'call_expression' || kids(call)[0]?.text !== 'lazy') return null;
+	const suffix = kids(call)[1];
+	const annotated = kids(suffix).find((child) => child.type === 'annotated_lambda');
+	return kids(annotated).find((child) => child.type === 'lambda_literal') ?? null;
+}
+
+/** Where a `return` stops belonging to the function around it. */
+const EXPECTATION_BARRIERS: ReadonlySet<string> = new Set([
+	'function_declaration',
+	'anonymous_function',
+	'class_declaration',
+	'object_declaration',
+	'object_literal',
+	'getter',
+	'setter'
+]);
+
+/** See `Emitter.expectedTypes` for why this is not the node itself. */
+function expectationKey(node: KNode): string {
+	return `${node.line}:${node.type}:${node.text}`;
 }
 
 /** The name a type node carries, without its arguments or its nullability. */

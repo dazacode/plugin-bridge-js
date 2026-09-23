@@ -533,6 +533,9 @@ export const RUNTIME_HELPERS = [
 	'listOfSize',
 	'elementsOf',
 	'decodeWith',
+	/* A reified type argument, as the text a decoder reads — see
+	   `Emitter.decodeType`. */
+	'typeText',
 	'shape',
 	'plusAssign',
 	'minusAssign',

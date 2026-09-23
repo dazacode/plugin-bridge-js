@@ -5371,6 +5371,23 @@ var __k = {
   },
 
   /**
+   * A reified type argument, as the text '__k.decode' reads a container from.
+   *
+   * 'inline fun <reified T> Response.parseAs(): T = json.decodeFromString(…)'
+   * carries T as an argument, and what arrives is whatever the call site
+   * wrote: the text 'List<Item>' for a type the runtime reads by name, or the
+   * class itself for one the module declares. A class is a record shape, and
+   * records are matched by their fields after the parse (see 'shape'), so its
+   * text is 'Any'. Not the empty string: a string receiver arrives as two
+   * strings, and decode tells payload from type by which one looks like a
+   * type. Handing decode the class itself would have it CALLED as a
+   * descriptor thunk, which an ES6 class refuses.
+   */
+  typeText: function (type) {
+    return typeof type === 'string' ? type : 'Any';
+  },
+
+  /**
    * keiyoushi's SimpleDateFormat.tryParse, which answers 0 and never throws.
    *
    * 0 is the epoch, and it is what this ecosystem stores for 'no date' — the
