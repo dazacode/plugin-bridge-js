@@ -132,6 +132,28 @@ describe('a Kotlin Map, as a JS Map and as a JsonObject', () => {
 	});
 });
 
+describe('a decode on the implicit receiver', () => {
+	it('decodes the receiver, not the source', async () => {
+		// Madara's `?.runCatching { parseAs<JsonObject>() }` was
+		// `__self.parseAs()` — the extension object, no type — which threw,
+		// became null, and silently stopped every view-count ping.
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    fun id(text: String?): String {',
+				'        val data = text?.runCatching { parseAs<JsonObject>() }?.getOrNull() ?: return "none"',
+				'        return data["manga_id"]?.jsonPrimitive?.content ?: "no id"',
+				'    }',
+				'}'
+			)
+		);
+		expect(demo.id('{"manga_id":"42"}')).toBe('42');
+		expect(demo.id('not json')).toBe('none');
+		expect(demo.id(null)).toBe('none');
+	});
+});
+
 describe('a reference to a member the template declares', () => {
 	it('binds it to the inherited value, not to the argument', async () => {
 		// DooPlay's `protected open val episodeNumberRegex`, read by a subclass

@@ -1403,6 +1403,11 @@ class Emitter {
 	 * a receiver and silently drop it.
 	 */
 	private readonly declaredObjects = new Set<string>();
+	/**
+	 * Top-level functions and values this file imports from keiyoushi's shared
+	 * `core/`, by name, with the package. See the last branch of `bareCall`.
+	 */
+	private readonly keiyoushiImports = new Map<string, string>();
 	/** Member extension functions this file declares, as `Owner.name`. */
 	private readonly declaredExtensions = new Set<string>();
 	private readonly declaredModuleExtensions = new Set<string>();
@@ -4528,6 +4533,9 @@ class Emitter {
 			const path = (kids(header)[0]?.text ?? '').replace(/\s+/g, '').split('.');
 			if (path.length < 2) continue;
 			const member = path[path.length - 1];
+			if (path[0] === 'keiyoushi' && /^[a-z]/.test(member)) {
+				this.keiyoushiImports.set(member, path.slice(0, -1).join('.'));
+			}
 			const owner = path[path.length - 2];
 			// A nested type imported this way is a type, and already resolves.
 			if (!this.declaredObjects.has(owner) || this.declaredTypes.has(member)) continue;
@@ -8169,6 +8177,23 @@ class Emitter {
 		) {
 			return this.rateLimitCall(callee, implicit, name, args, lambda);
 		}
+		// `x?.runCatching { parseAs<JsonObject>() }` — a decode whose receiver
+		// is the implicit one. Read as a member of the source it was
+		// `__self.parseAs()`: no type, the extension object as its payload, a
+		// throw that `runCatching` turned into null — and every Madara
+		// extension's view-count ping silently never went out. Decoded exactly
+		// as the written-receiver form `x.parseAs<T>()` is.
+		if (
+			implicit !== null &&
+			DECODING_METHODS.has(name) &&
+			!this.isSourceMember(name) &&
+			!this.extensionFunctions.has(name) &&
+			lambda === null
+		) {
+			const shape = typeArgument ?? expected;
+			if (shape === null) this.refuse(callee, `\`${name}()\` with no type argument`);
+			return `${this.helper('decode')}(${[implicit, this.decodeType(shape), ...tail].join(', ')})`;
+		}
 		if (implicit !== null && !this.isSourceMember(name)) {
 			const helper = EXTENSION_METHODS.get(name);
 			if (helper !== undefined) {
@@ -8234,6 +8259,28 @@ class Emitter {
 			// so a `headersBuilder()` in a property initialiser stays synchronous.
 			const call = `__super.${name}(${tail.join(', ')})`;
 			return SUPER_SUSPEND_MEMBERS.has(name) ? this.awaited(call) : call;
+		}
+
+		// A name nothing here declares is taken to be the extension's base
+		// class's, and called on the source. That is wrong for a name the file
+		// *imports*: ViTruyen's `import keiyoushi.utils.getLocalStorage` is a
+		// top-level function in core's `WebView.kt` — a WebView boundary — which
+		// the conversion never read, so it came out as
+		// `this.getLocalStorage(…)`, converted as complete, loaded, and failed on
+		// the first chapter with nothing refused. Refused by name instead.
+		// Only a name nothing in this build answers: `parseAs` or `rateLimit`
+		// imported from the same package is the runtime's, and reaches here
+		// through a receiver the paths above did not claim.
+		const imported = this.keiyoushiImports.get(name);
+		if (
+			imported !== undefined &&
+			!RUNTIME_KNOWN_CALLS.some((table) => table.has(name)) &&
+			!this.isSourceMember(name) &&
+			!this.declaredMethods.has(name) &&
+			!this.moduleNames.has(name) &&
+			!(this.ownerBase !== null && this.baseDeclares(this.ownerBase, name))
+		) {
+			this.refuse(callee, `\`${name}\` from \`${imported}\`, which this build did not read`);
 		}
 
 		// The source object, reached from wherever this call sits: inside a
@@ -10475,6 +10522,18 @@ function receiverSlots(node: KNode): ReceiverSlots | null {
  */
 const CONTEXTUAL = /@Contextual\b/;
 const CONTEXTUAL_FIELD = '@Contextual';
+
+/** Every table of call names the runtime answers. See the end of `bareCall`. */
+const RUNTIME_KNOWN_CALLS: readonly { has(name: string): boolean }[] = [
+	EXTENSION_METHODS,
+	DECODING_METHODS,
+	FREE_FUNCTIONS,
+	HOST_METHODS,
+	HOST_PROPERTY_METHODS,
+	SUPER_MEMBERS,
+	GLOBAL_NAMES,
+	BASE_SOURCE_MEMBERS
+];
 
 /** `@Serializable(X::class)` and `@Serializable(with = X::class)`, naming X. */
 const SERIALIZER_ANNOTATION = /@Serializable\s*\(\s*(?:with\s*=\s*)?([\w.]+)::class\s*\)/;

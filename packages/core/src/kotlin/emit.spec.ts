@@ -5339,6 +5339,24 @@ describe('file annotations, and a serializer on a type argument', () => {
 		expect(refusalNames(kt('val client: OkHttpClient = Injekt.get()'))).toEqual(['Injekt.get']);
 	});
 
+	it('refuses a call to a keiyoushi core function this build did not read', () => {
+		// ViTruyen's `getLocalStorage` (core's WebView.kt) came out as
+		// `this.getLocalStorage(…)`: complete, loaded, and broken on the first
+		// chapter. A name the runtime answers, imported the same way, is not.
+		expect(
+			refusalNames(
+				kt(
+					'import keiyoushi.utils.getLocalStorage',
+					'import keiyoushi.utils.parseAs',
+					'class Demo : HttpSource() {',
+					'    private suspend fun token(): String? = getLocalStorage(baseUrl, "auth_token")',
+					'    fun read(s: String) = s.runCatching { parseAs<List<String>>() }.getOrNull()',
+					'}'
+				)
+			)
+		).toEqual(['`getLocalStorage` from `keiyoushi.utils`, which this build did not read']);
+	});
+
 	it('refuses a transforming serializer whose base is not a default one', () => {
 		// "Decode the reshaped element as T" is only what kotlinx does when the
 		// base serializer is T's own. A hand-written base is its own decoder.
