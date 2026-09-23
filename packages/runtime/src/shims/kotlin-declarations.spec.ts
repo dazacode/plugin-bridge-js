@@ -838,11 +838,130 @@ describe('a decode that names a @Serializable class', () => {
 		expect(d.one()).toEqual({ a: 1 });
 	});
 
-	it('refuses to encode a record whose class runs a custom serializer', async () => {
-		// Encoding it as its decoded fields is not what the serializer writes.
+	it('refuses to encode a field a custom serializer writes, unless kotlinx would skip it', async () => {
+		// Encoding it as its decoded value is not what the serializer writes.
+		// At its default the property is left out before any serializer runs,
+		// so there is nothing to refuse — and `@JsonNames` is read-only: the
+		// name written is the property's own.
 		const d = await instantiate('Demo', demo, dtos);
-		const chapter = d.chapter('{"cap_id":7,"cap_nome":"n"}');
-		expect(() => d.encode(chapter)).toThrow(/custom serializer/);
+		const bare = d.chapter('{"cap_id":7,"cap_nome":"n"}');
+		expect(d.encode(bare)).toEqual({ cap_id: 7, name: 'n' });
+		const paged = d.chapter('{"cap_id":7,"cap_nome":"n","cap_paginas":["a.jpg"]}');
+		expect(() => d.encode(paged)).toThrow(/custom serializer/);
+	});
+});
+
+describe('an encode of a @Serializable class, the way kotlinx writes it', () => {
+	const source = kt(
+		'@Serializable',
+		'enum class Kind { @SerialName("m") MANGA, NOVEL }',
+		'@Serializable',
+		'data class Inner(@SerialName("v") val value: Int, val note: String? = null)',
+		'@Serializable',
+		'class Search(',
+		'    @SerialName("q") val query: String,',
+		'    val page: Int = 1,',
+		'    val size: Int = page * 10,',
+		'    val tag: String? = null,',
+		'    val cursor: String?,',
+		'    val kinds: List<Kind> = listOf(Kind.MANGA),',
+		'    val inner: Inner = Inner(1),',
+		'    @Transient val local: String = "never sent",',
+		'    @EncodeDefault val always: Boolean = true,',
+		') {',
+		'    val version: Int = 2',
+		'}',
+		'class Plain(val q: String)',
+		'class Demo {',
+		'    fun list(q: String): String = listOf(q, "b").toJsonRequestBody().text',
+		'    fun pair(): String = Pair("a", Kind.NOVEL).toJsonString()',
+		'    fun bare(): String = Search("x", cursor = null).toJsonString()',
+		'    fun full(): String = Search("x", 3, 30, "t", "c", listOf(Kind.NOVEL, Kind.MANGA), Inner(5, "n")).toJsonString()',
+		'    fun derived(): String = Search("x", page = 3, cursor = null).toJsonString()',
+		'    fun viaBody(): String = Search("y", 2, cursor = "z").toJsonRequestBody().text',
+		'    fun viaElement(): JsonElement = Search("w", cursor = null, inner = Inner(1, "set")).toJsonElement()',
+		'    fun plain(): Any = Plain("x").toJsonRequestBody()',
+		'}'
+	);
+
+	it('writes wire names and leaves out defaults and nulls, as the injected Json does', async () => {
+		const d = await instantiate('Demo', source);
+		// Every property at its default, and the one without a default null:
+		// kotlinx writes only the required name.
+		expect(JSON.parse(d.bare())).toEqual({ q: 'x', always: true });
+		// A default that reads an earlier parameter is compared with what it
+		// gives for *this* page: 3 * 10 is the default, so it is left out.
+		expect(JSON.parse(d.derived())).toEqual({ q: 'x', page: 3, always: true });
+		expect(JSON.parse(d.full())).toEqual({
+			q: 'x',
+			page: 3,
+			tag: 't',
+			cursor: 'c',
+			kinds: ['NOVEL', 'm'],
+			inner: { v: 5, note: 'n' },
+			always: true
+		});
+		expect(JSON.parse(d.viaBody())).toEqual({ q: 'y', page: 2, cursor: 'z', always: true });
+		// A data class default is compared structurally, as Kotlin's == does.
+		expect(d.viaElement()).toEqual({ q: 'w', inner: { v: 1, note: 'set' }, always: true });
+	});
+
+	it('writes lists, pairs and enums, and refuses a class it has no registration for', async () => {
+		const d = await instantiate('Demo', source);
+		expect(JSON.parse(d.list('a'))).toEqual(['a', 'b']);
+		expect(JSON.parse(d.pair())).toEqual({ first: 'a', second: 'NOVEL' });
+		expect(() => d.plain()).toThrow(/no @Serializable registration/);
+	});
+});
+
+describe('keiyoushi core’s GraphQL helpers', () => {
+	const source = kt(
+		'@Serializable',
+		'class Vars(@SerialName("p") val page: Int, val q: String? = null)',
+		'@Serializable',
+		'class Data(val items: List<Item>)',
+		'@Serializable',
+		'class Item(@SerialName("t") val title: String)',
+		'class Demo {',
+		'    fun typed(page: Int): String = graphQLPost("https://api.example.invalid/gql", Headers.Builder().build(), "query Op { x }", "Op", Vars(page)).body!!.text',
+		'    fun named(): String = graphQLPost(',
+		'        url = "https://api.example.invalid/gql",',
+		'        headers = Headers.Builder().build(),',
+		'        operationName = "Op",',
+		'        variables = buildJsonObject { put("id", 3) },',
+		'        extensions = persistedQueryExtension("abc"),',
+		'    ).body!!.text',
+		'    fun method(): String = graphQLPost("https://api.example.invalid/gql", Headers.Builder().build(), "q").method',
+		'    fun viaGet(): String = graphQLGet("https://api.example.invalid/gql", Headers.Builder().build(), operationName = "Op", variables = Vars(2, "x")).url.toString()',
+		'    fun read(text: String): List<String> = text.parseGraphQLAs<Data>().items.map { it.title }',
+		'}'
+	);
+
+	it('builds the request core builds, for typed and element variables alike', async () => {
+		const d = await instantiate('Demo', source);
+		expect(JSON.parse(d.typed(2))).toEqual({
+			operationName: 'Op',
+			query: 'query Op { x }',
+			variables: { p: 2 }
+		});
+		expect(JSON.parse(d.named())).toEqual({
+			operationName: 'Op',
+			variables: { id: 3 },
+			extensions: { persistedQuery: { version: 1, sha256Hash: 'abc' } }
+		});
+		expect(d.method()).toBe('POST');
+		expect(decodeURIComponent(d.viaGet())).toBe(
+			'https://api.example.invalid/gql?operationName=Op&variables={"p":2,"q":"x"}'
+		);
+	});
+
+	it('reads the envelope: data as its type, errors thrown, a missing data refused', async () => {
+		const d = await instantiate('Demo', source);
+		expect(d.read('{"data":{"items":[{"t":"One"}]}}')).toEqual(['One']);
+		expect(() => d.read('{"data":null,"errors":[{"message":"a"},{"message":"b"}]}')).toThrow(
+			'a\nb'
+		);
+		expect(() => d.read('{"errors":[]}')).toThrow(/missing the 'data' field/);
 	});
 });
 

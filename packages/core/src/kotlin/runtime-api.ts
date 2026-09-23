@@ -568,6 +568,14 @@ export const RUNTIME_HELPERS = [
 	'toRequestBody',
 	'toJsonBody',
 	'toJsonRequestBody',
+	/* keiyoushi core's GraphQL helpers (`utils/GraphQL.kt`): the builders, the
+	   builder extension and the envelope reader. */
+	'graphQLPost',
+	'graphQLBody',
+	'graphQLGet',
+	'appendGraphQLParams',
+	'persistedQueryExtension',
+	'parseGraphQLAs',
 	/* The response-side twin, which an interceptor hands to
 	   `response.newBuilder().body(…)` when it replaces what came back. */
 	'toResponseBody',

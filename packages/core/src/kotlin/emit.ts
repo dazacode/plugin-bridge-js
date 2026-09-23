@@ -3391,6 +3391,20 @@ class Emitter {
 			}
 			const listed = entries.map((entry) => `${owner}.${this.nameOf(entry) ?? ''}`);
 			lines.push(`${owner}.entries = Object.freeze([${listed.join(', ')}]);`);
+			// What kotlinx writes for an entry renamed by `@SerialName("m")`, for the
+			// encoder. Only the renamed ones; the rest are written as their names.
+			const renamed: Record<string, string> = {};
+			for (const entry of entries) {
+				const entryName = this.nameOf(entry);
+				const written = kids(entry).find((part) => part.type === 'modifiers')?.text ?? '';
+				const serial = /@SerialName\s*\(\s*"([^"]*)"/.exec(written);
+				if (entryName !== null && serial !== null) renamed[entryName] = serial[1];
+			}
+			if (Object.keys(renamed).length > 0) {
+				lines.push(
+					`Object.defineProperty(${owner}, "__kSerialNames", { value: ${JSON.stringify(renamed)} });`
+				);
+			}
 			lines.push(`${owner}.values = function () { return ${owner}.entries.slice(); };`);
 			lines.push(
 				`${owner}.valueOf = function (value) { for (const entry of ${owner}.entries) if (entry.name === value) return entry; throw new Error(${JSON.stringify(`No enum constant ${name}.`)} + value); };`
@@ -4806,7 +4820,8 @@ class Emitter {
 				typeOf(parameter),
 				parameter.allChildren.some((part) => part.type === '='),
 				CONTEXTUAL.test(written) ? CONTEXTUAL_FIELD : named(written),
-				/@Transient\b/.test(written)
+				/@Transient\b/.test(written),
+				encodeDefaultMode(written)
 			]);
 		}
 
@@ -4830,7 +4845,8 @@ class Emitter {
 				typeOf(kids(member).find((part) => part.type === 'variable_declaration')),
 				true,
 				CONTEXTUAL.test(written) ? CONTEXTUAL_FIELD : named(written),
-				false
+				false,
+				encodeDefaultMode(written)
 			]);
 		});
 
@@ -4863,7 +4879,10 @@ class Emitter {
 		const make = `(__a) => ${isData ? '' : 'new '}${this.safe(name)}(...__a)`;
 		const map = custom.length === 0 ? 'null' : `{ ${custom.join(', ')} }`;
 		return {
-			text: `${this.helper('serial')}(${JSON.stringify(name)}, ${make}, ${JSON.stringify(meta)}, ${map});`
+			// The class last, so an instance can be traced back to this — the
+			// encoder writes a record from the same registration the decoder
+			// builds one from.
+			text: `${this.helper('serial')}(${JSON.stringify(name)}, ${make}, ${JSON.stringify(meta)}, ${map}, ${this.safe(name)});`
 		};
 	}
 
@@ -8069,6 +8088,14 @@ class Emitter {
 			// written down. Nowhere to read it from is still a refusal.
 			const shape = typeArgument ?? expected;
 			if (shape === null) this.refuse(suffix, `\`.${name}()\` with no type argument`);
+			// keiyoushi core's `parseGraphQLAs<T>()`: the envelope's `data` decoded
+			// as T, its `errors` thrown — the runtime's reader, over the same type.
+			// Its one parameter is the Json, which the runtime already is.
+			if (name === 'parseGraphQLAs') {
+				if (lambda !== null) this.refuse(lambda, 'a block passed to `.parseGraphQLAs()`');
+				const json = this.plainArguments(name, args);
+				return `${this.helper('parseGraphQLAs')}(${[this.expr(receiver), this.decodeType(shape), ...json].join(', ')})`;
+			}
 			if (lambda !== null) {
 				// `parseAs<T> { it.substringAfter("…") }` — the block runs BEFORE
 				// the parse, and what it digs out is a JSON document embedded in
@@ -8946,7 +8973,8 @@ class Emitter {
 		) {
 			const shape = typeArgument ?? expected;
 			if (shape === null) this.refuse(callee, `\`${name}()\` with no type argument`);
-			return `${this.helper('decode')}(${[implicit, this.decodeType(shape), ...tail].join(', ')})`;
+			const reader = name === 'parseGraphQLAs' ? 'parseGraphQLAs' : 'decode';
+			return `${this.helper(reader)}(${[implicit, this.decodeType(shape), ...tail].join(', ')})`;
 		}
 		// A method the class's translated *base* declares, called bare from an
 		// extension function whose receiver does not have it —
@@ -12396,6 +12424,17 @@ function namesField(accessor: KNode): boolean {
 		if (found.type === 'interpolated_identifier' && found.text === 'field') return true;
 	}
 	return false;
+}
+
+/**
+ * A property's `@EncodeDefault`, for the encoder: `'ALWAYS'` (the bare
+ * annotation's mode) writes it even when it holds its default, `'NEVER'` leaves
+ * it out even under `encodeDefaults = true`, and null is the Json's own rule.
+ */
+function encodeDefaultMode(written: string): 'ALWAYS' | 'NEVER' | null {
+	const found = /@EncodeDefault\b(?:\s*\(\s*(?:[\w.]*\.)?(ALWAYS|NEVER)\s*\))?/.exec(written);
+	if (found === null) return null;
+	return found[1] === 'NEVER' ? 'NEVER' : 'ALWAYS';
 }
 
 function accessorOf(

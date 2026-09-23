@@ -1038,6 +1038,9 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 	['toRequestBody', 'toRequestBody'],
 	['toJsonBody', 'toJsonBody'],
 	['toJsonRequestBody', 'toJsonRequestBody'],
+	// keiyoushi core's `HttpUrl.Builder.appendGraphQLParams(…)` — see the
+	// GraphQL helpers in the runtime, and `FREE_FUNCTIONS` for the rest.
+	['appendGraphQLParams', 'appendGraphQLParams'],
 	// …and the body an interceptor puts on a response it rewrote. okio's
 	// `asResponseBody` is deliberately absent: it reads a `Buffer`, and there
 	// are no okio streams here to read.
@@ -1192,7 +1195,10 @@ export const DECODING_METHODS: ReadonlySet<string> = new Set([
 	// is already parsed rather than text. `decode` reads a non-string payload
 	// as the parsed value, so only the name was missing.
 	'decodeFromJsonElement',
-	'parseAs'
+	'parseAs',
+	// keiyoushi core's `parseGraphQLAs<T>()`, which decodes the envelope's
+	// `data` as T — the same type argument rule, and its own runtime reader.
+	'parseGraphQLAs'
 ]);
 
 /**
@@ -1941,6 +1947,15 @@ export const FREE_FUNCTIONS: ReadonlyMap<string, string> = new Map([
 
 	// `delay(300.milliseconds)` between retries. It suspends, so it is awaited.
 	['delay', 'delay'],
+	// keiyoushi core's GraphQL request builders (`utils/GraphQL.kt`), which
+	// the host supplies: each is overloaded on the type of `variables`, and
+	// one helper answers both overloads exactly — see the runtime. Their
+	// parameter lists are in `KNOWN_SIGNATURES`, because they are nearly
+	// always called with named arguments.
+	['graphQLPost', 'graphQLPost'],
+	['graphQLBody', 'graphQLBody'],
+	['graphQLGet', 'graphQLGet'],
+	['persistedQueryExtension', 'persistedQueryExtension'],
 	// kotlin.math's free functions. Each needs an explicit import in Kotlin, and
 	// without an entry here a bare `abs(x)` read as a member the base class
 	// supplies and came out `this.abs(x)` — unrefused, and a TypeError on the
@@ -2770,7 +2785,23 @@ export const KNOWN_SIGNATURES: ReadonlyMap<string, readonly string[]> = new Map(
 		'extractFromDash',
 		['mpdUrl', 'videoNameGen', 'mpdHeaders', 'videoHeaders', 'referer', 'subtitleList', 'audioList']
 	],
-	['graphQLPost', ['url', 'query', 'variables', 'headers']],
+	// keiyoushi core's GraphQL builders, as `utils/GraphQL.kt` declares them.
+	// This used to read `url, query, variables, headers`, which is no
+	// declaration of it: `graphQLPost(url, headers, query = q)` would have put
+	// the query where the headers go. Every parameter after the first two is
+	// defaulted, so a gap reaches the runtime as `undefined` and is read as the
+	// default there.
+	[
+		'graphQLPost',
+		['url', 'headers', 'query', 'operationName', 'variables', 'extensions', 'cache', 'json']
+	],
+	[
+		'graphQLGet',
+		['url', 'headers', 'query', 'operationName', 'variables', 'extensions', 'cache', 'json']
+	],
+	['graphQLBody', ['query', 'operationName', 'variables', 'extensions', 'json']],
+	['appendGraphQLParams', ['query', 'operationName', 'variables', 'extensions', 'json']],
+	['persistedQueryExtension', ['hash', 'version']],
 	// The framework's filter constructors, which a filter file extends with
 	// its arguments named — `Filter.Group<Option>(name = name, state = …)`.
 	// Refused, the whole base class went, and every class extending it with

@@ -3660,11 +3660,17 @@ describe('a request body an extension builds itself', () => {
 		expect(request.body.text).toBe('payload');
 	});
 
-	it('refuses to serialise an object, because the wire names are not here', () => {
-		// A @SerialName rename is carried only on the decode side, so encoding a
-		// DTO would post the Kotlin field names and the far end would answer 200
-		// with nothing in it — a source that looks like it has gone quiet.
-		expect(() => k.toJsonRequestBody({ q: 1 })).toThrow(/only for decoding/);
+	it('refuses to serialise an instance it holds no @Serializable registration for', () => {
+		// The wire names of a class live in its registration (see the typed
+		// encoder); an instance of a class with none would post its Kotlin field
+		// names, and the far end would answer 200 with nothing in it — a source
+		// that looks like it has gone quiet. A plain object is a JsonObject or a
+		// decoded payload here, and carries its wire names already.
+		class Unregistered {
+			q = 1;
+		}
+		expect(() => k.toJsonRequestBody(new Unregistered())).toThrow(/no @Serializable registration/);
+		expect(k.toJsonRequestBody({ q: 1 }).text).toBe('{"q":1}');
 		expect(() => k.toRequestBody({ q: 1 }, 'application/json')).toThrow(/as text/);
 	});
 });
@@ -3822,14 +3828,13 @@ describe('the builders whose block is handed a receiver', () => {
 		expect(k.jsonPrimitiveOf('x')).toBe('x');
 	});
 
-	it('lets a built JSON object become a request body, unlike a DTO', () => {
+	it('lets a built JSON object become a request body', () => {
 		const object = k.buildJsonObject(function (this: { put(k: string, v: unknown): unknown }) {
 			this.put('q', 'query');
 		});
 		// Safe because the extension wrote these keys itself — there is no
-		// `@SerialName` rename to lose, which is why a plain object is refused.
+		// `@SerialName` rename to lose.
 		expect(k.toJsonRequestBody(object).text).toBe('{"q":"query"}');
-		expect(() => k.toJsonRequestBody({ q: 'query' })).toThrow(/only for decoding/);
 	});
 });
 
