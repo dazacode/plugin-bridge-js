@@ -33,6 +33,7 @@ import {
 	RUNTIME_GLOBALS,
 	RUNTIME_HELPERS
 } from '@plugin-bridge/core/kotlin/runtime-api';
+import { RUNTIME_STATIC_REFERENCES } from '@plugin-bridge/core/kotlin/subset';
 import { JS_RUNTIME } from './js-runtime';
 import {
 	KOTLIN_RUNTIME_SECTIONS,
@@ -200,6 +201,15 @@ describe('what the emitter is promised', () => {
 
 	it('defines every global a scraper writes by name', () => {
 		const missing = RUNTIME_GLOBALS.filter((name) => runtime.globals[name] === undefined);
+		expect(missing).toEqual([]);
+	});
+
+	it('defines every function a `Global::member` reference may name', () => {
+		const missing = [...RUNTIME_STATIC_REFERENCES].flatMap(([owner, members]) =>
+			[...members]
+				.filter((member) => typeof runtime.globals[owner]?.[member] !== 'function')
+				.map((member) => `${owner}.${member}`)
+		);
 		expect(missing).toEqual([]);
 	});
 
@@ -531,6 +541,114 @@ describe('the digests a request signature is built from', () => {
 		expect(() => runtime.globals.MessageDigest.getInstance('SHA-512')).toThrow(
 			/does not implement/
 		);
+	});
+});
+
+describe("kotlinx's JsonElement accessors, over the plain parsed value", () => {
+	// A JsonElement is whatever JSON.parse made, so `el.jsonObject` and
+	// `p.jsonPrimitive.content` were plain property reads that answered
+	// `undefined`: a good document threw at `!!`, and the `?.` spelling
+	// answered null with nothing refused.
+	const doc = JSON.parse(
+		'{"name":"A","n":"12","f":1.5,"b":"true","nul":null,"xs":["a",2,false,null,{}]}'
+	);
+
+	it('answers the element itself for the kind it is, and throws for another', () => {
+		expect(k.jeObject(doc)).toBe(doc);
+		expect(k.jeArray(doc.xs)).toBe(doc.xs);
+		expect(k.jePrimitive('a')).toBe('a');
+		expect(k.jePrimitive(null)).toBeNull();
+		expect(() => k.jeObject(doc.xs)).toThrow(/JsonArray as a JsonObject/);
+		expect(() => k.jeArray('a')).toThrow(/JsonPrimitive as a JsonArray/);
+		expect(() => k.jePrimitive(doc)).toThrow(/JsonObject as a JsonPrimitive/);
+		expect(() => k.jeNull('a')).toThrow(/as a JsonNull/);
+	});
+
+	it("reads a primitive's content the way kotlinx spells it", () => {
+		expect(k.jeContent('A')).toBe('A');
+		expect(k.jeContent(2)).toBe('2');
+		expect(k.jeContent(false)).toBe('false');
+		// JsonNull's content is the text "null"; contentOrNull is null.
+		expect(k.jeContent(null)).toBe('null');
+		expect(k.jeContentOrNull(null)).toBeNull();
+		expect(k.jeIsString('A')).toBe(true);
+		expect(k.jeIsString(2)).toBe(false);
+	});
+
+	it('parses numbers and booleans from the content, strictly', () => {
+		expect(k.jeInt('12')).toBe(12);
+		expect(k.jeInt(7)).toBe(7);
+		expect(k.jeIntOrNull('1.5')).toBeNull();
+		expect(k.jeDouble('1.5')).toBe(1.5);
+		expect(k.jeLongOrNull(null)).toBeNull();
+		expect(() => k.jeInt('x')).toThrow(/as a number/);
+		expect(() => k.jeInt(null)).toThrow(/JsonNull as a number/);
+		expect(k.jeBoolean('true')).toBe(true);
+		expect(k.jeBooleanOrNull('True')).toBeNull();
+		expect(() => k.jeBoolean('yes')).toThrow(/as a boolean/);
+	});
+
+	it("reads keiyoushi's keyed JsonObject helpers with upstream's null and throw cases", () => {
+		// `get(key)?.jsonPrimitive?.contentOrNull`: absent and JSON null are
+		// both null, a number is its text, and an object under the key throws
+		// because `.jsonPrimitive` of one does.
+		expect(k.jeGetStringOrNull(doc, 'name')).toBe('A');
+		expect(k.jeGetStringOrNull(doc, 'f')).toBe('1.5');
+		expect(k.jeGetStringOrNull(doc, 'missing')).toBeNull();
+		expect(k.jeGetStringOrNull(doc, 'nul')).toBeNull();
+		expect(() => k.jeGetStringOrNull(doc, 'xs')).toThrow(/JsonArray as a JsonPrimitive/);
+		expect(k.jeGetIntOrNull(doc, 'n')).toBe(12);
+		expect(k.jeGetIntOrNull(doc, 'f')).toBeNull();
+		expect(k.jeGetLongOrNull(doc, 'missing')).toBeNull();
+		expect(k.jeGetBooleanOrNull(doc, 'b')).toBe(true);
+		// `get(key)?.jsonArray`: only an absent key is null; JsonNull.jsonArray throws.
+		expect(k.jeGetArrayOrNull(doc, 'xs')).toBe(doc.xs);
+		expect(k.jeGetArrayOrNull(doc, 'missing')).toBeNull();
+		expect(() => k.jeGetArrayOrNull(doc, 'nul')).toThrow(/JsonNull as a JsonArray/);
+		expect(k.jeGetObjectOrNull({ o: doc }, 'o')).toBe(doc);
+		expect(() => k.jeGetObject(doc, 'missing')).toThrow(/required JSON field "missing"/);
+		expect(k.jeGetArray(doc, 'xs')).toBe(doc.xs);
+		// A Map is a JsonObject too: kotlinx's untyped decode answers one.
+		expect(k.jeGetStringOrNull(new Map([['id', 7]]), 'id')).toBe('7');
+	});
+
+	it('refuses a keyed read from something that is not a JsonObject', () => {
+		// Typed on JsonObject upstream. An absent `memo` or an absent DTO
+		// field answering null here would walk into the source's fallback
+		// branch for a reason the source never wrote.
+		expect(() => k.jeGetStringOrNull(undefined, 'id')).toThrow(/as a JsonObject/);
+		expect(() => k.jeGetStringOrNull(doc.xs, 'id')).toThrow(/JsonArray as a JsonObject/);
+		expect(() => k.jeGetIntOrNull('text', 'id')).toThrow(/as a JsonObject/);
+	});
+
+	it('answers a real property unchanged, and an absent DTO field as undefined', () => {
+		// These are ordinary field names too. A record that has one answers
+		// it; a record whose optional field was not in the payload answered
+		// undefined before any of this existed, and must still.
+		expect(k.jeContent({ content: 'body' })).toBe('body');
+		expect(k.jeInt({ int: 3 })).toBe(3);
+		expect(k.jeContent({ title: 'x' })).toBeUndefined();
+		const computed = new (class {
+			get int() {
+				return 9;
+			}
+		})();
+		expect(k.jeInt(computed)).toBe(9);
+		expect(k.jeObject({ jsonObject: 'own' })).toBe('own');
+	});
+
+	it('tells the kinds apart in a type test, JSON null included', () => {
+		expect(k.isType(doc, 'JsonObject')).toBe(true);
+		expect(k.isType(doc.xs, 'JsonArray')).toBe(true);
+		expect(k.isType(doc.xs, 'JsonObject')).toBe(false);
+		expect(k.isType('a', 'JsonPrimitive')).toBe(true);
+		expect(k.isType(doc, 'JsonPrimitive')).toBe(false);
+		// JsonNull is a JsonPrimitive; an absent key (undefined) is no element.
+		expect(k.isType(null, 'JsonNull')).toBe(true);
+		expect(k.isType(null, 'JsonPrimitive')).toBe(true);
+		expect(k.isType(undefined, 'JsonNull')).toBe(false);
+		expect(k.isType('a', 'JsonNull')).toBe(false);
+		expect(k.isType(doc, 'JsonElement')).toBe(true);
 	});
 });
 
@@ -1026,6 +1144,54 @@ describe('one dead mirror must not lose the page', () => {
 /* ── properties, types, ranges ────────────────────────────────────────────── */
 
 describe('the parts of Kotlin that have no JavaScript spelling', () => {
+	it('runs the measured collection and text helpers without losing their return shapes', async () => {
+		expect(k.filterNotNull([null, 0, undefined, 2])).toEqual([0, 2]);
+		expect(k.maxOf([1, 3, 2], (n: number) => n * 2)).toBe(6);
+		expect(() => k.maxOf([], (n: number) => n)).toThrow(/empty/);
+		const values = [1, 2];
+		expect(k.replaceAll(values, (n: number) => n * 3)).toBeUndefined();
+		expect(values).toEqual([3, 6]);
+		expect(k.replaceAll('a1b22', '[0-9]+', '#')).toBe('a#b#');
+		const destination = k.mutableListOf('x');
+		expect(
+			await k.mapNotNullTo([1, 2, 3], destination, (n: number) => (n === 2 ? null : n * 10))
+		).toBe(destination);
+		expect(destination).toEqual(['x', 10, 30]);
+		const mapped = k.toMap([k.to('a', 1), k.to('b', 2), k.to('a', 3)]);
+		expect([...mapped]).toEqual([
+			['a', 3],
+			['b', 2]
+		]);
+		const into = k.mutableMapOf();
+		expect(k.toMap([k.to('z', 4)], into)).toBe(into);
+		expect(into.get('z')).toBe(4);
+	});
+	it('keeps equal sort keys stable while sorting a MutableList in place', () => {
+		const list = k.mutableListOf({ n: 1, id: 'a' }, { n: 2, id: 'b' }, { n: 1, id: 'c' });
+		expect(k.sortByDescending(list, (item: { n: number }) => item.n)).toBeUndefined();
+		expect(list.map((item: { id: string }) => item.id)).toEqual(['b', 'a', 'c']);
+		expect(k.sortBy(list, (item: { n: number }) => item.n)).toBeUndefined();
+		expect(list.map((item: { id: string }) => item.id)).toEqual(['a', 'c', 'b']);
+		expect(
+			k.sortWith(list, (a: { id: string }, b: { id: string }) => a.id.localeCompare(b.id))
+		).toBeUndefined();
+		expect(list.map((item: { id: string }) => item.id)).toEqual(['a', 'b', 'c']);
+	});
+
+	it('computes a map default only on misses and builds an insertion-ordered Set', () => {
+		const cache = k.mutableMapOf();
+		let calls = 0;
+		expect(k.getOrPut(cache, 'a', () => ++calls)).toBe(1);
+		expect(k.getOrPut(cache, 'a', () => ++calls)).toBe(1);
+		expect(calls).toBe(1);
+		cache.set('b', null);
+		expect(k.getOrPut(cache, 'b', () => ++calls)).toBe(2);
+		expect(k.getOrPut({}, 'toString', () => 'own')).toBe('own');
+		const built = k.buildSet(function (this: Set<string>) {
+			k.addAll(this, ['b', 'a', 'b']);
+		});
+		expect([...built]).toEqual(['b', 'a']);
+	});
 	it('runs a val initialiser once, however often it is read', () => {
 		// A getter would run per read, and `val client = ...build()` read twice
 		// would be two clients rather than one.
@@ -1615,8 +1781,36 @@ describe('java.util.regex, translated', () => {
 		expect(k.regex('(?<=\\?e=)(.*?)(?=&f=)').find('a?e=VALUE&f=b')?.value).toBe('VALUE');
 	});
 
+	it('translates the named classes that have an identical JavaScript spelling', () => {
+		// Madara's shared date parser is '(?<!\p{L})(?:year|…)'. Refusing it
+		// threw in every Madara chapter list that states a relative date.
+		const year = k.regex('(?<!\\p{L})(?:year|năm)');
+		expect(year.containsMatchIn('2 years ago')).toBe(true);
+		expect(year.containsMatchIn('3 năm trước')).toBe(true);
+		expect(year.containsMatchIn('nearyear')).toBe(false);
+		expect(year.containsMatchIn('éyear')).toBe(false);
+		expect(k.regex('\\P{L}+').find('ab12cd')?.value).toBe('12');
+		expect(k.regex('\\pL+').find('12ab')?.value).toBe('ab');
+		expect(k.regex('[\\p{Mn}]').replace('e\u0301', '')).toBe('e');
+		// POSIX names are US-ASCII in Java, so they are ranges, not categories.
+		expect(k.regex('\\p{Alpha}+').find('éab')?.value).toBe('ab');
+		expect(k.regex('\\p{Punct}').replace('a.b!', '')).toBe('ab');
+		expect(k.regex('[^\\p{ASCII}]').replace('aé', '')).toBe('a');
+		expect(k.regex('\\P{Alnum}+').find('ab--cd')?.value).toBe('--');
+		// A block is a fixed range.
+		expect(k.regex('\\p{InCombiningDiacriticalMarks}+').replace('e\u0301\u0300', '')).toBe('e');
+		expect(k.regex('\\p{InHangul_Syllables}').containsMatchIn('한')).toBe(true);
+	});
+
 	it('refuses what it cannot translate identically', () => {
-		expect(() => k.regex('\\p{Alpha}+').find('a')).toThrow(/Unicode class/);
+		// A script, and a block nobody measured, are not guessed at.
+		expect(() => k.regex('\\p{IsLatin}+').find('a')).toThrow(/Unicode class/);
+		expect(() => k.regex('\\p{InGreek}').find('a')).toThrow(/Unicode class/);
+		expect(() => k.regex('\\p{javaLowerCase}').find('a')).toThrow(/Unicode class/);
+		// A negated range has no spelling inside a class that is already open.
+		expect(() => k.regex('[a\\P{Alpha}]').find('a')).toThrow(/Unicode class/);
+		// Unicode mode rejects an escape the default mode reads as a letter.
+		expect(() => k.regex('\\p{L}\\j').find('a')).toThrow(/Unicode mode rejects/);
 		expect(() => k.regex('a++').find('a')).toThrow(/possessive/);
 		expect(() => k.regex('\\d*+').find('1')).toThrow(/possessive/);
 		expect(() => k.regex('(?>ab)').find('ab')).toThrow(/atomic/);
@@ -1904,6 +2098,27 @@ describe('okhttp, over the host', () => {
 
 		expect(sent.at(-1)?.url).toBe('https://example.invalid/a?signed=1');
 		expect(response.code).toBe(200);
+	});
+
+	it('reads one response header by name, as okhttp does', async () => {
+		// `response.header("Server") !in SERVER_CHECK` is how an interceptor
+		// tells a challenge from an answer. Missing, it was a TypeError on every
+		// request that reached it.
+		const { ctx } = context({
+			'https://example.invalid/a': {
+				body: '',
+				status: 403,
+				headers: { Server: 'ddos-guard' }
+			}
+		});
+		runtime.enter(ctx);
+		const response = await runtime.client
+			.newCall(runtime.globals.GET('https://example.invalid/a'))
+			.execute();
+
+		expect(response.header('server')).toBe('ddos-guard');
+		expect(response.header('X-Missing')).toBeNull();
+		expect(response.header('X-Missing', 'fallback')).toBe('fallback');
 	});
 
 	it('runs interceptors outermost first, in the order they were added', async () => {
@@ -2408,9 +2623,9 @@ describe('preferences', () => {
 /**
  * The runtime again, with the androidx preference names exported.
  *
- * They are not in `RUNTIME_GLOBALS` — nothing the emitter *calls* is a
- * preference type; an extension constructs them by name — so the shared loader
- * cannot reach them and this one exports them directly.
+ * The constructable ones are in `RUNTIME_GLOBALS` now, since a helper that
+ * builds one is translated; this loader predates that, and also reaches the
+ * store and the setting-id map, which the shared one does not.
  */
 async function loadPreferences(settingIds: Record<string, string> = {}) {
 	const probe = [
@@ -2448,6 +2663,28 @@ describe('the androidx preference framework a converted extension builds', () =>
 		screen.addPreference(new runtime.types.MultiSelectListPreference(null));
 
 		expect(screen.getPreferenceCount()).toBe(4);
+	});
+
+	it('runs the idiom as the emitter writes it: apply, a bare setDefaultValue, addPreference', async () => {
+		// `SwitchPreferenceCompat(screen.context).apply { key = …;
+		// setDefaultValue(true) }.also(screen::addPreference)`, in the shape
+		// emit.spec.ts asserts. The bare `setDefaultValue` must land on the
+		// preference: on the source object it would ask the extension instead.
+		const runtime = await loadPreferences();
+		runtime.enter(null);
+		const { k, types } = runtime;
+		const screen = types.PreferenceScreen(null);
+		k.also(
+			k.apply(types.SwitchPreferenceCompat(screen.context), function (this: any) {
+				this.key = 'hide_paid';
+				return this.setDefaultValue(true);
+			}),
+			(...a: unknown[]) => screen.addPreference(...a)
+		);
+
+		expect(screen.getPreferenceCount()).toBe(1);
+		expect(screen.getPreference(0).key).toBe('hide_paid');
+		expect(screen.getPreference(0).defaultValue).toBe(true);
 	});
 
 	it('is callable without `new`, since a Kotlin constructor has no keyword', async () => {
@@ -2858,10 +3095,28 @@ describe('the string helpers added for the catalogue', () => {
 
 	it('refuses a charset the host cannot do rather than guessing UTF-8', () => {
 		const bytes = new TextEncoder().encode('x');
-		expect(() => k.stringOf(bytes, runtime.globals.Charsets.ISO_8859_1)).toThrow(
-			/only offers UTF-8/
-		);
+		expect(() => k.stringOf(bytes, runtime.globals.Charsets.UTF_16)).toThrow(/only offers UTF-8/);
 		expect(() => k.toByteArray('x', runtime.globals.Charsets.UTF_16)).toThrow(/only offers UTF-8/);
+	});
+
+	it('decodes and encodes ISO-8859-1 one byte per character, as the JVM does', () => {
+		// Every byte value, including the ones UTF-8 would reject or merge.
+		const every = new Uint8Array(256).map((_, at) => at);
+		const text = k.stringOf(every, runtime.globals.Charsets.ISO_8859_1);
+		expect(text.length).toBe(256);
+		expect(text.charCodeAt(0xe9)).toBe(0xe9);
+		expect(text.charCodeAt(0xff)).toBe(0xff);
+		expect([...k.toByteArray(text, runtime.globals.Charsets.ISO_8859_1)]).toEqual([...every]);
+		// A character with no byte is '?', which is java.lang.String's answer.
+		expect([...k.toByteArray('a€', runtime.globals.Charsets.ISO_8859_1)]).toEqual([97, 63]);
+		// Named by string, as `Charset.forName` and `charset("…")` hand it over.
+		expect(k.stringOf(new Uint8Array([0x68, 0xe9]), 'ISO-8859-1')).toBe('hé');
+	});
+
+	it('decodes US-ASCII with the replacement character above 0x7f', () => {
+		const bytes = new Uint8Array([0x61, 0xe9]);
+		expect(k.stringOf(bytes, runtime.globals.Charsets.US_ASCII)).toBe('a\ufffd');
+		expect([...k.toByteArray('aé', runtime.globals.Charsets.US_ASCII)]).toEqual([97, 63]);
 	});
 
 	it('encodes to bytes and back', () => {
@@ -3298,6 +3553,26 @@ describe('the java and android types an extension names', () => {
 		expect(new TextDecoder().decode(Base64.encode(k.toByteArray('a'), Base64.NO_WRAP))).toBe(
 			'YQ=='
 		);
+	});
+
+	it('decodes base64 before any host is entered, to the bytes the host gives', async () => {
+		// `private val KEY = Base64.decode("…", Base64.DEFAULT)` in a companion
+		// is evaluated when the module loads, before any plugin call has
+		// entered a host — and it died there. Base64 is arithmetic, so that
+		// moment is decoded in plain JavaScript; the bytes must be the host's.
+		const fresh = await load();
+		const Base64 = fresh.globals.Base64;
+		const samples = ['YX+1nM4KgfaYwNE3/MPcTg==', 'YWJj', 'YQ', 'YWI', 'w7j_fg', '', 'AAEC/f7/'];
+		const early = samples.map((one) =>
+			Array.from(Base64.decode(one, Base64.DEFAULT) as Uint8Array)
+		);
+		expect(() => Base64.decode('not*base64', Base64.DEFAULT)).toThrow(/not base64/);
+		fresh.enter(context().ctx);
+		const hosted = samples.map((one) =>
+			Array.from(Base64.decode(one, Base64.DEFAULT) as Uint8Array)
+		);
+		expect(early).toEqual(hosted);
+		expect(early[1]).toEqual([97, 98, 99]);
 	});
 
 	it('builds a Triple, a Date and a StringBuilder', () => {
@@ -4165,15 +4440,37 @@ describe('the types a manga extension writes by name', () => {
 	});
 
 	it('is the same object under both names where the fork only renamed it', () => {
-		// Aniyomi's `SAnime` is `SManga` one rename later, and `AnimeFilter` is
-		// `Filter`. Aliased rather than copied, because two definitions of one
-		// thing drift and the drift would be a filter misreading its own state.
-		expect(runtime.globals.SManga).toBe(runtime.globals.SAnime);
+		// Aniyomi's `AnimeFilter` is `Filter` one rename later. Aliased rather
+		// than copied, because two definitions of one thing drift and the drift
+		// would be a filter misreading its own state.
 		expect(runtime.globals.Filter).toBe(runtime.globals.AnimeFilter);
 		expect(runtime.globals.FilterList).toBe(runtime.globals.AnimeFilterList);
 
 		const filter = runtime.globals.Filter as { TriState: { STATE_INCLUDE: number } };
 		expect(filter.TriState.STATE_INCLUDE).toBe(1);
+	});
+
+	it('gives a title the anime record plus a memo, sharing the constants and the url setter', () => {
+		// `SManga` stopped being an alias of `SAnime` when keiyoushi's lib gave
+		// the manga half a `memo`. Everything else is still the anime record's.
+		const SManga = runtime.globals.SManga as Record<string, unknown> & {
+			create(): Record<string, unknown> & { setUrlWithoutDomain(url: string): unknown };
+		};
+		const SAnime = runtime.globals.SAnime as Record<string, unknown> & {
+			create(): Record<string, unknown>;
+		};
+		for (const name of ['UNKNOWN', 'ONGOING', 'COMPLETED', 'ON_HIATUS']) {
+			expect(SManga[name]).toBe(SAnime[name]);
+		}
+		const manga = SManga.create();
+		expect(Object.keys(manga).sort()).toEqual([...Object.keys(SAnime.create()), 'memo'].sort());
+		manga.setUrlWithoutDomain('https://read.example.invalid/title/1');
+		expect(manga.url).toBe('/title/1');
+		// Empty, and a fresh object per record: one title's memo written into
+		// must not become another's.
+		expect(manga.memo).toEqual({});
+		expect(SManga.create().memo).not.toBe(manga.memo);
+		expect((runtime.globals.SChapter as { create(): { memo: unknown } }).create().memo).toEqual({});
 	});
 
 	it('exposes the nested filter types under the bare names an import produces', () => {
@@ -4242,6 +4539,45 @@ describe('names that are a companion rather than a constructor', () => {
 		// honest rather than a stub.
 		expect(runtime.globals.TimeZone.getTimeZone('UTC').getID()).toBe('UTC');
 		expect(runtime.globals.TimeZone.getDefault().getID()).toBe('UTC');
+	});
+});
+
+/* ── the shared Next.js reader ─────────────────────────────────────────────── */
+
+describe('Next.js data extraction', () => {
+	it('resolves App Router Flight text and model references', () => {
+		// The text row is 14 UTF-8 bytes: the non-ASCII character is two.
+		const rows =
+			'1:Te,{"x":"héllo"}\n' +
+			'3:{"cover":"c.png"}\n' +
+			'2:{"series":{"title":"One","cover":"$3:cover","raw":"$1"}}\n';
+		const html = `<script>self.__next_f.push(${JSON.stringify([1, rows])})</script>`;
+		const document = runtime.globals.Jsoup.parse(html, 'https://example.invalid/');
+		expect(
+			k.extractNextJs(document, 'Series', (value: Record<string, unknown>) => 'title' in value)
+		).toEqual({
+			title: 'One',
+			cover: 'c.png',
+			raw: '{"x":"héllo"}'
+		});
+	});
+
+	it('reads Pages Router data and infers required fields from a translated shape', () => {
+		class PageDto {}
+		k.shape(PageDto, ['mangaId', 'label'], ['label'], {});
+		const document = runtime.globals.Jsoup.parse(
+			'<script id="__NEXT_DATA__" type="application/json">{"props":{"pageProps":{"wrap":{"mangaId":"m-1"}}}}</script>',
+			'https://example.invalid/'
+		);
+		expect(k.extractNextJs(document, 'PageDto').mangaId).toBe('m-1');
+		expect(() => k.extractNextJs(document, 'UnknownDto')).toThrow(/Cannot infer a predicate/);
+	});
+
+	it('reads a raw Flight body as a typed list', () => {
+		class RscItemDto {}
+		k.shape(RscItemDto, ['slug'], [], {});
+		const body = '0:{"a":1}\n1:[{"slug":"x"},{"slug":"y"}]\n';
+		expect(k.extractNextJsRsc(body, 'List<RscItemDto>')).toEqual([{ slug: 'x' }, { slug: 'y' }]);
 	});
 });
 
@@ -4429,6 +4765,9 @@ describe('what cannot run before a plugin call has entered', () => {
 		['a', 'UTF-8'],
 		[new Uint8Array([1, 2])],
 		[new Uint8Array([1, 2]), 'UTF-8'],
+		// A text that IS base64, because okio's decoder answers null for one
+		// that is not before it ever asks the host.
+		['aGk='],
 		[{}],
 		[{}, 'a'],
 		[1],
@@ -4748,6 +5087,35 @@ describe('toCollection and the response an interceptor rebuilds', () => {
 		expect(response.body.contentType()).toBe('text/html');
 	});
 
+	it('relabels a body the way `body.source().asResponseBody(type)` is emitted', async () => {
+		// The emitter writes okio's rewrap as the body's text under the new
+		// type (see emit.spec.ts); this is that exact expression, run.
+		const { ctx } = context({
+			'https://example.invalid/page': {
+				status: 200,
+				body: '<p>page</p>',
+				headers: { 'content-type': 'application/octet-stream' }
+			}
+		});
+		runtime.enter(ctx);
+		const client = runtime.client
+			.newBuilder()
+			.addInterceptor(async function (chain: {
+				request(): unknown;
+				proceed(r: unknown): Promise<any>;
+			}) {
+				const response = await chain.proceed(chain.request());
+				const body = k.toResponseBody(response.body.string(), k.toMediaType('text/html'));
+				return response.newBuilder().body(body).build();
+			})
+			.build();
+		const response = await client
+			.newCall(runtime.globals.GET('https://example.invalid/page'))
+			.execute();
+		expect(response.body.string()).toBe('<p>page</p>');
+		expect(response.body.contentType()).toBe('text/html');
+	});
+
 	it('takes a UTF-8 byte body and refuses one that is not text', () => {
 		const { ctx } = context();
 		runtime.enter(ctx);
@@ -4949,5 +5317,93 @@ describe('HttpUrl.Builder, and android.net.Uri over the same parse', () => {
 		expect(runtime.globals.Uri.parse('https://example.invalid/a/b.html').lastPathSegment).toBe(
 			'b.html'
 		);
+	});
+});
+
+describe('jsoup mutation and statics, as the emitter reaches them', () => {
+	const { Jsoup, Parser, Entities, TextNode, Evaluator, Request } = runtime.globals;
+
+	it('reads a remove() with no argument as jsoup’s, on a selection or one element', () => {
+		// It used to remove `undefined` from the list — nothing — and answer
+		// false, leaving the advert in the synopsis with nothing refused.
+		const doc = Jsoup.parse('<p>keep <span class="ad">ad</span><b>x</b></p>');
+		k.remove(doc.select('span.ad'));
+		k.remove(doc.selectFirst('b'));
+		expect(doc.selectFirst('p').text()).toBe('keep');
+		// A bare array from children() is wrapped rather than misread.
+		const list = Jsoup.parse('<ul><li>1</li><li>2</li></ul>').selectFirst('ul');
+		k.remove(list.children);
+		expect(list.html()).toBe('');
+		// The one-argument form is still a collection's.
+		const items = ['a', 'b'];
+		expect(k.remove(items, 'a')).toBe(true);
+		expect(items).toEqual(['b']);
+		expect(() => k.remove(42)).toThrow(/remove\(\)/);
+	});
+
+	it('applies the Elements mutators to every member and answers the selection', () => {
+		const doc = Jsoup.parse('<div><p>a</p><br><p>b</p></div>', 'https://example.invalid/');
+		const picked = doc.select('p, br');
+		expect(picked.prepend('\\n')).toBe(picked);
+		expect(doc.selectFirst('div').wholeText()).toBe('\\na\\n\\nb');
+		doc.select('p').attr('data-x', 1);
+		expect(doc.select('p').eachAttr('data-x')).toEqual(['1', '1']);
+		expect(doc.select('p').attr('data-x')).toBe('1');
+		expect(doc.select('p').hasText()).toBe(true);
+		expect(doc.select('br').is('div > br')).toBe(true);
+		expect(
+			doc
+				.select('p')
+				.parents()
+				.map((one: { tagName: string }) => one.tagName)
+		).toEqual(['div', 'body', 'html']);
+	});
+
+	it('answers before()/after() for a node, a date and a calendar, and nothing else', () => {
+		const doc = Jsoup.parse('<div><p>x</p></div>');
+		expect(k.after(doc.selectFirst('p'), '<i>y</i>').tagName).toBe('p');
+		expect(doc.selectFirst('div').html()).toBe('<p>x</p><i>y</i>');
+		expect(k.before(new Date(1), new Date(2))).toBe(true);
+		expect(k.after(new Date(1), new Date(2))).toBe(false);
+		const early = runtime.globals.Calendar.getInstance();
+		early.setTimeInMillis(1000);
+		const late = runtime.globals.Calendar.getInstance();
+		late.setTimeInMillis(2000);
+		expect(k.before(early, late)).toBe(true);
+		// Calendar.before(Object) is false for anything that is not a Calendar.
+		expect(k.before(early, new Date(5000))).toBe(false);
+		expect(() => k.before('x', 'y')).toThrow(/neither a jsoup node nor a date/);
+	});
+
+	it('answers head() for a HEAD request and for a document’s <head>', () => {
+		const request = k.head(new Request.Builder().url('https://example.invalid/x')).build();
+		expect(request.method).toBe('HEAD');
+		const doc = Jsoup.parse('<title>t</title><p>x</p>');
+		expect(k.head(doc).selectFirst('title').text()).toBe('t');
+		expect(doc.body().selectFirst('p').text()).toBe('x');
+		expect(k.head([3, 4])).toBe(3);
+	});
+
+	it('defines the jsoup statics the scanner lets through', () => {
+		expect(Parser.unescapeEntities('&eacute;&copy=1', true)).toBe('é&copy=1');
+		expect(Entities.unescape('&eacute;&copy=1')).toBe('é©=1');
+		expect(Jsoup.parse('<p>a</p>', '', Parser.htmlParser()).selectFirst('p').text()).toBe('a');
+		const doc = Jsoup.parse('<div id="c" class="Box"><a>1</a></div>');
+		expect(doc.select(new Evaluator.Tag('a')).size()).toBe(1);
+		expect(doc.selectFirst(Evaluator.Class('box')).id).toBe('c');
+		expect(doc.select('div').select(Evaluator.Id('c')).size()).toBe(1);
+		const a = doc.selectFirst('a');
+		a.replaceWith(new TextNode('<t>'));
+		expect(doc.selectFirst('div').html()).toBe('&lt;t&gt;');
+	});
+
+	it('tells a text node from an element, which it answered true for before', () => {
+		const div = Jsoup.parse('<div>a<br>b</div>').selectFirst('div');
+		const kinds = div.childNodes().map((node: unknown) => k.isType(node, 'TextNode'));
+		expect(kinds).toEqual([true, false, true]);
+		expect(k.isType(TextNode('x'), 'TextNode')).toBe(true);
+		expect(
+			k.isType(Jsoup.parse('<script>s</script>').selectFirst('script').childNodes()[0], 'DataNode')
+		).toBe(true);
 	});
 });

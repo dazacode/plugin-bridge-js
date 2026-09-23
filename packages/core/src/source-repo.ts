@@ -106,6 +106,8 @@ export interface ExtensionSource {
 	readonly themeFiles: ReadonlyMap<string, string>;
 	/** Module name → that module's Kotlin, keyed relative to `lib/<name>/`. */
 	readonly libModules: ReadonlyMap<string, ReadonlyMap<string, string>>;
+	/** Repository-wide Kotlin helpers imported by this extension. */
+	readonly coreFiles: ReadonlyMap<string, string>;
 	/**
 	 * The non-Kotlin files an extension is built *with*, keyed as the classpath
 	 * names them: `assets/i18n/messages_en.properties` and its siblings.
@@ -145,6 +147,9 @@ const THEME_ROOT = 'lib-multisrc';
 
 /** Where the shared helper modules — the stream extractors — live. */
 const LIB_ROOT = 'lib';
+
+/** Repository-wide helpers shared by extensions and library modules. */
+const CORE_ROOT = 'core';
 
 /**
  * Build files to probe, in order. The first is the convention; the second
@@ -507,6 +512,7 @@ const EMPTY_SOURCE: ExtensionSource = {
 	themePackage: null,
 	themeFiles: new Map(),
 	libModules: new Map(),
+	coreFiles: new Map(),
 	resources: new Map(),
 	resolvedRef: null
 };
@@ -934,6 +940,62 @@ export async function fetchSharedSources(
 }
 
 /**
+ * Select only core declarations an extension imports. Reading the directory is
+ * cached with the other shared sources, but translating every file would pull
+ * unrelated Android helpers into otherwise runnable extensions.
+ */
+async function fetchCoreFiles(
+	rootUrl: string,
+	sources: readonly string[],
+	listFiles: FileLister,
+	getText: TextFetcher,
+	budget: SourceBudget,
+	cache: SharedCache | null
+): Promise<Map<string, string>> {
+	const imports = new Set<string>();
+	for (const source of sources) {
+		for (const match of source.matchAll(/^import\s+(keiyoushi\.[\w.]+)/gm)) {
+			const imported = match[1];
+			const symbol = imported.slice(imported.lastIndexOf('.') + 1);
+			// The host already supplies base classes and many top-level helpers.
+			// Reading their Android implementations introduces unrelated native
+			// dependencies. A named object used as a receiver is the missing kind
+			// the translator currently refuses rather than supplying itself.
+			if (
+				!imported.startsWith('keiyoushi.lib.') &&
+				/^[A-Z]/.test(symbol) &&
+				new RegExp(`\\b${symbol}(?:\\.|::)`).test(source)
+			)
+				imports.add(imported);
+		}
+	}
+	const selected = new Map<string, string>();
+	if (imports.size === 0) return selected;
+
+	const base = subdirectoryUrl(rootUrl, CORE_ROOT);
+	if (base === null) return selected;
+	const core = await readSharedDirectory(base, MAX_KOTLIN_FILES, listFiles, getText, budget, cache);
+	for (const [path, body] of core.files) {
+		const pkg = /^package\s+([\w.]+)/m.exec(body)?.[1];
+		if (pkg === undefined) continue;
+		for (const imported of imports) {
+			if (!imported.startsWith(`${pkg}.`)) continue;
+			const symbol = imported.slice(pkg.length + 1);
+			if (symbol.includes('.')) continue;
+			const declaration = new RegExp(
+				`^\\s*(?:(?:public|private|internal)\\s+)*object\\s+${symbol}\\b`,
+				'm'
+			);
+			if (declaration.test(body)) {
+				selected.set(path, body);
+				break;
+			}
+		}
+	}
+	return selected;
+}
+
+/**
  * Reads one located extension: its build file, the Kotlin beside it, the
  * template it subclasses and the modules it calls into.
  *
@@ -1092,6 +1154,21 @@ export async function fetchExtensionSource(
 			cache
 		);
 	}
+	const coreFiles =
+		rootUrl === null
+			? new Map<string, string>()
+			: await fetchCoreFiles(
+					rootUrl,
+					[
+						...kotlinFiles.values(),
+						...shared.themeFiles.values(),
+						...[...shared.libModules.values()].flatMap((module) => [...module.values()])
+					],
+					listFiles,
+					getText,
+					budget,
+					cache
+				);
 
 	// The extension's own copy of a path wins, which is the order the Android
 	// build merges assets in: an extension that ships its own
@@ -1106,6 +1183,7 @@ export async function fetchExtensionSource(
 		themePackage,
 		themeFiles: shared.themeFiles,
 		libModules: shared.libModules,
+		coreFiles,
 		resources,
 		resolvedRef
 	};

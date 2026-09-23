@@ -694,6 +694,10 @@ async function readExtensionSource(
 					source
 				}))
 			);
+		const core = [...found.coreFiles].map(([path, source]) => ({
+			path: `core/${path}`,
+			source
+		}));
 
 		// A class with a supertype is the extension; everything else beside it is
 		// a DTO, a filter or a helper.
@@ -718,7 +722,7 @@ async function readExtensionSource(
 		own.sort((a, b) => rank(a) - rank(b));
 
 		return {
-			files: [...own, ...theme, ...modules],
+			files: [...own, ...theme, ...modules, ...core],
 			licenseText: await readLicence(repositoryUrl, services, index)
 		};
 	}

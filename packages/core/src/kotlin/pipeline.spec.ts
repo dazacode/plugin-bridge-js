@@ -931,6 +931,8 @@ describe('which refusals stop a build', () => {
 	it('does not block on a member the host draws itself', async () => {
 		// A converted bundle declares no settings, so nothing ever calls
 		// `setupPreferenceScreen` — the same line `themes/convert.ts` draws.
+		// The preference types themselves translate now; the Android toast
+		// beside them is what is refused.
 		const result = await convertKotlin(
 			[
 				{
@@ -940,6 +942,7 @@ describe('which refusals stop a build', () => {
 						'    override val baseUrl = "https://example.invalid"',
 						'    override fun setupPreferenceScreen(screen: PreferenceScreen) {',
 						'        screen.addPreference(ListPreference(screen.context))',
+						'        Toast.makeText(screen.context, "saved", Toast.LENGTH_SHORT).show()',
 						'    }',
 						'}'
 					)
@@ -953,6 +956,58 @@ describe('which refusals stop a build', () => {
 		expect(result.complete).toBe(true);
 		// Still reported: nothing vanishes quietly, it simply does not stop a build.
 		expect(result.message).toContain('setupPreferenceScreen');
+	});
+
+	it('does not block on what a preference screen calls, since nothing runs one', async () => {
+		// The extension's own screen translates now that the preference types
+		// do, and it calls its template's — which refuses on a toast — and a
+		// shared helper that refuses, which is MangaThemesia's paid-chapter
+		// helper's shape. Neither can run: no driver invokes
+		// `setupPreferenceScreen`. The same helper called from a member the
+		// host does run still blocks, below.
+		const files = (caller: string) => [
+			{
+				path: 'Demo.kt',
+				source: kt(
+					'class Demo : Theme() {',
+					'    override fun setupPreferenceScreen(screen: PreferenceScreen) {',
+					'        screen.addPreference(ListPreference(screen.context))',
+					'        Helper().addTo(screen)',
+					'        super.setupPreferenceScreen(screen)',
+					'    }',
+					caller,
+					'}'
+				)
+			},
+			{
+				path: 'theme/Theme.kt',
+				source: kt(
+					'abstract class Theme : Source() {',
+					'    override fun setupPreferenceScreen(screen: PreferenceScreen) {',
+					'        Toast.makeText(screen.context, "saved", Toast.LENGTH_SHORT).show()',
+					'    }',
+					'}',
+					'',
+					'class Helper {',
+					'    fun addTo(screen: PreferenceScreen?) = Injekt.get<Loader>()',
+					'}'
+				)
+			}
+		];
+
+		const inert = await convertKotlin(files(''), { parser });
+		expect(inert.refusals.map((one) => one.member).sort()).toEqual([
+			'addTo',
+			'setupPreferenceScreen'
+		]);
+		expect(inert.blocking).toEqual([]);
+		expect(inert.complete).toBe(true);
+
+		const reached = await convertKotlin(
+			files('    override fun popularAnimeParse(response: Response) = Helper().addTo(null)'),
+			{ parser }
+		);
+		expect(reached.blocking.map((one) => one.member)).toEqual(['addTo']);
 	});
 
 	it('blocks on a member that returns data', async () => {
@@ -1004,6 +1059,82 @@ describe('which refusals stop a build', () => {
 
 		expect(result.blocking.map((one) => one.member)).toEqual(['intercept']);
 		expect(result.complete).toBe(false);
+	});
+
+	it('installs an interceptor whose only refused part is a WebView recovery', async () => {
+		// The Voe extractor's shape, whole: the recovery tail is cut (see
+		// `memberWithRecovery`), and the refused `by lazy` store it read is read
+		// by nothing that survived — so neither blocks, and the cut is reported.
+		const result = await convertKotlin(
+			[
+				{
+					path: 'Demo.kt',
+					source: kt(
+						'class Demo : Source() {',
+						'    override val client = network.client.newBuilder().addInterceptor(Guard()).build()',
+						'    override fun popularAnimeRequest(page: Int) = GET("https://example.invalid/")',
+						'}',
+						'',
+						'class Guard : Interceptor {',
+						'    private val cookieManager by lazy { CookieManager.getInstance() }',
+						'    override fun intercept(chain: Interceptor.Chain): Response {',
+						'        val response = chain.proceed(chain.request())',
+						'        if (response.code != 403) return response',
+						'        val cookies = cookieManager.getCookie(chain.request().url.toString())',
+						'        return chain.proceed(chain.request().newBuilder().addHeader("cookie", cookies).build())',
+						'    }',
+						'}'
+					)
+				}
+			],
+			{ parser }
+		);
+
+		expect(result.blocking).toEqual([]);
+		expect(result.complete).toBe(true);
+		expect(result.refusals.map((one) => one.member)).toEqual(['cookieManager']);
+		expect(result.deferred.map((one) => one.member)).toEqual(['intercept']);
+	});
+
+	it('blocks on a refused lazy property the moment translated code reads it', async () => {
+		const result = await convertKotlin(
+			[
+				{
+					path: 'Demo.kt',
+					source: kt(
+						'class Demo : Source() {',
+						'    private val store by lazy { CookieManager.getInstance() }',
+						'    override fun popularAnimeRequest(page: Int) = GET("https://example.invalid/" + store)',
+						'}'
+					)
+				}
+			],
+			{ parser }
+		);
+
+		expect(result.blocking.map((one) => one.member)).toEqual(['store']);
+	});
+
+	it('blocks on a refused lazy property that overrides one the driver reads', async () => {
+		// Nothing in the Kotlin names `client`, but the driver does: pruned, it
+		// would fall back to the base's client, which is the fallback a refused
+		// override never gets.
+		const result = await convertKotlin(
+			[
+				{
+					path: 'Demo.kt',
+					source: kt(
+						'class Demo : Source() {',
+						'    override val client by lazy { CookieManager.getInstance() }',
+						'    override fun popularAnimeRequest(page: Int) = GET("https://example.invalid/")',
+						'}'
+					)
+				}
+			],
+			{ parser }
+		);
+
+		expect(result.blocking.map((one) => one.member)).toEqual(['client']);
 	});
 
 	it('blocks on a configureClient, which the driver calls although nothing else does', async () => {
@@ -1309,6 +1440,98 @@ describe('which refusals the host can reach', () => {
 
 		expect(result.reachable).toContain('readEpisodes');
 		expect(result.blocking.map((one) => one.member)).toContain('readEpisodes');
+	});
+
+	it('blocks on a refused class a surviving class extends, whatever it is called', async () => {
+		// `class StatusList : MultiValueFilter(…)` runs `extends` when the module
+		// loads. The base refused, its name ends in `Filter` so it was exempted
+		// as host-drawn, and a class header draws no edge — so nothing blocked,
+		// and the bundle died on import with "MultiValueFilter is not defined".
+		const result = await convertKotlin(
+			[
+				{
+					path: 'Demo.kt',
+					source: kt(
+						'class Demo : Source() {',
+						'    override val baseUrl = "https://example.invalid"',
+						'    override fun getFilterList() = FilterList(StatusFilter())',
+						'}'
+					)
+				},
+				{
+					path: 'Filters.kt',
+					source: kt(
+						'abstract class MultiValueFilter(name: String) : Filter.Group<Filter.CheckBox>(name = name, options = emptyList())',
+						'class StatusFilter : MultiValueFilter("Status")'
+					)
+				}
+			],
+			{ parser }
+		);
+
+		expect(result.blocking.map((one) => one.member)).toContain('MultiValueFilter');
+		expect(result.complete).toBe(false);
+	});
+
+	it('follows a member reference, which is a call made later', async () => {
+		// `.addInterceptor(::checkForToken)` on a template's client: nothing
+		// *calls* `checkForToken` in the text, so it and the refused login it
+		// calls were pruned, and the bundle threw `this.refresh is not a
+		// function` on its first request with nothing refused.
+		const result = await convertKotlin(
+			[
+				{ path: 'Demo.kt', source: kt('class Demo : Base() {', '}') },
+				{
+					path: 'Base.kt',
+					source: kt(
+						'abstract class Base : Source() {',
+						'    override val client = network.client.newBuilder().addInterceptor(::checkForToken).build()',
+						'    private fun checkForToken(chain: Interceptor.Chain): Response {',
+						'        refresh()',
+						'        return chain.proceed(chain.request())',
+						'    }',
+						'    private fun refresh() = Injekt.get<Loader>()',
+						'}'
+					)
+				}
+			],
+			{ parser }
+		);
+
+		expect(result.reachable).toContain('checkForToken');
+		expect(result.blocking.map((one) => one.member)).toContain('refresh');
+	});
+
+	it('does not read `::x.isInitialized` as a call to `x`', async () => {
+		// It asks whether a `lateinit` was written. Followed as a call, a
+		// template's refused-but-unread `lateinit` blocked four listings that
+		// had been loading and requesting.
+		const result = await convertKotlin(
+			[
+				{
+					path: 'Demo.kt',
+					source: kt(
+						'class Demo : Source() {',
+						'    override val baseUrl = "https://example.invalid"',
+						'    fun popular(): Boolean = Cache.ready()',
+						'}'
+					)
+				},
+				{
+					path: 'Cache.kt',
+					source: kt(
+						'object Cache {',
+						'    lateinit var elements: Elements',
+						'    fun ready() = ::elements.isInitialized',
+						'}'
+					)
+				}
+			],
+			{ parser }
+		);
+
+		expect(result.reachable).toContain('ready');
+		expect(result.blocking.map((one) => one.member)).not.toContain('elements');
 	});
 });
 

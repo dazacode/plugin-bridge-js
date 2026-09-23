@@ -507,7 +507,10 @@ function __call(name, args) {
  * that does not, which 'FOREIGN.md' §4.1.8 records as the reason the policy
  * exists at all.
  */
-async function __send(request) {
+async function __send(pending) {
+  // A request member may suspend — it reads a token first — and hands back a
+  // Promise of the request rather than the request.
+  const request = await pending;
   if (request === null || request === undefined) {
     throw new Error('This extension built no request.');
   }
@@ -562,9 +565,56 @@ function __mangaRef(sourceMediaId) {
   return manga;
 }
 
+/**
+ * A chapter's 'memo' travels inside its id.
+ *
+ * Upstream persists a chapter's memo with the chapter, and a source that wrote
+ * one reads it back when the chapter is opened: Madara keeps the title's path
+ * there and builds the chapter url from it, so without it every chapter it
+ * lists answers "Refresh the chapter list." This host keeps nothing between
+ * 'listChapters' and 'readChapter' except the id — which 'ABI.md' §8.2 makes
+ * the source's own opaque string, handed back verbatim — so the memo rides in
+ * it, after the url, and is taken off again here.
+ *
+ * Only a non-empty memo is carried, so every other source's ids are exactly
+ * its urls, as before. The encoded part cannot contain '#', so the last marker
+ * is always the one this wrote, whatever the url itself contains.
+ *
+ * A title's memo is deliberately not carried the same way: it is not stable
+ * (Madara's holds the genres), and a title's id is what the matching layer
+ * binds, so a title whose memo changed would become a different title.
+ */
+const __MEMO_MARK = '#yorozo-memo=';
+
+function __chapterIdOf(url, memo) {
+  if (!memo || typeof memo !== 'object' || Array.isArray(memo)) return url;
+  let text;
+  try {
+    text = JSON.stringify(memo);
+  } catch (e) {
+    return url;
+  }
+  if (typeof text !== 'string' || text === '{}') return url;
+  return url + __MEMO_MARK + encodeURIComponent(text);
+}
+
 function __chapterRef(sourceChapterId) {
   const chapter = SChapter.create();
-  chapter.url = String(sourceChapterId);
+  const id = String(sourceChapterId);
+  const at = id.lastIndexOf(__MEMO_MARK);
+  if (at > 0) {
+    try {
+      const memo = JSON.parse(decodeURIComponent(id.slice(at + __MEMO_MARK.length)));
+      if (memo && typeof memo === 'object' && !Array.isArray(memo)) {
+        chapter.url = id.slice(0, at);
+        chapter.memo = memo;
+        return chapter;
+      }
+    } catch (e) {
+      // Not one this driver wrote: the id is the url, verbatim.
+    }
+  }
+  chapter.url = id;
   return chapter;
 }
 
@@ -596,7 +646,11 @@ async function __page(kind, coroutine, args) {
     return __normalisePage(await __source[override].apply(__source, args));
   }
   const response = await __send(__call(kind + 'Request', args));
-  return __normalisePage(__call(kind + 'Parse', [response]));
+  // Awaited: a parse member that makes a request of its own — Toptoon reads a
+  // JSON file named in the page it was handed — is emitted 'async', and the
+  // Promise it answers has no 'mangas'. Normalised unawaited, every result on
+  // the page was dropped and the page came back empty, reporting nothing.
+  return __normalisePage(await __call(kind + 'Parse', [response]));
 }
 `;
 
@@ -716,7 +770,8 @@ export default {
       const date = Number(row.date_upload) || 0;
       chapters.push({
         // Verbatim, and handed back to this extension's own page request.
-        sourceChapterId: url,
+        // Plus its memo, when it wrote one: see '__chapterIdOf'.
+        sourceChapterId: __chapterIdOf(url, row.memo),
         // Upstream's unset value is -1, which is not a chapter number. A list
         // that states none is numbered by its own order, newest first, which
         // is how these sites render.
@@ -767,7 +822,9 @@ export default {
       if (image.length === 0 && String(row.url || '').length > 0 && __declares('imageUrlParse')) {
         try {
           const resolved = await __send(__call('imageUrlRequest', [row]));
-          image = String(__call('imageUrlParse', [__both(resolved)]) || '');
+          // Awaited for the same reason as '__page': unawaited, a suspending
+          // imageUrlParse made every page's image the text "[object Promise]".
+          image = String((await __call('imageUrlParse', [__both(resolved)])) || '');
         } catch (error) {
           image = '';
         }

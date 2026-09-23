@@ -103,6 +103,12 @@ JavaScript for iOS and macOS — reaching the same ABI through the same host.
 | Return a stream URL              | 6                | 39                         |
 | **Verified playable end to end** | **3**            | **18**                     |
 
+That Kotlin column is an early, fully verified corpus. Over the two large Kotlin
+catalogues as a whole, v0.5.0 **loads** 949 of 1,396 manga listings and 101 of
+256 anime listings — load, and reaching requests under a probe, not playback.
+[`docs/compatibility.md`](docs/compatibility.md) has those figures with what
+they do and do not show.
+
 **A returned URL is not playback.** Both ecosystems report the claim and the
 verified result as separate rows, and each URL is checked in the same call that
 produced it — a signed stream URL expires and is often bound to the resolving

@@ -147,8 +147,59 @@ const ENTRYPOINT = 'source';
  *     extension converts to changed in both directions — members now emitted,
  *     and bundles that imported but could not run now refused — so a row
  *     installed before this keeps its old bundle until it is converted again.
+ *
+ * 50: imported repository-wide core objects used as receivers are now read
+ *     with the extension. They previously remained undeclared and were
+ *     refused. This widens the converted bundle, so existing installations
+ *     need another conversion to include those helpers.
+ *
+ * 51: the video libraries' update hint and catching map variant now use the
+ *     existing runtime equivalents. Extensions that called those names were
+ *     refused before, so reconversion is needed to pick up the widened subset.
+ *
+ * 52: detached class and companion getters, mutable lazy properties, and
+ *     empty anonymous subclasses now keep their Kotlin behavior. Previously
+ *     refused members can enter a bundle after reconversion.
+ *
+ * 53: mutable sorts, getOrPut, buildSet and Observable lambdas widen the
+ *     supported control-flow subset; descending keyed sorts also preserve
+ *     Kotlin's stable order. Reconvert to include newly emitted members.
+ *
+ * 54: measured collection and numeric helpers from the stdlib pass now emit
+ *     through checked runtime behavior: null filtering, maxOf, replaceAll,
+ *     mapNotNullTo, toMap, and nullable double parsing. Reconvert to include
+ *     extensions previously refused for those calls.
+ *
+ * 55: Next.js App Router, Pages Router, and React Flight extraction now run
+ *     through the runtime for typed `extractNextJs` and `extractNextJsRsc`.
+ *     Reconvert bundles that use those core helpers.
+ *
+ * 56: nullable Kotlin comparisons now preserve null/undefined equivalence in
+ *     JavaScript. This prevents pagination loops when optional links are absent.
+ *
+ * 57: a decode that names a `@Serializable` class builds it by type, running
+ *     the extension's own custom serializers; JsonElement accessors, Kotlin
+ *     Map views and entries, and a suspending Mihon parse all answered wrong
+ *     or empty before with nothing refused. Several constructs that converted
+ *     and then failed at run time are now refused by name instead (an unread
+ *     keiyoushi core call, a value reference that did not resolve, a
+ *     custom serializer this runtime cannot run). Every bundle made at 56 or
+ *     earlier must be reconverted: some decode differently, and some that
+ *     loaded are now honestly refused.
+ *
+ * 58: a plain `fun` that blocks is awaited from another file and through a
+ *     `::` reference, and `runCatching` over a suspending block is awaited
+ *     before its Result is read. At 57 the Voe extractor, among others,
+ *     answered no videos. A temporary file handed to the player is a `data:`
+ *     uri. Reconvert every bundle made at 57 or earlier.
+ * 59: a manga chapter's `memo` travels inside its id, so opening a chapter
+ *     hands the source back what listing it wrote; and `\p{...}` classes with
+ *     an identical JavaScript spelling translate rather than refuse. At 58
+ *     every Madara chapter list with a relative date threw, and every Madara
+ *     chapter answered "Refresh the chapter list." Reconvert every bundle made
+ *     at 58 or earlier.
  */
-export const CONVERTER_VERSION = 49;
+export const CONVERTER_VERSION = 59;
 
 export interface BundleInput {
 	readonly id: string;

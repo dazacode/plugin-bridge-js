@@ -113,10 +113,29 @@ async function build(loader: WasmLoader): Promise<KotlinParser> {
 		// closes produces no error — see `genericCallOperands`. Kept only if the
 		// rewrite parses at least as well as the source did, which is what stops
 		// a repair from being trusted further than it has earned.
-		const normalised = genericCallOperands(source);
-		if (normalised !== source) {
+		//
+		// Two such rewrites now, tried together and then the older one alone, so
+		// a file the newer one cannot help is read exactly as it was before it
+		// existed. See `tightPrefixOperands`.
+		const generic = genericCallOperands(source);
+		const candidates = [tightPrefixOperands(generic), generic].filter(
+			(one, at, all) => one !== source && all.indexOf(one) === at
+		);
+		for (const normalised of candidates) {
 			const rewritten = wrap(parser.parse(normalised).rootNode as unknown as RawNode);
 			if (!rewritten.hasError) return { root: rewritten, hasError: false };
+			// The rewrite can be right and the file still carry a second, unrelated
+			// gap the retry below exists for. Judged alone, the rewrite then lost
+			// to a source that parses *without error and wrongly* — the Dailymotion
+			// extractor's `} ?: emptyList<Track>()` read as `(… ?: emptyList)<Track>()`
+			// and refused as "a call through" its whole left operand, in five
+			// listings. So the rewrite gets the same retry the source would, and is
+			// kept only if the two together parse cleanly.
+			const both = repairKnownGrammarGaps(maskSupertypeAnnotations(normalised));
+			if (both !== normalised) {
+				const repaired = wrap(parser.parse(both).rootNode as unknown as RawNode);
+				if (!repaired.hasError) return { root: repaired, hasError: false };
+			}
 		}
 
 		const tree = parser.parse(source);
@@ -259,7 +278,8 @@ function repairKnownGrammarGaps(source: string): string {
 		...trailingCommas(masked),
 		...dottedReceiverTypes(masked),
 		...rangeUntil(masked),
-		...nullableCallableReceivers(masked)
+		...nullableCallableReceivers(masked),
+		...delegateOnNextLine(masked)
 	].sort((left, right) => right.start - left.start);
 	let output = plain;
 	for (const edit of edits) {
@@ -503,6 +523,171 @@ function genericCallOperands(source: string): string {
 		output = output.slice(0, edit.start) + edit.text + output.slice(edit.end);
 	}
 	return output;
+}
+
+/**
+ * A prefix `!` or `-` after a binary operator, parenthesised with its operand:
+ * `x == -1 || y` becomes `x == (-1) || y`.
+ *
+ * Kotlin's prefix operators bind tighter than every binary one, so `!b` and
+ * `-1` are whole operands wherever they stand. The pinned grammar agrees at the
+ * start of an expression and disagrees after an operator: there it lets the
+ * prefix take everything to its right, and the tree has no ERROR in it —
+ *
+ *     start == -1 || end == -1       read as   start == -(1 || end == -1)
+ *     y && !list.any { … } || empty  read as   y && !(list.any { … } || empty)
+ *
+ * — so the emitted code compared against a boolean and negated the wrong
+ * thing, in every extension that writes an index check or a guard this way
+ * (fifty-odd lines across the two catalogues measured, `indexOf(…) != -1 &&
+ * …` among them), with nothing refused.
+ *
+ * Parenthesising the prefix and its operand is Kotlin's own grouping, so the
+ * rewrite cannot change a value; it is done only where the grammar goes wrong
+ * — after a binary operator, and before another one the prefix could swallow
+ * — to keep the rewrite as small as the gap. The operand is the prefix's
+ * postfix chain: a name, number, string or parenthesised primary, then any
+ * `.name`, `?.name`, `!!`, call, index or trailing lambda. Anything the scan
+ * cannot read to its end is left alone, and the caller keeps the rewrite only
+ * if it parses without error.
+ */
+export function tightPrefixOperands(source: string): string {
+	if (!PREFIX_AFTER_OPERATOR.test(source)) return source;
+	const masked = maskLiteralsAndComments(source);
+	const edits: Edit[] = [];
+	for (let at = 0; at < masked.length; at += 1) {
+		const character = masked.charAt(at);
+		if (character !== '!' && character !== '-') continue;
+		const next = masked.charAt(at + 1);
+		if (
+			character === '!' &&
+			(next === '=' || next === '!' || /^(?:in|is)\b/.test(masked.slice(at + 1, at + 4)))
+		) {
+			continue;
+		}
+		if (character === '-' && (next === '>' || next === '-' || next === '=')) continue;
+		if (!afterBinaryOperator(masked, at)) continue;
+		const end = operandEnd(masked, at + 1);
+		if (end === -1 || !beforeBinaryOperator(masked, end)) continue;
+		edits.push({ start: end, end, text: ')' });
+		edits.push({ start: at, end: at, text: '(' });
+	}
+	if (edits.length === 0) return source;
+	let output = source;
+	for (const edit of edits.sort((left, right) => right.start - left.start)) {
+		output = output.slice(0, edit.start) + edit.text + output.slice(edit.end);
+	}
+	return output;
+}
+
+const PREFIX_AFTER_OPERATOR = /(?:&&|\|\||[=!<>]=|[<>+*\/%]|\?:|\.\.|\bin)[ \t]*[!-][^=>!-]/;
+
+/** True when the token before `at` is a binary operator. */
+function afterBinaryOperator(masked: string, at: number): boolean {
+	let index = at - 1;
+	while (index >= 0 && /[ \t\n\u0002]/.test(masked.charAt(index))) index -= 1;
+	if (index < 0) return false;
+	const before = masked.slice(Math.max(0, index - 2), index + 1);
+	if (/(?:&&|\|\||[=!<>]=|\?:|\.\.)$/.test(before)) return true;
+	// A lone `<` or `>` is a comparison here only when it is not the end of an
+	// arrow or of a type-argument list; `-` and `+` only when binary, which is
+	// when an operand stands before them.
+	const one = masked.charAt(index);
+	if (one === '>' && masked.charAt(index - 1) === '-') return false;
+	if ('<>*/%'.includes(one)) return one !== '>' || /[\w)\]\s]/.test(masked.charAt(index - 1));
+	if (one === '+' || one === '-') {
+		let operand = index - 1;
+		while (operand >= 0 && /[ \t]/.test(masked.charAt(operand))) operand -= 1;
+		return operand >= 0 && /[\w)\]\u0001]/.test(masked.charAt(operand));
+	}
+	return /(?:^|[^\w])in$/.test(masked.slice(Math.max(0, index - 3), index + 1));
+}
+
+/** True when a binary operator follows `at`, which the prefix could swallow. */
+function beforeBinaryOperator(masked: string, at: number): boolean {
+	let index = at;
+	while (index < masked.length && /[ \t]/.test(masked.charAt(index))) index += 1;
+	const rest = masked.slice(index, index + 3);
+	if (/^(?:&&|\|\||[=!<>]=|\?:|\.\.|[<>*\/%+]|-(?!>)|as\b|in\b|!in\b)/.test(rest)) return true;
+	// Kotlin continues a line that the next one begins with `&&`, `||` or `?:`.
+	while (index < masked.length && /[ \t\n\u0002]/.test(masked.charAt(index))) index += 1;
+	return /^(?:&&|\|\||\?:)/.test(masked.slice(index, index + 2));
+}
+
+/** Where the operand of a prefix operator starting at `from` ends, or -1. */
+function operandEnd(masked: string, from: number): number {
+	let at = from;
+	while (/[ \t]/.test(masked.charAt(at))) at += 1;
+	const first = masked.charAt(at);
+	if (first === '!' || first === '-') return operandEnd(masked, at + 1);
+	if (first === '(') {
+		at = callEnd(masked, at);
+		if (at === -1) return -1;
+	} else if (first === '\u0001') {
+		while (masked.charAt(at) === '\u0001') at += 1;
+	} else if (/[\w$]/.test(first)) {
+		while (/[\w$]/.test(masked.charAt(at))) at += 1;
+		// A decimal: `1.5`, `2.0f` — a dot followed by a digit is the number's.
+		if (/\d/.test(first) && masked.charAt(at) === '.' && /\d/.test(masked.charAt(at + 1))) {
+			at += 1;
+			while (/[\w$]/.test(masked.charAt(at))) at += 1;
+		}
+	} else return -1;
+
+	for (;;) {
+		let look = at;
+		while (/[ \t\n]/.test(masked.charAt(look))) look += 1;
+		const here = masked.slice(look, look + 2);
+		if ((here.charAt(0) === '.' && here !== '..') || here === '?.') {
+			let name = look + (here === '?.' ? 2 : 1);
+			while (/[ \t\n]/.test(masked.charAt(name))) name += 1;
+			if (!/[\w$`]/.test(masked.charAt(name))) return -1;
+			if (masked.charAt(name) === '`') name = masked.indexOf('`', name + 1) + 1;
+			else while (/[\w$]/.test(masked.charAt(name))) name += 1;
+			at = name;
+			continue;
+		}
+		// Everything else continues the chain only on the same line.
+		if (look !== at && masked.slice(at, look).includes('\n')) return at;
+		if (here === '!!') {
+			at = look + 2;
+			continue;
+		}
+		const open = masked.charAt(look);
+		if (open === '(' || open === '[') {
+			const close = callEnd(masked, look);
+			if (close === -1) return -1;
+			at = close;
+			continue;
+		}
+		if (open === '{') {
+			const close = braceEnd(masked, look);
+			if (close === -1) return -1;
+			at = close;
+			continue;
+		}
+		if (here === '::') {
+			let name = look + 2;
+			while (/[\w$]/.test(masked.charAt(name))) name += 1;
+			at = name;
+			continue;
+		}
+		return at;
+	}
+}
+
+/** The index just past the `}` closing the brace opened at `from`, or -1. */
+function braceEnd(masked: string, from: number): number {
+	let depth = 0;
+	for (let at = from; at < masked.length; at += 1) {
+		const character = masked.charAt(at);
+		if (character === '{') depth += 1;
+		else if (character === '}') {
+			depth -= 1;
+			if (depth === 0) return at + 1;
+		}
+	}
+	return -1;
 }
 
 const GENERIC_OPERAND =
@@ -799,6 +984,48 @@ function rangeUntil(masked: string): Edit[] {
 	const edits: Edit[] = [];
 	for (let at = masked.indexOf('..<'); at !== -1; at = masked.indexOf('..<', at + 3)) {
 		edits.push({ start: at, end: at + 3, text: ' until ' });
+	}
+	return edits;
+}
+
+/**
+ * A property's `by` delegate written on the line below it:
+ *
+ *     private val SharedPreferences.ignorePreview
+ *         by preferences.delegate(IGNORE_PREVIEW_KEY, IGNORE_PREVIEW_DEFAULT)
+ *
+ * Kotlin reads the two lines as one declaration; the pinned grammar ends the
+ * declaration at the newline and recovers `by preferences` as an error. Every
+ * multisrc theme that keeps its settings this way, and three extensions with
+ * `override var baseUrl: String` above its delegate, lost the property to it.
+ *
+ * The `by` line is joined to its declaration — the newline and indentation in
+ * front of `by` become one space — and a newline is put back at the end of the
+ * joined line, so the line count is unchanged and everything below reads at
+ * the line it was written on. The delegate itself is reported one line up.
+ *
+ * Only after a line that is a whole property header and nothing more: `val` or
+ * `var` after modifiers, no `=`, no brace, no trailing operator. Anything else
+ * ending above a line that starts with `by` is left as it was.
+ */
+function delegateOnNextLine(masked: string): Edit[] {
+	const edits: Edit[] = [];
+	const header =
+		/^[ \t]*(?:(?:private|protected|internal|public|override|open|final|lateinit)[ \t]+)*va[lr][ \t]+[^=\n{}]*[\w>?)][ \t]*$/;
+	let lineStart = 0;
+	while (lineStart < masked.length) {
+		const newline = masked.indexOf('\n', lineStart);
+		if (newline === -1) break;
+		const line = masked.slice(lineStart, newline);
+		const next = /^[ \t]+by[ \t]/.exec(masked.slice(newline + 1));
+		if (header.test(line) && next !== null) {
+			const by = newline + 1 + next[0].search(/by/);
+			const end = masked.indexOf('\n', by);
+			const close = end === -1 ? masked.length : end;
+			edits.push({ start: close, end: close, text: '\n' });
+			edits.push({ start: newline, end: by, text: ' ' });
+		}
+		lineStart = newline + 1;
 	}
 	return edits;
 }

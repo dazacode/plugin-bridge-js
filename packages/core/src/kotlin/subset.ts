@@ -420,6 +420,38 @@ const NAMED_OBSTACLES: readonly {
 	{ pattern: /\bCookieManager\b/, name: 'the WebView cookie store' }
 ];
 
+/**
+ * The boundaries an anti-bot *recovery* reaches for, by the names refusals give
+ * them.
+ *
+ * An okhttp interceptor in this ecosystem very often has one shape: send the
+ * request, look at the answer, hand it straight back unless it is a challenge
+ * page, and only then do something about the challenge — read the WebView's
+ * cookie store for a clearance cookie, or open a WebView to earn one. The
+ * challenge half is a boundary and stays one (`docs/adr/0005-network-
+ * boundaries.md` §4). The pass-through half is ordinary Kotlin, and it is what
+ * runs on every request the source does not challenge.
+ *
+ * `emit.ts` (`recoveryCut`) uses this list to tell that shape from an
+ * interceptor that is *about* the boundary: the part of `intercept` after the
+ * pass-through guard may be cut off — replaced by an error naming the
+ * boundary — only when what refused it is one of these. A tail refused for an
+ * ordinary gap is a translator gap and is left refused, where it is counted.
+ *
+ * Every name here is one the scoreboard counts as a native capability
+ * (`host/src/scoreboard.ts`), and `scoreboard.spec.ts` holds the two lists to
+ * that. The passthrough spelling `.getCookie()` is on it because a lower-case
+ * `cookieManager` field read is not something the name table can see: the
+ * emitter meets the call and refuses it by the method's name.
+ */
+export const RECOVERY_BOUNDARIES: ReadonlyMap<string, string> = new Map([
+	// Refusal kind → what the runtime error calls it, in a viewer's words.
+	['WebView', 'a WebView'],
+	['the WebView cookie store', "the WebView's cookie store"],
+	['`.getCookie()`', "the WebView's cookie store"],
+	['reading a cookie jar', 'reading its own cookie jar']
+]);
+
 /* ── algorithms ───────────────────────────────────────────────────────────── */
 
 /**
@@ -574,6 +606,13 @@ export function cryptoObstacle(text: string, asTransformation = false): string |
 const APPLICATION_PREFERENCES = /\bInjekt\.get<Application>\(\)\.getSharedPreferences\(/;
 
 /**
+ * `Injekt.get<Json>()`, or a property typed `Json` initialised by a bare
+ * `Injekt.get()`, whitespace squeezed out. See the exemption in `scanInto`.
+ */
+const INJECTED_JSON =
+	/^(?:Injekt\.get<Json>\(\)|(?:(?:private|internal|public)?(?:val|var))\w+:Json=Injekt\.get(?:<Json>)?\(\))$/;
+
+/**
  * The classpath, in the two spellings this ecosystem writes it in.
  *
  * `this::class.java.classLoader` and `javaClass.classLoader` are one idiom, and
@@ -650,6 +689,11 @@ export function namedObstacle(text: string): string | null {
  * typo is `__k.mapNotNul is not a function` inside a sandbox.
  */
 export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
+	// Kotlin's Map transforms, each answering a Map — see the runtime.
+	['mapValues', 'mapValues'],
+	['mapKeys', 'mapKeys'],
+	['filterKeys', 'filterKeys'],
+	['filterValues', 'filterValues'],
 	// strings — every one of these differs from its JavaScript namesake
 	['substringAfter', 'substringAfter'],
 	['substringAfterLast', 'substringAfterLast'],
@@ -704,7 +748,11 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 	// turn a DTO list into something it can store. See the helper.
 	['toJsonElement', 'toJsonElement'],
 	['asUriPart', 'asQueryPart'],
-	['head', 'firstOrNull'],
+	// Not a list's head: okhttp's `Request.Builder().head()` (the HEAD
+	// method) and jsoup's `document.head()`. Mapped to `firstOrNull` it
+	// answered null for both, so a HEAD request died at `.build()` and a
+	// document's <head> read as nothing. The helper asks the value.
+	['head', 'head'],
 	['rateLimit', 'rateLimit'],
 	// The per-host sibling of the one above. Both are emitted with their period
 	// already resolved to milliseconds; see `rateLimitCall` in `emit.ts`.
@@ -731,6 +779,13 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 	['none', 'none'],
 	['sortedBy', 'sortedBy'],
 	['sortedByDescending', 'sortedByDescending'],
+	// MutableList sorts reorder the receiver and answer Unit.
+	['sortBy', 'sortBy'],
+	['sortByDescending', 'sortByDescending'],
+	['sortWith', 'sortWith'],
+	['sortDescending', 'sortDescending'],
+	// Compute only when the map has no non-null value under the key.
+	['getOrPut', 'getOrPut'],
 	['reversed', 'reversed'],
 	['distinct', 'distinct'],
 	['take', 'take'],
@@ -816,6 +871,13 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 	['use', 'let'],
 	['orEmpty', 'orEmpty'],
 	['eachText', 'eachText'],
+	// `Int.inc()`/`dec()` — the operator functions behind `++`, called by name:
+	// `calendar.get(Calendar.YEAR).inc()`. A Char steps to its neighbour.
+	['inc', 'inc'],
+	['dec', 'dec'],
+	// `hashes.groupingBy { it.second }.eachCount()`: a Grouping, and the one
+	// terminal this ecosystem asks of it.
+	['groupingBy', 'groupingBy'],
 	['eachAttr', 'eachAttr'],
 	['filterIsInstance', 'filterIsInstance'],
 	['bodyString', 'bodyString'],
@@ -833,6 +895,9 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 	['parallelForEachBlocking', 'forEach'],
 	['parallelCatchingMap', 'catchingMap'],
 	['parallelCatchingMapBlocking', 'catchingMap'],
+	// The NotNull variant also drops nulls; catchingMap already skips failed
+	// transforms and null results. Only its parallelism is lost in the sandbox.
+	['parallelCatchingMapNotNull', 'catchingMap'],
 	['parallelCatchingFlatMap', 'catchingFlatMap'],
 	['parallelCatchingFlatMapBlocking', 'catchingFlatMap'],
 	// The same three functions again without the `parallel` prefix. The
@@ -981,6 +1046,10 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 	// jsoup's two upward calls
 	['closest', 'closest'],
 	['ownerDocument', 'ownerDocument'],
+	// jsoup's sibling insertions, spelled like java.util.Date's comparisons:
+	// the helper tells a node from a date by asking the value.
+	['before', 'before'],
+	['after', 'after'],
 
 	// `Throwable.printStackTrace()`, which is what `onFailure { … }` contains
 	['printStackTrace', 'printStackTrace'],
@@ -1027,6 +1096,49 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 	['keys', 'jsonKeys'],
 	['opt', 'jsonOpt'],
 
+	// keiyoushi's keyed readers over a kotlinx JsonObject, from `core/`'s
+	// `utils/JsonElement.kt` — `obj.getStringOrNull("id")`. The host supplies
+	// them the way it supplies the other `keiyoushi.utils` helpers, because
+	// `core/` is read only for named objects. They are not org.json's: the
+	// receiver must be a JsonObject, and `getArrayOrNull` over a JSON null
+	// throws as upstream does. The one-argument `getString`/`getInt`/… reach
+	// org.json's `jsonGet*`, which agree with upstream's `getValue(k)` forms.
+	// MutableList's in-place pair and Map's throwing read. `reverse` is not
+	// JavaScript's: Kotlin's answers Unit and `reversed()` is the copy, and a
+	// StringBuilder has one of its own — see the helper for both.
+	['removeAt', 'removeAt'],
+	['padEnd', 'padEnd'],
+	['min', 'collectionMin'],
+	['max', 'collectionMax'],
+	['average', 'average'],
+	['capitalize', 'capitalize'],
+	['runningFold', 'runningFold'],
+	['mapIndexedTo', 'mapIndexedTo'],
+	['containsAll', 'containsAll'],
+	['retainAll', 'retainAll'],
+	['replaceAfterLast', 'replaceAfterLast'],
+	['windowed', 'windowed'],
+	['toByteString', 'toByteString'],
+	['findAnyOf', 'findAnyOf'],
+	// okio's, answering a ByteString or null; an extension's own
+	// `String.decodeBase64()` shadows it, as any declaration does.
+	['decodeBase64', 'okioDecodeBase64'],
+	['component1', 'component1'],
+	['component2', 'component2'],
+	['component3', 'component3'],
+	['component4', 'component4'],
+	['component5', 'component5'],
+	['reverse', 'reverseInPlace'],
+	['getValue', 'mapGetValue'],
+	['getStringOrNull', 'jeGetStringOrNull'],
+	['getIntOrNull', 'jeGetIntOrNull'],
+	['getLongOrNull', 'jeGetLongOrNull'],
+	['getBooleanOrNull', 'jeGetBooleanOrNull'],
+	['getArrayOrNull', 'jeGetArrayOrNull'],
+	['getObjectOrNull', 'jeGetObjectOrNull'],
+	['getArray', 'jeGetArray'],
+	['getObject', 'jeGetObject'],
+
 	// The long tail. Each of these refused extensions by name while the
 	// behaviour was already spelled somewhere in the runtime — `xor` as an
 	// infix operator, `isLowerCase` as a `Character` static, `toMillis` on the
@@ -1052,7 +1164,15 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 	['xor', 'bitwiseXor'],
 	// `length()` with the parentheses is org.json's, never Kotlin's
 	// `String.length` — that one is a property and reaches a different table.
-	['length', 'jsonLength']
+	['length', 'jsonLength'],
+	// Measured stdlib gaps. The nullable number reader already has the same
+	// double-precision result; the remaining helpers live in the runtime.
+	['toDoubleOrNull', 'toFloatOrNull'],
+	['filterNotNull', 'filterNotNull'],
+	['maxOf', 'maxOf'],
+	['replaceAll', 'replaceAll'],
+	['mapNotNullTo', 'mapNotNullTo'],
+	['toMap', 'toMap']
 ]);
 
 /**
@@ -1130,7 +1250,10 @@ export const ARGUMENT_LAMBDA_METHODS: ReadonlySet<string> = new Set([
 	'addInterceptor',
 	// keiyoushi's `addCookie { listOf("k" to v) }`: the lambda is the cookies,
 	// asked for at each request so a preference can change them.
-	'addCookie'
+	'addCookie',
+	// Observable takes each block as a function of the value or error.
+	'doOnNext',
+	'onErrorReturn'
 ]);
 
 /**
@@ -1146,6 +1269,10 @@ export const EXTENSION_PROPERTIES: ReadonlyMap<string, string> = new Map([
 	// `undefined`, and handed that to whatever iterated it. A refusal would have
 	// been the honest outcome; silence was not. See `indices` in the runtime.
 	['indices', 'indices'],
+	// `List.lastIndex` and `CharSequence.lastIndex`, the same gap one name
+	// over: `list.removeAt(list.lastIndex)` read undefined and removed nothing
+	// it named, and `x < segments.lastIndex` compared against undefined.
+	['lastIndex', 'lastIndex'],
 	['groupValues', 'groupValues'],
 	['destructured', 'destructured'],
 	// `Char.code`. A Char is a one-character string here, so the read came out
@@ -1153,7 +1280,37 @@ export const EXTENSION_PROPERTIES: ReadonlyMap<string, string> = new Map([
 	// NaN: the unpacker module's radix parser answered NaN for every word and
 	// returned its packed input unchanged, with nothing refused. The name is
 	// also okhttp's `response.code`, which the helper hands straight back.
-	['code', 'code']
+	['code', 'code'],
+	// kotlinx's JsonElement accessors. A JsonElement is the plain parsed value
+	// here, so every one of these was a property read that answered
+	// `undefined` — `.jsonPrimitive.content` threw on a good document and its
+	// `?.` spelling answered null, nothing refused. Each helper defers to a
+	// receiver that really has the property, because these are ordinary field
+	// names too; see `jeObject` in the runtime.
+	['jsonObject', 'jeObject'],
+	['jsonArray', 'jeArray'],
+	['jsonPrimitive', 'jePrimitive'],
+	['jsonNull', 'jeNull'],
+	['content', 'jeContent'],
+	['contentOrNull', 'jeContentOrNull'],
+	['isString', 'jeIsString'],
+	['int', 'jeInt'],
+	['intOrNull', 'jeIntOrNull'],
+	['long', 'jeLong'],
+	['longOrNull', 'jeLongOrNull'],
+	['double', 'jeDouble'],
+	['doubleOrNull', 'jeDoubleOrNull'],
+	['float', 'jeFloat'],
+	['floatOrNull', 'jeFloatOrNull'],
+	['boolean', 'jeBoolean'],
+	['booleanOrNull', 'jeBooleanOrNull'],
+	// A Kotlin Map's views. A JS Map spells these as *methods* and a
+	// JsonObject has none, so each was a property read that answered the
+	// method or undefined — `m.values.joinToString()` was empty, nothing
+	// refused. Deferring to a receiver that has the property, as above.
+	['keys', 'kKeys'],
+	['values', 'kValues'],
+	['entries', 'kEntries']
 ]);
 
 /**
@@ -1184,6 +1341,21 @@ export const HOST_PROPERTY_METHODS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Functions a runtime global answers by name, for a `Global::member`
+ * reference to them — `publishedAt?.let(Instant::parseOrNull)`.
+ *
+ * The call form `Instant.parseOrNull(it)` has always passed through; the
+ * reference form was refused, because nothing said the global has that
+ * member. Refused inside a DTO's `toSChapter`, which a `map(Dto::toSChapter)`
+ * reached, it was a chapter list that died at "not a function". Kept to what
+ * the runtime defines — `kotlin-runtime.spec.ts` checks each is a function on
+ * its global — so a reference here cannot name something that is missing.
+ */
+export const RUNTIME_STATIC_REFERENCES: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+	['Instant', new Set(['parse', 'parseOrNull', 'tryParse', 'fromEpochMilliseconds'])]
+]);
+
+/**
  * Methods and properties emitted unchanged, because the runtime defines them.
  *
  * jsoup (`shims/dom.ts`), the HTTP client, the URL builder and the three model
@@ -1191,6 +1363,60 @@ export const HOST_PROPERTY_METHODS: ReadonlySet<string> = new Set([
  * is a deliberate cost rather than an oversight.
  */
 export const HOST_METHODS: ReadonlySet<string> = new Set([
+	// The one terminal of a `groupingBy { }` Grouping this runtime builds.
+	'eachCount',
+	// java.text.CharacterIterator's reads, on the one this runtime builds.
+	'current',
+	// A PreferenceScreen's (`KOTLIN_PREFS`), which is the one call the
+	// preference idiom ends on: `SwitchPreferenceCompat(ctx).apply { … }
+	// .also(screen::addPreference)`. It records the child and its default.
+	// `setDefaultValue` is the call inside that block, bare, on the
+	// preference: without it here the block's implicit receiver lost to the
+	// source object and the default was asked of the extension instead.
+	// java.time's DateTimeFormatterBuilder (`kotlin-time.ts`).
+	// okhttp's CacheControl.Builder (`KOTLIN_HTTP`), which the host's
+	// transport treats as advice; the builder answers these already.
+	'noCache',
+	'noStore',
+	// java.util.Locale's language name — see `getDisplayLanguage`.
+	'getDisplayLanguage',
+	// java.util.Random's reader, on the runtime's `Random` (which `Random()`
+	// answers), and java.lang.String's code point reader, which is
+	// JavaScript's under the same name and the same UTF-16 index.
+	'nextInt',
+	'codePointAt',
+	'appendPattern',
+	'parseDefaulting',
+	'toFormatter',
+	'addPreference',
+	'setDefaultValue',
+	// okio's ByteString readers, on what `decodeBase64()` answers (see
+	// `__byteString` in the runtime).
+	'utf8',
+	// kotlinx's JsonDecoder, as a KSerializer's `deserialize` is handed it by
+	// the typed decoder (`__jsonDecoder` in the runtime). The `encode*` half
+	// is what the same object's `serialize` writes; the runtime never calls
+	// one, and refuses to encode a record whose class names a serializer.
+	// A temporary file's own members (`__KTempFile` in the runtime).
+	'writeText',
+	'readText',
+	'deleteOnExit',
+	'decodeJsonElement',
+	'decodeString',
+	'decodeInt',
+	'decodeLong',
+	'decodeDouble',
+	'decodeFloat',
+	'decodeBoolean',
+	'decodeNull',
+	'decodeNotNullMark',
+	'encodeString',
+	'encodeInt',
+	'encodeLong',
+	'encodeDouble',
+	'encodeBoolean',
+	'encodeNull',
+	'encodeJsonElement',
 	// The classpath, and the one question this ecosystem asks a `Locale`.
 	//
 	// `getResourceAsStream(name)` is the read at the bottom of `Intl`, and
@@ -1243,6 +1469,35 @@ export const HOST_METHODS: ReadonlySet<string> = new Set([
 	'wholeText',
 	'getElementById',
 	'getElementsByTag',
+	'getElementsByClass',
+	// Traversal jsoup answers without a selector, each defined by the shim
+	// with jsoup's own semantics: `parents()` stops below the document,
+	// `previousElementSiblings()` is nearest first, `child(i)` throws past
+	// the end, `is(q)` matches against the whole tree.
+	'child',
+	'elementSiblingIndex',
+	'parents',
+	'nextElementSiblings',
+	'previousElementSiblings',
+	'childNodes',
+	'nodeName',
+	'normalName',
+	'is',
+	'hasText',
+	'attributes',
+	'dataset',
+	'getWholeText',
+	'setBaseUri',
+	// A jsoup document is mutable, and scrapers edit one before reading it.
+	// `remove()` is the collection helper, which dispatches on the argument
+	// count; `before`/`after` are helpers too (see `EXTENSION_METHODS`).
+	'replaceWith',
+	'prepend',
+	'appendText',
+	'prependText',
+	'appendElement',
+	'prependElement',
+	'createElement',
 	'hasClass',
 	'classNames',
 	'clone',
@@ -1636,16 +1891,26 @@ export const HOST_METHODS: ReadonlySet<string> = new Set([
  * `BLOCKING_CALLS` carries that outward to whatever calls *it* — so a member
  * that decrypts becomes `async` and its callers await it, transitively.
  *
- * Only these four, and each is a name javax.crypto and java.security own.
+ * The crypto four are each a name javax.crypto and java.security own.
  * `init`, `initSign` and `update` stay synchronous because the shim keeps them
  * so: a key is recorded rather than imported, and the import happens inside the
  * operation, which is what keeps the asynchronous surface this small.
+ *
+ * `proceed` is okhttp's `Interceptor.Chain.proceed`, and it is on this list for
+ * the same reason: the runtime runs the chain (`__proceed`) and the end of it
+ * is the host's send, so what it hands back is a promise of the response. Not
+ * awaited, `val response = chain.proceed(request)` held that promise, and every
+ * read of it answered `undefined` — `response.code != 403` was true of every
+ * answer, so an interceptor that exists to notice a challenge noticed nothing
+ * and handed the promise back, which the runtime then happened to await. A
+ * returned response survived that by accident; a *read* one never did.
  */
 export const AWAITED_HOST_METHODS: ReadonlySet<string> = new Set([
 	'doFinal',
 	'sign',
 	'verify',
-	'generateKeyPair'
+	'generateKeyPair',
+	'proceed'
 ]);
 
 /**
@@ -1774,6 +2039,7 @@ export const FREE_FUNCTIONS: ReadonlyMap<string, string> = new Map([
 	// The builders whose block is handed a receiver. `buildString` is emitted
 	// by name in `emit.ts`; these four are ordinary free functions there.
 	['buildList', 'buildList'],
+	['buildSet', 'buildSet'],
 	['buildMap', 'buildMap'],
 	['buildJsonObject', 'buildJsonObject'],
 	['buildJsonArray', 'buildJsonArray'],
@@ -1800,9 +2066,29 @@ export const FREE_FUNCTIONS: ReadonlyMap<string, string> = new Map([
 
 	['ArrayList', 'arrayList'],
 	['LinkedList', 'arrayList'],
+	// java.util's maps and sets by constructor — empty, sized, or copying.
+	// `IntRange(0, 9)` is `0..9` by constructor, and a range here is the list
+	// of its values — see `range` in the runtime.
+	['IntRange', 'range'],
+	['LongRange', 'range'],
+	// `Array(size) { i -> … }` builds, exactly as `List(size) { … }` does.
+	['Array', 'listOfSize'],
+	['HashMap', 'hashMap'],
+	// Thread-safe in Java; there is one thread here, so it is a map.
+	['ConcurrentHashMap', 'hashMap'],
+	['LinkedHashMap', 'hashMap'],
+	['HashSet', 'hashSet'],
+	['LinkedHashSet', 'hashSet'],
 	// `List(n) { at -> … }` BUILDS: it is an episode list as often as not, and
 	// an empty array of that length answers undefined for every entry.
 	['List', 'listOfSize'],
+	// `Array(n) { i -> … }` is the same builder under Array's name — Kotlin's
+	// Array constructor always takes the init block — and arrays are lists
+	// here (see `arrayOf`). Cycity builds its year filter this way.
+	['Array', 'listOfSize'],
+	// java.text's `StringCharacterIterator("kMGTPE")`, which a byte-size
+	// formatter walks with `next()` and reads with `current()`. See the helper.
+	['StringCharacterIterator', 'charIterator'],
 
 	['JSONObject', 'jsonObject'],
 	['JSONArray', 'jsonArray'],
@@ -1855,6 +2141,27 @@ export const BASE_CONSTANTS: ReadonlyMap<string, string> = new Map([
 ]);
 
 /**
+ * The members each of jsoup's static receivers actually has in the runtime.
+ *
+ * A capitalised receiver in `GLOBAL_NAMES` is passed through with no check on
+ * the member, which is right for the model builders and wrong here: these
+ * four define a handful of members each, and `Parser.xmlParser()` in
+ * particular would otherwise hand `Jsoup.parse` a parser it ignores and
+ * build an HTML tree from XML. The emitter refuses any member not listed.
+ */
+export const JSOUP_STATICS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+	['Parser', new Set(['unescapeEntities', 'htmlParser'])],
+	['Entities', new Set(['unescape'])],
+	['Evaluator', new Set(['Tag', 'Class', 'Id'])],
+	['TextNode', new Set<string>()],
+	// java.io.File, whose only member a plugin can honour is a temporary file
+	// handed to the player as a `data:` uri — see `__KTempFile` in the runtime.
+	// Not jsoup, but the same question: a capitalised receiver the runtime
+	// defines only in part. `File(path)` is refused in the emitter.
+	['File', new Set(['createTempFile'])]
+]);
+
+/**
  * Names the runtime defines at bundle scope, used bare.
  *
  * Kept in step with `RUNTIME_GLOBALS` by `subset.spec.ts`; duplicated as a set
@@ -1882,6 +2189,14 @@ export const GLOBAL_NAMES: ReadonlySet<string> = new Set([
 	'Headers',
 	'FormBody',
 	'Jsoup',
+	// jsoup's `Parser.unescapeEntities`, `Entities.unescape`, `TextNode(text)`
+	// and `Evaluator.Tag/Class/Id`. Each defines only those members, and
+	// `JSOUP_STATICS` refuses any other one by name before it can reach a
+	// runtime that has never heard of it.
+	'Parser',
+	'Entities',
+	'TextNode',
+	'Evaluator',
 	'SAnime',
 	'SEpisode',
 	'Video',
@@ -1895,7 +2210,19 @@ export const GLOBAL_NAMES: ReadonlySet<string> = new Set([
 	'RegexOption',
 	'Observable',
 	'UpdateStrategy',
+	'AnimeUpdateStrategy',
 	'SMangaUpdate',
+	'HttpUrl',
+	// androidx's preference types — see `RUNTIME_GLOBALS`.
+	'PreferenceCategory',
+	'SwitchPreferenceCompat',
+	'SwitchPreference',
+	'CheckBoxPreference',
+	'EditTextPreference',
+	'ListPreference',
+	'DropDownPreference',
+	'MultiSelectListPreference',
+	'SeekBarPreference',
 	'SimpleDateFormat',
 	'DateTimeFormatter',
 	'Locale',
@@ -1996,6 +2323,8 @@ export const GLOBAL_NAMES: ReadonlySet<string> = new Set([
 	'ZoneOffset',
 	'ChronoUnit',
 	'ChronoField',
+	'DateTimeFormatterBuilder',
+	'Charset',
 	'DayOfWeek',
 	'Month',
 	'TextStyle',
@@ -2013,7 +2342,16 @@ export const GLOBAL_NAMES: ReadonlySet<string> = new Set([
 	   declared here rather than left to translate and fail. */
 	'PropertyResourceBundle',
 	'InputStreamReader',
-	'Collator'
+	'Collator',
+
+	/* kotlinx.serialization's names a hand-written KSerializer declares, and
+	   JsonNull, which is JSON's null — see the typed decoder in the runtime. */
+	'PrimitiveSerialDescriptor',
+	'PrimitiveKind',
+	'JsonNull',
+
+	/* java.io.File, as far as `File.createTempFile` goes: see `JSOUP_STATICS`. */
+	'File'
 ]);
 
 /**
@@ -2316,11 +2654,35 @@ export const KNOWN_SIGNATURES: ReadonlyMap<string, readonly string[]> = new Map(
 	// counterpart and named about as often as it is passed positionally.
 	['MangasPage', ['mangas', 'hasNextPage']],
 
+	// The framework's filter constructors, which a filter class names in its
+	// supertype call — `: Filter.Group<TriStateItem>(name = "Genre", state =
+	// genres.map(::TriStateItem))` — and which were refused for the names
+	// alone. The lists are upstream's parameter order, which is also the
+	// runtime's (`AnimeFilter` in `KOTLIN_MODELS`), under both spellings of
+	// the type. `Header` and `Separator` take only a name.
+	...['Filter', 'AnimeFilter'].flatMap((base): [string, readonly string[]][] => [
+		[`${base}.Select`, ['name', 'values', 'state']],
+		[`${base}.Sort`, ['name', 'values', 'state']],
+		[`${base}.Text`, ['name', 'state']],
+		[`${base}.CheckBox`, ['name', 'state']],
+		[`${base}.TriState`, ['name', 'state']],
+		[`${base}.Group`, ['name', 'state']],
+		[`${base}.Header`, ['name']],
+		[`${base}.Separator`, ['name']]
+	]),
+	// `Filter.Sort.Selection(index, ascending)`, a sort filter's state, which
+	// the catalogue writes as `Selection(2, ascending = false)`.
+	['Selection', ['index', 'ascending']],
+
 	// **`SMangaUpdate(manga = …, chapters = …)`**, the pair the current
 	// manga API returns details and chapters in, from one request. Every
 	// construction site in the measured catalogue names both — 92 listings
 	// were refused on that alone — and the order is the data class's own.
 	['SMangaUpdate', ['manga', 'chapters']],
+
+	// `Filter.Sort.Selection(index, ascending)`, the state of a Sort filter,
+	// which HeanCms-style sources build as `Selection(1, ascending = false)`.
+	['Selection', ['index', 'ascending']],
 
 	// **`getMangaUpdate(manga, chapters, fetchDetails = …, fetchChapters = …)`**,
 	// the base class's `final` entry point, which an extension calls on itself
@@ -2350,6 +2712,24 @@ export const KNOWN_SIGNATURES: ReadonlyMap<string, readonly string[]> = new Map(
 	// ecosystem compares a header name, and it is the same trailing-boolean
 	// shape as the four above.
 	['equals', ['other', 'ignoreCase']],
+	// `description.indexOf("English", ignoreCase = true)`. Not the trailing-
+	// boolean shape above — `startIndex` sits between — so a named call is not
+	// left on the passthrough: `emit.ts` sends it to `__k.indexOf`, which takes
+	// a skipped `startIndex` as `undefined` and honours `ignoreCase`. JavaScript's
+	// own `indexOf` would drop the flag without a word. Positional calls, which
+	// mean the same in both languages, stay on the passthrough.
+	['indexOf', ['string', 'startIndex', 'ignoreCase']],
+	['lastIndexOf', ['string', 'startIndex', 'ignoreCase']],
+	['findAnyOf', ['strings', 'startIndex', 'ignoreCase']],
+	['windowed', ['size', 'step', 'partialWindows', 'transform']],
+	['replaceAfterLast', ['delimiter', 'replacement', 'missingDelimiterValue']],
+	// `substringBeforeLast('.', missingDelimiterValue = name)` — what the
+	// four answer when the delimiter is absent, which the runtime's helpers
+	// already take third.
+	['substringBefore', ['delimiter', 'missingDelimiterValue']],
+	['substringBeforeLast', ['delimiter', 'missingDelimiterValue']],
+	['substringAfter', ['delimiter', 'missingDelimiterValue']],
+	['substringAfterLast', ['delimiter', 'missingDelimiterValue']],
 
 	// `AnimesPage(animes = …, hasNextPage = …)`, which a list parse returns by
 	// hand. Both halves are required, so nothing is filled with `undefined`.
@@ -2384,7 +2764,28 @@ export const KNOWN_SIGNATURES: ReadonlyMap<string, readonly string[]> = new Map(
 		'extractFromDash',
 		['mpdUrl', 'videoNameGen', 'mpdHeaders', 'videoHeaders', 'referer', 'subtitleList', 'audioList']
 	],
-	['graphQLPost', ['url', 'query', 'variables', 'headers']]
+	['graphQLPost', ['url', 'query', 'variables', 'headers']],
+	// The framework's filter constructors, which a filter file extends with
+	// its arguments named — `Filter.Group<Option>(name = name, state = …)`.
+	// Refused, the whole base class went, and every class extending it with
+	// it. The lists are upstream's own (`Filter.kt` in both ecosystems, the
+	// video fork renamed and unchanged) and the runtime's constructors take
+	// them in the same order; `Separator(name = "")` names a parameter the
+	// runtime ignores, which is what upstream's default does too.
+	...(['Filter', 'AnimeFilter'] as const).flatMap((family) =>
+		(
+			[
+				['Header', ['name']],
+				['Separator', ['name']],
+				['Select', ['name', 'values', 'state']],
+				['Text', ['name', 'state']],
+				['CheckBox', ['name', 'state']],
+				['TriState', ['name', 'state']],
+				['Group', ['name', 'state']],
+				['Sort', ['name', 'values', 'state']]
+			] as const
+		).map(([type, params]): [string, readonly string[]] => [`${family}.${type}`, params])
+	)
 	// `videosFromUrl` and `videoFromUrl` were here, and both were wrong.
 	//
 	// Every one of the 37 extractor declarations in this ecosystem puts `url`
@@ -2676,6 +3077,26 @@ const HOST_DRAWN_MEMBERS: ReadonlySet<string> = new Set([
 	'restartApp'
 ]);
 
+/**
+ * Host-drawn members that nothing runs, ever — so what they call is not a
+ * caller's need.
+ *
+ * `setupPreferenceScreen` is read *statically* (`aniyomi-preferences.ts`
+ * derives the manifest's settings from its source) and no driver invokes it:
+ * the Mihon driver's `__super` answers it with an empty function and the
+ * Aniyomi driver has no such member. So its body is inert, and two things it
+ * used to decide were wrong. It was a reachability root, like everything the
+ * extension declares, so a refused helper only it called blocked the build;
+ * and its calls counted as a translated caller's, so once the preference
+ * types translated, `super.setupPreferenceScreen(screen)` in an extension
+ * made its template's refused screen block — one DooPlay extension stopped
+ * loading for a preference listener lambda that can never run.
+ *
+ * `getFilterList` is host-drawn too and is NOT here: the driver calls it on
+ * every search, which is exactly why a refused helper it calls must block.
+ */
+export const NEVER_INVOKED_MEMBERS: ReadonlySet<string> = new Set(['setupPreferenceScreen']);
+
 /** True when refusing this member does not stop a bundle from being built. */
 export function isHostDrawn(member: string): boolean {
 	if (HOST_DRAWN_MEMBERS.has(member)) return true;
@@ -2856,6 +3277,13 @@ function scanInto(node: KNode, memberName: string, found: Untranslatable[]): voi
 	) {
 		return;
 	}
+	// The same container asked for the app's `Json`, which is the other object
+	// the runtime already owns: `by injectLazy<Json>()` has resolved to it all
+	// along, and keiyoushi core spells the same request `val jsonInstance:
+	// Json = Injekt.get()`. Mihon configures that instance with
+	// `ignoreUnknownKeys` and `explicitNulls = false`, which is what the
+	// runtime's decoder does. Anything else asked of Injekt stays refused.
+	if (INJECTED_JSON.test(node.text.replace(/\s+/g, ''))) return;
 
 	// And a fourth: `Thread.sleep(ms)`. The name table refuses `Thread` because
 	// a leaf cannot tell a pause from a thread (see the note on that entry),
@@ -2899,6 +3327,18 @@ function scanInto(node: KNode, memberName: string, found: Untranslatable[]): voi
 			const receiver = callee?.children[0];
 			if (receiver !== undefined) scanInto(receiver, memberName, found);
 			for (const suffix of suffixes) if (suffix !== undefined) scanInto(suffix, memberName, found);
+			return;
+		}
+	}
+
+	// `class Volume(val chapters: List<Chapter>) : Iterable<Chapter> by
+	// chapters` — the one interface delegation the emitter implements (see
+	// `iterableDelegate` there). The node kind stays refused for any other
+	// interface; for this one only the delegate expression is scanned.
+	if (node.type === 'explicit_delegation') {
+		const delegate = iterableDelegateOf(node);
+		if (delegate !== null) {
+			scanInto(delegate, memberName, found);
 			return;
 		}
 	}
@@ -2959,6 +3399,34 @@ function scanInto(node: KNode, memberName: string, found: Untranslatable[]): voi
 		if (swallowed !== null && (child.type === 'ERROR' || child.type === 'else')) continue;
 		scanInto(child, memberName, found);
 	}
+}
+
+/**
+ * The expression after `by` in `Iterable<T> by expr`, or null for any other
+ * delegation. Shared by the scanner and the emitter so the two agree on
+ * exactly which delegations translate.
+ */
+export function iterableDelegateOf(node: KNode): KNode | null {
+	if (node.type !== 'explicit_delegation') return null;
+	// Named children only: the type, then the delegate. The `by` between them
+	// is an anonymous token, asked of `allChildren`.
+	const parts = node.children.filter((child) => !COMMENT_KINDS.has(child.type));
+	if (parts.length !== 2 || !node.allChildren.some((child) => child.type === 'by')) return null;
+	const [type, delegate] = parts;
+	const name = type.children.find((child) => child.type === 'type_identifier')?.text;
+	if (type.type !== 'user_type' || name !== 'Iterable') return null;
+	// `: Iterable<Chapter> by pages { … }` — the grammar reads the class body
+	// as a trailing lambda passed to `pages`, so the members are inside the
+	// delegate. Refused as the delegation it is rather than emitted as a call.
+	if (
+		delegate.type === 'call_expression' &&
+		delegate.allChildren.some((child) =>
+			child.allChildren.some((part) => part.type === 'annotated_lambda')
+		)
+	) {
+		return null;
+	}
+	return delegate;
 }
 
 /** Node kinds under this one with no handler. For the survey and the specs. */

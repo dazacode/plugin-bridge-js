@@ -71,6 +71,11 @@ interface Page {
 interface Loaded {
 	id: string;
 	listChapters(id: string, ctx: unknown): Promise<{ sourceChapterId: string; title?: string }[]>;
+	readChapter(
+		id: string,
+		chapter: { number: number; sourceChapterId?: string },
+		ctx: unknown
+	): Promise<{ pages: { index: number; url: string }[] }>;
 	browse(shelf: string, page: number, ctx: unknown): Promise<Page>;
 	searchCatalog(query: string, page: number, ctx: unknown): Promise<Page>;
 }
@@ -172,6 +177,40 @@ class Extension {
 		const page = await module.browse('popular', 1, context());
 		expect(page.entries).toHaveLength(1);
 		expect(page.entries[0].title).toBe('Deferred');
+		expect(page.hasMore).toBe(true);
+	});
+
+	it('awaits a parse member that suspends, rather than normalising its Promise', async () => {
+		// The request/parse pair had the bug the test above guards on the
+		// fetchX path. A parse that makes a request of its own — Toptoon reads
+		// the JSON file its search page names — is emitted `async`, and its
+		// Promise has no `mangas`: every result was dropped, nothing reported.
+		const module = await load(`
+class Extension {
+  constructor() { this.baseUrl = '${BASE_URL}'; }
+  popularMangaRequest(page) { return GET(this.baseUrl + '/popular'); }
+  async popularMangaParse(response) {
+    await Promise.resolve();
+    return MangasPage([{ url: '/manga/second-request', title: 'After a second request' }], true);
+  }
+}
+`);
+
+		const sending = {
+			...(context() as object),
+			http: {
+				policy: async () => undefined,
+				send: async (url: string) => ({
+					status: 200,
+					url,
+					headers: {},
+					text: async () => '',
+					json: async () => ({})
+				})
+			}
+		};
+		const page = await module.browse('popular', 1, sending);
+		expect(page.entries.map((entry) => entry.title)).toEqual(['After a second request']);
 		expect(page.hasMore).toBe(true);
 	});
 
@@ -408,6 +447,31 @@ class Extension {
 		);
 	});
 
+	it('sends the cookies a configureClient `addCookie { … }` block answers', async () => {
+		// The block form, exactly as the emitter writes
+		// `configureClient() = addCookie { listOf("age" to "18") }` — a function
+		// asked per request, on the builder that is the implicit receiver.
+		const module = await load(
+			`
+class Extension {
+  constructor() { this.baseUrl = '${BASE_URL}'; }
+  configureClient(__recv) {
+    return __recv.addCookie((it) => { return __k.listOf(__k.to('confirm_age', '1')); });
+  }
+  async getPopularManga(page) {
+    await __k.okhttp(this.client, 'get', [this.baseUrl + '/p'], {});
+    return { mangas: [], hasNextPage: false };
+  }
+}
+`,
+			{},
+			true
+		);
+		const { ctx, sent } = recording();
+		await module.browse('popular', 1, ctx);
+		expect(sent[0].headers.Cookie).toBe('confirm_age=1');
+	});
+
 	it('lists chapters through fetchMangaUpdate, asking for chapters only', async () => {
 		// The current API's one member for both, which the host calls through
 		// the base class's final getMangaUpdate. An extension that implements
@@ -432,5 +496,59 @@ class Extension {
 		expect(chapters).toHaveLength(1);
 		expect(chapters[0].sourceChapterId).toBe('/m/1');
 		expect(chapters[0].title).toBe('details=false chapters=true');
+	});
+
+	it('hands a chapter its memo back when it is opened', async () => {
+		// Upstream persists a chapter's memo with the chapter. Madara keeps the
+		// title's path there and builds the chapter url from it, so a memo lost
+		// between listing and opening made every chapter it listed answer
+		// "Refresh the chapter list." The id is the only thing that survives,
+		// so the memo rides in it — and only when there is one.
+		const module = await load(
+			`
+class Extension {
+  constructor() { this.baseUrl = '${BASE_URL}'; }
+  async fetchMangaUpdate(manga, chapters, fetchDetails, fetchChapters) {
+    const kept = SChapter.create();
+    kept.url = 'chapter-1#top';
+    kept.chapter_number = 1;
+    kept.memo = { mangaPath: '/manga/a b#c' };
+    const plain = SChapter.create();
+    plain.url = '/c/2';
+    plain.chapter_number = 2;
+    return SMangaUpdate(manga, [kept, plain]);
+  }
+  async getPageList(chapter) {
+    const path = chapter.memo.mangaPath === undefined ? '' : chapter.memo.mangaPath;
+    return [{ index: 0, url: '', imageUrl: 'https://cdn.example.invalid' + path + '|' + chapter.url }];
+  }
+}
+`,
+			{},
+			true
+		);
+		const { ctx } = recording();
+		const chapters = await module.listChapters('/m', ctx);
+		// A chapter without a memo keeps its url as its id, exactly as before.
+		expect(chapters[1].sourceChapterId).toBe('/c/2');
+		const kept = await module.readChapter(
+			'/m',
+			{ number: 1, sourceChapterId: chapters[0].sourceChapterId },
+			ctx
+		);
+		expect(kept.pages[0].url).toBe('https://cdn.example.invalid/manga/a b#c|chapter-1#top');
+		const plain = await module.readChapter(
+			'/m',
+			{ number: 2, sourceChapterId: chapters[1].sourceChapterId },
+			ctx
+		);
+		expect(plain.pages[0].url).toBe('https://cdn.example.invalid|/c/2');
+		// An id this driver did not write is read as a url, whatever it holds.
+		const foreign = await module.readChapter(
+			'/m',
+			{ number: 3, sourceChapterId: '/c/3#yorozo-memo=nope' },
+			ctx
+		);
+		expect(foreign.pages[0].url).toBe('https://cdn.example.invalid|/c/3#yorozo-memo=nope');
 	});
 });

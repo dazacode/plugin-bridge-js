@@ -103,10 +103,13 @@ import {
 	EXTENSION_PROPERTIES,
 	FREE_FUNCTIONS,
 	GLOBAL_NAMES,
+	JSOUP_STATICS,
 	HOST_METHODS,
+	RUNTIME_STATIC_REFERENCES,
 	HOST_PROPERTY_METHODS,
 	KNOWN_SIGNATURES,
 	OUT_OF_SCOPE_KINDS,
+	RECOVERY_BOUNDARIES,
 	swallowedWhenElse,
 	SUPER_BASE_PROPERTIES,
 	SUPER_MEMBERS,
@@ -121,6 +124,7 @@ import {
 	VARARG_OPTIONS,
 	VIDEO_V16_ONLY,
 	VIDEO_V16_PARAMETERS,
+	iterableDelegateOf,
 	scanObstacles,
 	thrownHelper,
 	type Refusal,
@@ -157,6 +161,17 @@ export interface MemberEdges {
 	readonly owner: string | null;
 	/** True for a property: it runs whenever its owner is constructed. */
 	readonly construction: boolean;
+	/**
+	 * True for a `by lazy` property that overrides nothing.
+	 *
+	 * Counted as construction above, because reachability over-approximates;
+	 * but its initialiser does not in fact run at construction — it runs on
+	 * the first read — and nothing outside the Kotlin can read it, the driver
+	 * included, since it overrides nothing the driver asks for. `pipeline.ts`
+	 * uses this to stop a refused one blocking when no translated code names
+	 * it. Absent on members this was never worked out for.
+	 */
+	readonly lazy?: boolean;
 	/** Every identifier under the member, deduplicated. */
 	readonly references: readonly string[];
 	/** Call targets, with unresolved receivers kept as conservative edges. */
@@ -190,6 +205,15 @@ export interface Emission {
 	 * against the extension that merely sits beside it.
 	 */
 	readonly graph: readonly MemberEdges[];
+	/**
+	 * Members that translated with a tail cut off, and what the tail needed.
+	 *
+	 * Not refusals — the member is in `translated` and the host calls it — and
+	 * not silence either: each names the boundary the cut-off part reached for,
+	 * so a caller can still say what the converted plugin cannot do. See
+	 * `recoveryCut`.
+	 */
+	readonly deferred: readonly Refusal[];
 }
 
 /**
@@ -376,6 +400,7 @@ const RECEIVER_SCOPE: ReadonlySet<string> = new Set(['apply', 'run', 'runCatchin
  */
 const RECEIVER_BUILDERS: ReadonlySet<string> = new Set([
 	'buildList',
+	'buildSet',
 	'buildMap',
 	'buildJsonObject',
 	'buildJsonArray'
@@ -388,8 +413,17 @@ const RECEIVER_BUILDERS: ReadonlySet<string> = new Set([
  * okhttp's three spellings of "send this now". Everything else an extension
  * blocks on reaches the network through one of them.
  */
+/** The first segment of a package path, never a name a source declares. */
+const PACKAGE_ROOTS: ReadonlySet<string> = new Set(['java', 'javax', 'android', 'okhttp3', 'okio']);
+
 /** `java.net.URLEncoder`, and the other packages written out in full. */
-const QUALIFIED_GLOBAL = /^(?:java|javax|kotlin|android)\.[\w.]*?\.?(\w+)$/;
+const QUALIFIED_GLOBAL = /^(?:java|javax|kotlin|android|okhttp3|okio|rx)\.[\w.]*?\.?(\w+)$/;
+
+/** `Filter.Sort.Selection` and the video fork's `AnimeFilter.Sort.Selection`. */
+const SORT_SELECTION = /^(?:Anime)?Filter\.Sort\.Selection$/;
+
+/** A package path and nothing else: `java.net`, `java.text`, `rx` — lowercase segments. */
+const PACKAGE_PATH = /^(?:java|javax|kotlin|android|okhttp3|okio|rx)(?:\.[a-z_][a-z0-9_]*)*$/;
 
 /**
  * `Injekt.get<T>()`, whitespace already squeezed out of the text.
@@ -418,14 +452,27 @@ const LOG_CALL = /^Log\.(?:v|d|i|w|e|wtf)$/;
 /**
  * The calls that make a member `async` whether or not it said `suspend`.
  *
- * `.execute()` blocks in Kotlin and cannot here; the crypto four are
- * `AWAITED_HOST_METHODS`, which the runtime shim implements over
+ * `.execute()` blocks in Kotlin and cannot here; the crypto four and an
+ * interceptor chain's `.proceed()` are `AWAITED_HOST_METHODS`, which the runtime shim implements over
  * `crypto.subtle` and which are therefore promises. `blockingMembers` reads
  * this off a member's *source text* and propagates to a fixpoint, so a helper
  * that decrypts makes its callers `async` too.
  */
 const BLOCKING_CALLS =
-	/\.(?:execute|awaitSuccess|await|doFinal|generateKeyPair|verify)\s*\(|(?<!\bMath)\.sign\s*\(|\bThread\s*\.\s*sleep\s*\(|\b(?:client|[a-z]\w*Client)\s*\.\s*(?:get|post|put|head)\s*\(/;
+	/\.(?:execute|awaitSuccess|await|doFinal|generateKeyPair|verify|proceed)\s*\(|(?<!\bMath)\.sign\s*\(|\bThread\s*\.\s*sleep\s*\(|\b(?:client|[a-z]\w*Client)\s*\.\s*(?:get|post|put|head)\s*\(/;
+
+/** `BLOCKING_CALLS` less `.proceed(`, for a member called from another file. */
+const CROSS_FILE_BLOCKING_CALLS = new RegExp(
+	BLOCKING_CALLS.source.replace('|verify|proceed)', '|verify)'),
+	BLOCKING_CALLS.flags
+);
+// Derived from the text above, so an edit there must not silently keep
+// `proceed` in: fail at load, where it is seen, rather than refuse listings.
+if (CROSS_FILE_BLOCKING_CALLS.source === BLOCKING_CALLS.source) {
+	throw new Error(
+		'CROSS_FILE_BLOCKING_CALLS no longer removes `.proceed(`; update it with BLOCKING_CALLS.'
+	);
+}
 
 /**
  * keiyoushi's suspend verbs on an okhttp client, and what they are called on.
@@ -751,7 +798,37 @@ interface Local {
 	readonly receiverArity?: number;
 	/** On such a parameter: whether its type is `suspend`, so a call is awaited. */
 	readonly receiverSuspends?: boolean;
+	/**
+	 * Set on a parameter declared with a type that has no `invoke` — see
+	 * `VALUE_ONLY_TYPES`. Kotlin resolves `name(…)` to a local only when the
+	 * local can be invoked, so a call through this name is a member's.
+	 */
+	readonly valueOnly?: boolean;
 }
+
+/**
+ * Parameter types that cannot be called, so `name(…)` never means the parameter.
+ *
+ * keiyoushi's `fetchMangaUpdate(manga, chapters, fetchDetails: Boolean,
+ * fetchChapters: Boolean)` is overridden by Madara and others, and its body
+ * calls the source's own `fetchChapters(path, id)` with the Boolean in scope.
+ * Kotlin resolves that to the member, because a Boolean has no `invoke`;
+ * emitted as a bare call it called the Boolean — "fetchChapters is not a
+ * function" on the first library refresh, with nothing refused. Only the
+ * standard library's value types are listed: a user type could declare an
+ * `operator fun invoke`, and a function type obviously can.
+ */
+const VALUE_ONLY_TYPES: ReadonlySet<string> = new Set([
+	'Boolean',
+	'String',
+	'Int',
+	'Long',
+	'Short',
+	'Byte',
+	'Float',
+	'Double',
+	'Char'
+]);
 
 /** One `function`-ish emission in progress. */
 interface Frame {
@@ -857,9 +934,15 @@ export function emitKotlin(
 	 * class named by `build.gradle`'s `extClass` first. This carries that fact
 	 * the one step further it needed to travel.
 	 */
-	entryFile = false
+	entryFile = false,
+	/**
+	 * Names this file's own *declaration* is written under where its
+	 * references are renamed — a class named after the class it imports and
+	 * extends. See `keepsDeclaration` in `pipeline.ts`.
+	 */
+	declaredAs: ReadonlyMap<string, string> = new Map()
 ): Emission {
-	return new Emitter(neighbours, renames, entryFile).file(tree.root);
+	return new Emitter(neighbours, renames, entryFile, declaredAs).file(tree.root);
 }
 
 /**
@@ -1252,7 +1335,8 @@ class Emitter {
 	constructor(
 		neighbours: Declared,
 		private readonly renames: ReadonlyMap<string, string> = new Map(),
-		private readonly entryFile = false
+		private readonly entryFile = false,
+		private readonly declaredAs: ReadonlyMap<string, string> = new Map()
 	) {
 		for (const name of neighbours.types) {
 			this.declaredTypes.add(name);
@@ -1390,6 +1474,11 @@ class Emitter {
 	 * a receiver and silently drop it.
 	 */
 	private readonly declaredObjects = new Set<string>();
+	/**
+	 * Top-level functions and values this file imports from keiyoushi's shared
+	 * `core/`, by name, with the package. See the last branch of `bareCall`.
+	 */
+	private readonly keiyoushiImports = new Map<string, string>();
 	/** Member extension functions this file declares, as `Owner.name`. */
 	private readonly declaredExtensions = new Set<string>();
 	private readonly declaredModuleExtensions = new Set<string>();
@@ -1416,6 +1505,22 @@ class Emitter {
 	 * apart from the one that got there first. See `scopeNestedTypes`.
 	 */
 	private readonly emittedTypes = new Set<string>();
+	/** See `nestedRenames`. */
+	private readonly nestedRenameCache = new Map<KNode, ReadonlyMap<string, string>>();
+	/**
+	 * The types this file declares at its top level, by name.
+	 *
+	 * Reserved before anything is emitted, because a nested type is usually
+	 * written *above* its top-level namesake: `LibGroupDto.kt` nests
+	 * `Chapter.Branch` and declares a top-level `Branch` sixty lines further
+	 * down. `emittedTypes` only knows what has been written so far, so the
+	 * nested one took the bare name, the top-level one was written under it
+	 * too, and the module was "Branch has already been declared" at load —
+	 * converted, nothing refused, and two listings dead. The top-level type is
+	 * the one the rest of the file and the files next door name bare, so it is
+	 * the one that keeps the name; the nested one is renamed apart.
+	 */
+	private readonly topLevelTypes = new Set<string>();
 	/**
 	 * `typealias A = B`, as `A → B`.
 	 *
@@ -1464,6 +1569,15 @@ class Emitter {
 	 * `__k.durationOf` for why the receiver still decides.
 	 */
 	private readonly durationImports = new Set<string>();
+
+	/**
+	 * `import eu.kanade.tachiyomi.source.model.SManga.Companion.COMPLETED`,
+	 * then `status = COMPLETED` — a companion constant of a type the runtime
+	 * defines by name, imported so it can be written bare. Name to the
+	 * qualified read. Only for a runtime global (`GLOBAL_NAMES`): anything
+	 * else is a class this build may not have, and stays refused by name.
+	 */
+	private readonly companionImports = new Map<string, string>();
 	private readonly declaredMethods = new Set<string>();
 	private readonly declaredSuspends = new Set<string>();
 	/**
@@ -1479,6 +1593,22 @@ class Emitter {
 	private readonly destructuredParts: string[] = [];
 	/** What each member mentions; see `MemberEdges`. */
 	private readonly graph: MemberEdges[] = [];
+	/**
+	 * The extension properties the class being emitted declares on the
+	 * settings store, by name. See `extensionProperty`.
+	 */
+	private extensionProperties = new Set<string>();
+	/** The subset of `extensionProperties` with a setter to write through. */
+	private extensionSetters = new Set<string>();
+	/** What the settings store is called in the class being emitted. */
+	private preferenceStores = new Set<string>(['preferences']);
+	/** Members translated with a boundary-reaching tail cut off; see `recoveryCut`. */
+	private readonly deferred: Refusal[] = [];
+	/**
+	 * The cut the *next* function body is emitted under, consumed on entry.
+	 * Set only around the one `functionDeclaration` call that asked for it.
+	 */
+	private cut: RecoveryCut | null = null;
 	/** The class or object whose members are being emitted. */
 	private owner: string | null = null;
 	/**
@@ -2014,6 +2144,7 @@ class Emitter {
 			this.qualifiedTypes.has(name) ||
 			GLOBAL_NAMES.has(name) ||
 			BASE_CONSTANTS.has(name) ||
+			this.companionImports.has(name) ||
 			this.aliased(name) !== name
 		);
 	}
@@ -2101,6 +2232,12 @@ class Emitter {
 					for (const unit of DURATION_UNITS.keys()) this.durationImports.add(unit);
 				else this.durationImports.add(found[1]);
 			}
+			for (const found of list.text.matchAll(
+				/^\s*import\s+[\w.]*?\b([A-Z]\w*)\.Companion\.([A-Z][A-Z0-9_]*)\s*$/gm
+			)) {
+				if (GLOBAL_NAMES.has(found[1]))
+					this.companionImports.set(found[2], `${found[1]}.${found[2]}`);
+			}
 		}
 		// Registered before anything is emitted: an extension function is
 		// usually declared below the members that call it, and so is the nested
@@ -2112,6 +2249,11 @@ class Emitter {
 		this.registerImports(kids(root).find((child) => child.type === 'import_list'));
 
 		const top = kids(root);
+		for (const child of top) {
+			if (child.type !== 'class_declaration' && child.type !== 'object_declaration') continue;
+			const declared = this.nameOf(child);
+			if (declared !== null && declared !== undefined) this.topLevelTypes.add(declared);
+		}
 		for (const [index, child] of top.entries()) {
 			if (child.type === 'package_header' || child.type === 'import_list') continue;
 			const piece = this.declaration(child, top[index + 1]);
@@ -2124,7 +2266,8 @@ class Emitter {
 					refusals: this.refusals,
 					usedRuntime: [],
 					fileRefusal: this.fileRefusal,
-					graph: this.graph
+					graph: this.graph,
+					deferred: []
 				};
 			}
 			if (piece !== null && piece.length > 0) parts.push(piece);
@@ -2142,7 +2285,8 @@ class Emitter {
 			refusals: this.refusals,
 			usedRuntime: [...this.used].sort(),
 			fileRefusal: null,
-			graph: this.graph
+			graph: this.graph,
+			deferred: this.deferred
 		};
 	}
 
@@ -2312,7 +2456,31 @@ class Emitter {
 		if (kinds.has('interface')) return this.interfaceDeclaration(node, name);
 		// An enum is a class with a fixed set of instances — see `enumTail`.
 		const isEnum = kinds.has('enum_class_body');
-		if (modifiers.has('data')) return this.dataDeclaration(node, name);
+
+		// A `@Serializable` class registers what kotlinx knows about it — its
+		// fields' wire names, types and defaults, and any custom serializer it
+		// names — so a decode that names its type builds it the way kotlinx
+		// does. See `serialRegistration`. A custom serializer this build cannot
+		// run faithfully is refused here, by name, and graphed, so it blocks
+		// exactly the members that reach the class and no others: read past,
+		// it decoded the JSON the serializer existed to reshape, and converted,
+		// loaded and answered wrong with nothing refused.
+		const serial = this.serialRegistration(node, name, modifiers.has('data'), isEnum);
+		if (serial !== null && 'refusal' in serial) {
+			this.graph.push({
+				member: name,
+				owner: this.owner,
+				construction: false,
+				references: mentions(node),
+				calls: callEdges(node)
+			});
+			return this.declineMember(name, node, serial.refusal);
+		}
+		const registration = serial === null ? null : serial.text;
+		if (modifiers.has('data')) {
+			const data = this.dataDeclaration(node, name);
+			return data === null || registration === null ? data : `${data}\n${registration}`;
+		}
 
 		// The header — everything but the body — must parse cleanly. A recovered
 		// base-class name or constructor call means every member below it is
@@ -2327,33 +2495,6 @@ class Emitter {
 			}
 		}
 
-		// `List<@Serializable(RankingMangaSerializer::class) Ranking>` — a
-		// custom serializer named on a type argument of a constructor property.
-		// It decodes each element through the extension's own
-		// `transformDeserialize` before the class sees it, and the decoder here
-		// is a structural walk with no custom serializers: the annotation would
-		// be read past, and every element decoded as the raw JSON the serializer
-		// existed to reshape — a tuple array read as a record, every field
-		// `undefined`. Refused by name, and graphed, so it blocks exactly the
-		// members that reach the class and no others. Only reachable at all
-		// since `trailingCommas` in `grammar.ts` let the one file carrying it
-		// parse.
-		const serializer = typeArgumentSerializer(node);
-		if (serializer !== null) {
-			this.graph.push({
-				member: name,
-				owner: this.owner,
-				construction: false,
-				references: mentions(node),
-				calls: callEdges(node)
-			});
-			return this.declineMember(
-				name,
-				node,
-				`a custom serializer \`${serializer}\` on a type argument`
-			);
-		}
-
 		// A supertype this file supplies is emitted as a real `extends`; one it
 		// does not is the extension's own base class, which lives in
 		// `shims/aniyomi-entry.ts` and is attached by the driver. Dropping the
@@ -2363,6 +2504,26 @@ class Emitter {
 		// it with `undefined` — the plugin that looks like it works.
 		const invoked = this.baseInvocation(node);
 		const base = invoked === null ? null : this.resolvedBase(invoked.type);
+		// A class named after the class it imports and extends: every other
+		// spelling of the name in this file means the import, so only the
+		// header is written under the declared name. What else would name the
+		// class itself — a companion's statics, an enum's entries — reads it
+		// through the renamed spelling, so those shapes are refused rather than
+		// written against the wrong class.
+		const ownSpelling = rename === undefined ? this.declaredAs.get(name) : undefined;
+		if (
+			ownSpelling !== undefined &&
+			(isEnum ||
+				kids(kids(node).find((child) => child.type === 'class_body')).some(
+					(child) => child.type === 'companion_object'
+				))
+		) {
+			return this.declineMember(
+				name,
+				node,
+				'a class with a companion, named after the class it imports'
+			);
+		}
 
 		// A class that *constructs* an unreachable base is the extension. One
 		// that merely lists an interface — `class SomethingFactory :
@@ -2420,6 +2581,9 @@ class Emitter {
 		const outerSuspends = this.suspendMembers;
 		const outerLabel = this.ownerLabel;
 		const outerSelf = this.selfClass;
+		const outerExtensionProperties = this.extensionProperties;
+		const outerSetters = this.extensionSetters;
+		const outerStores = this.preferenceStores;
 		this.owner = name;
 		this.ownerLabel = this.nameOf(node) ?? name;
 		this.ownerBase = base;
@@ -2428,12 +2592,53 @@ class Emitter {
 			exact: !modifiers.has('open') && !modifiers.has('abstract') && !modifiers.has('sealed')
 		};
 
+		// An extension property is not a member of the instance: `private val
+		// SharedPreferences.quality get() = …` is read as `preferences.quality`,
+		// and naming it here made `this.quality` look like a field. See
+		// `extensionProperty`.
+		this.extensionProperties = new Set(
+			members
+				.filter(
+					(child) =>
+						child.type === 'property_declaration' &&
+						extensionReceiverOf(child) === 'SharedPreferences'
+				)
+				.map((child) => this.propertyName(child))
+				.filter((found): found is string => found !== null)
+		);
+		this.extensionSetters = new Set(
+			members
+				.filter(
+					(child, at) =>
+						child.type === 'property_declaration' &&
+						extensionReceiverOf(child) === 'SharedPreferences' &&
+						(accessorOf(child, undefined, 'setter') !== undefined ||
+							members.slice(at + 1, at + 3).some((next) => next.type === 'setter'))
+				)
+				.map((child) => this.propertyName(child))
+				.filter((found): found is string => found !== null)
+		);
+		// The names the settings store goes by here: `preferences`, which is
+		// also what an inherited one is called, and any property this class
+		// builds from `getPreferencesLazy()`/`getPreferences()` or types as a
+		// `SharedPreferences` — NovelCool's is `preference`.
+		this.preferenceStores = new Set(['preferences']);
+		for (const child of members) {
+			if (child.type !== 'property_declaration' || extensionReceiverOf(child) !== null) continue;
+			const declared = this.propertyName(child);
+			if (declared === null) continue;
+			const shape = child.text.replace(/\s+/g, ' ');
+			if (/(?:\bby getPreferencesLazy\b|= getPreferences\(|: SharedPreferences\b)/.test(shape)) {
+				this.preferenceStores.add(declared);
+			}
+		}
 		this.classMembers = new Set(
 			members
 				.map((child) =>
 					child.type === 'function_declaration'
 						? this.nameOf(child)
-						: child.type === 'property_declaration'
+						: child.type === 'property_declaration' &&
+							  extensionReceiverOf(child) !== 'SharedPreferences'
 							? this.propertyName(child)
 							: null
 				)
@@ -2554,7 +2759,11 @@ class Emitter {
 					// below.
 					const mangled =
 						this.overloadsOf(fnName) === null ? null : `${fnName}$${this.signatureOf(child).key}`;
-					const emitted = this.member(fnName, child, () =>
+					const candidate =
+						fnName === 'intercept' && implementsInterceptor(node)
+							? recoveryCandidate(child, this.nameOf(node) ?? name)
+							: null;
+					const emitted = this.memberWithRecovery(fnName, child, candidate, () =>
 						this.functionDeclaration(child, 'method', mangled)
 					);
 					if (emitted !== null) {
@@ -2613,6 +2822,9 @@ class Emitter {
 			}
 		}
 
+		// Iterable, made iterable here too. See `iterationMembers`.
+		memberLines.push(...this.iterationMembers(node, members, constructorParams, false));
+
 		// The plain name of an overloaded method, for everything that calls it
 		// by that name — this file's own `this.x(…)`, the files next door, and
 		// the driver. It resolves against the *instance*, so an override a
@@ -2668,6 +2880,9 @@ class Emitter {
 		this.selfClass = outerSelf;
 		this.classMembers = outerMembers;
 		this.suspendMembers = outerSuspends;
+		this.extensionProperties = outerExtensionProperties;
+		this.extensionSetters = outerSetters;
+		this.preferenceStores = outerStores;
 		const companionMembers = this.companionMembers;
 		this.companionRenames = outerRenames;
 		this.companionMembers = outerCompanion;
@@ -2690,7 +2905,7 @@ class Emitter {
 			]).join('\n\n');
 		}
 		const cls =
-			`class ${this.safe(name)} ${heritage}${block([...ctor, ...memberLines])}` +
+			`class ${ownSpelling ?? this.safe(name)} ${heritage}${block([...ctor, ...memberLines])}` +
 			(statics.length > 0 ? `\n${statics}` : '');
 		// A `@Serializable` class is a *shape* as well as a class: the decoder
 		// answers plain JSON, so a field the source renamed and a property it
@@ -2698,7 +2913,8 @@ class Emitter {
 		// beside the class so the runtime can recognise a decoded object as one
 		// — see `shape` in the runtime for why the match has to be exact.
 		const shape = this.serialisableShape(node, name);
-		return orderClasses([...hoisted, shape === null ? cls : `${cls}\n${shape}`]).join('\n\n');
+		const tail = [shape, registration].filter((line) => line !== null).join('\n');
+		return orderClasses([...hoisted, tail.length === 0 ? cls : `${cls}\n${tail}`]).join('\n\n');
 	}
 
 	/**
@@ -2771,21 +2987,9 @@ class Emitter {
 		members: readonly KNode[],
 		owner: string
 	): { renames: ReadonlyMap<string, string>; restore: () => void } {
-		const renames = new Map<string, string>();
+		const renames = this.nestedRenames(members, owner);
 		const saved = new Map<string, string | undefined>();
-
-		for (const child of members) {
-			if (child.type !== 'class_declaration' && child.type !== 'object_declaration') continue;
-			const declared = this.nameOf(child);
-			if (declared === null || declared === undefined) continue;
-			if (!this.emittedTypes.has(declared)) {
-				this.emittedTypes.add(declared);
-				continue;
-			}
-			let candidate = `${owner}_${declared}`;
-			while (this.emittedTypes.has(candidate)) candidate = `${candidate}_`;
-			this.emittedTypes.add(candidate);
-			renames.set(declared, candidate);
+		for (const [declared, candidate] of renames) {
 			saved.set(declared, this.localTypes.get(declared));
 			this.localTypes.set(declared, candidate);
 		}
@@ -2799,6 +3003,57 @@ class Emitter {
 				}
 			}
 		};
+	}
+
+	/**
+	 * Which of a class body's nested types are renamed apart, decided once.
+	 *
+	 * Split out of `scopeNestedTypes` because the class's `@Serializable`
+	 * registration is written *before* its body is scoped, and it names the
+	 * nested types too: `Chapter(val branches: List<Branch>)` over a nested
+	 * `Chapter.Branch` renamed to `Chapter_Branch` registered its field as
+	 * `List<Branch>` — the top-level namesake — and a decode built every
+	 * branch as the wrong class, missing the fields its own methods read.
+	 * Cached by the body's first member, so both callers see one answer and
+	 * the names are reserved once.
+	 */
+	private nestedRenames(members: readonly KNode[], owner: string): ReadonlyMap<string, string> {
+		const first = members[0];
+		if (first === undefined) return new Map();
+		const cached = this.nestedRenameCache.get(first);
+		if (cached !== undefined) return cached;
+		const renames = new Map<string, string>();
+		for (const child of members) {
+			if (child.type !== 'class_declaration' && child.type !== 'object_declaration') continue;
+			const declared = this.nameOf(child);
+			if (declared === null || declared === undefined) continue;
+			if (!this.emittedTypes.has(declared) && !this.topLevelTypes.has(declared)) {
+				this.emittedTypes.add(declared);
+				continue;
+			}
+			let candidate = `${owner}_${declared}`;
+			while (this.emittedTypes.has(candidate) || this.topLevelTypes.has(candidate)) {
+				candidate = `${candidate}_`;
+			}
+			this.emittedTypes.add(candidate);
+			renames.set(declared, candidate);
+			// `Chapter.Branch` spelled out names this one, not the namesake.
+			this.qualifiedTypes.set(`${owner}.${declared}`, candidate);
+		}
+		this.nestedRenameCache.set(first, renames);
+		return renames;
+	}
+
+	/**
+	 * A type as written, with every nested type renamed apart spelled the way
+	 * it was emitted — for the text handed to the typed decoder, which looks
+	 * a class up by its registered name rather than through `safe`.
+	 */
+	private scopedTypeText(text: string, own: ReadonlyMap<string, string> = new Map()): string {
+		return text.replace(/\b[A-Z]\w*(?:\.[A-Z]\w*)*/g, (written) => {
+			if (written.includes('.')) return this.qualifiedTypes.get(written) ?? written;
+			return own.get(written) ?? this.localTypes.get(written) ?? written;
+		});
 	}
 
 	/**
@@ -2829,7 +3084,10 @@ class Emitter {
 	 * value that was never a Promise costs nothing, and the failure this
 	 * replaces is silent.
 	 */
-	private blockingMembers(members: readonly KNode[]): Set<string> {
+	private blockingMembers(
+		members: readonly KNode[],
+		pattern: RegExp = BLOCKING_CALLS
+	): Set<string> {
 		const bodies = new Map<string, string>();
 		for (const child of members) {
 			if (child.type !== 'function_declaration') continue;
@@ -2839,7 +3097,7 @@ class Emitter {
 
 		const blocking = new Set<string>();
 		for (const [name, text] of bodies) {
-			if (BLOCKING_CALLS.test(text)) blocking.add(name);
+			if (pattern.test(text)) blocking.add(name);
 		}
 
 		for (let grew = true; grew;) {
@@ -2895,7 +3153,8 @@ class Emitter {
 		for (const child of members) {
 			if (child.type !== 'companion_object') continue;
 			const inner = kids(child).find((part) => part.type === 'class_body');
-			for (const part of kids(inner)) {
+			const parts = kids(inner);
+			for (const [index, part] of parts.entries()) {
 				const declared =
 					part.type === 'property_declaration'
 						? this.propertyName(part)
@@ -2903,6 +3162,15 @@ class Emitter {
 							? this.nameOf(part)
 							: null;
 				if (declared === null) continue;
+				// A companion getter is a hoisted function, including when the
+				// grammar puts its accessor beside the property. Mark it before
+				// earlier class members are emitted so their reads call it.
+				if (
+					part.type === 'property_declaration' &&
+					accessorOf(part, parts[index + 1], 'getter') !== undefined
+				) {
+					this.moduleGetters.add(declared);
+				}
 				if (this.emittedNames.has(declared) || this.companionClaims.has(declared)) {
 					let binding = `${plainName(owner)}_${plainName(declared)}`;
 					while (this.emittedNames.has(binding) || this.moduleNames.has(binding)) binding += '_';
@@ -2992,7 +3260,9 @@ class Emitter {
 				this.companionRenames = this.registerCompanionNames(kids(body), name);
 				this.companionMembers = [];
 				const nested: string[] = [];
-				for (const child of kids(body)) {
+				const bodyMembers = kids(body);
+				for (const [index, child] of bodyMembers.entries()) {
+					if (child.type === 'getter' || child.type === 'setter') continue;
 					if (child.type === 'function_declaration') {
 						fields.push(this.functionDeclaration(child, 'method'));
 						continue;
@@ -3019,7 +3289,7 @@ class Emitter {
 					}
 					const member = this.propertyName(child);
 					if (member === null) this.refuse(child, 'an unnamed property');
-					const getter = kids(child).find((part) => part.type === 'getter');
+					const getter = accessorOf(child, bodyMembers[index + 1], 'getter');
 					if (getter === undefined) {
 						fields.push(`${JSON.stringify(member)}: ${this.propertyValue(child, member)}`);
 						continue;
@@ -3030,6 +3300,10 @@ class Emitter {
 					if (emitted.isAsync) this.refuse(getter, 'a suspending getter');
 					fields.push(`get ${member}() ${emitted.text}`);
 				}
+
+				// Iterable, made iterable here too — see `iterationMembers`. The
+				// parameters are this factory's own, in scope as locals.
+				fields.push(...this.iterationMembers(node, bodyMembers, params, true));
 
 				// Handed to `dataRecord` with its own factory and field order, so
 				// `copy(count = 3)` can rebuild it: a computed property here
@@ -3270,7 +3544,24 @@ class Emitter {
 				);
 			}
 
-			return `const ${self} = Object.freeze(${block(fields.map(comma))});`;
+			const literal = `const ${self} = Object.freeze(${block(fields.map(comma))});`;
+			// `object X : JsonTransformingSerializer<T>(ListSerializer(Item.serializer()))`
+			// — the typed decoder runs X's `transformDeserialize` and then the
+			// base serializer, which it can only do as "decode as this type".
+			// That is exact when the base is built from default serializers,
+			// so only that is accepted, and the type it decodes is recorded.
+			const invoked = this.baseInvocation(node);
+			if (invoked?.type !== 'JsonTransformingSerializer') return literal;
+			const written = invoked.args.find((arg) => arg.type === 'value_argument');
+			const decodes =
+				written === undefined ||
+				invoked.args.filter((a) => a.type === 'value_argument').length !== 1
+					? null
+					: defaultSerializerType(written.text.replace(/\s+/g, ''));
+			if (decodes === null) {
+				this.refuse(node, `a \`JsonTransformingSerializer\` over \`${describe(written ?? node)}\``);
+			}
+			return `${literal}\n${this.helper('transforms')}(${self}, ${JSON.stringify(decodes)});`;
 		});
 	}
 
@@ -3296,8 +3587,10 @@ class Emitter {
 	private companionBody(node: KNode): string[] {
 		const body = kids(node).find((child) => child.type === 'class_body');
 		const out: string[] = [];
+		const members = kids(body);
 
-		for (const child of kids(body)) {
+		for (const [index, child] of members.entries()) {
+			if (child.type === 'getter' || child.type === 'setter') continue;
 			if (child.type === 'property_declaration') {
 				const name = this.propertyName(child) ?? 'val';
 				const binding = this.companionRenames.get(name) ?? name;
@@ -3311,7 +3604,7 @@ class Emitter {
 					// and the companion refused for a member the class computes
 					// on every read. `moduleGetters` is what makes the call sites
 					// add the parentheses back.
-					const getter = accessorOf(child, undefined, 'getter');
+					const getter = accessorOf(child, members[index + 1], 'getter');
 					if (getter !== undefined) {
 						const body = kids(getter).find((part) => part.type === 'function_body');
 						if (body === undefined) this.refuse(getter, 'a getter with no body');
@@ -3435,16 +3728,31 @@ class Emitter {
 		 * property's edge as what its initialiser does, and an edge left out
 		 * lets reachability prune a refusal the setter still calls into.
 		 */
-		accessors: readonly KNode[] = []
+		accessors: readonly KNode[] = [],
+		/**
+		 * The parts of `node` that will actually be emitted, when that is not
+		 * all of it — only ever a `recoveryCut`. Edges and the obstacle scan are
+		 * read off these alone: the cut-off tail is never emitted, so what it
+		 * would have called is not reachable from here and what it would have
+		 * refused for is not this member's to answer.
+		 */
+		scope: readonly KNode[] | null = null
 	): string | null {
+		const parts = scope ?? [node, ...accessors];
 		// Recorded before anything is attempted, so a refused member still has
 		// edges — a member reachable only from one has to stay reachable.
 		this.graph.push({
 			member: name,
 			owner: this.owner,
 			construction: node.type === 'property_declaration',
-			references: [...new Set([node, ...accessors].flatMap((one) => mentions(one)))],
-			calls: [node, ...accessors].flatMap((one) => callEdges(one))
+			lazy:
+				node.type === 'property_declaration' &&
+				!this.hasModifier(node, 'override') &&
+				kids(node).some(
+					(child) => child.type === 'property_delegate' && /^by\s+lazy\b/.test(child.text)
+				),
+			references: [...new Set(parts.flatMap((one) => mentions(one)))],
+			calls: parts.flatMap((one) => callEdges(one))
 		});
 
 		const previousName = this.memberName;
@@ -3452,7 +3760,9 @@ class Emitter {
 		this.memberName = name;
 		this.pending = [];
 
-		const obstacles = scanObstacles(node, name);
+		// The node alone when there is no cut, as before it: a setter written
+		// beside its property is scanned where it is emitted, not here.
+		const obstacles = (scope ?? [node]).flatMap((one) => scanObstacles(one, name));
 		if (obstacles.length > 0) {
 			this.refusals.push({ member: name, obstacles });
 			this.memberName = previousName;
@@ -3500,6 +3810,90 @@ class Emitter {
 		}
 	}
 
+	/**
+	 * `member`, with one second chance: an interceptor whose only trouble is in
+	 * the recovery it runs after a pass-through guard.
+	 *
+	 * The shape, from the Voe extractor's `DdosGuardInterceptor`:
+	 *
+	 *     val response = chain.proceed(originalRequest)
+	 *     if (response.code !in ERROR_CODES || response.header("Server") !in SERVER_CHECK) {
+	 *         return response
+	 *     }
+	 *     …read the WebView's cookie store for a clearance cookie…
+	 *
+	 * Refused whole, that one member refused every extension that installs the
+	 * extractor — sixteen in one catalogue that never reach the tail unless the
+	 * hoster answers with a DDoS-Guard challenge — because an interceptor's
+	 * `intercept` is reached the moment the class is (see `reach` in
+	 * `pipeline.ts`) and a refused one cannot be pruned. Dropping it and letting
+	 * the client call through would be the base-class fallback this project does
+	 * not make: a challenged answer handed to the extractor as if it were the
+	 * video page.
+	 *
+	 * So the member is emitted up to and including the guard, and the tail
+	 * becomes `throw __k.recoveryRefused(…)` naming what it needed. Every answer
+	 * the guard passes through behaves exactly as the Kotlin does; the one the
+	 * Kotlin would have recovered from is an error with a name on it, raised
+	 * where the recovery would have started. What the extension does with that
+	 * error is its own business — the same as any other failed request.
+	 *
+	 * Taken only when the first attempt was refused, every obstacle it found
+	 * sits in the tail, and at least one of them is a `RECOVERY_BOUNDARIES`
+	 * name. A tail refused only for an ordinary translator gap stays refused,
+	 * because that is ours to fix and a cut would hide it; a guard or prefix
+	 * that does not translate stays refused, because then the pass-through is
+	 * not what would run. The member is reported in `deferred` either way it
+	 * is cut, so the boundary is still named.
+	 */
+	private memberWithRecovery(
+		name: string,
+		node: KNode,
+		candidate: RecoveryCandidate | null,
+		run: () => string
+	): string | null {
+		const refusalsBefore = this.refusals.length;
+		const graphAt = this.graph.length;
+		const first = this.member(name, node, run);
+		if (first !== null || candidate === null) return first;
+
+		const refusal = this.refusals[this.refusals.length - 1];
+		if (this.refusals.length !== refusalsBefore + 1 || refusal.member !== name) return null;
+		const late = refusal.obstacles.every((one) => one.line >= candidate.tailLine);
+		const kinds = [
+			...new Set(
+				refusal.obstacles
+					.map((one) => RECOVERY_BOUNDARIES.get(one.kind))
+					.filter((one): one is string => one !== undefined)
+			)
+		];
+		if (!late || kinds.length === 0) return null;
+
+		const firstEdges = this.graph[graphAt];
+		this.refusals.pop();
+		this.graph.splice(graphAt, 1);
+		this.cut = { body: candidate.body, keep: candidate.keep, owner: candidate.owner, kinds };
+		const secondAt = this.graph.length;
+		let second: string | null;
+		try {
+			second = this.member(name, node, run, [], candidate.kept);
+		} finally {
+			this.cut = null;
+		}
+		if (second !== null) {
+			this.deferred.push(refusal);
+			return second;
+		}
+		// The pass-through itself did not translate, so the cut buys nothing:
+		// put back what the whole member was refused for, which is the more
+		// useful thing to read.
+		this.graph.splice(secondAt, 1);
+		this.graph.splice(graphAt, 0, firstEdges);
+		this.refusals.pop();
+		this.refusals.push(refusal);
+		return null;
+	}
+
 	private declineMember(name: string, node: KNode, kind: string): null {
 		// Named the way its author would recognise it wherever there is a name;
 		// a bare grammar kind in a message helps nobody read their own source.
@@ -3517,6 +3911,12 @@ class Emitter {
 	): { kind: 'assign' | 'member'; text: string; ctor?: string } | null {
 		const name = this.propertyName(node);
 		if (name === null) return this.declineMember('val', node, 'an unnamed property');
+
+		const receiver = extensionReceiverOf(node);
+		if (receiver === 'SharedPreferences' && this.extensionProperties.has(name)) {
+			const text = this.extensionProperty(node, name, detached);
+			return text === null ? null : { kind: 'member', text };
+		}
 
 		// `protected abstract val isHentaiSite: Boolean` — a property this class
 		// deliberately does not define, because the subclass is required to.
@@ -3643,6 +4043,142 @@ class Emitter {
 		return text === null ? null : { kind: deferred ? 'member' : 'assign', text };
 	}
 
+	/**
+	 * `private val SharedPreferences.quality get() = getString(KEY, DEFAULT)!!`
+	 * — a property of the settings store, declared inside the extension.
+	 *
+	 * This ecosystem keeps every setting behind one of these, and reads it as
+	 * `preferences.quality`. The receiver used to be dropped: the property was
+	 * emitted as the *extension's* own getter, `getString` inside it resolved
+	 * to the extension, and the read went to the store object, which has no
+	 * such field. Every setting read answered `undefined` with nothing refused
+	 * — AniSama sorted its videos by `undefined`, AniList never knew whether
+	 * adult titles were allowed, Subsplease put the string "undefined" in the
+	 * URL where the debrid token goes. The delegated spelling on its own line
+	 * did not parse at all (see `delegateOnNextLine` in `grammar.ts`).
+	 *
+	 * Now it is a method taking its receiver, `__ext_quality(__recv)`, and a
+	 * read through the store calls it (`extensionPropertyRead`). Three bodies:
+	 *
+	 * - a getter, run with `this` meaning the receiver, exactly as an extension
+	 *   function's body is — and a setter beside it becomes
+	 *   `__ext_set_quality(__recv, value)`, which a write through the store
+	 *   calls (`preferences.slugMap += more` reads, adds and writes);
+	 * - `by preferences.delegate(KEY, DEFAULT)`, the store's own delegate, read
+	 *   on every access as Kotlin reads it — the receiver is not consulted,
+	 *   because the delegate was bound to `preferences` where it was declared;
+	 * - `by lazy { … }` / `by LazyMutable { … }`, whose one delegate object
+	 *   lives in the extension instance, so the value is computed once per
+	 *   instance whatever receiver it is read through — memoised on `this`.
+	 *
+	 * Only on `SharedPreferences`, which is the receiver every read can be
+	 * recognised by (`isPreferencesStore`). A write with no setter to call, a
+	 * delegated one, and a bare read through an implicit receiver are refused.
+	 *
+	 * **Not done: any other receiver.** `private val Element.imgSrc get() = …`
+	 * read as `img.imgSrc` still goes out the way it always did — as the
+	 * extension's own getter, read off the element, which answers `undefined`.
+	 * Telling `chapter.id` (the extension property on `SChapter`) from `tag.id`
+	 * (a DTO's field) needs the receiver's type, which this build does not
+	 * have. Refusing them instead would drop the handful of listings that load
+	 * today with one wrong field, and that is a decision, not a fix.
+	 */
+	private extensionProperty(node: KNode, name: string, detached: readonly KNode[]): string | null {
+		const getter =
+			accessorOf(node, undefined, 'getter') ?? detached.find((one) => one.type === 'getter');
+		const setter =
+			accessorOf(node, undefined, 'setter') ?? detached.find((one) => one.type === 'setter');
+		const delegate = kids(node).find((child) => child.type === 'property_delegate');
+		const method = `__ext_${name}`;
+		return this.member(
+			name,
+			node,
+			() => {
+				if (delegate !== undefined) {
+					if (setter !== undefined) this.refuse(setter, 'a setter beside a `by` delegate');
+					const thunk = this.delegateValue(delegate, node, name);
+					const memoised = /^by\s+(?:lazy|LazyMutable)\b/.test(delegate.text);
+					const value = memoised
+						? `${this.helper('lazy')}(this, ${JSON.stringify(method)}, ${thunk})`
+						: `(${thunk})()`;
+					return `${method}(__recv) ${block([`return ${value};`])}`;
+				}
+				if (getter === undefined) this.refuse(node, 'an extension property with no getter');
+				const read = this.extensionAccessor(getter, name, []);
+				if (setter === undefined) return `${method}(__recv) ${read}`;
+				// `set(map) { cache = map; edit().putString(KEY, …).apply() }`: the
+				// setter's own parameter, and the receiver as `this`, as the getter.
+				const parameter = [...walk(setter)].find((one) => one.type === 'simple_identifier')?.text;
+				if (parameter === undefined) this.refuse(setter, 'a setter with no parameter');
+				const write = this.extensionAccessor(setter, name, [parameter]);
+				return `${method}(__recv) ${read}\n__ext_set_${name}(__recv, ${this.safe(parameter)}) ${write}`;
+			},
+			[...(getter === undefined ? [] : [getter]), ...(setter === undefined ? [] : [setter])]
+		);
+	}
+
+	/** A getter or setter body, run with the receiver as `this`. */
+	private extensionAccessor(accessor: KNode, name: string, params: readonly string[]): string {
+		const body = kids(accessor).find((child) => child.type === 'function_body');
+		if (body === undefined) this.refuse(accessor, 'an accessor with no body');
+		const previousReceiver = this.receiverParam;
+		const previousLabel = this.receiverLabel;
+		const previousType = this.receiverType;
+		this.receiverParam = '__recv';
+		this.receiverLabel = name;
+		this.receiverType = 'SharedPreferences';
+		let emitted;
+		try {
+			emitted = this.accessorScope(null, () =>
+				this.functionScope('function', null, ['__recv', ...params], () => this.functionBody(body))
+			);
+		} finally {
+			this.receiverParam = previousReceiver;
+			this.receiverLabel = previousLabel;
+			this.receiverType = previousType;
+		}
+		if (emitted.isAsync) this.refuse(accessor, 'a suspending accessor');
+		return emitted.text;
+	}
+
+	/**
+	 * `preferences.quality`, where `quality` is an extension property this
+	 * class declares on the store: a call of the method it became. Null when
+	 * the read is not one of those.
+	 *
+	 * The receiver has to be the store for the rewrite, and the Kotlin says it
+	 * is: the source compiled, and a `SharedPreferences` has no member of its
+	 * own by these names, so `preferences.quality` resolving to the extension
+	 * is what made it compile. Any other receiver reading the same name is
+	 * some other object's field — `video.quality` — and is left alone, unless
+	 * it looks like a store this build cannot type, which is refused rather
+	 * than read off the wrong object.
+	 */
+	private extensionPropertyRead(node: KNode): string | null {
+		const parts = kids(node);
+		if (parts.length !== 2 || parts[1].type !== 'navigation_suffix') return null;
+		const name = kids(parts[1]).find((child) => child.type === 'simple_identifier')?.text;
+		if (name === undefined || !this.extensionProperties.has(name)) return null;
+		const receiver = parts[0];
+		if (this.isPreferencesStore(receiver)) {
+			// The receiver first: emitting it is what marks a receiver block as
+			// needing `__self`, which `selfReference` then answers with.
+			const store = this.expr(receiver);
+			return `${this.selfReference()}.__ext_${name}(${store})`;
+		}
+		if (/pref/i.test(receiver.text)) {
+			this.refuse(node, `a read of extension property \`${name}\` this build cannot type`);
+		}
+		return null;
+	}
+
+	/** A name in `preferenceStores`, bare or through `this.`, meaning the class's store. */
+	private isPreferencesStore(receiver: KNode): boolean {
+		const text = receiver.text.replace(/\s+/g, '');
+		const named = text.startsWith('this.') ? text.slice(5) : text;
+		if (!this.preferenceStores.has(named)) return false;
+		return text !== named || this.lookup(named) === null;
+	}
 	/**
 	 * A property whose accessors need a backing field, or that has a setter.
 	 *
@@ -3829,9 +4365,11 @@ class Emitter {
 		const call = kids(delegate)[0];
 		const called = call === undefined ? null : this.nameOf(call);
 
-		if (called === 'lazy') {
+		// LazyMutable computes once like lazy, then lets the property's
+		// overridable setter replace the memoised value.
+		if (called === 'lazy' || called === 'LazyMutable') {
 			const lambda = this.lambdaOf(call);
-			if (lambda === null) this.refuse(delegate, 'a `lazy` without a block');
+			if (lambda === null) this.refuse(delegate, `a \`${called}\` without a block`);
 			const body = this.functionScope('lambda', called, [], () => block(this.lambdaLines(lambda)));
 			return `${body.isAsync ? 'async ' : ''}() => ${body.text}`;
 		}
@@ -4007,6 +4545,26 @@ class Emitter {
 			const body = kids(child).find(
 				(part) => part.type === 'class_body' || part.type === 'enum_class_body'
 			);
+			// A plain `fun` that blocks on a request is async in JavaScript — see
+			// `blockingMembers` — and a class next door calls it too. Recorded
+			// only for the `suspend` modifier, PlaylistUtils' `fixSubtitles`
+			// (which blocks inside `parallelMapNotNullBlocking`) was called
+			// unawaited from every extractor file: ChillxExtractor handed a
+			// Promise on as a subtitle list, and Voe's
+			// `.let(playlistUtils::fixSubtitles)` inside `runCatching` threw, so
+			// its hoster answered no videos. The same fixpoint, crossing the file.
+			//
+			// Without `.proceed(`: it is only ever called inside an interceptor,
+			// which the runtime invokes on each request, never a caller in the
+			// next file. Counted, `NexusDecrypt.createInterceptor()` — which
+			// *returns* the lambda that proceeds — became a suspending call, and
+			// `override val client = …addInterceptor(NexusDecrypt
+			// .createInterceptor())…` a suspending property initialiser, refused.
+			if (!isEntry) {
+				for (const name of this.blockingMembers(kids(body), CROSS_FILE_BLOCKING_CALLS)) {
+					this.declaredSuspends.add(name);
+				}
+			}
 			for (const member of kids(body)) {
 				if (member.type === 'function_declaration') {
 					const method = this.nameOf(member);
@@ -4146,6 +4704,157 @@ class Emitter {
 	}
 
 	/**
+	 * What kotlinx knows about a `@Serializable` class, for the typed decoder,
+	 * or a refusal, or null for a class that is not one.
+	 *
+	 * The runtime used to recognise a decoded record by its field set, which is
+	 * a guess, and a class whose fields are all optional fits every record — so
+	 * one such DTO made the rest unrecognisable and a record came back with no
+	 * methods. A decode that names its type needs no guess: this writes down
+	 * the class's constructor (in declaration order), each field's wire names
+	 * (`@SerialName`, `@JsonNames`), declared type, whether it has a default,
+	 * whether it is `@Transient`, and which custom serializer it names — on
+	 * the field, on a type argument inside it, or on the class. See
+	 * `__serialDecode` in the runtime.
+	 *
+	 * A custom serializer is accepted only when it is an `object` this build
+	 * declares, built on `JsonTransformingSerializer` (whose base is checked
+	 * where the object is emitted) or on the `KSerializer` interface alone.
+	 * A generic serializer class, `@Contextual`, or any other base is refused.
+	 * An enum or a polymorphic class is not registered — it keeps the
+	 * structural walk it had — and one naming a serializer is refused.
+	 */
+	private serialRegistration(
+		node: KNode,
+		name: string,
+		isData: boolean,
+		isEnum: boolean
+	): { text: string } | { refusal: string } | null {
+		const annotations = kids(node).find((child) => child.type === 'modifiers');
+		const found = customSerializer(node);
+		if (annotations === undefined || !/@Serializable\b/.test(annotations.text)) {
+			return found === null
+				? null
+				: { refusal: `a custom serializer \`${found.name}\` ${found.placement}` };
+		}
+		const polymorphic = /\b(?:sealed|abstract)\b/.test(annotations.text);
+		if (isEnum || polymorphic) {
+			return found === null
+				? null
+				: { refusal: `a custom serializer \`${found.name}\` ${found.placement}` };
+		}
+
+		const serializers = new Set<string>();
+		const named = (written: string | undefined): string | null => {
+			const hit = written?.match(SERIALIZER_ANNOTATION)?.[1] ?? null;
+			if (hit !== null) serializers.add(hit);
+			return hit;
+		};
+		const wires = (declared: string, written: string): string[] => {
+			const out = [declared];
+			for (const annotation of written.matchAll(/@(SerialName|JsonNames)\s*\(([^)]*)\)/g)) {
+				const quoted = [...annotation[2].matchAll(/"([^"]*)"/g)].map((one) => one[1]);
+				if (annotation[1] === 'SerialName' && quoted.length > 0) out[0] = quoted[0];
+				else out.push(...quoted);
+			}
+			return out;
+		};
+		let contextual = false;
+		// This class's own nested types, as they will be emitted — see
+		// `nestedRenames` for what reading them bare decoded.
+		const own = this.nestedRenames(
+			kids(
+				kids(node).find((child) => child.type === 'class_body' || child.type === 'enum_class_body')
+			),
+			name
+		);
+		const typeOf = (holder: KNode | undefined): string => {
+			const written = kids(holder).find(
+				(part) => part.type.endsWith('type') && part.type !== 'binding_pattern_kind'
+			);
+			if (written === undefined) return 'Any';
+			if (/@Contextual\b/.test(written.text)) contextual = true;
+			for (const marker of written.text.matchAll(new RegExp(SERIALIZER_ANNOTATION, 'g'))) {
+				serializers.add(marker[1]);
+			}
+			return this.scopedTypeText(serialType(written.text), own);
+		};
+
+		const fields: unknown[] = [];
+		const constructor = kids(node).find((child) => child.type === 'primary_constructor');
+		for (const parameter of kids(constructor)) {
+			if (parameter.type !== 'class_parameter') continue;
+			const declared = kids(parameter).find((part) => part.type === 'simple_identifier')?.text;
+			if (declared === undefined) continue;
+			const written = kids(parameter).find((part) => part.type === 'modifiers')?.text ?? '';
+			fields.push([
+				fieldName(declared),
+				wires(fieldName(declared), written),
+				typeOf(parameter),
+				parameter.allChildren.some((part) => part.type === '='),
+				CONTEXTUAL.test(written) ? CONTEXTUAL_FIELD : named(written),
+				/@Transient\b/.test(written)
+			]);
+		}
+
+		// A property in the body with a backing field is serialised too — one
+		// with an initialiser, and no getter or delegate. Set after the
+		// constructor, when the payload carries it.
+		const body: unknown[] = [];
+		const members = kids(kids(node).find((child) => child.type === 'class_body'));
+		members.forEach((member, index) => {
+			if (member.type !== 'property_declaration') return;
+			const declared = this.propertyName(member);
+			if (declared === null) return;
+			if (accessorOf(member, members[index + 1], 'getter') !== undefined) return;
+			if (kids(member).some((part) => part.type === 'property_delegate')) return;
+			if (!member.allChildren.some((part) => part.type === '=')) return;
+			const written = kids(member).find((part) => part.type === 'modifiers')?.text ?? '';
+			if (/@Transient\b/.test(written)) return;
+			body.push([
+				fieldName(declared),
+				wires(fieldName(declared), written),
+				typeOf(kids(member).find((part) => part.type === 'variable_declaration')),
+				true,
+				CONTEXTUAL.test(written) ? CONTEXTUAL_FIELD : named(written),
+				false
+			]);
+		});
+
+		// `List<@Contextual Date>` decodes each element through the Json's
+		// `serializersModule`, which this runtime does not have and cannot
+		// read around. On a property it is only consulted when the payload
+		// carries the key — see `CONTEXTUAL_FIELD` — but on a type argument
+		// it is every element.
+		if (contextual) return { refusal: '`@Contextual` on a type argument' };
+
+		const params = kids(kids(node).find((child) => child.type === 'type_parameters'))
+			.filter((child) => child.type === 'type_parameter')
+			.map((child) => kids(child).find((part) => part.type === 'type_identifier')?.text ?? '?');
+		const ownSerializer = named(annotations.text);
+
+		const custom: string[] = [];
+		for (const serializer of serializers) {
+			const bare = serializer.replace(/^.*\./, '');
+			if (!this.declaredObjects.has(bare)) {
+				return { refusal: `a custom serializer \`${serializer}\` that is not an \`object\`` };
+			}
+			const base = this.classBaseIndex.get(bare);
+			if (base !== undefined && base !== 'JsonTransformingSerializer') {
+				return { refusal: `a custom serializer \`${serializer}\` built on \`${base}\`` };
+			}
+			custom.push(`${JSON.stringify(serializer)}: () => ${this.safe(bare)}`);
+		}
+
+		const meta = { params, fields, body, with: ownSerializer };
+		const make = `(__a) => ${isData ? '' : 'new '}${this.safe(name)}(...__a)`;
+		const map = custom.length === 0 ? 'null' : `{ ${custom.join(', ')} }`;
+		return {
+			text: `${this.helper('serial')}(${JSON.stringify(name)}, ${make}, ${JSON.stringify(meta)}, ${map});`
+		};
+	}
+
+	/**
 	 * The registration a `@Serializable` class needs, or null.
 	 *
 	 * Two things are lost between the JSON and the Kotlin, and both are silent:
@@ -4253,6 +4962,9 @@ class Emitter {
 			const path = (kids(header)[0]?.text ?? '').replace(/\s+/g, '').split('.');
 			if (path.length < 2) continue;
 			const member = path[path.length - 1];
+			if (path[0] === 'keiyoushi' && /^[a-z]/.test(member)) {
+				this.keiyoushiImports.set(member, path.slice(0, -1).join('.'));
+			}
 			const owner = path[path.length - 2];
 			// A nested type imported this way is a type, and already resolves.
 			if (!this.declaredObjects.has(owner) || this.declaredTypes.has(member)) continue;
@@ -4477,6 +5189,13 @@ class Emitter {
 				const key = expectationKey(node);
 				const known = this.expectedTypes.get(key);
 				this.expectedTypes.set(key, known === undefined || known === type ? type : null);
+				// `= use { json.decodeFromString(it.body.string()) }` — a scope
+				// function whose value IS its block's, so Kotlin infers the
+				// block's result from the same expected type. Only the three that
+				// answer the block: `also`/`apply` answer their receiver, and a
+				// type pushed into their block would be a wrong one.
+				const block = valueScopeBlock(node);
+				if (block !== null) this.expectLast(block, type);
 				return;
 			}
 		}
@@ -4502,7 +5221,7 @@ class Emitter {
 		const bare = type.replace(/\?$/, '');
 		const bound = this.reifiedTypes?.get(bare);
 		if (bound !== undefined) return `${this.helper('typeText')}(${bound})`;
-		return JSON.stringify(type);
+		return JSON.stringify(this.scopedTypeText(type));
 	}
 
 	/** The type annotation on a property declaration, if it carries one. */
@@ -4618,12 +5337,23 @@ class Emitter {
 				(one): one is { name: string; arity: number; suspends: boolean } =>
 					one.name !== null && one.arity !== null
 			);
+		const valueParams = kids(list)
+			.filter((child) => child.type === 'parameter')
+			.filter((child) => {
+				const type = kids(child).find(
+					(part) => part.type === 'user_type' || part.type === 'nullable_type'
+				);
+				return type !== undefined && VALUE_ONLY_TYPES.has(type.text.replace(/\?$/, ''));
+			})
+			.map((child) => this.nameOf(child))
+			.filter((one): one is string => one !== null);
 		let emitted;
 		try {
 			emitted = this.functionScope('function', null, names, () => {
 				for (const one of receiverParams) {
 					this.declareReceiverLocal(one.name, one.arity, one.suspends);
 				}
+				for (const one of valueParams) this.markValueOnly(one);
 				return this.functionBody(body);
 			});
 		} finally {
@@ -4648,6 +5378,17 @@ class Emitter {
 	}
 
 	private functionBody(node: KNode): string {
+		const cut = this.cut;
+		if (cut !== null && node.line === cut.body.line && node.text === cut.body.text) {
+			// See `recoveryCut`: the statements up to and including the
+			// pass-through guard, then the error the tail would have become.
+			this.cut = null;
+			const statements = kids(node).find((child) => child.type === 'statements');
+			return block([
+				...(statements === undefined ? [] : this.statementList(statements, null, cut.keep)),
+				`throw ${this.helper('recoveryRefused')}(${JSON.stringify(cut.owner)}, ${JSON.stringify(cut.kinds)});`
+			]);
+		}
 		if (node.allChildren.some((child) => child.type === '{')) {
 			const statements = kids(node).find((child) => child.type === 'statements');
 			return block(statements === undefined ? [] : this.statementList(statements, null));
@@ -4924,8 +5665,8 @@ class Emitter {
 
 	/* ── statements ──────────────────────────────────────────────────────── */
 
-	private statementList(node: KNode, sink: Sink): string[] {
-		const children = this.rejoinJumps(kids(node));
+	private statementList(node: KNode, sink: Sink, limit?: number): string[] {
+		const children = this.rejoinJumps(kids(node).slice(0, limit));
 		const out: string[] = [];
 		children.forEach((entry, index) => {
 			const tail =
@@ -5357,15 +6098,35 @@ class Emitter {
 			// Kotlin destructuring is `component1()`, `component2()` — positional
 			// over a Pair, a data class, a list or a regex match. The runtime is
 			// asked for the components rather than the emitter guessing a shape.
+			// Each component is bound the way a single local is — see
+			// `localBinding` — because `val (manga, chapters) = …` inside
+			// `fetchMangaUpdate(manga, chapters, …)` redeclares two parameters,
+			// which is a SyntaxError in the function's own body.
 			const value = this.expr(initialiser);
 			const names = kids(destructuring).map(boundName);
-			for (const name of names) this.declare(name, mutable);
-			return `${keyword} [${names.map((part) => this.safe(part)).join(', ')}] = ${this.helper('destructured')}(${value});`;
+			const bindings = names.map((name) => (name === '_' ? '' : this.localBinding(name)));
+			names.forEach((name, index) => {
+				if (name !== '_') this.declareAs(name, bindings[index], mutable);
+			});
+			return `${keyword} [${bindings.join(', ')}] = ${this.helper('destructured')}(${value});`;
 		}
 
 		const name = this.propertyName(node);
 		if (name === null) this.refuse(node, 'an unnamed local');
 		const binding = this.localBinding(name);
+		// The two paths below write the value into the binding from *inside*
+		// the initialiser, and an initialiser may declare its own local of the
+		// same name — `val url = if (q) { val url = …; url } else …`. The inner
+		// one is bound first (the outer does not exist yet), so the branch's
+		// write came out as `url = url` against the inner `const`, which is
+		// "assignment to constant" at import. The outer takes a fresh spelling
+		// whenever the initialiser rebinds its name.
+		const target =
+			[...walk(initialiser)].some(
+				(child) => child.type === 'variable_declaration' && boundName(child) === name
+			) && binding === this.safe(name)
+				? `${binding}$${(this.temporaries += 1)}`
+				: binding;
 
 		const guarded = this.elvisJump(initialiser);
 		if (guarded !== null) {
@@ -5384,18 +6145,18 @@ class Emitter {
 			// Declared after the value is written, because the value is emitted
 			// in the scope *before* the name exists: in Kotlin a local's own
 			// initialiser sees whatever it shadows.
-			const lines = this.tail(initialiser, { target: binding });
-			this.declareAs(name, binding, mutable);
-			return [`let ${binding};`, lines].join('\n');
+			const lines = this.tail(initialiser, { target });
+			this.declareAs(name, target, mutable);
+			return [`let ${target};`, lines].join('\n');
 		}
 
 		if (this.needsInlining(initialiser)) {
 			// `val x = response.use { … return … }`: same argument as the `try`
 			// above, one construct along. The block is emitted into this function
 			// rather than into a callback, so the `return` is this function's.
-			const lines = this.deliver(initialiser, { target: binding });
-			this.declareAs(name, binding, mutable);
-			return [`let ${binding};`, ...lines].join('\n');
+			const lines = this.deliver(initialiser, { target });
+			this.declareAs(name, target, mutable);
+			return [`let ${target};`, ...lines].join('\n');
 		}
 
 		const value = this.expr(initialiser);
@@ -5426,6 +6187,38 @@ class Emitter {
 		const target = kids(node)[0];
 		const value = kids(node)[kids(node).length - 1];
 		const operator = node.allChildren.find((child) => ASSIGN_OPS.has(child.type))?.type ?? '=';
+		// `preferences.token = value` — a write through an extension property,
+		// which `extensionProperty` does not give a setter. Refused by name:
+		// read as an ordinary assignment it would set a field on the store
+		// object that nothing ever reads back.
+		const written = kids(target);
+		const writtenName = kids(written[written.length - 1])
+			.filter((child) => child.type === 'simple_identifier')
+			.pop()?.text;
+		if (
+			written.length === 2 &&
+			written[1].type === 'navigation_suffix' &&
+			writtenName !== undefined &&
+			this.extensionProperties.has(writtenName)
+		) {
+			if (!this.isPreferencesStore(written[0]) || !this.extensionSetters.has(writtenName)) {
+				this.refuse(target, `a write to extension property \`${writtenName}\``);
+			}
+			const store = this.expr(written[0]);
+			const self = this.selfReference();
+			const given = this.expr(value);
+			// `preferences.slugMap += more` on a read-only `Map` is `slugMap =
+			// slugMap + more`: Kotlin's `+`, read and written through the
+			// accessors, the way a rebound `var` takes it.
+			if (operator !== '=' && operator !== '+=' && operator !== '-=') {
+				this.refuse(node, `\`${operator}\` on extension property \`${writtenName}\``);
+			}
+			const next =
+				operator === '='
+					? given
+					: `${this.helper(operator === '+=' ? 'plus' : 'minus')}(${self}.__ext_${writtenName}(${store}), ${given})`;
+			return `${self}.__ext_set_${writtenName}(${store}, ${next});`;
+		}
 
 		// **The `if` that swallowed its own assignment.**
 		//
@@ -5508,7 +6301,12 @@ class Emitter {
 				inner !== undefined && inner.type === 'simple_identifier'
 					? this.lookupLocal(inner.text)
 					: null;
-			if (local !== null && !local.mutable) {
+			// `mutableListOf(…).apply { this += more }`: `this` can no more be
+			// rebound than a `val` can, so it is `plusAssign` for the same
+			// reason. Read as a rebinding it was `this = __k.plus(this, …)`,
+			// which is not JavaScript at all — the bundle failed to parse.
+			const receiverSelf = inner !== undefined && inner.type === 'this_expression';
+			if (receiverSelf || (local !== null && !local.mutable)) {
 				const receiver = this.assignable(target);
 				// `all += page.entries ?: throw Exception("…")` — the elvis guard
 				// below, on the one path that returned before reaching it. The
@@ -5790,7 +6588,7 @@ class Emitter {
 			if (binding.type === 'multi_variable_declaration') {
 				const names = kids(binding).map(boundName);
 				for (const name of names) this.declare(name);
-				head = `const [${names.map((part) => this.safe(part)).join(', ')}]`;
+				head = `const ${this.pattern(names)}`;
 			} else {
 				const name = boundName(binding);
 				this.declare(name);
@@ -5928,14 +6726,37 @@ class Emitter {
 	 */
 	private whenChain(node: KNode, sink: Sink): string {
 		const subject = kids(node).find((child) => child.type === 'when_subject');
-		const subjectValue = kids(subject)[0];
+		// `when (val e = m.groupValues[1]) { … }` binds the subject to a name
+		// the branches read. The grammar gives the binding first and the value
+		// second; read as the subject, the binding was an undeclared `e`.
+		const binding = kids(subject)[0]?.type === 'variable_declaration' ? kids(subject)[0] : null;
+		const subjectValue = binding === null ? kids(subject)[0] : kids(subject)[1];
+		const bound =
+			binding === null
+				? null
+				: (kids(binding).find((child) => child.type === 'simple_identifier')?.text ?? null);
+		if (binding !== null && (bound === null || subjectValue === undefined)) {
+			this.refuse(binding, 'a `when` subject binding this build could not read');
+		}
 		const name = subjectValue === undefined ? null : this.temporary();
 
 		const lines: string[] = [];
 		if (name !== null && subjectValue !== undefined) {
 			lines.push(`const ${name} = ${this.expr(subjectValue)};`);
 		}
+		// The name is in scope for the branches and nowhere else, as Kotlin's.
+		if (bound !== null && name !== null) {
+			this.pushScope();
+			this.declareAs(bound, name, false);
+		}
+		try {
+			return this.whenBranches(node, sink, name, lines);
+		} finally {
+			if (bound !== null && name !== null) this.popScope();
+		}
+	}
 
+	private whenBranches(node: KNode, sink: Sink, name: string | null, lines: string[]): string {
 		const clauses: string[] = [];
 		let fallback: string | null = null;
 		for (const entry of kids(node)) {
@@ -6180,8 +7001,14 @@ class Emitter {
 				if (guarded !== null) return this.hoistedGuard(node, guarded);
 				return `(${this.expr(kids(node)[0])} ?? ${this.expr(kids(node)[1])})`;
 			}
-			case 'equality_expression':
-				return this.binary(node, (operator) => (operator.startsWith('==') ? '===' : '!=='));
+			case 'equality_expression': {
+				const operands = kids(node);
+				const nullable = operands.some((part) => part.type === 'null' || part.text === 'null');
+				return this.binary(node, (operator) => {
+					if (nullable) return operator.startsWith('==') ? '==' : '!=';
+					return operator.startsWith('==') ? '===' : '!==';
+				});
+			}
 			case 'comparison_expression': {
 				const generic = this.genericReference(node);
 				if (generic !== null) return generic;
@@ -6638,14 +7465,45 @@ class Emitter {
 		) {
 			return `(__recv) => __recv.${member.text}`;
 		}
+		// `File::deleteOnExit` — a type the runtime defines by name, referenced
+		// unbound: the argument is the receiver. Read through `isValueName`, a
+		// global is a value, and the member was called on the type itself.
+		const partial = named ? JSOUP_STATICS.get(owner.text) : undefined;
+		if (partial !== undefined && !partial.has(member.text) && !this.moduleNames.has(owner.text)) {
+			if (!HOST_METHODS.has(member.text)) this.refuse(node, `\`${owner.text}::${member.text}\``);
+			return `(__recv, ...__a) => __recv.${member.text}(...__a)`;
+		}
 		if (named && this.isValueName(owner.text)) {
 			const receiver = this.read(owner.text, owner);
 			const helper = EXTENSION_METHODS.get(member.text);
 			if (helper !== undefined) {
 				return `(...__a) => ${this.helper(helper)}(${[receiver, '...__a'].join(', ')})`;
 			}
-			if (!this.declaredMethods.has(member.text) && !HOST_METHODS.has(member.text)) {
+			if (
+				!this.declaredMethods.has(member.text) &&
+				!HOST_METHODS.has(member.text) &&
+				RUNTIME_STATIC_REFERENCES.get(owner.text)?.has(member.text) !== true
+			) {
 				this.refuse(node, `\`::${member.text}\` on \`${owner.text}\``);
+			}
+			// A runtime type's own function, `createdAt?.let(Instant::parseOrNull)`:
+			// one argument, not all of them. A collection helper hands a lambda the
+			// index too, and `Instant.parse(text, format)` would take it as the
+			// format.
+			if (RUNTIME_STATIC_REFERENCES.get(owner.text)?.has(member.text) === true) {
+				return `(__a) => ${receiver}.${member.text}(__a)`;
+			}
+			// A member that suspends here — PlaylistUtils' `fixSubtitles` blocks on
+			// the network in Kotlin and is async in JavaScript — answers a Promise.
+			// The written call `playlistUtils.fixSubtitles(x)` is awaited; the
+			// reference was not, so `.let(playlistUtils::fixSubtitles)` handed a
+			// Promise on, and a surrounding `runCatching { }.getOrDefault(…)` read
+			// its member off the Promise. The reference is an async function, and
+			// the block it sits in is counted as suspending, as a lambda that
+			// awaits is.
+			if (this.declaredSuspends.has(member.text)) {
+				this.asyncLambdas += 1;
+				return `async (...__a) => (await ${receiver}.${member.text}(...__a))`;
 			}
 			return `(...__a) => ${receiver}.${member.text}(...__a)`;
 		}
@@ -6680,6 +7538,17 @@ class Emitter {
 		// a method.
 		if (named && this.classFieldIndex.get(owner.text)?.has(member.text) === true) {
 			return `(__recv) => __recv.${member.text}`;
+		}
+
+		// Everything below reads the left side as a *type*: `Type::method`, whose
+		// argument becomes the receiver. A lowercase name is a value — Kotlin's
+		// types are capitalised — and one the checks above could not resolve.
+		// Read as a type it came out as `(__a) => __a.parseToJsonElement()`:
+		// `jsonInstance::parseToJsonElement` called the method on the string it
+		// was handed, and never mentioned `jsonInstance`, so the graph could not
+		// see that the value it names was refused. Refused by name instead.
+		if (named && /^[a-z_]/.test(owner.text)) {
+			this.refuse(node, `\`${owner.text}::${member.text}\` on a value this build did not resolve`);
 		}
 
 		const helper = EXTENSION_METHODS.get(member.text);
@@ -6724,6 +7593,14 @@ class Emitter {
 	private objectLiteral(node: KNode): string {
 		const invoked = this.baseInvocation(node);
 		if (invoked !== null) {
+			// An empty anonymous subclass adds nothing to a constructed base;
+			// creating that base gives the same fields and methods. A body needs
+			// its own inherited scope, which this emitter cannot represent.
+			const base = this.resolvedBase(invoked.type);
+			const members = kids(kids(node).find((child) => child.type === 'class_body'));
+			if (base !== null && members.length === 0) {
+				return `new ${base}(${this.plainArguments(invoked.type, [...invoked.args]).join(', ')})`;
+			}
 			this.refuse(node, `an anonymous \`object : ${invoked.type}(…)\` over a constructed base`);
 		}
 		const body = kids(node).find((child) => child.type === 'class_body');
@@ -6789,6 +7666,12 @@ class Emitter {
 		// is what should happen to a container reached for anything else.
 		const injected = INJEKT_GET.exec(node.text.replace(/\s+/g, ''));
 		if (injected !== null && GLOBAL_NAMES.has(injected[1])) return injected[1];
+		// `val jsonInstance: Json = Injekt.get()` — keiyoushi core's spelling,
+		// with the type on the property rather than the call. Only `Json`,
+		// which the scanner lets past for the same reason: see `INJECTED_JSON`.
+		if (node.text.replace(/\s+/g, '') === 'Injekt.get()' && this.expectedOf(node) === 'Json') {
+			return 'Json';
+		}
 
 		// `x.ifEmpty { return@map null }` before anything else looks at the call:
 		// its lambda is a jump out of the *enclosing* lambda, which only reads
@@ -6816,6 +7699,23 @@ class Emitter {
 
 		const { callee, args, lambda, labelled, typeArgument } = this.flatten(node);
 		const expected = typeArgument === null ? this.expectedOf(node) : null;
+		// `Filter.Sort.Selection(1, false)` — the qualified spelling of the
+		// `Selection(…)` the runtime already answers bare. Read as a method
+		// call it was a member `Selection` of the value `Filter.Sort`, which is
+		// no member anything defines, so it was refused; it is one constructor
+		// written two ways, and both now reach the same helper with the same
+		// named-argument signature.
+		if (
+			callee.type === 'navigation_expression' &&
+			SORT_SELECTION.test(callee.text.replace(/\s+/g, '')) &&
+			!this.moduleNames.has('Filter') &&
+			!this.moduleNames.has('AnimeFilter') &&
+			!this.declaredTypes.has('Selection')
+		) {
+			if (lambda !== null) this.refuse(lambda, 'a lambda passed to `Selection`');
+			const tail = this.callArguments('Selection', args, null, labelled, false);
+			return `${this.helper('selection')}(${tail.join(', ')})`;
+		}
 		if (callee.type === 'navigation_expression') {
 			return this.methodCall(callee, args, lambda, labelled, typeArgument, expected);
 		}
@@ -6936,6 +7836,23 @@ class Emitter {
 		const name = fieldName(written);
 		if (!JS_IDENTIFIER.test(name)) this.refuse(suffix, `\`.${written}()\``);
 		const safe = suffix.allChildren[0]?.type === '?.';
+
+		// `java.net.URI(url)` and `java.text.SimpleDateFormat(…)` — a constructor
+		// written with its package, which is the bare constructor the imported
+		// spelling already reaches. Only a package path in front and only a
+		// name the bare path knows (`FREE_FUNCTIONS`, or a runtime global), so
+		// an unknown qualified class still refuses.
+		if (
+			!safe &&
+			/^[A-Z]/.test(name) &&
+			PACKAGE_PATH.test(receiver.text.replace(/\s+/g, '')) &&
+			(FREE_FUNCTIONS.has(name) || GLOBAL_NAMES.has(name))
+		) {
+			const bare = kids(suffix).find((child) => child.type === 'simple_identifier');
+			if (bare !== undefined) {
+				return this.bareCall(bare, args, lambda, labelled, typeArgument, expected);
+			}
+		}
 
 		// `newBuilder().block()` — a parameter typed `R.() -> T`, invoked on an
 		// explicit receiver. Kotlin resolves a member of the receiver first, and
@@ -7077,6 +7994,34 @@ class Emitter {
 			return `!(${this.expr(receiver)})`;
 		}
 
+		if (
+			(name === 'extractNextJs' || name === 'extractNextJsRsc') &&
+			!this.extensionFunctions.has(name)
+		) {
+			// The core helper reads either an HTML page or React Flight rows, then
+			// decodes the first predicate match as T. With no predicate it derives
+			// required fields from T's translated @Serializable shape; an unknown
+			// shape cannot be guessed without selecting the wrong page object.
+			const shape = typeArgument ?? expected;
+			if (shape === null) this.refuse(suffix, `\`.${name}()\` with no type argument`);
+			const predicate = this.callArguments(name, args, lambda, labelled, false);
+			if (predicate.length > 1) this.refuse(suffix, `\`.${name}()\` with a deserializer`);
+			if (predicate.length === 0) {
+				const element = /^(?:List|MutableList)<(.+)>\??$/.exec(shape)?.[1] ?? shape;
+				const bare = element.replace(/\?$/, '').replace(/^.*\./, '');
+				if (!this.declaredTypes.has(bare)) {
+					this.refuse(
+						suffix,
+						`\`.${name}()\` inferring a predicate from a type this build did not read`
+					);
+				}
+			}
+			const value = this.expr(receiver);
+			const call = (target: string) =>
+				`${this.helper(name)}(${[target, JSON.stringify(shape), ...predicate].join(', ')})`;
+			return safe ? `${this.helper('sc')}(${value}, (__r) => ${call('__r')})` : call(value);
+		}
+
 		if (DECODING_METHODS.has(name)) {
 			// The shape being decoded is named in the type argument, not the
 			// arguments. Without one the runtime would have to guess a
@@ -7095,7 +8040,33 @@ class Emitter {
 				const withBlock = this.callArguments(name, args, lambda, labelled, false);
 				return `${this.helper('decodeWith')}(${[this.expr(receiver), this.decodeType(shape), ...withBlock].join(', ')})`;
 			}
-			const tail = this.plainArguments(name, args);
+			// `response.parseAs<Manga>(transform = ::transformJsonResponse)` —
+			// core's overload that runs the text through a function before the
+			// parse, named rather than trailing. The same `decodeWith` the block
+			// form takes; `json =` names a parser the runtime is already, and
+			// anything else keeps the refusal.
+			if (name === 'parseAs' && args.length > 0) {
+				const named = args.map((arg) => this.argumentName(arg));
+				const transform = args.find((arg) => this.argumentName(arg) === 'transform');
+				if (
+					transform !== undefined &&
+					named.every((one) => one === 'transform' || one === 'json')
+				) {
+					const fn = this.expr(this.argumentValue(transform));
+					return `${this.helper('decodeWith')}(${[this.expr(receiver), this.decodeType(shape), fn].join(', ')})`;
+				}
+			}
+
+			// `json.decodeFromStream(body.byteStream())` reads the whole body as
+			// the document, which is what the body's text already is here. Only
+			// that argument, read straight off a body: `.byteStream()` anywhere
+			// else is a stream of image bytes this runtime does not keep.
+			const streamed =
+				name === 'decodeFromStream' && args.length === 1
+					? okioStreamOf(this.argumentValue(args[0]), 'byteStream')
+					: null;
+			const tail =
+				streamed !== null ? [`${this.expr(streamed)}.string()`] : this.plainArguments(name, args);
 			return `${this.helper('decode')}(${[this.expr(receiver), this.decodeType(shape), ...tail].join(', ')})`;
 		}
 
@@ -7108,11 +8079,24 @@ class Emitter {
 			// in 145 places across one catalogue, with nothing anywhere saying
 			// so. The runtime's own `Result` declares these five; they are
 			// emitted on it directly.
+			//
+			// A block that suspends makes `runCatching` answer a Promise of the
+			// Result, so the Result is awaited *before* the member is read off it.
+			// Awaiting the whole call read `getOrDefault` off the Promise: Voe's
+			// `runCatching { … .let(playlistUtils::fixSubtitles) }
+			// .getOrDefault(emptyList())` threw "getOrDefault is not a function"
+			// the moment fixSubtitles converted, and the hoster's own catch
+			// dropped every Voe video with it. The tail's own lambda — a
+			// suspending `getOrElse { }` — is awaited separately.
 			const before = this.asyncLambdas;
 			const receiverText = this.expr(receiver);
+			const receiverSuspends = this.asyncLambdas > before;
+			const middle = this.asyncLambdas;
 			const tail = this.callArguments(name, args, lambda, labelled, false);
-			const call = `${receiverText}.${name}(${tail.join(', ')})`;
-			return this.asyncLambdas > before ? this.awaited(call) : call;
+			const tailSuspends = this.asyncLambdas > middle;
+			const target = receiverSuspends ? this.awaited(receiverText) : receiverText;
+			const call = `${target}.${name}(${tail.join(', ')})`;
+			return tailSuspends ? this.awaited(call) : call;
 		}
 
 		const qualified = this.qualifiedTypes.get(`${receiver.text.trim()}.${name}`);
@@ -7188,6 +8172,51 @@ class Emitter {
 		// Arity separates them cleanly. Every SharedPreferences call in this
 		// ecosystem passes a default (`getString(KEY, DEFAULT)!!`); every
 		// org.json read passes only the field.
+		// `n.toString(16)` and `bytes.toString(Charsets.UTF_8)`: toString WITH an
+		// argument is a radix or a charset, never the plain one — see
+		// `toStringWith`. The plain helper ignored the argument.
+		if (
+			name === 'toString' &&
+			args.length === 1 &&
+			lambda === null &&
+			!this.extensionFunctions.has(name) &&
+			!this.declaredMethods.has(name)
+		) {
+			const value = this.expr(receiver);
+			const argument = this.plainArguments(name, args)[0];
+			const call = (target: string) => `${this.helper('toStringWith')}(${target}, ${argument})`;
+			return safe ? `${this.helper('sc')}(${value}, (__r) => ${call('__r')})` : call(value);
+		}
+
+		// `Filter.Sort.Selection(3, false)` — the sort state written qualified,
+		// which is the same value the bare `Selection(…)` already builds
+		// through `__k.selection`. The receiver is the framework's nested type,
+		// not a value, so it is dropped rather than passed through.
+		if (
+			name === 'Selection' &&
+			lambda === null &&
+			!safe &&
+			/^(?:Anime)?Filter\.Sort$/.test(receiver.text.replace(/\s+/g, ''))
+		) {
+			return `${this.helper('selection')}(${this.callArguments(name, args, null, labelled, false).join(', ')})`;
+		}
+
+		// `body.source().asResponseBody(type)` — okio's spelling of "the same
+		// bytes under another content type", which is how an interceptor fixes a
+		// host that serves its pages as `application/octet-stream`. A response
+		// here is the text the host read, so the same body is its `string()`,
+		// handed to `toResponseBody` with the new type. Only this whole chain:
+		// `.source()` on its own is an okio stream (`readByteArray`,
+		// `cipherSource`) over bytes this runtime does not keep, and stays
+		// refused, as does the two-argument form, which also asserts a length.
+		if (name === 'asResponseBody' && args.length === 1 && lambda === null) {
+			const body = okioSourceOf(receiver);
+			if (body !== null) {
+				const type = this.plainArguments(name, args)[0];
+				return `${this.helper('toResponseBody')}(${this.expr(body)}.string(), ${type})`;
+			}
+		}
+
 		const jsonGetter = JSON_GETTERS.get(name);
 		if (jsonGetter !== undefined && args.length === 1 && lambda === null) {
 			return `${this.helper(jsonGetter)}(${[this.expr(receiver), ...this.plainArguments(name, args)].join(', ')})`;
@@ -7275,10 +8304,17 @@ class Emitter {
 			const declarative = this.declarativeInterceptor(suffix, receiver, args[0]);
 			if (declarative !== null) return declarative;
 		}
+		// A named argument to `indexOf`/`lastIndexOf` is `ignoreCase` or
+		// `startIndex`, which only Kotlin's own reads: see `KNOWN_SIGNATURES`.
+		const namedSearch =
+			(name === 'indexOf' || name === 'lastIndexOf') &&
+			args.some((arg) => arg.allChildren.some((child) => child.type === '='));
 		const helper = indexed
 			? 'getAt'
 			: scopeFunction && !shadowed
-				? EXTENSION_METHODS.get(name)
+				? namedSearch
+					? name
+					: EXTENSION_METHODS.get(name)
 				: undefined;
 		if (helper !== undefined) {
 			const before = this.asyncLambdas;
@@ -7447,7 +8483,24 @@ class Emitter {
 			(receiverText === 'this' || receiverText === this.selfReference());
 		const ownMember = ownReceiver && this.isSourceMember(name);
 		const declared = this.declaredMethods.has(name) || ownMember;
-		if (!HOST_METHODS.has(name) && !crossFileObject && !declared && scopeFunction) {
+		// jsoup's statics pass through as a capitalised receiver, which checks no
+		// member at all — and the runtime defines only the ones in the table.
+		// `Parser.xmlParser()` in particular must not reach a runtime whose
+		// `Jsoup.parse` would quietly build an HTML tree from the XML.
+		const statics = JSOUP_STATICS.get(receiver.text);
+		if (statics !== undefined && !statics.has(name) && !this.moduleNames.has(receiver.text)) {
+			this.refuse(suffix, `\`${receiver.text}.${name}()\``);
+		}
+		// java.util.Base64's coders: `Base64.getDecoder().decode(text)`. `decode`
+		// and `withoutPadding` are not on the allowlist — the first is too common
+		// a word to pass through on any receiver — so they pass here only on the
+		// accessor that returns one of the runtime's coders.
+		const javaCoder =
+			(name === 'decode' || name === 'withoutPadding' || name === 'encodeToString') &&
+			/\.get(?:Url|Mime)?(?:Decoder|Encoder)\(\)(?:\.withoutPadding\(\))?$/.test(
+				receiver.text.replace(/\s+/g, '')
+			);
+		if (!HOST_METHODS.has(name) && !crossFileObject && !declared && scopeFunction && !javaCoder) {
 			// Passthrough is an allowlist. See the file header: a fallback turns
 			// an unrecognised Kotlin helper into a call on a shim that has never
 			// heard of it, and the failure then happens inside a sandbox rather
@@ -7456,18 +8509,27 @@ class Emitter {
 		}
 		const argumentLambda = ARGUMENT_LAMBDA_METHODS.has(name);
 		const builderLambda = lambda !== null && (BUILDER_LAMBDA_METHODS.has(name) || argumentLambda);
-		if (lambda !== null && !builderLambda) this.refuse(lambda, `a lambda passed to \`.${name}()\``);
+		const trailing =
+			lambda !== null && !builderLambda && declared
+				? this.trailingLambdaArguments(name, receiver, args, lambda, labelled)
+				: null;
+		if (lambda !== null && !builderLambda && trailing === null) {
+			this.refuse(lambda, `a lambda passed to \`.${name}()\``);
+		}
 
-		const argumentsText = builderLambda
-			? this.callArguments(
-					name,
-					args,
-					lambda,
-					labelled,
-					!argumentLambda,
-					argumentLambda ? null : modelTypeOf(receiver)
-				)
-			: this.plainArguments(name, args, this.receiverTypeOf(receiver));
+		const argumentsText =
+			trailing !== null
+				? trailing
+				: builderLambda
+					? this.callArguments(
+							name,
+							args,
+							lambda,
+							labelled,
+							!argumentLambda,
+							argumentLambda ? null : modelTypeOf(receiver)
+						)
+					: this.plainArguments(name, args, this.receiverTypeOf(receiver));
 		// `element.parent()` is a jsoup call and a runtime field; see
 		// `HOST_PROPERTY_METHODS` for what emitting it as written cost.
 		if (argumentsText.length === 0 && HOST_PROPERTY_METHODS.has(name) && !declared) {
@@ -7496,6 +8558,11 @@ class Emitter {
 		expected: string | null = null
 	): string {
 		const name = callee.text;
+		// `File(path)`: a path on a filesystem a plugin does not have. The one
+		// `File` the runtime makes is `File.createTempFile` — see `JSOUP_STATICS`.
+		if (name === 'File' && !this.moduleNames.has(name) && this.lookup(name) === null) {
+			this.refuse(callee, '`File(…)`');
+		}
 
 		// `withContext(dispatcher) { … }` is a thread hop, and the sandbox has
 		// one thread. The dispatcher is dropped and the block is awaited.
@@ -7659,7 +8726,13 @@ class Emitter {
 			const inEnum = this.enumMember(name);
 			if (inEnum !== null) return `${inEnum}(${this.plainArguments(name, args).join(', ')})`;
 		}
-		const local = this.lookup(name);
+		// A parameter that cannot be invoked does not hide a member of the same
+		// name from a call — see `VALUE_ONLY_TYPES`. Asked only when something
+		// the source declares answers to the name, so the call still goes
+		// somewhere real.
+		const bound = this.lookupLocal(name);
+		const local =
+			bound?.valueOnly === true && this.callableMember(name) ? null : (bound?.text ?? null);
 		if (local !== null) {
 			const call = `${local}(${this.callArguments(name, args, lambda, labelled, false).join(', ')})`;
 			return this.localSuspends.has(name) ? this.awaited(call) : call;
@@ -7698,6 +8771,24 @@ class Emitter {
 			const types = this.reifiedArguments(callee, name, typeArgument, expected);
 			const call = `${this.safe(importedFrom)}.${fieldName(name)}(${[...types, ...tail].join(', ')})`;
 			return this.declaredSuspends.has(name) ? this.awaited(call) : call;
+		}
+
+		// `Observable.error(Exception("Licensed"))` — an exception built as a
+		// value rather than thrown on the spot. `throw` already reads the same
+		// names (`thrownHelper`); here the error is made and handed on, which
+		// is `__k.exception`. Only a type this build did not see declared: an
+		// extension's own `class LoginRequired : Exception()` is a class like
+		// any other, and a name nothing declares that does not end in
+		// Exception/Error/Throwable is not this.
+		if (
+			thrownHelper(name) === 'error' &&
+			lambda === null &&
+			args.length <= 2 &&
+			!this.classMembers.has(name) &&
+			!this.declaredTypes.has(name) &&
+			!this.moduleNames.has(name)
+		) {
+			return `${this.helper('exception')}(${this.plainArguments(name, args).join(', ')})`;
 		}
 
 		// A capitalised bare call is a constructor of a class this build has not
@@ -7769,6 +8860,21 @@ class Emitter {
 			const withLambda = this.callArguments(name, args, lambda, labelled, true);
 			return `${implicit}.${name}(${withLambda.join(', ')})`;
 		}
+		// `configureClient() = addCookie { listOf("age" to "18") }` — the same
+		// call the written-receiver form already makes, on the builder that is
+		// the implicit receiver, with the block as an ordinary argument (the
+		// cookies, asked for per request). Only `addCookie`: the other
+		// argument-lambda method is `addInterceptor`, and an interceptor lambda
+		// is a boundary this path must not open by the back door.
+		if (
+			implicit !== null &&
+			lambda !== null &&
+			name === 'addCookie' &&
+			!this.isSourceMember(name)
+		) {
+			const withLambda = this.callArguments(name, args, lambda, labelled, false);
+			return `${implicit}.${name}(${withLambda.join(', ')})`;
+		}
 		// `configureClient() = rateLimit(3)`: the builder is the implicit
 		// receiver, and the period has to be resolved here exactly as it is for
 		// the written-out `.rateLimit(3)` — the generic helper path below passes
@@ -7780,6 +8886,23 @@ class Emitter {
 			!this.extensionFunctions.has(name)
 		) {
 			return this.rateLimitCall(callee, implicit, name, args, lambda);
+		}
+		// `x?.runCatching { parseAs<JsonObject>() }` — a decode whose receiver
+		// is the implicit one. Read as a member of the source it was
+		// `__self.parseAs()`: no type, the extension object as its payload, a
+		// throw that `runCatching` turned into null — and every Madara
+		// extension's view-count ping silently never went out. Decoded exactly
+		// as the written-receiver form `x.parseAs<T>()` is.
+		if (
+			implicit !== null &&
+			DECODING_METHODS.has(name) &&
+			!this.isSourceMember(name) &&
+			!this.extensionFunctions.has(name) &&
+			lambda === null
+		) {
+			const shape = typeArgument ?? expected;
+			if (shape === null) this.refuse(callee, `\`${name}()\` with no type argument`);
+			return `${this.helper('decode')}(${[implicit, this.decodeType(shape), ...tail].join(', ')})`;
 		}
 		if (implicit !== null && !this.isSourceMember(name)) {
 			const helper = EXTENSION_METHODS.get(name);
@@ -7846,6 +8969,28 @@ class Emitter {
 			// so a `headersBuilder()` in a property initialiser stays synchronous.
 			const call = `__super.${name}(${tail.join(', ')})`;
 			return SUPER_SUSPEND_MEMBERS.has(name) ? this.awaited(call) : call;
+		}
+
+		// A name nothing here declares is taken to be the extension's base
+		// class's, and called on the source. That is wrong for a name the file
+		// *imports*: ViTruyen's `import keiyoushi.utils.getLocalStorage` is a
+		// top-level function in core's `WebView.kt` — a WebView boundary — which
+		// the conversion never read, so it came out as
+		// `this.getLocalStorage(…)`, converted as complete, loaded, and failed on
+		// the first chapter with nothing refused. Refused by name instead.
+		// Only a name nothing in this build answers: `parseAs` or `rateLimit`
+		// imported from the same package is the runtime's, and reaches here
+		// through a receiver the paths above did not claim.
+		const imported = this.keiyoushiImports.get(name);
+		if (
+			imported !== undefined &&
+			!RUNTIME_KNOWN_CALLS.some((table) => table.has(name)) &&
+			!this.isSourceMember(name) &&
+			!this.declaredMethods.has(name) &&
+			!this.moduleNames.has(name) &&
+			!(this.ownerBase !== null && this.baseDeclares(this.ownerBase, name))
+		) {
+			this.refuse(callee, `\`${name}\` from \`${imported}\`, which this build did not read`);
 		}
 
 		// The source object, reached from wherever this call sits: inside a
@@ -7935,6 +9080,47 @@ class Emitter {
 			}
 		}
 		return out;
+	}
+
+	/**
+	 * `VidHideExtractor(client, headers).videosFromUrl(url) { quality -> quality }`
+	 * — a trailing lambda to a method this unit declares, on a receiver whose
+	 * class is known. Null when either is not the case, and the caller refuses.
+	 *
+	 * Kotlin binds a trailing lambda to the *last* parameter, whatever sits
+	 * between: `videosFromUrl(url, prefix = "", videoNameGen)` called as
+	 * `videosFromUrl(url) { … }` leaves `prefix` at its default. So the lambda
+	 * goes in the last slot of the declared signature and every slot skipped on
+	 * the way is `undefined`, which is what makes a JavaScript default parameter
+	 * — the emitted declaration's own — apply. The signature is the receiver
+	 * class's own (`qualifiedSignatures`), never the name's across the unit:
+	 * this ecosystem declares `videosFromUrl` in forty extractors, with forty
+	 * parameter lists.
+	 *
+	 * Positional arguments only. A named argument before the block is a
+	 * placement question `plainArguments` answers for plain calls and this does
+	 * not try to.
+	 */
+	private trailingLambdaArguments(
+		name: string,
+		receiver: KNode,
+		args: KNode[],
+		lambda: KNode,
+		labelled: string | null
+	): string[] | null {
+		if (args.some((arg) => arg.allChildren.some((child) => child.type === '='))) return null;
+		const owner = this.receiverTypeOf(receiver);
+		if (owner === null) return null;
+		const signature = this.qualifiedSignatures.get(`${owner}.${name}`);
+		if (signature === undefined || signature.length === 0) return null;
+		if (args.length > signature.length - 1) return null;
+		const out = this.callArguments(name, args, lambda, labelled, false);
+		const given = out.slice(0, -1);
+		if (given.length !== args.length || given.some((one) => one.startsWith('...'))) {
+			this.refuse(lambda, `a lambda passed to \`.${name}()\` after a spread`);
+		}
+		const skipped = signature.length - 1 - given.length;
+		return [...given, ...Array.from({ length: skipped }, () => 'undefined'), out[out.length - 1]];
 	}
 
 	/**
@@ -8479,6 +9665,11 @@ class Emitter {
 		// segment.
 		const qualified = QUALIFIED_GLOBAL.exec(node.text.replace(/\s+/g, ''));
 		if (qualified !== null && GLOBAL_NAMES.has(qualified[1])) return qualified[1];
+		// `java.lang.String.format(…)` is the `String.format(…)` a bare `String`
+		// receiver already reaches: Kotlin's String type, which this runtime
+		// spells as JavaScript's.
+		const spelled = node.text.replace(/\s+/g, '');
+		if (spelled === 'java.lang.String' || spelled === 'kotlin.String') return 'String';
 
 		// The one thing this ecosystem asks the JVM class object for, and the
 		// only reflection in the catalogue that has an answer here.
@@ -8497,6 +9688,9 @@ class Emitter {
 		// simple name. See `SIMPLE_NAME` in `subset.ts` for both halves.
 		const simple = SIMPLE_NAME.exec(node.text.replace(/\s+/g, ''));
 		if (simple !== null) return this.simpleName(node, simple[1] ?? null);
+
+		const extension = this.extensionPropertyRead(node);
+		if (extension !== null) return extension;
 
 		const receiver = kids(node)[0];
 		if (receiver.type === 'super_expression') {
@@ -8570,6 +9764,14 @@ class Emitter {
 		if (helper !== undefined) {
 			if (!safe) return `${this.helper(helper)}(${this.expr(receiver)})`;
 			return `${this.helper('sc')}(${this.expr(receiver)}, (__r) => ${this.helper(helper)}(__r))`;
+		}
+
+		// `File.separator` — a static read off a type the runtime defines only
+		// in part (`JSOUP_STATICS`). Passed through, it answered undefined.
+		const partial =
+			receiver.type === 'simple_identifier' ? JSOUP_STATICS.get(receiver.text) : undefined;
+		if (partial !== undefined && !partial.has(name) && !this.moduleNames.has(receiver.text)) {
+			this.refuse(node, `\`${receiver.text}.${name}\``);
 		}
 
 		// Property *reads* are passthrough where method calls are not: a DTO's
@@ -8658,7 +9860,7 @@ class Emitter {
 				const holder = `__p${names.length + 1}`;
 				names.push(holder);
 				unpack.push(
-					`const [${parts.map((part) => this.safe(part)).join(', ')}] = ${this.helper('destructured')}(${this.safe(holder)});`
+					`const ${this.pattern(parts)} = ${this.helper('destructured')}(${this.safe(holder)});`
 				);
 				this.destructuredParts.push(...parts);
 			}
@@ -9098,7 +10300,7 @@ class Emitter {
 			names.push(holder);
 			bound.push(holder, ...parts);
 			unpack.push(
-				`const [${parts.map((part) => this.safe(part)).join(', ')}] = ${this.helper('destructured')}(${this.safe(holder)});`
+				`const ${this.pattern(parts)} = ${this.helper('destructured')}(${this.safe(holder)});`
 			);
 		}
 		return { names, unpack, bound };
@@ -9275,6 +10477,19 @@ class Emitter {
 	/* ── names and scopes ────────────────────────────────────────────────── */
 
 	/**
+	 * A destructuring's binding list, with each `_` left as a hole.
+	 *
+	 * Kotlin's `_` is "no component here" and may be written any number of
+	 * times — `val (id, _, _) = url.split("/", limit = 3)`. Passed through as a
+	 * name it is two `const` bindings of `_`, which is "\"_\" has already been
+	 * declared" when the bundle is imported, taking every member with it. An
+	 * elided element is exactly what Kotlin meant: the component is not read.
+	 */
+	private pattern(parts: readonly string[]): string {
+		return `[${parts.map((part) => (part === '_' ? '' : this.safe(part))).join(', ')}]`;
+	}
+
+	/**
 	 * The JavaScript name a Kotlin one is written out as.
 	 *
 	 * Two rewrites, and they are different in kind. `safeName` handles what
@@ -9291,6 +10506,18 @@ class Emitter {
 	private read(name: string, node: KNode): string {
 		const local = this.lookup(name);
 		if (local !== null) return local;
+		// The root of a package path — `java.lang.Integer.toHexString(…)` — that
+		// nothing above resolved. Read as a member it became `this.java`, and
+		// the call died on `undefined` at run time with nothing refused.
+		if (PACKAGE_ROOTS.has(name) && !this.classMembers.has(name) && !this.moduleNames.has(name)) {
+			this.refuse(node, `a fully qualified \`${name}.…\` name this build does not know`);
+		}
+		// A bare `quality` naming an extension property is a read through an
+		// implicit receiver — `with(preferences) { quality }` — which this
+		// build does not track. Refused, rather than read off the extension.
+		if (this.extensionProperties.has(name) && !this.classMembers.has(name)) {
+			this.refuse(node, `a bare read of extension property \`${name}\``);
+		}
 		// Inside an enum: an entry by its bare name, and the entry list.
 		const inEnum = this.enumMember(name);
 		if (inEnum !== null) return inEnum;
@@ -9352,6 +10579,8 @@ class Emitter {
 		// so a source that declares the same name keeps meaning its own.
 		const inherited = BASE_CONSTANTS.get(name);
 		if (inherited !== undefined) return inherited;
+		const imported = this.companionImports.get(name);
+		if (imported !== undefined) return imported;
 
 		// A capitalised name this file did not declare belongs to another
 		// module — `Injekt`, `Dispatchers`, an extractor object. Reading it as a
@@ -9446,6 +10675,12 @@ class Emitter {
 	private isValueName(name: string): boolean {
 		if (this.lookup(name) !== null) return true;
 		if (this.classMembers.has(name) || BASE_SOURCE_MEMBERS.has(name)) return true;
+		// A member a translated template declares — DooPlay's `protected open
+		// val episodeNumberRegex`, read by `AnimePlayer : DooPlay` as
+		// `.let(episodeNumberRegex::find)`. The subclass inherits it through the
+		// real `extends`, so it is a value here exactly as its own members are.
+		const base = this.owner === null ? undefined : this.classBaseIndex.get(this.owner);
+		if (base !== undefined && this.baseDeclares(base, name)) return true;
 		if (GLOBAL_NAMES.has(name)) return true;
 		return this.moduleNames.has(name) && !this.declaredTypes.has(name);
 	}
@@ -9482,6 +10717,18 @@ class Emitter {
 	 * Whether the class or object being emitted declares `name` itself, or a
 	 * local of that name is in scope. See the free-function check in `bareCall`.
 	 */
+	/**
+	 * Whether a call `name(…)` could reach something other than a local: a
+	 * member of this class or of a template it extends, an `object`'s own
+	 * member, or a file-scope `fun`. See `Local.valueOnly`.
+	 */
+	private callableMember(name: string): boolean {
+		if (this.isSourceMember(name) || this.moduleNames.has(name)) return true;
+		if (this.owner !== null && this.objectMembers.get(name) === this.owner) return true;
+		const base = this.owner === null ? undefined : this.classBaseIndex.get(this.owner);
+		return base !== undefined && this.baseDeclares(base, name);
+	}
+
 	private declaresOwn(name: string): boolean {
 		if (this.lookup(name) !== null) return true;
 		if (this.owner !== null && this.objectMembers.get(name) === this.owner) return true;
@@ -9616,6 +10863,13 @@ class Emitter {
 	/** A local bound under a JavaScript name other than its own. See `localBinding`. */
 	private declareAs(name: string, text: string, mutable: boolean): void {
 		this.scopes[this.scopes.length - 1]?.set(name, { text, mutable });
+	}
+
+	/** See `Local.valueOnly`. Rebinds the innermost binding of `name`, unchanged otherwise. */
+	private markValueOnly(name: string): void {
+		const scope = this.scopes[this.scopes.length - 1];
+		const found = scope?.get(name);
+		if (found !== undefined) scope.set(name, { ...found, valueOnly: true });
 	}
 
 	/** A parameter typed `R.(…) -> T`, taking `arity` arguments besides `R`. */
@@ -9820,6 +11074,14 @@ class Emitter {
 		if (this.declaredTypes.has(declared)) {
 			return this.safe(this.localTypes.get(declared) ?? declared);
 		}
+		// `: AnimeStreamFilters.QueryPartFilter(name, LIST)` — a nested type
+		// written through the object holding it. It is hoisted to module scope
+		// under its bare name (see `qualifiedTypes`), and that binding is what
+		// the `extends` names, exactly as for the imported bare spelling.
+		const nested = this.qualifiedTypes.get(declared);
+		if (nested !== undefined && this.declaredTypes.has(nested)) {
+			return this.safe(this.localTypes.get(nested) ?? nested);
+		}
 		// Both spellings of one class: the video ecosystem renamed `Filter` to
 		// `AnimeFilter` when it forked and changed nothing else, so a subclass
 		// of either resolves and the runtime aliases the two together.
@@ -9834,6 +11096,71 @@ class Emitter {
 		// a type of its own by that name is caught above, as it must be.
 		if (ANIME_FILTER_KINDS.has(declared)) return `AnimeFilter.${declared}`;
 		return null;
+	}
+
+	/**
+	 * What makes a Kotlin `Iterable` iterable here.
+	 *
+	 * Two spellings reach this. `class Volume(val chapters: List<Chapter>) :
+	 * Iterable<Chapter> by chapters` delegates the interface, which was refused
+	 * as an `explicit_delegation`; and `override fun iterator() = (a +
+	 * b).iterator()` declares it, which translated — into a class JavaScript
+	 * cannot iterate. `for (x in volume)` then threw "is not iterable", and
+	 * worse, `volume.map { … }` went through `__arr`, which read a value with
+	 * no protocol as a list of one: the map ran once, over the Volume itself,
+	 * and answered a plausible list of the wrong thing with nothing refused.
+	 *
+	 * So a delegate becomes `iterator()` over it — read each time from the
+	 * `val`s it names, which is the same list Kotlin captured at construction
+	 * because a `val` cannot be reassigned (a plain constructor parameter is
+	 * gone after construction, so a delegate naming one is refused) — and a
+	 * class with either gets `[Symbol.iterator]` draining its Kotlin iterator,
+	 * which is what `for…of`, `Array.from` and so `__arr` all ask for.
+	 */
+	private iterationMembers(
+		node: KNode,
+		members: readonly KNode[],
+		params: readonly { name: string; isProperty?: boolean }[],
+		record: boolean
+	): string[] {
+		let delegate: KNode | null = null;
+		for (const specifier of kids(node)) {
+			if (specifier.type !== 'delegation_specifier') continue;
+			const explicit = kids(specifier).find((child) => child.type === 'explicit_delegation');
+			if (explicit === undefined) continue;
+			delegate = iterableDelegateOf(explicit);
+			if (delegate === null) this.refuse(explicit, 'explicit_delegation');
+		}
+		const declares = members.some(
+			(child) =>
+				child.type === 'function_declaration' &&
+				this.nameOf(child) === 'iterator' &&
+				!this.hasModifier(child, 'abstract') &&
+				kids(kids(child).find((part) => part.type === 'function_value_parameters')).length === 0
+		);
+		if (delegate === null && !declares) return [];
+		const out: string[] = [];
+		if (delegate !== null) {
+			if (declares) this.refuse(delegate, 'an `Iterable` delegate beside its own `iterator()`');
+			if (!record) {
+				for (const used of walk(delegate)) {
+					if (used.type !== 'simple_identifier') continue;
+					const param = params.find((one) => one.name === used.text);
+					if (param !== undefined && param.isProperty !== true) {
+						this.refuse(used, 'an `Iterable` delegate reading a parameter that is not a property');
+					}
+				}
+			}
+			const body = this.functionScope('function', null, [], () =>
+				block([`return ${this.helper('iterator')}(${this.expr(delegate as KNode)});`])
+			);
+			if (body.isAsync) this.refuse(delegate, 'an `Iterable` delegate that suspends');
+			out.push(`iterator() ${body.text}`);
+		}
+		out.push(
+			'*[Symbol.iterator]() { const __it = this.iterator(); while (__it.hasNext()) yield __it.next(); }'
+		);
+		return out;
 	}
 
 	/** A base constructor's arguments, read with the subclass's own parameters in scope. */
@@ -10042,6 +11369,51 @@ function receiverArity(parameter: KNode): number | null {
 	return kids(parts[list]).length;
 }
 
+/**
+ * `x` in `x.source()` — a zero-argument, non-safe call of `source` — or null.
+ * See the `asResponseBody` case in `methodCall`.
+ */
+function okioSourceOf(node: KNode): KNode | null {
+	return okioStreamOf(node, 'source');
+}
+
+/** `x` in `x.<name>()`, zero arguments and not safe, or null. */
+function okioStreamOf(node: KNode, name: string): KNode | null {
+	if (node.type !== 'call_expression') return null;
+	const [callee, suffix] = kids(node);
+	if (callee?.type !== 'navigation_expression' || suffix?.type !== 'call_suffix') return null;
+	if (suffix.allChildren.some((part) => part.type === 'annotated_lambda')) return null;
+	const args = kids(suffix).find((part) => part.type === 'value_arguments');
+	if (args !== undefined && kids(args).length > 0) return null;
+	const [inner, step] = kids(callee);
+	if (step?.type !== 'navigation_suffix' || step.text !== `.${name}`) return null;
+	return inner ?? null;
+}
+
+/**
+ * The block of `x.use { … }`, `x.let { … }` or `x.run { … }`, the receiver
+ * written or implicit — the scope functions whose value is the block's last
+ * expression — or null. Only a call whose single argument is that trailing
+ * block, so `let(::f)` and a `use` with parentheses are not read as one.
+ */
+const VALUE_SCOPE_FUNCTIONS: ReadonlySet<string> = new Set(['use', 'let', 'run']);
+function valueScopeBlock(call: KNode): KNode | null {
+	const [callee, suffix] = kids(call);
+	if (suffix?.type !== 'call_suffix' || kids(suffix).length !== 1) return null;
+	const name =
+		callee?.type === 'simple_identifier'
+			? callee.text
+			: callee?.type === 'navigation_expression'
+				? kids(kids(callee)[1] ?? callee)[0]?.text
+				: undefined;
+	// Bare is the implicit receiver's: `fun String.parseAs(): T = let { … }`.
+	if (name === undefined || !VALUE_SCOPE_FUNCTIONS.has(name)) return null;
+	const lambda = kids(kids(suffix)[0])[0];
+	return kids(suffix)[0].type === 'annotated_lambda' && lambda?.type === 'lambda_literal'
+		? lambda
+		: null;
+}
+
 /** See `ReceiverSlots`. Null for a function with no function-typed parameter. */
 function receiverSlots(node: KNode): ReceiverSlots | null {
 	const list = kids(node).find((child) => child.type === 'function_value_parameters');
@@ -10059,17 +11431,120 @@ function receiverSlots(node: KNode): ReceiverSlots | null {
 }
 
 /**
- * The serializer a `@Serializable(X::class)` names on a type argument anywhere
- * in this class's header, or null. See `classDeclaration`.
+ * `@Contextual` on a property: kotlinx asks the Json's `serializersModule` for
+ * the serializer, which this runtime does not have. It asks only when the
+ * payload carries the key — MayoTune's `@Contextual private val sdf =
+ * SimpleDateFormat(…)` never arrives, and its initialiser is what runs — so
+ * the field is registered with this marker in its serializer slot, and the
+ * runtime refuses by name only if the key is actually there.
  */
-function typeArgumentSerializer(node: KNode): string | null {
+const CONTEXTUAL = /@Contextual\b/;
+const CONTEXTUAL_FIELD = '@Contextual';
+
+/** Every table of call names the runtime answers. See the end of `bareCall`. */
+const RUNTIME_KNOWN_CALLS: readonly { has(name: string): boolean }[] = [
+	EXTENSION_METHODS,
+	DECODING_METHODS,
+	FREE_FUNCTIONS,
+	HOST_METHODS,
+	HOST_PROPERTY_METHODS,
+	SUPER_MEMBERS,
+	GLOBAL_NAMES,
+	BASE_SOURCE_MEMBERS
+];
+
+/** `@Serializable(X::class)` and `@Serializable(with = X::class)`, naming X. */
+const SERIALIZER_ANNOTATION = /@Serializable\s*\(\s*(?:with\s*=\s*)?([\w.]+)::class\s*\)/;
+
+/**
+ * A declared Kotlin type as the typed decoder reads it: no whitespace, no
+ * variance, no annotations — except `@Serializable(X::class)` on a type
+ * argument, which is written `@X|` in front of the type it applies to.
+ */
+function serialType(text: string): string {
+	return text
+		.replace(new RegExp(SERIALIZER_ANNOTATION, 'g'), '\u0000$1\u0001')
+		.replace(/@[\w.]+(?:\s*\([^()]*\))?/g, '')
+		.replace(/\b(?:out|in)\s+(?=[A-Za-z_*])/g, '')
+		.replace(/\s+/g, '')
+		.replace(/,>/g, '>')
+		.replace(/\u0000([\w.]+)\u0001/g, '@$1|');
+}
+
+/**
+ * The type a serializer built only from kotlinx's defaults decodes, or null.
+ *
+ * `ListSerializer(Item.serializer())` is `List<Item>`, `MapSerializer(a, b)`
+ * is `Map<A, B>`, `X.serializer().nullable` is `X?`. Anything else — a
+ * hand-written serializer, a polymorphic one — decodes something only its own
+ * code knows, and answers null.
+ */
+function defaultSerializerType(text: string): string | null {
+	const nullable = /^(.*)\.nullable$/.exec(text);
+	if (nullable !== null) {
+		const inner = defaultSerializerType(nullable[1]);
+		return inner === null ? null : `${inner}?`;
+	}
+	const own = /^([A-Za-z_][\w.]*)\.serializer\(\)$/.exec(text);
+	if (own !== null) return own[1].replace(/^.*\./, '');
+	const generic = /^serializer<(.+)>\(\)$/.exec(text);
+	if (generic !== null) return serialType(generic[1]);
+	const call = /^(ListSerializer|SetSerializer|MapSerializer)\((.*)\)$/.exec(text);
+	if (call === null) return null;
+	const parts: string[] = [];
+	let depth = 0;
+	let start = 0;
+	for (let at = 0; at < call[2].length; at += 1) {
+		const ch = call[2][at];
+		if (ch === '(' || ch === '<') depth += 1;
+		else if (ch === ')' || ch === '>') depth -= 1;
+		else if (ch === ',' && depth === 0) {
+			parts.push(call[2].slice(start, at));
+			start = at + 1;
+		}
+	}
+	parts.push(call[2].slice(start));
+	const types = parts.filter((part) => part.length > 0).map(defaultSerializerType);
+	if (types.some((type) => type === null)) return null;
+	if (call[1] === 'MapSerializer') return types.length === 2 ? `Map<${types.join(',')}>` : null;
+	if (types.length !== 1) return null;
+	return `${call[1] === 'ListSerializer' ? 'List' : 'Set'}<${types[0]}>`;
+}
+
+/**
+ * The first custom serializer a `@Serializable(X::class)` names anywhere in this
+ * class's own declaration, and where, or null. See `classDeclaration`.
+ *
+ * Four placements, all measured in the catalogue: on the class itself, on a
+ * constructor property (the common one), on a property in the body, and on a
+ * type argument — `List<@Serializable(RankingMangaSerializer::class) Ranking>`,
+ * which reshapes each element rather than the list. A nested class is its own
+ * declaration and answers for itself, so the walk stops at one.
+ */
+function customSerializer(node: KNode): { name: string; placement: string } | null {
+	const named = (text: string | undefined) => text?.match(SERIALIZER_ANNOTATION)?.[1] ?? null;
+
+	const own = named(kids(node).find((child) => child.type === 'modifiers')?.text);
+	if (own !== null) return { name: own, placement: 'on the class' };
+
 	const header = kids(node).find((child) => child.type === 'primary_constructor');
-	if (header === undefined) return null;
-	for (const child of walk(header)) {
-		if (child.type !== 'type_projection') continue;
-		const modifiers = kids(child).find((part) => part.type === 'type_modifiers');
-		const found = modifiers?.text.match(/@Serializable\s*\(\s*(?:with\s*=\s*)?([\w.]+)::class/);
-		if (found !== undefined && found !== null) return found[1];
+	for (const parameter of kids(header)) {
+		if (parameter.type !== 'class_parameter') continue;
+		const found = named(kids(parameter).find((part) => part.type === 'modifiers')?.text);
+		if (found !== null) return { name: found, placement: 'on a property' };
+	}
+	const body = kids(node).find((child) => child.type === 'class_body');
+	for (const member of kids(body)) {
+		if (member.type !== 'property_declaration') continue;
+		const found = named(kids(member).find((part) => part.type === 'modifiers')?.text);
+		if (found !== null) return { name: found, placement: 'on a property' };
+	}
+	if (header !== undefined) {
+		for (const child of walk(header)) {
+			if (child.type !== 'type_projection') continue;
+			const found = named(kids(child).find((part) => part.type === 'type_modifiers')?.text);
+			if (found !== null) return { name: found, placement: 'on a type argument' };
+		}
 	}
 	return null;
 }
@@ -10118,7 +11593,26 @@ const TYPE_ARGUMENTS = '(?:<[^<>()]*(?:<[^<>()]*>[^<>()]*)*>\\s*)?';
 
 function callEdges(node: KNode): CallEdge[] {
 	const found = new Map<string, boolean>();
+	const inert = new Set<KNode>();
 	for (const child of walk(node)) {
+		// `.addInterceptor(::checkForToken)` calls `checkForToken` as surely as
+		// `checkForToken(chain)` does — later, from the client, on every request.
+		// It is not a `call_expression`, so it drew no edge, and the member
+		// behind it was pruned as unreachable along with everything *it*
+		// called. LibGroup's refused `refreshToken` (a WebView login) went
+		// that way: the bundle reported complete, loaded, and threw
+		// `this.refreshToken is not a function` on the first request.
+		// Not `::filterElements.isInitialized`, which asks whether a `lateinit`
+		// has been written and calls nothing.
+		if (child.type === 'navigation_expression' && /\.\s*isInitialized$/.test(child.text)) {
+			const reference = kids(child)[0];
+			if (reference?.type === 'callable_reference') inert.add(reference);
+		}
+		if (child.type === 'callable_reference' && !inert.has(child)) {
+			const target = kids(child).findLast((part) => part.type === 'simple_identifier');
+			if (target !== undefined) found.set(target.text, found.get(target.text) ?? false);
+			continue;
+		}
 		if (child.type !== 'call_expression') continue;
 		const text = child.text;
 		const dotted = new RegExp(`\\.\\s*([A-Za-z_]\\w*)\\s*${TYPE_ARGUMENTS}\\(`, 'g');
@@ -10839,6 +12333,120 @@ function accessorOf(
 	return (
 		kids(node).find((child) => child.type === kind) ?? (next?.type === kind ? next : undefined)
 	);
+}
+
+/**
+ * Where an interceptor's pass-through ends and its recovery begins, if it has
+ * that shape. See `memberWithRecovery` for why, and for when the cut is taken.
+ *
+ * Read off the syntax, narrowly, because the claim it supports is narrow —
+ * "every answer this guard hands back runs exactly as written":
+ *
+ * - `intercept` takes one parameter, the chain;
+ * - a top-level `val r = chain.proceed(…)` binds the answer;
+ * - a later top-level `if (…) return r`, with no `else`, whose condition reads
+ *   `r` — a guard *about the answer*, handing that same answer back.
+ *
+ * A guard that returns `chain.proceed(…)` afresh is deliberately not one: that
+ * decides which *requests* the interceptor handles, and there the tail is the
+ * interceptor's purpose rather than its recovery.
+ */
+function recoveryCandidate(fn: KNode, owner: string): RecoveryCandidate | null {
+	const list = kids(fn).find((child) => child.type === 'function_value_parameters');
+	const params = kids(list).filter((child) => child.type === 'parameter');
+	if (params.length !== 1) return null;
+	const chain = kids(params[0]).find((child) => child.type === 'simple_identifier')?.text;
+	if (chain === undefined) return null;
+	const body = kids(fn).find((child) => child.type === 'function_body');
+	const statements = kids(body).find((child) => child.type === 'statements');
+	if (body === undefined || statements === undefined) return null;
+
+	const answers = new Set<string>();
+	const proceeds = new RegExp(`^${chain}\\s*\\.\\s*proceed\\s*\\(`);
+	const lines = kids(statements);
+	for (const [index, statement] of lines.entries()) {
+		if (statement.type === 'property_declaration') {
+			const parts = kids(statement);
+			const bound = kids(parts.find((part) => part.type === 'variable_declaration'))[0]?.text;
+			const value = parts[parts.length - 1];
+			if (bound !== undefined && value !== undefined && proceeds.test(value.text)) {
+				answers.add(bound);
+			}
+			continue;
+		}
+		const guard = passThrough(statement);
+		if (guard === null || !answers.has(guard.returned)) continue;
+		if (!mentions(guard.condition).includes(guard.returned)) continue;
+		const tail = lines[index + 1];
+		if (tail === undefined) return null;
+		return {
+			body,
+			keep: index + 1,
+			kept: [...params, ...lines.slice(0, index + 1)],
+			tailLine: tail.line,
+			owner
+		};
+	}
+	return null;
+}
+
+/** `if (cond) return x` / `if (cond) { return x }`, no `else`: its parts, or null. */
+function passThrough(node: KNode): { condition: KNode; returned: string } | null {
+	if (node.type !== 'if_expression') return null;
+	if (node.allChildren.some((child) => child.type === 'else')) return null;
+	const parts = kids(node);
+	if (parts.length !== 2 || parts[1].type !== 'control_structure_body') return null;
+	let inner = kids(parts[1]);
+	if (inner.length === 1 && inner[0].type === 'statements') inner = kids(inner[0]);
+	if (inner.length !== 1 || inner[0].type !== 'jump_expression') return null;
+	const jump = inner[0];
+	if (!/^return\s/.test(jump.text)) return null;
+	const value = kids(jump);
+	if (value.length !== 1 || value[0].type !== 'simple_identifier') return null;
+	return { condition: parts[0], returned: value[0].text };
+}
+
+/**
+ * The receiver type of an extension property, `SharedPreferences` in `val
+ * SharedPreferences.quality`, or null for an ordinary property. The grammar
+ * puts the receiver's `user_type` directly under the declaration, where an
+ * ordinary property's type sits inside its `variable_declaration`.
+ */
+function extensionReceiverOf(node: KNode): string | null {
+	const parts = kids(node);
+	const at = parts.findIndex((child) => child.type === 'user_type');
+	const declared = parts.findIndex((child) => child.type === 'variable_declaration');
+	if (at === -1 || declared === -1 || at > declared) return null;
+	return typeName(parts[at]);
+}
+
+/** Whether a class lists okhttp's `Interceptor` among its supertypes. */
+function implementsInterceptor(node: KNode): boolean {
+	return kids(node).some(
+		(child) =>
+			child.type === 'delegation_specifier' && /^(?:okhttp3\.)?Interceptor$/.test(child.text.trim())
+	);
+}
+
+interface RecoveryCandidate {
+	/** The `function_body`, to recognise when it is reached. */
+	readonly body: KNode;
+	/** How many statements (`kids` of `statements`) are kept: through the guard. */
+	readonly keep: number;
+	/** The parameter and the kept statements: what edges and the scan read. */
+	readonly kept: readonly KNode[];
+	/** The first line of the tail; an obstacle on or after it is the tail's. */
+	readonly tailLine: number;
+	/** The class, as the error names it. */
+	readonly owner: string;
+}
+
+interface RecoveryCut {
+	readonly body: KNode;
+	readonly keep: number;
+	readonly owner: string;
+	/** What the tail was refused for, in `RECOVERY_BOUNDARIES`' plain words. */
+	readonly kinds: readonly string[];
 }
 
 /**

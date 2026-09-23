@@ -335,6 +335,89 @@ object Filters {
 		expect(value).not.toBeNull();
 	});
 
+	it('keeps the generic-operand rewrite when the file also needs a known-gap repair', async () => {
+		// The Dailymotion extractor, in two lines: a dotted receiver type the
+		// pinned grammar cannot read, and `?: emptyList<Track>()`. The rewrite
+		// alone left the first error in place, so it lost to the source — which
+		// parses the second line *cleanly and wrongly*, as the whole elvis being
+		// called with `<Track>()`, and refused it as "a call through".
+		const parse = await loadKotlinGrammar(vendorWasm);
+		const tree = parse(`
+class Demo {
+    private fun build(block: Headers.Builder.() -> Unit = {}) = headers.newBuilder().apply(block)
+    private fun tracks(parsed: Dto): List<Track> {
+        return parsed.subtitles?.map {
+            Track(it.url, it.label)
+        } ?: emptyList<Track>()
+    }
+}
+`);
+
+		expect(tree.hasError).toBe(false);
+		const elvis = firstOfType(tree.root, 'elvis_expression');
+		expect(elvis).not.toBeNull();
+		// The elvis is the value, not the callee of a call.
+		expect(elvis?.allChildren.at(-1)?.text).toBe('(emptyList<Track>())');
+	});
+
+	it('reads a `by` delegate written on the line below its property', async () => {
+		// Kotlin reads the two lines as one declaration; the grammar ended the
+		// declaration at the newline and recovered `by preferences` as an error.
+		const parse = await loadKotlinGrammar(vendorWasm);
+		const tree = parse(`
+class Demo {
+    override var baseUrl: String
+        by preferences.delegate(PREF_DOMAIN_KEY, DEFAULT_DOMAIN)
+
+    private val SharedPreferences.ignorePreview
+        by preferences.delegate(IGNORE_PREVIEW_KEY, IGNORE_PREVIEW_DEFAULT)
+
+    fun after() = 1
+}
+`);
+
+		expect(tree.hasError).toBe(false);
+		const delegates: string[] = [];
+		const visit = (node: KNode): void => {
+			if (node.type === 'property_delegate') delegates.push(node.text);
+			for (const child of node.allChildren) visit(child);
+		};
+		visit(tree.root);
+		expect(delegates).toEqual([
+			'by preferences.delegate(PREF_DOMAIN_KEY, DEFAULT_DOMAIN)',
+			'by preferences.delegate(IGNORE_PREVIEW_KEY, IGNORE_PREVIEW_DEFAULT)'
+		]);
+		// No line moved: what follows is still where it was written.
+		expect(firstOfType(tree.root, 'function_declaration')?.line).toBe(9);
+	});
+
+	it('keeps a prefix operator after a binary one to its own operand', async () => {
+		// The grammar let the prefix take everything to its right, with no
+		// error: `start == -1 || end == -1` as `start == -(1 || end == -1)`.
+		const parse = await loadKotlinGrammar(vendorWasm);
+		const tree = parse(`
+class Demo {
+    fun bad(start: Int, end: Int) = start == -1 || end == -1
+    fun none(y: Boolean, list: List<Int>) = y && !list.any { it > 1 } || list.isEmpty()
+}
+`);
+
+		expect(tree.hasError).toBe(false);
+		const top: string[] = [];
+		const visit = (node: KNode): void => {
+			if (node.type === 'disjunction_expression' && !top.some((one) => one.includes(node.text))) {
+				top.push(node.text);
+			}
+			for (const child of node.allChildren) visit(child);
+		};
+		visit(tree.root);
+		// Each `||` is the outermost operator of its function, as in Kotlin.
+		expect(top).toEqual([
+			'start == (-1) || end == -1',
+			'y && (!list.any { it > 1 }) || list.isEmpty()'
+		]);
+	});
+
 	it('leaves a genuine pair of comparisons alone', async () => {
 		// `x + a < b && c > (d)` has the same characters in the same order and is
 		// two comparisons. The angle brackets have to hold nothing but type

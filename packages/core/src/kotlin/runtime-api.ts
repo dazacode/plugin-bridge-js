@@ -74,6 +74,10 @@ export const RUNTIME_HELPERS = [
 	'contains',
 	'startsWith',
 	'endsWith',
+	/* `indexOf`/`lastIndexOf` called with a named argument — `ignoreCase` —
+	   which JavaScript's own would drop. See `KNOWN_SIGNATURES`. */
+	'indexOf',
+	'lastIndexOf',
 	'isNotBlank',
 	'isBlank',
 	'isNotEmpty',
@@ -146,6 +150,12 @@ export const RUNTIME_HELPERS = [
 	'none',
 	'sortedBy',
 	'sortedByDescending',
+	'sortBy',
+	'sortByDescending',
+	'sortWith',
+	'sortDescending',
+	'getOrPut',
+	'buildSet',
 	'reversed',
 	'distinct',
 	'take',
@@ -173,6 +183,73 @@ export const RUNTIME_HELPERS = [
 	'associate',
 	'associateBy',
 	'indices',
+	'lastIndex',
+	/* kotlinx's JsonElement accessors, read as properties — see `jeObject`. */
+	'jeObject',
+	'jeArray',
+	'jePrimitive',
+	'jeNull',
+	'jeContent',
+	'jeContentOrNull',
+	'jeIsString',
+	'jeInt',
+	'jeIntOrNull',
+	'jeLong',
+	'jeLongOrNull',
+	'jeDouble',
+	'jeDoubleOrNull',
+	'jeFloat',
+	'jeFloatOrNull',
+	'jeBoolean',
+	'jeBooleanOrNull',
+	/* An exception built as a value, not thrown — see `exception`. */
+	'exception',
+	/* MutableList.removeAt/reverse and Map.getValue — see each in the runtime. */
+	'padEnd',
+	'collectionMin',
+	'collectionMax',
+	'average',
+	'capitalize',
+	'runningFold',
+	'mapIndexedTo',
+	'containsAll',
+	'retainAll',
+	'replaceAfterLast',
+	'windowed',
+	'toByteString',
+	'toStringWith',
+	'findAnyOf',
+	'okioDecodeBase64',
+	'hashMap',
+	'hashSet',
+	'component1',
+	'component2',
+	'component3',
+	'component4',
+	'component5',
+	'removeAt',
+	'reverseInPlace',
+	'mapGetValue',
+	/* keiyoushi's keyed JsonObject readers from core/ — see `jeGetStringOrNull`. */
+	'jeGetStringOrNull',
+	'jeGetIntOrNull',
+	'jeGetLongOrNull',
+	'jeGetBooleanOrNull',
+	'jeGetArrayOrNull',
+	'jeGetObjectOrNull',
+	'jeGetArray',
+	'jeGetObject',
+	/* A Kotlin Map's views and transforms — see `__mapPart` in the runtime. */
+	'kKeys',
+	'kValues',
+	'kEntries',
+	'mapValues',
+	'mapKeys',
+	'filterKeys',
+	'filterValues',
+	/* Typed decoding: a '@Serializable' class, and a JsonTransformingSerializer. */
+	'serial',
+	'transforms',
 	'associateWith',
 	'sumOf',
 	'count',
@@ -295,6 +372,9 @@ export const RUNTIME_HELPERS = [
 	/* keiyoushi's `client.get(url)` and its three siblings, which build the
 	   request, send it and await it in one suspend call. See `clientVerb`. */
 	'okhttp',
+	/* keiyoushi core's Next.js Flight and page-data extraction. */
+	'extractNextJs',
+	'extractNextJsRsc',
 
 	/* Throwing. `error("…")` is Kotlin's, and an extension that throws a plain
 	   exception should surface as a plugin error rather than as a refusal. */
@@ -313,9 +393,22 @@ export const RUNTIME_HELPERS = [
 	'catchingMap',
 	'catchingFlatMap',
 
+	/* The error an interceptor's cut-off recovery becomes: the pass-through
+	   before it translates, the part that needed a boundary (the WebView's
+	   cookie store, a WebView) does not, and reaching it says so by name.
+	   See `recoveryCut` in `emit.ts`. */
+	'recoveryRefused',
+
 	/* jsoup's `Elements.eachText()` / `eachAttr()`, which return every match's
 	   text at once — the shortcut scraper code reaches for instead of a `map`. */
 	'eachText',
+
+	/* `Int.inc()`/`dec()` by name, and `groupingBy { }` with `eachCount()`. */
+	'inc',
+	'dec',
+	'groupingBy',
+	/* java.text's StringCharacterIterator. */
+	'charIterator',
 	'eachAttr',
 
 	/* `filterIsInstance<T>()`, which is `filter` plus the type test `isType`
@@ -482,6 +575,13 @@ export const RUNTIME_HELPERS = [
 	   than down — `shims/dom.ts` defines them and these reach them. */
 	'closest',
 	'ownerDocument',
+	/* jsoup's `before(…)`/`after(…)` share their names with java.util.Date's
+	   comparisons, and the receiver's type is not known here — the helper
+	   asks the value which one it is. */
+	'before',
+	'after',
+	/* `.head()`: okhttp's HEAD method or jsoup's <head>, by the value. */
+	'head',
 
 	/* `Throwable.printStackTrace()`, which is what `onFailure { … }` almost
 	   always contains. It logs; it must not rethrow. */
@@ -598,6 +698,11 @@ export const RUNTIME_HELPERS = [
 	   `CLASS_LOADER` in `subset.ts` for the two spellings that reach it, and
 	   `__RESOURCES` in the entry point for where the files come from. */
 	'classLoader',
+	'filterNotNull',
+	'maxOf',
+	'replaceAll',
+	'mapNotNullTo',
+	'toMap',
 	/* A class's simple name — see `SIMPLE_NAME` in `subset.ts` for the two
 	   chains that reach it and why a value only reaches it inside a log line. */
 	'simpleName',
@@ -653,6 +758,9 @@ export const HOST_BACKED_HELPERS: ReadonlySet<RuntimeHelper> = new Set([
 	'toJsonBody',
 	'toRequestBody',
 	'toResponseBody',
+	'toStringWith',
+	'okioDecodeBase64',
+	'toByteString',
 	'uri'
 ]);
 
@@ -669,6 +777,11 @@ export const RUNTIME_GLOBALS = [
 	'Headers',
 	'FormBody',
 	'Jsoup',
+	/* jsoup's statics and its one hand-built node — see `KOTLIN_JSOUP`. */
+	'Parser',
+	'Entities',
+	'TextNode',
+	'Evaluator',
 	'SAnime',
 	'SEpisode',
 	'Video',
@@ -717,7 +830,29 @@ export const RUNTIME_GLOBALS = [
 	/* RxJava's one type, as this ecosystem uses it. */
 	'Observable',
 	'UpdateStrategy',
+	/* Aniyomi's spelling of the same library-refresh hint. */
+	'AnimeUpdateStrategy',
 	'SMangaUpdate',
+	/* okhttp's HttpUrl, for `HttpUrl.Builder()` — a url built from nothing.
+	   Everything else on it is an instance member the runtime already has. */
+	'HttpUrl',
+	/* androidx's preference types, as declarations (see `KOTLIN_PREFS`). A
+	   plugin never draws them — the manifest's settings are derived from
+	   `setupPreferenceScreen` before packaging — but a helper that builds one
+	   is ordinary code: MangaThemesia's `MangaThemesiaPaidChapterHelper`
+	   constructs a `SwitchPreferenceCompat` in a member the template's own
+	   screen calls, and every instance refused on that constructor while the
+	   runtime already defined the type. Running one records its default,
+	   which is the one thing it does here. */
+	'PreferenceCategory',
+	'SwitchPreferenceCompat',
+	'SwitchPreference',
+	'CheckBoxPreference',
+	'EditTextPreference',
+	'ListPreference',
+	'DropDownPreference',
+	'MultiSelectListPreference',
+	'SeekBarPreference',
 	'SimpleDateFormat',
 	/* The `java.time` formatter the same helpers are called on —
 	   `DateTimeFormatter.ofPattern("yyyy-MM-dd").tryParseDate(date)`. Shimmed
@@ -907,6 +1042,11 @@ export const RUNTIME_GLOBALS = [
 	'ZoneOffset',
 	'ChronoUnit',
 	'ChronoField',
+	/* `DateTimeFormatterBuilder().appendPattern(…).parseDefaulting(YEAR, …)
+	   .toFormatter(locale)` — a pattern whose text leaves the year out. */
+	'DateTimeFormatterBuilder',
+	/* java.nio's Charset by name — `defaultCharset()` is Android's UTF-8. */
+	'Charset',
 	'DayOfWeek',
 	'Month',
 	'TextStyle',
@@ -924,7 +1064,16 @@ export const RUNTIME_GLOBALS = [
 	   declared here rather than left to translate and fail. */
 	'PropertyResourceBundle',
 	'InputStreamReader',
-	'Collator'
+	'Collator',
+
+	/* kotlinx.serialization's names a hand-written KSerializer declares, and
+	   JsonNull, which is JSON's null — see the typed decoder in the runtime. */
+	'PrimitiveSerialDescriptor',
+	'PrimitiveKind',
+	'JsonNull',
+
+	/* java.io.File, as far as `File.createTempFile` goes: see `JSOUP_STATICS`. */
+	'File'
 ] as const;
 
 /** Everything the runtime source must define, for the spec that checks it. */

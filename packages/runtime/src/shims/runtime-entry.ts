@@ -15,7 +15,7 @@
  * Nothing imports this file at runtime; it exists to be a build input.
  */
 
-import { parseHtml } from './dom';
+import { createTextNode, jsoupEvaluator, parseHtml, unescapeEntities } from './dom';
 import {
 	base64Decode,
 	base64Encode,
@@ -30,6 +30,9 @@ import {
 // inlined into a larger module as an IIFE and an `export` cannot be nested.
 (globalThis as unknown as Record<string, unknown>)['__yorozoRuntime'] = {
 	parseHtml,
+	createTextNode,
+	jsoupEvaluator,
+	unescapeEntities,
 	unpackDeanEdwards,
 	unpackStringArray,
 	decodeJsUnicodeEscapes,

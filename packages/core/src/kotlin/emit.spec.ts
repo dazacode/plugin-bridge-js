@@ -1096,6 +1096,88 @@ describe('control flow', () => {
 		expect(demo.swap('x', 'y')).toBe('yx');
 	});
 
+	it('keeps a branch’s own local apart from the value it becomes', () => {
+		// `val url = if (…) { val url = …; url } else …`: the branch's write
+		// came out as `url = url` against the inner `const` — a bundle that
+		// threw "assignment to constant" at import, nothing refused.
+		const demo = instantiate(
+			inClass(
+				'    fun pick(q: String): String {',
+				'        val url = if (q.isNotBlank()) {',
+				'            val url = q + "!"',
+				'            url',
+				'        } else {',
+				'            "none"',
+				'        }',
+				'        return url',
+				'    }'
+			)
+		);
+
+		expect(demo.pick('a')).toBe('a!');
+		expect(demo.pick(' ')).toBe('none');
+	});
+
+	it('adds to the receiver of an `apply` with `this +=`, in place', () => {
+		// `this` cannot be rebound, so `this += more` is `plusAssign`. Read as a
+		// rebinding it was `this = …`, which JavaScript will not even parse.
+		const demo = instantiate(
+			inClass(
+				'    fun genres(more: List<String>): List<String> = mutableListOf("All").apply {',
+				'        this += more.map { it.uppercase() }',
+				'    }'
+			)
+		);
+
+		expect(demo.genres(['a', 'b'])).toEqual(['All', 'A', 'B']);
+	});
+
+	it('lets a destructuring shadow the parameters it is built from', () => {
+		// `val (manga, chapters) = …` inside `fetchMangaUpdate(manga, chapters,
+		// …)` redeclared two parameters: a SyntaxError at import.
+		const demo = instantiate(
+			inClass(
+				'    fun update(manga: String, chapters: Int): String {',
+				'        val (manga, chapters) = manga + "!" to chapters + 1',
+				'        return manga + chapters',
+				'    }'
+			)
+		);
+
+		expect(demo.update('m', 1)).toBe('m!2');
+	});
+
+	it('reads a backtick-quoted name as the name inside the quotes', () => {
+		// `` val `data`: Wrapper `` was written out as `` this.`data` = data ``,
+		// which JavaScript cannot parse: the bundle died on import.
+		const demo = instantiate(
+			inClass(
+				'    class Box(val `data`: String, val `in`: Int)',
+				'    fun `object`(): String = Box("d", 2).let { it.`data` + it.data + it.`in` }',
+				'    fun read(): String = `object`()'
+			)
+		);
+
+		expect(demo.read()).toBe('dd2');
+	});
+
+	it('skips each `_` in a destructuring, however many there are', () => {
+		// `val (id, _, _) = …` was two `const` bindings of `_` — a SyntaxError
+		// at import, with nothing refused. Each `_` is a hole: not read.
+		const demo = instantiate(
+			inClass(
+				'    fun pick(a: String, b: String): String {',
+				'        val (first, _) = a to b',
+				'        val (_, second) = a to b',
+				'        val (_, _) = a to b',
+				'        return first + second + listOf("x", "y", "z").map { it }.let { (_, mid, _) -> mid }',
+				'    }'
+			)
+		);
+
+		expect(demo.pick('p', 'q')).toBe('pqy');
+	});
+
 	it('unwraps `?: return` into a guard rather than refusing it', () => {
 		const demo = instantiate(
 			inClass(
@@ -4604,6 +4686,54 @@ describe('the class loader', () => {
 });
 
 describe('the shared playlist module’s signatures', () => {
+	it('treats Kotlin null comparisons as nullish JavaScript comparisons', () => {
+		const emitted = translate(
+			inClass(
+				'    fun missing(value: String?): Boolean = value == null',
+				'    fun present(value: String?): Boolean = value != null'
+			)
+		);
+		expect(emitted.refusals).toEqual([]);
+		expect(emitted.js).toContain('value == null');
+		expect(emitted.js).toContain('value != null');
+	});
+
+	it('routes the measured stdlib calls through their runtime helpers', () => {
+		const emitted = translate(
+			inClass(
+				'    fun number(text: String) = text.toDoubleOrNull()',
+				'    fun compact(xs: List<Int?>) = xs.filterNotNull()',
+				'    fun largest(xs: List<Int>) = xs.maxOf { it }',
+				'    fun rewritten(xs: MutableList<Int>) = xs.replaceAll { it + 1 }',
+				'    fun into(xs: List<Int>) = xs.mapNotNullTo(mutableListOf()) { it }',
+				'    fun pairs(xs: List<Pair<String, Int>>) = xs.toMap()'
+			)
+		);
+		expect(emitted.refusals).toEqual([]);
+		expect(emitted.js).toContain('__k.toFloatOrNull(text)');
+		for (const helper of ['filterNotNull', 'maxOf', 'replaceAll', 'mapNotNullTo', 'toMap']) {
+			expect(emitted.js).toContain(`__k.${helper}(`);
+		}
+	});
+
+	it('routes in-place sorts, map defaults, receiver builders and Observable callbacks', () => {
+		const emitted = translate(
+			inClass(
+				'    fun order(xs: MutableList<Int>) { xs.sortByDescending { it }; xs.sortDescending() }',
+				'    fun cache(m: MutableMap<String, Int>) = m.getOrPut("a") { 1 }',
+				'    fun unique() = buildSet { add("a"); add("a") }',
+				'    fun observed(o: Observable<Int>) = o.doOnNext { it.toString() }.onErrorReturn { 0 }'
+			)
+		);
+		expect(emitted.refusals).toEqual([]);
+		expect(emitted.js).toContain('__k.sortByDescending(xs,');
+		expect(emitted.js).toContain('__k.sortDescending(xs)');
+		expect(emitted.js).toContain('__k.getOrPut(m,');
+		expect(emitted.js).toContain('__k.buildSet(');
+		expect(emitted.js).toContain('.doOnNext(');
+		expect(emitted.js).toContain('.onErrorReturn(');
+	});
+
 	// Each of these is a shape `PlaylistUtils` is written in, and each was
 	// emitted without a refusal and wrong: the request went out with the wrong
 	// headers or referer, which reads to a viewer as a hoster being down.
@@ -4692,6 +4822,19 @@ describe('the shared playlist module’s signatures', () => {
 		expect(emitted.js).toContain('this.max(4)');
 	});
 
+	it('uses the catching map and Aniyomi update hint', () => {
+		const emitted = translate(
+			inClass(
+				'    suspend fun lengths(xs: List<String>): List<Int> = xs.parallelCatchingMapNotNull { it.length }',
+				'    fun hint() = AnimeUpdateStrategy.ONLY_FETCH_ONCE'
+			)
+		);
+
+		expect(emitted.refusals).toEqual([]);
+		expect(emitted.js).toContain('__k.catchingMap(xs,');
+		expect(emitted.js).toContain('AnimeUpdateStrategy.ONLY_FETCH_ONCE');
+	});
+
 	it('calls an object’s own member over the runtime function of that name', () => {
 		const shown = evaluate(
 			kt(
@@ -4704,6 +4847,23 @@ describe('the shared playlist module’s signatures', () => {
 		);
 
 		expect(shown).toBe('a+a');
+	});
+});
+
+describe('the shared Next.js reader', () => {
+	it('routes an explicit predicate and infers a type from a typed return', () => {
+		const emitted = translate(
+			kt(
+				'@Serializable data class PageDto(val slug: String)',
+				'class Demo : Source() {',
+				'    fun page(document: Document): PageDto? = document.extractNextJs { it.jsonObject.containsKey("slug") }',
+				'    fun flight(text: String): PageDto? = text.extractNextJsRsc()',
+				'}'
+			)
+		);
+		expect(emitted.refusals).toEqual([]);
+		expect(emitted.js).toContain('__k.extractNextJs(');
+		expect(emitted.js).toContain('__k.extractNextJsRsc(');
 	});
 });
 
@@ -5004,6 +5164,97 @@ describe('a local that shadows a name already in scope', () => {
 	});
 });
 
+describe('a parameter that cannot be invoked', () => {
+	it('does not hide a member of the same name from a call', () => {
+		// keiyoushi's `fetchMangaUpdate(…, fetchDetails: Boolean, fetchChapters:
+		// Boolean)`, overridden by Madara, calls the source's own
+		// `fetchChapters(path, id)` with the Boolean in scope. Kotlin resolves
+		// that to the member because a Boolean has no `invoke`; emitted bare, it
+		// called the Boolean. A function-typed parameter is still the callee.
+		const demo = instantiate(
+			inClass(
+				'    fun update(fetchChapters: Boolean, id: String?): String =',
+				'        if (fetchChapters) fetchChapters(id ?: "none") else "skipped"',
+				'    fun through(fetchChapters: (String) -> String): String = fetchChapters("x")',
+				'    private fun fetchChapters(id: String): String = "chapters of " + id'
+			)
+		);
+
+		expect(demo.update(true, '7')).toBe('chapters of 7');
+		expect(demo.update(false, '7')).toBe('skipped');
+		expect(demo.through((id: string) => 'lambda ' + id)).toBe('lambda x');
+	});
+});
+
+describe("okio's source, which is only ever the same body under another type", () => {
+	it('rewraps `body.source().asResponseBody(type)` as the body text, and refuses the stream', () => {
+		// The Madara interceptors that fix a host serving pages as
+		// `application/octet-stream`. A response here is text, so the same
+		// bytes are its `string()`; the runtime half is proved in
+		// kotlin-runtime.spec.ts. Reading the source as a stream is not
+		// something a text body can answer, and stays refused.
+		const emission = translate(
+			inClass(
+				'    fun fix(response: Response): Response {',
+				'        val body = response.body.source().asResponseBody("image/jpeg".toMediaType())',
+				'        return response.newBuilder().body(body).build()',
+				'    }',
+				'    fun stream(response: Response) = response.body.source().readByteArray(12)',
+				'    fun sized(response: Response) = response.body.source().asResponseBody(null, -1)'
+			)
+		);
+		expect(emission.js).toContain(
+			"__k.toResponseBody(response.body.string(), __k.toMediaType('image/jpeg'))"
+		);
+		expect(emission.refusals.map((one) => one.member).sort()).toEqual(['sized', 'stream']);
+	});
+});
+
+describe("keiyoushi's addCookie block on an implicit builder", () => {
+	it('passes the block to the builder `configureClient` receives', () => {
+		// The written-receiver form already did this; the implicit one refused
+		// the block. The runtime half is in mihon-conversion.spec.ts. An
+		// interceptor block on the same path stays refused.
+		const emission = translate(
+			inClass(
+				'    override fun OkHttpClient.Builder.configureClient() = addCookie { listOf("age" to "18") }'
+			)
+		);
+		expect(emission.refusals).toEqual([]);
+		expect(emission.js).toContain('return __recv.addCookie((it) => {');
+		expect(
+			refusalNames(
+				inClass(
+					'    override fun OkHttpClient.Builder.configureClient() = addInterceptor { it.proceed(it.request()) }'
+				)
+			)
+		).toContain('a lambda passed to `addInterceptor`');
+	});
+});
+
+describe('the androidx preference idiom', () => {
+	it('builds the preference and hands it to the screen, not to the source', () => {
+		// MangaThemesia's paid-chapter helper. `setDefaultValue` inside the
+		// block is the preference's; the runtime half is in kotlin-runtime.spec.
+		const emission = translate(
+			kt(
+				'class Helper {',
+				'    fun addTo(screen: PreferenceScreen) {',
+				'        SwitchPreferenceCompat(screen.context).apply {',
+				'            key = "hide_paid"',
+				'            setDefaultValue(true)',
+				'        }.also(screen::addPreference)',
+				'    }',
+				'}'
+			)
+		);
+		expect(emission.refusals).toEqual([]);
+		expect(emission.js).toContain('SwitchPreferenceCompat(screen.context)');
+		expect(emission.js).toContain('return this.setDefaultValue(true);');
+		expect(emission.js).toContain('(...__a) => screen.addPreference(...__a)');
+	});
+});
+
 describe('a safe assignment', () => {
 	it('writes when the receiver is there, and evaluates nothing when it is not', () => {
 		// `firstOrNull()?.date_upload = time` on an empty list does nothing in
@@ -5081,23 +5332,176 @@ describe('file annotations, and a serializer on a type argument', () => {
 		).toEqual(['`@file:UseSerializers(BoxSerializer::class)`']);
 	});
 
-	it('refuses a custom serializer named on a type argument rather than decoding raw', () => {
-		// `List<@Serializable(RankingMangaSerializer::class) Ranking>` reshapes
-		// each element before the class sees it; decoded structurally, a tuple
-		// array became a record with every field `undefined`.
+	it('accepts a custom serializer it can run, in every placement', () => {
+		// The typed decoder runs an `object` serializer — a
+		// JsonTransformingSerializer over default serializers, or a
+		// KSerializer — where kotlinx would. On a constructor property, on a
+		// type argument, on a body property and on the class.
+		const transforming = kt(
+			'object Pages : JsonTransformingSerializer<List<Page>>(ListSerializer(Page.serializer())) {',
+			'    override fun transformDeserialize(element: JsonElement): JsonElement = element',
+			'}',
+			'object Flexible : KSerializer<String> {',
+			'    override val descriptor = PrimitiveSerialDescriptor("Flexible", PrimitiveKind.STRING)',
+			'    override fun deserialize(decoder: Decoder): String = decoder.decodeString()',
+			'    override fun serialize(encoder: Encoder, value: String) { encoder.encodeString(value) }',
+			'}',
+			'@Serializable',
+			'class Page(val src: String)'
+		);
+		expect(
+			refusalNames(
+				kt(
+					transforming,
+					'@Serializable',
+					'data class Chapter(',
+					'    @SerialName("cap_paginas") @Serializable(Pages::class) val pages: List<Page> = emptyList(),',
+					'    val ranked: List<@Serializable(Flexible::class) String>,',
+					') {',
+					'    @Serializable(with = Flexible::class)',
+					'    val title: String = ""',
+					'}',
+					'@Serializable(with = Flexible::class)',
+					'class Whole(val id: Int)'
+				)
+			)
+		).toEqual([]);
+	});
+
+	it('refuses a custom serializer it cannot run, by name', () => {
+		// Read past, each of these decoded the JSON the serializer existed to
+		// reshape: a tuple array read as a record, every field `undefined`.
 		expect(
 			refusalNames(
 				kt(
 					'@Serializable',
 					'class RankingResponse(',
-					'    val children: List<',
-					'        @Serializable(RankingMangaSerializer::class)',
-					'        Ranking,',
-					'        >,',
+					'    val children: List<@Serializable(RankingMangaSerializer::class) Ranking>,',
 					')'
 				)
 			)
-		).toEqual(['a custom serializer `RankingMangaSerializer` on a type argument']);
+		).toEqual(['a custom serializer `RankingMangaSerializer` that is not an `object`']);
+		expect(
+			refusalNames(
+				kt(
+					'class Stringified<T>(element: KSerializer<T>) : JsonTransformingSerializer<List<T>>(ListSerializer(element))',
+					'@Serializable',
+					'class Dto(@Serializable(with = Stringified::class) val tags: List<String>)'
+				)
+			)
+		).toContain('a custom serializer `Stringified` that is not an `object`');
+		expect(
+			refusalNames(
+				kt(
+					'object Poly : JsonContentPolymorphicSerializer<Item>(Item::class) {',
+					'    override fun selectDeserializer(element: JsonElement) = Item.serializer()',
+					'}',
+					'@Serializable',
+					'class Dto(@Serializable(Poly::class) val item: Item)'
+				)
+			)
+		).toContain('a custom serializer `Poly` built on `JsonContentPolymorphicSerializer`');
+		expect(
+			refusalNames(kt('@Serializable', 'class Dto(val dates: List<@Contextual Date>)'))
+		).toEqual(['`@Contextual` on a type argument']);
+		// On a property it is only consulted when the key is present, which the
+		// runtime refuses by name; absent, the default runs, as in kotlinx.
+		expect(
+			refusalNames(
+				kt(
+					'@Serializable',
+					'data class Dto(val id: String) {',
+					'    @Contextual',
+					'    private val sdf = Date()',
+					'}'
+				)
+			)
+		).toEqual([]);
+	});
+
+	it('refuses a reference on a value it cannot resolve, rather than reading it as a type', () => {
+		// `helper::wrap` with no `helper` in reach was emitted as the unbound
+		// `(__a) => __a.wrap()`: the method called on the argument, and the
+		// value never mentioned, so nothing could see it was missing.
+		expect(refusalNames(kt('fun f(s: String?) = s?.let(helper::wrap)'))).toEqual([
+			'`helper::wrap` on a value this build did not resolve'
+		]);
+		// Injekt is still refused for anything but the app's Json.
+		expect(refusalNames(kt('val client: OkHttpClient = Injekt.get()'))).toEqual(['Injekt.get']);
+	});
+
+	it('refuses a call to a keiyoushi core function this build did not read', () => {
+		// ViTruyen's `getLocalStorage` (core's WebView.kt) came out as
+		// `this.getLocalStorage(…)`: complete, loaded, and broken on the first
+		// chapter. A name the runtime answers, imported the same way, is not.
+		expect(
+			refusalNames(
+				kt(
+					'import keiyoushi.utils.getLocalStorage',
+					'import keiyoushi.utils.parseAs',
+					'class Demo : HttpSource() {',
+					'    private suspend fun token(): String? = getLocalStorage(baseUrl, "auth_token")',
+					'    fun read(s: String) = s.runCatching { parseAs<List<String>>() }.getOrNull()',
+					'}'
+				)
+			)
+		).toEqual(['`getLocalStorage` from `keiyoushi.utils`, which this build did not read']);
+	});
+
+	it('does not count a returned interceptor as blocking its builder', () => {
+		// Nexus Toons: `NexusDecrypt.createInterceptor()` returns the lambda that
+		// proceeds; it does not proceed itself. Counted as blocking across
+		// files, the client initialiser became a suspending one and refused.
+		expect(
+			refusalNames(
+				kt(
+					'object NexusDecrypt {',
+					'    fun createInterceptor(): Interceptor = Interceptor { chain -> chain.proceed(chain.request()) }',
+					'}',
+					'class Demo : HttpSource() {',
+					'    override val client = network.client.newBuilder().addInterceptor(NexusDecrypt.createInterceptor()).build()',
+					'}'
+				)
+			)
+		).toEqual([]);
+	});
+
+	it('refuses a transforming serializer whose base is not a default one', () => {
+		// "Decode the reshaped element as T" is only what kotlinx does when the
+		// base serializer is T's own. A hand-written base is its own decoder.
+		expect(
+			refusalNames(
+				kt(
+					'object Outer : JsonTransformingSerializer<List<String>>(ListSerializer(Custom)) {',
+					'    override fun transformDeserialize(element: JsonElement): JsonElement = element',
+					'}'
+				)
+			)
+		).toEqual(['a `JsonTransformingSerializer` over `ListSerializer(Custom)`']);
+	});
+
+	it('refuses a serializer on a class that is not registered, rather than reading past it', () => {
+		// No `@Serializable` of its own, an enum, a sealed class: the typed
+		// decoder does not build any of these, so a serializer on one could
+		// never run.
+		expect(
+			refusalNames(
+				kt(
+					'object S : KSerializer<String> {',
+					'    override fun deserialize(decoder: Decoder): String = decoder.decodeString()',
+					'}',
+					'class Loose(@Serializable(S::class) val a: String)',
+					'@Serializable',
+					'sealed class Base(@Serializable(S::class) val b: String)'
+				)
+			)
+		).toEqual(['a custom serializer `S` on a property', 'a custom serializer `S` on a property']);
+	});
+
+	it('still translates a plain @Serializable class', () => {
+		expect(
+			refusalNames(kt('@Serializable', 'data class Plain(@SerialName("x") val a: Int)'))
+		).toEqual([]);
 	});
 });
 
@@ -5640,5 +6044,70 @@ describe('throwing where Kotlin throws' + ' (control flow)', () => {
 		demo.stamp(chapters, 7);
 
 		expect(chapters).toEqual([{ date_upload: 7 }, { date_upload: 0 }]);
+	});
+});
+
+/* ── jsoup's statics, mutation, and the names it shares with other libraries ── */
+
+describe('jsoup beyond select and read', () => {
+	it('emits a zero-argument remove() with no item, so the runtime reads it as jsoup', () => {
+		const { js, refusals } = translate(
+			inClass('    fun strip(doc: Document) { doc.select("script, .ad").remove() }')
+		);
+		expect(refusals).toEqual([]);
+		expect(js).toContain("__k.remove(doc.select('script, .ad'))");
+	});
+
+	it('routes head(), before() and after() through helpers that ask the value', () => {
+		// `Request.Builder().head()` is the HEAD method and `doc.head()` is the
+		// <head>; `Date.before(d)` compares and `el.before(html)` inserts.
+		const { js, refusals } = translate(
+			inClass(
+				'    fun a(doc: Document) = doc.head()',
+				'    fun b(p: Element) { p.after("\\n\\n") }',
+				'    fun c(x: java.util.Date, y: java.util.Date) = x.before(y)'
+			)
+		);
+		expect(refusals).toEqual([]);
+		expect(js).toContain('__k.head(doc)');
+		expect(js).toContain("__k.after(p, '\\n\\n')");
+		expect(js).toContain('__k.before(x, y)');
+	});
+
+	it('lets through the statics the runtime defines and refuses the rest by name', () => {
+		const { js, refusals } = translate(
+			inClass(
+				'    fun a(s: String) = Parser.unescapeEntities(s, false) + Entities.unescape(s)',
+				'    fun b(doc: Document) = doc.select(Evaluator.Tag("a")).size',
+				'    fun c(s: String) = Jsoup.parse(s, "", Parser.htmlParser())'
+			)
+		);
+		expect(refusals).toEqual([]);
+		expect(js).toContain("Evaluator.Tag('a')");
+		// An XML parse is a different tree, not the HTML one with a flag.
+		expect(
+			refusalNames(inClass('    fun d(s: String) = Jsoup.parse(s, "", Parser.xmlParser())'))
+		).toContain('`Parser.xmlParser()`');
+		expect(refusalNames(inClass('    fun e() = Evaluator.AttributeKeyPair("a", "b")'))).toContain(
+			'`Evaluator.AttributeKeyPair()`'
+		);
+	});
+});
+
+describe('a Sort filter’s Selection, however it is spelled', () => {
+	it('builds the qualified and the named forms with the bare form’s helper', () => {
+		const { js, refusals } = translate(
+			inClass(
+				'    fun a() = Filter.Sort.Selection(3, false)',
+				'    fun b() = Filter.Sort.Selection(1, ascending = true)',
+				'    fun c() = Selection(2, ascending = false)',
+				'    fun d() = AnimeFilter.Sort.Selection(ascending = true, index = 4)'
+			)
+		);
+		expect(refusals).toEqual([]);
+		expect(js).toContain('__k.selection(3, false)');
+		expect(js).toContain('__k.selection(1, true)');
+		expect(js).toContain('__k.selection(2, false)');
+		expect(js).toContain('__k.selection(4, true)');
 	});
 });
