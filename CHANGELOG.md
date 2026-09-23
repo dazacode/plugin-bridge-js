@@ -12,7 +12,126 @@ to exhaustion and deliberately closed it. `v0.1.x` is for fixes to what has
 already been promised; a minor bump whose case is "the number went up" is not a
 minor bump.
 
-## Unreleased — the reason a format was refused stopped being true
+## v0.5.0 — a converted extension decodes, awaits and remembers what upstream does
+
+A pass over two whole published catalogues — keiyoushi (Mihon, 1,396 manga
+listings) and yuzono (Aniyomi, 256 anime listings) — fixing what they refused
+or got silently wrong, one class at a time and never one source at a time.
+Most of what changed is a guarantee rather than a feature: a value that used to
+come back quietly wrong now comes back right, or the conversion refuses and
+names why.
+
+This release also contains the four sections below it that were marked
+_Unreleased_. `CONVERTER_VERSION` moves from 49 to 59, so every bundle a host
+converted earlier is reconverted.
+
+### What is now translated with the source's semantics
+
+- **Typed decoding.** A decode that names a `@Serializable` class now
+  _constructs_ that class, field by field, with its wire names, defaults and
+  methods, the way kotlinx does. Before, a structural matcher guessed the
+  class from the record's keys; any all-optional DTO fitted every record, so
+  whole modules came back as plain JSON with no methods, and a data class's
+  `@SerialName` was never applied.
+- **Custom serializers run.** A `JsonTransformingSerializer` object, and a
+  `KSerializer` object's `deserialize` over a `JsonDecoder`. kotlinx's
+  `JsonElement` accessors (`jsonObject`, `jsonPrimitive`, `contentOrNull` …)
+  read the parsed value.
+- **A Kotlin `Map` behaves as one.** It iterates as entries carrying
+  `key`/`value`/`first`/`second`; `keys`, `values` and `entries` are views;
+  filtering a map answers a map; `mapValues`, `mapKeys`, `filterKeys` and
+  `filterValues` exist.
+- **What blocks is awaited, wherever it is called from.** A plain `fun` that
+  makes a request is asynchronous here. That was known inside one file and not
+  across files, nor through a `::` reference, nor under
+  `runCatching { … }.getOrDefault(…)` — each handed the caller a Promise where
+  it expected a value. The Mihon driver likewise now awaits a parse member that
+  suspends. The Voe extractor, among others, answered no videos at all while
+  its listings counted as loaded.
+- **A repaired subtitle reaches the player.** `File.createTempFile` gives an
+  in-memory file and `Uri.fromFile` turns it into a `data:` URI typed by its
+  suffix (`.vtt` is `text/vtt`), so an extension that rewrites its captions
+  hands over exactly the bytes it wrote. **Host note:** a host that routes
+  subtitle URLs through a relay must leave `data:` ones alone; they are the
+  captions, not an address.
+- **`\p{…}` classes with an identical JavaScript spelling.** Unicode general
+  categories (under the `u` flag), Java's POSIX names (US-ASCII, so exact
+  ranges), and the blocks the catalogue uses. Madara's shared date parser is
+  `(?<!\p{L})…`, so before this every Madara chapter list that states a
+  relative date threw.
+- **A chapter's `memo` survives from listing to opening.** Upstream persists
+  it with the chapter; this host keeps only the id. It now rides inside
+  `sourceChapterId`, which `ABI.md` §8.2 already makes the source's opaque
+  string, and only when non-empty, so no other source's ids change. A title's
+  memo is not carried: it is not stable, and a title's id is what matching
+  binds. §8.2 now says, for host authors, that the id is kept whole.
+- Many smaller Kotlin and jsoup semantics, each a wrong value before: jsoup
+  documents edited before they are read, `Sort.Selection`, `when` subjects,
+  nested classes extended through their holder, a prefix `!`/`-` after a
+  binary operator, `substring`'s `missingDelimiterValue`, imported companion
+  constants, extension-property settings, Kotlin `Iterable`, and an Aniyomi
+  source factory running the source it creates.
+
+### What stays refused, and is named when it is hit
+
+- **Serializers this cannot build honestly:** a serializer _class_ (generic or
+  constructed), one on an enum or sealed type, a base other than
+  `JsonTransformingSerializer`, and `@Contextual` on a type argument.
+  `@Contextual` on a property refuses only when that key is present.
+- **The filesystem.** `File(path)`, `File.separator` and every other use of
+  `java.io.File` except the temporary-file carrier above.
+- **The deliberate native boundaries**, unchanged: WebView, an embedded
+  JavaScript engine, reading a cookie jar, okhttp interceptors given arbitrary
+  code, threads and background executors, a local HTTP server, and `android.*`.
+  These are decisions (ADR-0005, ADR-0006), not backlog.
+- `\p{…}` scripts, the `java*` classes and unmeasured blocks; atomic groups and
+  possessive quantifiers.
+
+### Evidence
+
+Measured over each whole published index. **Loaded** means the listing
+converts and its bundle imports. **All three stages** means execution reached
+a network request at browse, at list and at read, against a probe that answers
+every request with an empty page. Neither is proof that a source works end to
+end: they do not show that real pages parse or that media plays, and a site
+may be dead. Replay runs against scripted responses are the stronger evidence
+of parsing, and they cover a subset of sources, not the catalogues.
+
+|                        | start        | v0.5.0          |
+| ---------------------- | ------------ | --------------- |
+| keiyoushi loaded       | 828 of 1,396 | **949 (68%)**   |
+| keiyoushi three stages | 412          | **609 (44%)**   |
+| yuzono loaded          | 74 of 256    | **101 (39%)**   |
+| yuzono three stages    | 62           | **82 (32%)**    |
+| combined loaded        | 902 of 1,652 | **1,050 (64%)** |
+| combined three stages  | 474          | **691 (42%)**   |
+
+"Start" is engine `9048d76` for the loaded counts; the stage counts were first
+taken a few commits later, when loading stood at 829 and 74. keiyoushi's stage
+run counts 950 rows where 949 are distinct listings, so 609 may be off by one
+at the listing level; the percentage is unaffected.
+
+Madara's chapters were measured separately, because the probe opens a chapter
+id it invents and so cannot see a handoff from listing to opening. Listing
+chapters against a scripted Madara page and then opening the id returned:
+**0 of 176 loaded Madara listings opened a chapter before, 164 after.** The
+other 12 use page layouts the scripted page does not match.
+
+With the listings refused on a deliberate native boundary set aside (115 and
+114), the figures are 949 of 1,281 (74%) and 101 of 142 (71%). Those are the
+_load rate among listings not behind a deliberate native boundary_. They are
+not compatibility rates, because setting the boundaries aside changes the
+population.
+
+### Version history, reconciled
+
+The manifests went to `0.2.0`, `0.2.1`, `0.3.0`, `0.3.1`, `0.3.2` and `0.4.0`,
+each in one commit whose subject is that version's heading below, and none was
+tagged; the tags stopped at `v0.1.3`. Those six are now tagged at exactly the
+commits that declared them, which is where `v0.1.0`–`v0.1.3` already sit.
+Nothing was re-dated or re-ordered.
+
+## v0.5.0, continued — the reason a format was refused stopped being true
 
 Hayase was `browse-only` on one stated ground: _"extensions in this format
 return torrents rather than streams, and Yorozo has no torrent client."_ The
@@ -52,7 +171,7 @@ No `CONVERTER_VERSION` bump: the number exists so already-installed rows are
 re-converted when the converter improves, and a format that could never be
 installed has no such rows.
 
-## Unreleased — the destination is the site's to name, the scheme is not
+## v0.5.0, continued — the destination is the site's to name, the scheme is not
 
 A family of sources answer an **https** request with a 301 to **http** on
 their own host — misconfigured canonical redirects, usually doing nothing but
@@ -88,7 +207,7 @@ an estimate built from two homepages predicted two recoveries and one was
 real. With it, the two ways the instrument lies: a bare `fetch` follows the
 downgrade the relay refuses, and Node's trust store is not a browser's.
 
-## Unreleased — asking for the settings store is not asking for the container
+## v0.5.0, continued — asking for the settings store is not asking for the container
 
 `Injekt` is a dependency-injection container and reaching into a host app's
 object graph is out of scope, so every mention of it was refused. But the
@@ -125,7 +244,7 @@ longer blocks anything.
 
 `CONVERTER_VERSION` 47, because what an extension converts to has changed.
 
-## Unreleased — an addon that was never set up is not an addon blocking us
+## v0.5.0, continued — an addon that was never set up is not an addon blocking us
 
 A Stremio addon may require configuration without declaring it. Measured on a
 live one: `configurable: true`, `configurationRequired: false`, no `config[]`

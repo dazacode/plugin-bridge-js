@@ -315,7 +315,9 @@ have.
 Repealed: `ABI.md` §6's engine paragraph now says what ADR-0003 left, and
 lookbehind is allowed. Atomic groups, possessive quantifiers and `\p{…}` stay
 refused — those are `java.util.regex` constructs JavaScript does not have,
-which is a different reason and one the collapse did not touch. The other four
+which is a different reason and one the collapse did not touch. (Later,
+in v0.5.0, the `\p{…}` classes that _do_ have an identical JavaScript
+spelling were translated; the rest stay refused. `ABI.md` §6 has the list.) The other four
 bullets in §6 are also inherited from the three-engine world; two of them are
 load-bearing for _other_ reasons and none has been re-decided, which §6 now
 says out loud.

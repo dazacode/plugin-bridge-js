@@ -27,7 +27,14 @@ always a wrong value rather than an error:
 - `substringAfter` returns the **whole string** when the delimiter is absent.
 - `Int` division truncates.
 - `+=` on a `val` collection is `plusAssign` — a mutation, not a rebind.
-- A `@Serializable` class's renamed and computed fields survive the decode.
+- A `@Serializable` class's renamed and computed fields survive the decode,
+  and a decode that names the class **constructs** it, methods included — not
+  a plain object that happens to have the right keys.
+- A `Map` iterates as **entries** with `key` and `value`, not as a JavaScript
+  object's keys.
+- A plain `fun` that makes a request is **awaited** from another file and
+  through a `::` reference, not handed back as a Promise.
+- A manga chapter's `memo` is **the one it was listed with** when it is opened.
 - `it` inside a block that takes no parameter is still the **enclosing** `it`.
 
 Each of those was a bug that shipped a plugin reporting success. That is the
@@ -261,6 +268,41 @@ describe _translation_ or describe one translator.
 | ----------------- | ---------------- | ---------------------- |
 | convert and load  | 60 of 254        | 57 of 57 anime modules |
 | verified playable | 6                | 16                     |
+
+The Kotlin column is an early measurement of one 254-listing corpus, kept
+because the playable figure is the one that was proven end to end. The
+current state of the two large Kotlin catalogues is below.
+
+### The Kotlin catalogues at v0.5.0 (2026-09-22)
+
+Measured over each whole published index, not a sample:
+
+|           | listings | loaded      | all three stages |
+| --------- | -------- | ----------- | ---------------- |
+| keiyoushi | 1,396    | 949 (68%)   | 609 (44%)        |
+| yuzono    | 256      | 101 (39%)   | 82 (32%)         |
+| combined  | 1,652    | 1,050 (64%) | 691 (42%)        |
+
+Read these for what they are. **Loaded** is convert-and-import. **All three
+stages** is execution reaching a request at browse, list and read against a
+probe that answers every request with an empty page; it does not show that a
+real page parses, that media plays, or that the site is alive. Both are partial
+evidence on the first of the three numbers above and say nothing about the
+second. Replay runs against
+scripted responses are the stronger evidence of parsing, and they cover a
+subset. keiyoushi's stage run counts 950 rows for 949 distinct listings, so
+609 may be off by one.
+
+A capability that passes state from one call to the next cannot be seen by
+that probe at all, because it invents the id it opens. Madara's chapters were
+measured instead by listing against a scripted page and opening the id
+returned: **0 of 176 loaded Madara listings opened a chapter before v0.5.0,
+164 after.**
+
+With the listings refused on a deliberate native boundary set aside, 949 of
+1,281 (74%) and 101 of 142 (71%) load. That is the _load rate among listings
+not behind a deliberate native boundary_, and never a compatibility rate:
+setting the boundaries aside changes the population.
 
 ### A third, measured as a no (2026-09-19)
 

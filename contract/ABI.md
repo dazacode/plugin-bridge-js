@@ -555,10 +555,15 @@ API level 1 requires:
 - **Regex lookbehind is allowed.** It was forbidden here for the engine table
   above, and `ADR-0003` §2.2 repealed that: every surface has it. `ADR-0004`
   names this as the first concrete thing the engine collapse bought, and
-  `foreign/episode-recognition.ts` has needed one since. Atomic groups,
-  possessive quantifiers and `\p{…}` are **still** refused — those are
-  `java.util.regex` constructs JavaScript does not have, which is a different
-  reason and one the collapse did not touch.
+  `foreign/episode-recognition.ts` has needed one since. Atomic groups and
+  possessive quantifiers are **still** refused — those are `java.util.regex`
+  constructs JavaScript does not have, which is a different reason and one the
+  collapse did not touch. `\p{…}` is refused **except** where JavaScript has
+  a spelling that matches identically: a Unicode general category (`\p{L}`,
+  `\p{Mn}` …, under the `u` flag), a Java POSIX name (US-ASCII in Java, so an
+  exact range), and a block the catalogue was measured using. Scripts, the
+  `java*` classes and any other block stay refused, as does a pattern that
+  Unicode mode rejects.
 - **No `TextEncoder`/`TextDecoder`/`atob`/`btoa` globals.** Use `ctx.text` and
   `ctx.bytes`; the SDK shims them per engine.
 - **No `crypto` global, no `crypto.subtle`.** `ctx.crypto` (§2) is what is
@@ -665,6 +670,14 @@ interface PageImage {
 reason: a source that enumerated said where the chapter lives and this client's
 numbering has no standing to correct it, and a source that did not still has to
 be addressable. Neither optional field may be assumed present.
+
+**A host keeps `sourceChapterId` whole and hands it back unchanged.** It is
+the source's opaque string, and some carry more than an address: a chapter
+from a converted Mihon-family extension may end in an implementation payload
+such as `#yorozo-memo=…`, which is what that source needs to open the chapter
+again. A host stores and returns the complete id as it received it. It does
+not parse it, trim it, normalise it as a URL, or depend on the encoding, which
+belongs to the plugin and may change with it.
 
 **`index` is the order, not the array position.** A source that yields its pages
 out of order, or that omits one, is common enough that trusting arrival order
