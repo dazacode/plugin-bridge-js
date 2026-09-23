@@ -914,6 +914,37 @@ describe('an encode of a @Serializable class, the way kotlinx writes it', () => 
 	});
 });
 
+describe('a typealias declared in the file next door', () => {
+	it('constructs through it, and decodes as the whole type it names', async () => {
+		// Erased within its own file only: the extension's
+		// `LatestVariables(offset = 1)` was refused as the constructor of a
+		// class nothing declares, and `parseAs<ItemPage>()` named a type the
+		// typed decoder had no registration for — so the `@SerialName` below
+		// was lost to the structural walk.
+		const d = await instantiate(
+			'Demo',
+			kt(
+				'@Serializable',
+				'class Vars(val offset: Int = 0, val limit: Int = 20)',
+				'typealias LatestVariables = Vars',
+				'@Serializable',
+				'class Listing<T>(val items: List<T>)',
+				'@Serializable',
+				'class Item(@SerialName("t") val title: String)',
+				'typealias ItemPage = Listing<Item>'
+			),
+			kt(
+				'class Demo {',
+				'    fun made(): String = LatestVariables(offset = 5).toJsonString()',
+				'    fun read(text: String): List<String> = text.parseAs<ItemPage>().items.map { it.title }',
+				'}'
+			)
+		);
+		expect(JSON.parse(d.made())).toEqual({ offset: 5 });
+		expect(d.read('{"items":[{"t":"One"},{"t":"Two"}]}')).toEqual(['One', 'Two']);
+	});
+});
+
 describe('keiyoushi core’s GraphQL helpers', () => {
 	const source = kt(
 		'@Serializable',

@@ -1112,6 +1112,22 @@ export interface Declared {
 	 * null where two declarations of the name disagree. See `ReceiverSlots`.
 	 */
 	readonly receiverLambdas: ReadonlyMap<string, ReceiverSlots | null>;
+	/**
+	 * `typealias` declarations: the alias to the type it names (its head, as a
+	 * constructor is called by), and — for an alias with no type parameters of
+	 * its own — to the whole type it stands for, arguments included.
+	 *
+	 * Erased as Kotlin erases them, but only within the file that declared
+	 * them: `typealias LatestQueryVariables = PopularQueryVariables` in a DTO
+	 * file, and `LatestQueryVariables(offset = …)` in the extension next door,
+	 * refused as the constructor of a class nothing declares. And a decode typed
+	 * with one — `parseAs<MangaListDto>()` over `typealias MangaListDto =
+	 * PaginatedResponseDto<MangaDataDto>` — named a type the decoder had no
+	 * registration for, and fell back to the structural walk the typed decoder
+	 * exists to replace.
+	 */
+	readonly aliases: ReadonlyMap<string, string>;
+	readonly aliasTexts: ReadonlyMap<string, string>;
 }
 
 /**
@@ -1189,7 +1205,9 @@ const EMPTY_DECLARED: Declared = {
 	reified: new Map(),
 	overloads: new Map(),
 	classFunctions: new Map(),
-	receiverLambdas: new Map()
+	receiverLambdas: new Map(),
+	aliases: new Map(),
+	aliasTexts: new Map()
 };
 
 /** What one parsed file declares, without translating any of it. */
@@ -1220,7 +1238,12 @@ export function mergeDeclared(parts: readonly Declared[]): Declared {
 	const classFunctions = new Map<string, Set<string>>();
 	const ambiguous = new Set<string>();
 	const receiverLambdas = new Map<string, ReceiverSlots | null>();
+	const aliases = new Map<string, string>();
+	const aliasTexts = new Map<string, string>();
 	for (const part of parts) {
+		for (const [name, head] of part.aliases) if (!aliases.has(name)) aliases.set(name, head);
+		for (const [name, text] of part.aliasTexts)
+			if (!aliasTexts.has(name)) aliasTexts.set(name, text);
 		for (const [name, slots] of part.receiverLambdas) {
 			mergeReceiverSlots(receiverLambdas, name, slots);
 		}
@@ -1303,7 +1326,9 @@ export function mergeDeclared(parts: readonly Declared[]): Declared {
 		reified,
 		overloads: new Map([...overloads].map(([name, shapes]) => [name, [...shapes.values()]])),
 		classFunctions,
-		receiverLambdas
+		receiverLambdas,
+		aliases,
+		aliasTexts
 	};
 }
 
@@ -1384,6 +1409,10 @@ class Emitter {
 			this.classFieldIndex.set(owner, into);
 		}
 		for (const [owner, base] of neighbours.classBases) this.classBaseIndex.set(owner, base);
+		// A file's own alias still wins over a neighbour's: `registerAlias` runs
+		// after this and overwrites.
+		for (const [name, head] of neighbours.aliases) this.typeAliases.set(name, head);
+		for (const [name, text] of neighbours.aliasTexts) this.typeAliasTexts.set(name, text);
 		for (const [name, shapes] of neighbours.overloads) {
 			for (const shape of shapes) this.rememberOverload(name, shape);
 		}
@@ -1538,6 +1567,8 @@ class Emitter {
 	 * one, because a bare `Rows(...)` is not something this build can build.
 	 */
 	private readonly typeAliases = new Map<string, string>();
+	/** The whole type an alias stands for, where it has no parameters of its own. */
+	private readonly typeAliasTexts = new Map<string, string>();
 	/**
 	 * Types this file declares, registered before anything is emitted.
 	 *
@@ -1855,7 +1886,9 @@ class Emitter {
 				[...this.overloadIndex].map(([name, shapes]) => [name, [...shapes.values()]])
 			),
 			classFunctions: this.classFunctionIndex,
-			receiverLambdas: this.receiverLambdas
+			receiverLambdas: this.receiverLambdas,
+			aliases: this.typeAliases,
+			aliasTexts: this.typeAliasTexts
 		};
 	}
 
@@ -3049,9 +3082,19 @@ class Emitter {
 	 * it was emitted — for the text handed to the typed decoder, which looks
 	 * a class up by its registered name rather than through `safe`.
 	 */
-	private scopedTypeText(text: string, own: ReadonlyMap<string, string> = new Map()): string {
+	private scopedTypeText(
+		text: string,
+		own: ReadonlyMap<string, string> = new Map(),
+		depth = 0
+	): string {
 		return text.replace(/\b[A-Z]\w*(?:\.[A-Z]\w*)*/g, (written) => {
 			if (written.includes('.')) return this.qualifiedTypes.get(written) ?? written;
+			// A closed `typealias` is the type it names, arguments and all — see
+			// `Declared.aliasTexts`. Bounded, as `aliased` is: a cycle does not
+			// compile, so one here is a file already being read wrongly.
+			const aliasText = own.has(written) ? undefined : this.typeAliasTexts.get(written);
+			if (aliasText !== undefined && depth < 8)
+				return this.scopedTypeText(aliasText, own, depth + 1);
 			return own.get(written) ?? this.localTypes.get(written) ?? written;
 		});
 	}
@@ -4682,6 +4725,13 @@ class Emitter {
 		const head = kids(target).find((child) => child.type === 'type_identifier');
 		if (name === null || head === undefined || head.text === name) return;
 		this.typeAliases.set(name, head.text);
+		// A generic alias — `typealias Page<T> = Response<List<T>>` — would need
+		// its arguments substituted, which is a type checker; only a closed one
+		// stands for a whole type.
+		const generic = kids(node).some((child) => child.type === 'type_parameters');
+		if (!generic && target !== undefined) {
+			this.typeAliasTexts.set(name, target.text.replace(/\s+/g, ''));
+		}
 	}
 
 	/**
