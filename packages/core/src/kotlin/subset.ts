@@ -1522,6 +1522,25 @@ export const FREE_FUNCTIONS: ReadonlyMap<string, string> = new Map([
 
 	// `delay(300.milliseconds)` between retries. It suspends, so it is awaited.
 	['delay', 'delay'],
+	// kotlin.math's free functions. Each needs an explicit import in Kotlin, and
+	// without an entry here a bare `abs(x)` read as a member the base class
+	// supplies and came out `this.abs(x)` — unrefused, and a TypeError on the
+	// first call. PlaylistUtils' quality normaliser, which every HLS extraction
+	// runs, is `STANDARD_QUALITIES.minByOrNull { abs(it - intQuality) }`.
+	// Named `math*` so they cannot collide with the collection helpers of the
+	// same Kotlin spelling (`list.maxOf { … }` is a different function). A
+	// class's own `min`/`max` still wins; see `declaresOwn` in `emit.ts`.
+	['abs', 'mathAbs'],
+	['min', 'mathMin'],
+	['max', 'mathMax'],
+	['ceil', 'mathCeil'],
+	['floor', 'mathFloor'],
+	['round', 'mathRound'],
+	['sqrt', 'mathSqrt'],
+	['log10', 'mathLog10'],
+	['sign', 'mathSign'],
+	['maxOf', 'mathMaxOf'],
+	['minOf', 'mathMinOf'],
 	// Generic packed-script decoding. The runtime deliberately accepts only the
 	// one-argument form; option-bearing variants carry semantics we cannot prove
 	// equivalent without executing foreign code.

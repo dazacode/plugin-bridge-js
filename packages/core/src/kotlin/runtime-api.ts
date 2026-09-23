@@ -560,7 +560,20 @@ export const RUNTIME_HELPERS = [
 	'ownOr',
 	/* `.code`: a Char's code unit, or the property of that name on anything
 	   else. See `EXTENSION_PROPERTIES` in `subset.ts`. */
-	'code'
+	'code',
+	/* kotlin.math's free functions, and the free maxOf/minOf; see the table in
+	   `subset.ts`. Kept apart from the collection helpers by the prefix. */
+	'mathAbs',
+	'mathMin',
+	'mathMax',
+	'mathCeil',
+	'mathFloor',
+	'mathRound',
+	'mathSqrt',
+	'mathLog10',
+	'mathSign',
+	'mathMaxOf',
+	'mathMinOf'
 ] as const;
 
 export type RuntimeHelper = (typeof RUNTIME_HELPERS)[number];

@@ -4509,6 +4509,25 @@ describe('the shared playlist module’s signatures', () => {
 		expect(emitted.js).toContain("(__k.code(ch) - __k.code('0'))");
 	});
 
+	it('reads kotlin.math called bare as the runtime’s, not as a member', () => {
+		// `STANDARD_QUALITIES.minByOrNull { abs(it - intQuality) }` came out
+		// `this.abs(…)`, unrefused, and threw on every HLS extraction.
+		const emitted = translate(
+			inClass(
+				'    fun near(a: Int, b: Int): Int = abs(a - b) + min(a, b) + maxOf(a, b, 3)',
+				'    fun max(a: Int): Int = a',
+				'    fun own(): Int = max(4)'
+			)
+		);
+
+		expect(emitted.refusals).toEqual([]);
+		expect(emitted.js).toContain('__k.mathAbs((a - b))');
+		expect(emitted.js).toContain('__k.mathMin(a, b)');
+		expect(emitted.js).toContain('__k.mathMaxOf(a, b, 3)');
+		// The class's own `max` is still the one it calls.
+		expect(emitted.js).toContain('this.max(4)');
+	});
+
 	it('calls an object’s own member over the runtime function of that name', () => {
 		const shown = evaluate(
 			kt(

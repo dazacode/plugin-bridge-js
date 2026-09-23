@@ -233,6 +233,23 @@ describe('what the emitter is promised', () => {
 		expect(k.javaClass).toBeUndefined();
 	});
 
+	it('answers kotlin.math the way Kotlin does, round included', () => {
+		expect(k.mathAbs(-3)).toBe(3);
+		expect(k.mathMin(2, 5)).toBe(2);
+		expect(k.mathMax(2, 5)).toBe(5);
+		expect(Number.isNaN(k.mathMax(Number.NaN, 1))).toBe(true);
+		expect(k.mathCeil(1.2)).toBe(2);
+		expect(k.mathFloor(-1.2)).toBe(-2);
+		expect(k.mathLog10(1000)).toBe(3);
+		// Ties to even, unlike Math.round — and unlike roundToInt.
+		expect(k.mathRound(2.5)).toBe(2);
+		expect(k.mathRound(3.5)).toBe(4);
+		expect(k.mathRound(-2.5)).toBe(-2);
+		expect(k.mathRound(2.4)).toBe(2);
+		expect(k.mathMaxOf(1, 9, 4)).toBe(9);
+		expect(k.mathMinOf('b', 'a')).toBe('a');
+	});
+
 	it('reads a Char’s code, and any other .code as the property it is', () => {
 		expect(k.code('A')).toBe(65);
 		expect(k.code('0')).toBe(48);

@@ -6169,7 +6169,11 @@ class Emitter {
 		// the runtime's one-argument `unpack`, the result was a string that
 		// `joinToString(" ")` then spelled out a character at a time, and every
 		// extractor built on it answered garbage with nothing refused.
-		const free = this.declaresOwn(name) ? undefined : FREE_FUNCTIONS.get(name);
+		//
+		// kotlin.math never takes a block: a bare `maxOf { … }` inside a
+		// receiver block is the receiver's collection `maxOf`, not the free one.
+		const listed = this.declaresOwn(name) ? undefined : FREE_FUNCTIONS.get(name);
+		const free = listed?.startsWith('math') === true && lambda !== null ? undefined : listed;
 		if (free !== undefined) {
 			const before = this.asyncLambdas;
 			const tail = this.provenance(

@@ -2919,6 +2919,55 @@ var __k = {
    * one that keeps it gets a double where Kotlin had a float. The difference
    * shows up past 2^24, which no base-62 unbaser reaches.
    */
+  /*
+   * kotlin.math, called bare. JavaScript's Math agrees with Kotlin on every one
+   * of these for the doubles and ints a scraper handles — NaN propagates the
+   * same way through min and max — except round, which is below.
+   */
+  mathAbs: function (value) { return Math.abs(Number(value)); },
+  mathMin: function (a, b) { return Math.min(Number(a), Number(b)); },
+  mathMax: function (a, b) { return Math.max(Number(a), Number(b)); },
+  mathCeil: function (value) { return Math.ceil(Number(value)); },
+  mathFloor: function (value) { return Math.floor(Number(value)); },
+  mathSqrt: function (value) { return Math.sqrt(Number(value)); },
+  mathLog10: function (value) { return Math.log10(Number(value)); },
+  mathSign: function (value) { return Math.sign(Number(value)); },
+
+  /**
+   * kotlin.math.round, which rounds a tie to the EVEN neighbour: round(2.5) is
+   * 2.0 and round(3.5) is 4.0. Math.round sends every tie up, which is what
+   * roundToInt does and not what this does.
+   */
+  mathRound: function (value) {
+    var x = Number(value);
+    if (!Number.isFinite(x)) return x;
+    var floor = Math.floor(x);
+    var diff = x - floor;
+    if (diff < 0.5) return floor;
+    if (diff > 0.5) return floor + 1;
+    return floor % 2 === 0 ? floor : floor + 1;
+  },
+
+  /**
+   * The free maxOf(a, b, …) and minOf(a, b, …), over numbers or anything
+   * comparable. Kotlin answers the first of equal values, and NaN for a NaN
+   * among doubles, which Math.max/min already do.
+   */
+  mathMaxOf: function () {
+    var values = Array.prototype.slice.call(arguments);
+    if (values.every(function (v) { return typeof v === 'number'; })) return Math.max.apply(null, values);
+    var best = values[0];
+    for (var i = 1; i < values.length; i += 1) if (values[i] > best) best = values[i];
+    return best;
+  },
+  mathMinOf: function () {
+    var values = Array.prototype.slice.call(arguments);
+    if (values.every(function (v) { return typeof v === 'number'; })) return Math.min.apply(null, values);
+    var best = values[0];
+    for (var i = 1; i < values.length; i += 1) if (values[i] < best) best = values[i];
+    return best;
+  },
+
   pow: function (value, exponent) {
     return Math.pow(Number(value), Number(exponent));
   },
