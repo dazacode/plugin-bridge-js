@@ -1178,6 +1178,34 @@ describe('the parts of Kotlin that have no JavaScript spelling', () => {
 		expect(k.randomUUID()).not.toBe(one);
 	});
 
+	it('sorts a MutableList in place, stably, in either direction', () => {
+		const list = k.mutableListOf({ n: 1, id: 'a' }, { n: 2, id: 'b' }, { n: 1, id: 'c' });
+		expect(k.sortByDescending(list, (item: { n: number }) => item.n)).toBeUndefined();
+		// Equal keys keep their order, as Kotlin's stable sort does.
+		expect(list.map((item: { id: string }) => item.id)).toEqual(['b', 'a', 'c']);
+		k.sortBy(list, (item: { n: number }) => item.n);
+		expect(list.map((item: { id: string }) => item.id)).toEqual(['a', 'c', 'b']);
+	});
+
+	it('runs a `getOrPut` block only on a miss', () => {
+		const cache = k.mutableMapOf();
+		let built = 0;
+		const make = () => {
+			built += 1;
+			return 'v';
+		};
+		expect(k.getOrPut(cache, 'k', make)).toBe('v');
+		expect(k.getOrPut(cache, 'k', make)).toBe('v');
+		expect(built).toBe(1);
+	});
+
+	it('builds a Set with `buildSet`, keeping insertion order', () => {
+		const built = k.buildSet(function (this: Set<string>) {
+			k.addAll(this, ['b', 'a', 'b']);
+		});
+		expect([...built]).toEqual(['b', 'a']);
+	});
+
 	it('reads the infix `matches` from whichever side holds the Regex', () => {
 		expect(k.regexMatches(k.regex('a+'), 'aaa')).toBe(true);
 		expect(k.regexMatches('aaa', k.regex('a+'))).toBe(true);

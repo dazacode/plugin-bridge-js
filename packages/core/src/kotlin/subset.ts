@@ -678,6 +678,14 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 	['none', 'none'],
 	['sortedBy', 'sortedBy'],
 	['sortedByDescending', 'sortedByDescending'],
+	// The in-place four, on a MutableList: the list itself is reordered and
+	// the call answers Unit, where the `sorted` spellings answer a new list.
+	['sortBy', 'sortBy'],
+	['sortByDescending', 'sortByDescending'],
+	['sortWith', 'sortWith'],
+	['sortDescending', 'sortDescending'],
+	// `cache.getOrPut(key) { build() }`: the block runs only on a miss.
+	['getOrPut', 'getOrPut'],
 	['reversed', 'reversed'],
 	['distinct', 'distinct'],
 	['take', 'take'],
@@ -1059,7 +1067,13 @@ export const BUILDER_LAMBDA_METHODS: ReadonlySet<string> = new Set([
  * is how most of them are written — refused for an `it` with no lambda around
  * it, naming a construct the source never wrote.
  */
-export const ARGUMENT_LAMBDA_METHODS: ReadonlySet<string> = new Set(['addInterceptor']);
+export const ARGUMENT_LAMBDA_METHODS: ReadonlySet<string> = new Set([
+	'addInterceptor',
+	// RxJava's two on the runtime's Observable, which takes each as a plain
+	// function of the value (or of the error) — see `__observable`.
+	'doOnNext',
+	'onErrorReturn'
+]);
 
 /**
  * Kotlin properties (no call parentheses) that must go through the runtime.
@@ -1565,6 +1579,7 @@ export const FREE_FUNCTIONS: ReadonlyMap<string, string> = new Map([
 	// The builders whose block is handed a receiver. `buildString` is emitted
 	// by name in `emit.ts`; these four are ordinary free functions there.
 	['buildList', 'buildList'],
+	['buildSet', 'buildSet'],
 	['buildMap', 'buildMap'],
 	['buildJsonObject', 'buildJsonObject'],
 	['buildJsonArray', 'buildJsonArray'],

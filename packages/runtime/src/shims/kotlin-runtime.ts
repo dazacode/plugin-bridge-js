@@ -717,6 +717,15 @@ function __isType(value, type) {
 }
 
 /** An array that also answers to a MutableList's method names. */
+/** Writes a sorted copy back into the MutableList it came from; Unit. */
+function __sortInPlace(list, sorted) {
+  if (!Array.isArray(list)) {
+    throw new Error('This converted extension sorted something that is not a mutable list.');
+  }
+  for (var i = 0; i < sorted.length; i += 1) list[i] = sorted[i];
+  return undefined;
+}
+
 function __mutableList(items) {
   function define(name, value) {
     Object.defineProperty(items, name, { value: value, enumerable: false, writable: true });
@@ -2629,8 +2638,64 @@ var __k = {
     });
   },
 
+  /**
+   * Stable too, which reversing the ascending order is not: two chapters with
+   * the same number would come out in the opposite order to Kotlin's.
+   */
   sortedByDescending: function (list, selector) {
-    return __then(__k.sortedBy(list, selector), function (sorted) { return sorted.slice().reverse(); });
+    var items = __arr(list).slice();
+    return __then(__each(items, function (item) { return selector(item); }), function (keys) {
+      var order = [];
+      for (var i = 0; i < items.length; i += 1) order.push(i);
+      order.sort(function (a, b) {
+        var delta = __cmp(keys[b], keys[a]);
+        return delta !== 0 ? delta : a - b;
+      });
+      var out = [];
+      for (var j = 0; j < order.length; j += 1) out.push(items[order[j]]);
+      return out;
+    });
+  },
+
+  /**
+   * sortBy / sortByDescending / sortWith / sortDescending: the MutableList
+   * itself reordered, and Unit answered. The sorted copy is computed by the
+   * 'sorted' spelling of each and written back, so the two cannot disagree
+   * about the order.
+   */
+  sortBy: function (list, selector) {
+    return __then(__k.sortedBy(list, selector), function (sorted) { return __sortInPlace(list, sorted); });
+  },
+
+  sortByDescending: function (list, selector) {
+    return __then(__k.sortedByDescending(list, selector), function (sorted) {
+      return __sortInPlace(list, sorted);
+    });
+  },
+
+  sortWith: function (list, comparator) {
+    return __sortInPlace(list, __k.sortedWith(list, comparator));
+  },
+
+  sortDescending: function (list) {
+    return __sortInPlace(list, __k.sortedDescending(list));
+  },
+
+  /**
+   * getOrPut: the value under the key, or the block's value stored and
+   * answered. The block runs only on a miss — it is often a request — and a
+   * key present with a null value counts as a miss, as it does in Kotlin.
+   */
+  getOrPut: function (map, key, make) {
+    if (map instanceof Map) {
+      if (map.has(key) && __present(map.get(key))) return map.get(key);
+      return __then(make(), function (value) { map.set(key, value); return value; });
+    }
+    if (map === null || map === undefined || typeof map !== 'object') {
+      throw new Error('This converted extension called getOrPut on something that is not a map.');
+    }
+    if (__present(map[key])) return map[key];
+    return __then(make(), function (value) { map[key] = value; return value; });
   },
 
   /**
@@ -4887,6 +4952,13 @@ var __k = {
     var block = typeof b === 'function' ? b : a;
     var items = __mutableList([]);
     return __then(block.call(items, items), function () { return items; });
+  },
+
+  /** buildSet { add(x) }, the same shape over a Set, which keeps insertion order. */
+  buildSet: function (a, b) {
+    var block = typeof b === 'function' ? b : a;
+    var set = __k.toSet([]);
+    return __then(block.call(set, set), function () { return set; });
   },
 
   /** buildMap { put(k, v) }, the same shape over a MutableMap. */
