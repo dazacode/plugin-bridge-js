@@ -1394,6 +1394,18 @@ class Emitter {
 	/** See `Declared.reified`. */
 	private readonly reifiedMembers = new Map<string, readonly string[]>();
 	/**
+	 * Companion members written out under a name other than their own, while
+	 * the class holding them is emitted. See `registerCompanionNames`.
+	 */
+	private companionRenames: ReadonlyMap<string, string> = new Map();
+	/** Companion member names some class in this file already holds. */
+	private readonly companionClaims = new Set<string>();
+	/**
+	 * What each companion emitted since the class holding it began, to be
+	 * reachable through the class's name. See `companionStatics`.
+	 */
+	private companionMembers: CompanionMember[] = [];
+	/**
 	 * Members of a declared `object` this file imports by name, and the
 	 * object each is reached through.
 	 *
@@ -2194,7 +2206,10 @@ class Emitter {
 		this.emittedTypes.add(name);
 		const nested = this.scopeNestedTypes(members, name);
 
-		this.registerCompanionNames(members);
+		const outerRenames = this.companionRenames;
+		const outerCompanion = this.companionMembers;
+		this.companionRenames = this.registerCompanionNames(members, name);
+		this.companionMembers = [];
 
 		const hoisted: string[] = [];
 		const ctorLines: string[] = constructorParams
@@ -2348,8 +2363,14 @@ class Emitter {
 		this.ownerBase = outerBase;
 		this.classMembers = outerMembers;
 		this.suspendMembers = outerSuspends;
+		const companionMembers = this.companionMembers;
+		this.companionRenames = outerRenames;
+		this.companionMembers = outerCompanion;
 		const heritage = base === null ? '' : `extends ${base} `;
-		const cls = `class ${this.safe(name)} ${heritage}${block([...ctor, ...memberLines])}`;
+		const statics = this.companionStatics(name, companionMembers);
+		const cls =
+			`class ${this.safe(name)} ${heritage}${block([...ctor, ...memberLines])}` +
+			(statics.length > 0 ? `\n${statics}` : '');
 		// A `@Serializable` class is a *shape* as well as a class: the decoder
 		// answers plain JSON, so a field the source renamed and a property it
 		// computes are both absent from what a member then reads. Registered
@@ -2533,7 +2554,23 @@ class Emitter {
 	 * 254-listing catalogue, that one omission was the single most common
 	 * blocker in the set.
 	 */
-	private registerCompanionNames(members: readonly KNode[]): void {
+	/**
+	 * A companion's member names, registered before the class body is emitted,
+	 * and renamed where an earlier companion in this file already took one.
+	 *
+	 * Companion members hoist to module scope, where two classes' `private val
+	 * options = arrayOf(…)` are one name — and a filters file declares a dozen
+	 * classes that each keep their options in a companion. The second was
+	 * refused as a collision, which refused every filter after the first.
+	 * Kotlin scopes each to its own class, and so does this: the later one is
+	 * written out as `Owner_options`, and while that class and its companion
+	 * are being emitted `safe` maps the bare name onto it — the scope Kotlin
+	 * resolves a bare companion name in, nested classes included.
+	 *
+	 * Answers the renames to install, which the caller takes back afterwards.
+	 */
+	private registerCompanionNames(members: readonly KNode[], owner: string): Map<string, string> {
+		const renames = new Map(this.companionRenames);
 		for (const child of members) {
 			if (child.type !== 'companion_object') continue;
 			const inner = kids(child).find((part) => part.type === 'class_body');
@@ -2544,9 +2581,45 @@ class Emitter {
 						: part.type === 'function_declaration'
 							? this.nameOf(part)
 							: null;
-				if (declared !== null) this.moduleNames.add(declared);
+				if (declared === null) continue;
+				if (this.emittedNames.has(declared) || this.companionClaims.has(declared)) {
+					let binding = `${plainName(owner)}_${plainName(declared)}`;
+					while (this.emittedNames.has(binding) || this.moduleNames.has(binding)) binding += '_';
+					renames.set(declared, binding);
+				} else {
+					renames.delete(declared);
+				}
+				this.companionClaims.add(declared);
+				this.moduleNames.add(declared);
 			}
 		}
+		return renames;
+	}
+
+	/**
+	 * Every companion member emitted for `owner`, reachable as `Owner.name`.
+	 *
+	 * Inside the class a companion member is a bare name and resolves
+	 * lexically to its hoisted binding. From anywhere else Kotlin writes it
+	 * through the class — `Holder.KEY`, `Layout.fromKey(…)` — and the emitted
+	 * class had no such property, so the read answered `undefined` with
+	 * nothing refused. A getter rather than a copy, so a companion `var`
+	 * written after load is still the value read.
+	 *
+	 * `name`, `length` and `prototype` are a function's own, and not
+	 * overwritten: a companion member spelled that way stays reachable bare.
+	 */
+	private companionStatics(owner: string, members: readonly CompanionMember[]): string {
+		const lines: string[] = [];
+		for (const member of members) {
+			if (FUNCTION_OWN_NAMES.has(member.name)) continue;
+			const value = member.getter ? `${member.binding}()` : member.binding;
+			const write = member.mutable === true ? `, set: (__v) => { ${member.binding} = __v; }` : '';
+			lines.push(
+				`Object.defineProperty(${this.safe(owner)}, ${JSON.stringify(member.name)}, { get: () => ${value}${write}, enumerable: true, configurable: true });`
+			);
+		}
+		return lines.join('\n');
 	}
 
 	private dataDeclaration(node: KNode, name: string): string | null {
@@ -2572,6 +2645,8 @@ class Emitter {
 				renames: ReadonlyMap<string, string>;
 				restore: () => void;
 			} | null = null;
+			let outerRenames = this.companionRenames;
+			let outerCompanion = this.companionMembers;
 			try {
 				const args = params.map((param) => {
 					this.declare(param.name);
@@ -2586,7 +2661,10 @@ class Emitter {
 				const body = kids(node).find((child) => child.type === 'class_body');
 				this.emittedTypes.add(name);
 				scoped = this.scopeNestedTypes(kids(body), name);
-				this.registerCompanionNames(kids(body));
+				outerRenames = this.companionRenames;
+				outerCompanion = this.companionMembers;
+				this.companionRenames = this.registerCompanionNames(kids(body), name);
+				this.companionMembers = [];
 				const nested: string[] = [];
 				for (const child of kids(body)) {
 					if (child.type === 'function_declaration') {
@@ -2628,8 +2706,11 @@ class Emitter {
 				}
 
 				const factory = `function ${this.safe(name)}(${args.join(', ')}) ${block([`return ${block(fields.map(comma))};`])}`;
-				return [...nested, factory].join('\n\n');
+				const statics = this.companionStatics(name, this.companionMembers);
+				return [...nested, statics.length > 0 ? `${factory}\n${statics}` : factory].join('\n\n');
 			} finally {
+				this.companionRenames = outerRenames;
+				this.companionMembers = outerCompanion;
 				scoped?.restore();
 				this.popScope();
 				this.owner = outerOwner;
@@ -2823,8 +2904,9 @@ class Emitter {
 		for (const child of kids(body)) {
 			if (child.type === 'property_declaration') {
 				const name = this.propertyName(child) ?? 'val';
+				const binding = this.companionRenames.get(name) ?? name;
 				const emitted = this.member(name, child, () => {
-					if (this.emittedNames.has(name)) {
+					if (this.emittedNames.has(binding)) {
 						this.refuse(child, `a second companion member named \`${name}\``);
 					}
 					// `private val LATEST_PREF_ENTRIES get() = arrayOf(…)` — a
@@ -2842,14 +2924,21 @@ class Emitter {
 						);
 						this.moduleNames.add(name);
 						this.moduleGetters.add(name);
-						this.emittedNames.add(name);
+						this.emittedNames.add(binding);
+						this.companionMembers.push({ name, binding: this.safe(name), getter: true });
 						const prefix = emittedBody.isAsync ? 'async ' : '';
 						return `${prefix}function ${this.safe(name)}() ${emittedBody.text}`;
 					}
 					const value = this.propertyValue(child, name);
 					this.moduleNames.add(name);
-					this.emittedNames.add(name);
-					return `const ${this.safe(name)} = ${value};`;
+					this.emittedNames.add(binding);
+					// A companion `var` is assigned after load — `counter += 1`,
+					// a cache filled on first use — and a `const` throws there.
+					const mutable = kids(child).some(
+						(part) => part.type === 'binding_pattern_kind' && part.text === 'var'
+					);
+					this.companionMembers.push({ name, binding: this.safe(name), getter: false, mutable });
+					return `${mutable ? 'let' : 'const'} ${this.safe(name)} = ${value};`;
 				});
 				if (emitted !== null) out.push(emitted);
 				continue;
@@ -2858,7 +2947,13 @@ class Emitter {
 				const name = this.nameOf(child) ?? 'fun';
 				const emitted = this.member(name, child, () => {
 					this.moduleNames.add(name);
-					return this.functionDeclaration(child, 'module');
+					const text = this.functionDeclaration(child, 'module');
+					// An extension function takes its receiver first, and is not
+					// something a caller reaches as `Owner.name(…)`.
+					if (receiverOf(child) === null) {
+						this.companionMembers.push({ name, binding: this.safe(name), getter: false });
+					}
+					return text;
 				});
 				if (emitted !== null) out.push(emitted);
 				continue;
@@ -4838,7 +4933,18 @@ class Emitter {
 		}
 
 		let target: string;
-		if (inner.type === 'simple_identifier') {
+		if (
+			inner.type === 'simple_identifier' &&
+			parts.length > 1 &&
+			this.lookup(inner.text) === null &&
+			!this.isSourceMember(inner.text) &&
+			(this.declaredTypes.has(inner.text) || this.moduleNames.has(inner.text))
+		) {
+			// `Holder.counter = 0` — the head is a declared type or a module
+			// binding being *read*, and the write is to its member. Read as the
+			// name being assigned, it came out as `this.Holder.counter`.
+			target = this.read(inner.text, inner);
+		} else if (inner.type === 'simple_identifier') {
 			const local = this.lookup(inner.text);
 			if (inner.text === 'field') this.refuse(inner, 'a `field` backing reference');
 			// Writes inside `apply {}` go to the receiver: that is the idiom, and
@@ -4860,6 +4966,15 @@ class Emitter {
 				target = `${receiver}.${inner.text}`;
 			} else if (this.receiverParam !== null && !this.isSourceMember(inner.text)) {
 				target = `${this.receiverParam}.${inner.text}`;
+			} else if (
+				local === null &&
+				this.companionClaims.has(inner.text) &&
+				!this.isSourceMember(inner.text)
+			) {
+				// A companion `var`, which is a module binding here: written as
+				// `this.counter` it set a field on the instance and left the
+				// companion's value where it was.
+				target = this.safe(inner.text);
 			} else {
 				target = `this.${inner.text}`;
 			}
@@ -6044,10 +6159,18 @@ class Emitter {
 		// name: `LocalFilters.sorted(2)` is that object's `sorted`, which
 		// Kotlin resolves before any extension — the runtime's collection
 		// `sorted` would have been handed the object as a list.
+		//
+		// A construction of a declared class is the same fact one step on:
+		// `TypeFilter().count()` is that class's `count`, not the collection
+		// helper handed an instance.
+		const declaredOwner =
+			receiver.type === 'simple_identifier' && this.declaredObjects.has(receiver.text)
+				? receiver.text
+				: receiver.type === 'call_expression'
+					? this.receiverTypeOf(receiver)
+					: null;
 		const objectMember =
-			receiver.type === 'simple_identifier' &&
-			this.declaredObjects.has(receiver.text) &&
-			this.classMemberIndex.get(receiver.text)?.has(name) === true;
+			declaredOwner !== null && this.classMemberIndex.get(declaredOwner)?.has(name) === true;
 		const shadowed =
 			objectMember ||
 			(lambda === null &&
@@ -7795,7 +7918,7 @@ class Emitter {
 	 * means the framework's. `pipeline.ts` decides which files those are.
 	 */
 	private safe(name: string): string {
-		return safeName(this.renames.get(name) ?? name);
+		return safeName(this.companionRenames.get(name) ?? this.renames.get(name) ?? name);
 	}
 
 	private read(name: string, node: KNode): string {
@@ -9122,6 +9245,25 @@ const EXPECTATION_BARRIERS: ReadonlySet<string> = new Set([
 	'object_literal',
 	'getter',
 	'setter'
+]);
+
+/** A companion member as it was written out, for `Emitter.companionStatics`. */
+interface CompanionMember {
+	readonly name: string;
+	readonly binding: string;
+	/** A `val X get() = …`, which is a function at module scope. */
+	readonly getter: boolean;
+	/** A `var`, whose static also writes. */
+	readonly mutable?: boolean;
+}
+
+/** A function's own properties, which a companion member is not written over. */
+const FUNCTION_OWN_NAMES: ReadonlySet<string> = new Set([
+	'name',
+	'length',
+	'prototype',
+	'caller',
+	'arguments'
 ]);
 
 /** See `Emitter.expectedTypes` for why this is not the node itself. */

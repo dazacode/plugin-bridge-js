@@ -81,11 +81,11 @@ async function instantiate(entry: string, ...sources: string[]): Promise<any> {
 		JS_RUNTIME,
 		kotlinRuntime(),
 		...emitted.map((emission) => emission.js),
-		`export const make = function (ctx) { __enter(ctx); return new ${entry}(); };`
+		`export const __instantiate = function (ctx) { __enter(ctx); return new ${entry}(); };`
 	].join('\n');
 	const url = `data:text/javascript;base64,${Buffer.from(module).toString('base64')}`;
-	const loaded = (await import(/* @vite-ignore */ url)) as { make(ctx: unknown): any };
-	return loaded.make(context());
+	const loaded = (await import(/* @vite-ignore */ url)) as { __instantiate(ctx: unknown): any };
+	return loaded.__instantiate(context());
 }
 
 function refusalNames(source: string): string[] {
@@ -314,5 +314,62 @@ describe('a member imported by name from a shared object', () => {
 		// list instead of the declared extension, it answered an encoded list.
 		const demo = await instantiate('Demo', shared, importing);
 		expect(demo.query()).toBe('a b');
+	});
+});
+
+describe('a companion object, which belongs to its class', () => {
+	it('keeps two classes’ companion members of one name apart', async () => {
+		// Hoisted to one module scope, the second `options` was refused as a
+		// collision — and a filters file keeps a dozen of them, one per filter.
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class GenreFilter {',
+				'    fun first() = options[0]',
+				'    companion object {',
+				'        private val options = listOf("action", "drama")',
+				'    }',
+				'}',
+				'class TypeFilter {',
+				'    fun first() = options[0]',
+				'    fun count() = describe()',
+				'    companion object {',
+				'        private val options = listOf("manga", "manhwa", "manhua")',
+				'        private fun describe() = options.size',
+				'    }',
+				'}',
+				'class Demo {',
+				'    fun run() = listOf(GenreFilter().first(), TypeFilter().first(), TypeFilter().count().toString())',
+				'}'
+			)
+		);
+		expect(demo.run()).toEqual(['action', 'manga', '3']);
+	});
+
+	it('is reachable through the class’s name from outside it', async () => {
+		// `Holder.KEY` read a property the emitted class never had, and
+		// answered undefined with nothing refused.
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class Holder(val tag: String) {',
+				'    fun bump(): Int { counter += 1; return counter }',
+				'    companion object {',
+				'        const val KEY = "key"',
+				'        var counter = 0',
+				'        fun make() = Holder("made")',
+				'    }',
+				'}',
+				'class Demo {',
+				'    fun run(): String {',
+				'        Holder.counter = 40',
+				'        Holder("x").bump()',
+				'        return Holder.KEY + ":" + Holder.make().tag + ":" + Holder("y").bump()',
+				'    }',
+				'}'
+			)
+		);
+		// A companion `var` is one value, written from outside and from inside.
+		expect(demo.run()).toBe('key:made:42');
 	});
 });
