@@ -600,6 +600,12 @@ var __TYPES = {
   // both, which is what MangaThemesia's Element.imgAttr / Elements.imgAttr pair
   // needs told apart.
   Elements: function (v) { return Array.isArray(v); },
+  // okhttp's Headers, by the shape __headersObject builds: the builder and the
+  // name list together, which no Map, list or model has.
+  Headers: function (v) {
+    return v !== null && typeof v === 'object' && typeof v.newBuilder === 'function' &&
+      typeof v.names === 'function' && typeof v.get === 'function';
+  },
   // okhttp's Response, by the shape __responseOf builds.
   Response: function (v) {
     return v !== null && typeof v === 'object' && typeof v.code === 'number' &&
@@ -623,17 +629,38 @@ var __TYPES = {
   JSONArray: function (v) { return Array.isArray(v); }
 };
 
-/** Whether each argument fits its parameter, where this runtime can decide the type. */
+/**
+ * Whether each argument fits its parameter, where this runtime can decide.
+ *
+ * Three things are decidable. A type in __TYPES. A function type — written
+ * with its arrow, '(Headers,String)->Headers' — which is a JavaScript
+ * function or nothing. And a slot that was skipped: a call with named
+ * arguments arrives with undefined wherever the caller left a parameter out,
+ * which only a parameter with a default permits. That last one is what tells
+ * PlaylistUtils' two extractFromHls apart: 'masterHeaders: Headers' has no
+ * default, 'masterHeadersGen: (…) -> Headers' does, and a call naming neither
+ * is the second — taken as the first, it called itself for ever.
+ */
 function __overloadAccepts(entry, args) {
   var types = entry[3];
   var nullable = entry[4];
-  for (var i = 0; i < args.length && i < types.length; i += 1) {
-    var value = args[i];
-    if (value === null || value === undefined) {
-      if (nullable[i] !== true && __knownType(types[i])) return false;
+  var defaults = entry[5] || [];
+  for (var i = 0; i < types.length; i += 1) {
+    var value = i < args.length ? args[i] : undefined;
+    var type = String(types[i]);
+    if (value === undefined) {
+      if (defaults[i] !== true && nullable[i] !== true) return false;
       continue;
     }
-    if (__knownType(types[i]) && !__isType(value, types[i])) return false;
+    if (value === null) {
+      if (nullable[i] !== true && (__knownType(type) || type.indexOf('->') !== -1)) return false;
+      continue;
+    }
+    if (type.indexOf('->') !== -1) {
+      if (typeof value !== 'function') return false;
+      continue;
+    }
+    if (__knownType(type) && !__isType(value, type)) return false;
   }
   return true;
 }
@@ -646,8 +673,8 @@ function __overloadRank(entry, args) {
   var score = entry[2] === args.length ? 1 : 0;
   var types = entry[3];
   for (var i = 0; i < args.length && i < types.length; i += 1) {
-    if (types[i] === 'Any') continue;
-    if (__knownType(types[i])) score += 4;
+    if (types[i] === 'Any' || args[i] === undefined) continue;
+    if (__knownType(types[i]) || String(types[i]).indexOf('->') !== -1) score += 4;
     if (types[i] === 'Document') score += 2;
   }
   return score;

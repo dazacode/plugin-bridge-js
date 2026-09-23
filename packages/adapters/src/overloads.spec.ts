@@ -187,6 +187,32 @@ class Ext : ParsedHttpSource() {
 		expect(new exported.Ext().all()).toBe('P3PiJ1Jc');
 	});
 
+	it('tells a skipped defaulted slot from a required one, and a function from a Headers', async () => {
+		// PlaylistUtils: two extractFromHls, the same length, differing only in
+		// `masterHeaders: Headers` (required) against `masterHeadersGen: (…) ->
+		// Headers = …` (defaulted). A call naming neither is the second; taken
+		// as the first, its body called the dispatcher again, for ever.
+		const { exported, k } = await run(
+			`
+class Utils(private val client: OkHttpClient) {
+    fun hls(url: String, referer: String = "r", master: Headers, name: (String) -> String = { it }): String =
+        hls(url, referer, { _, _ -> master }, name)
+    fun hls(url: String, referer: String = "r", masterGen: (Headers, String) -> Headers = { h, _ -> h }, name: (String) -> String = { it }): String =
+        "gen " + name(url)
+}
+class Ext : ParsedHttpSource() {
+    fun named(u: Utils): String = u.hls("a", referer = "x", name = { it + "!" })
+    fun headed(u: Utils): String = u.hls("b", "x", headers, { it })
+}
+`,
+			['Ext', 'Utils']
+		);
+		const ext = new exported.Ext();
+		ext.headers = k.headersOf ? k.headersOf('A', '1') : undefined;
+		const utils = new exported.Utils(null);
+		expect(ext.named(utils)).toBe('gen a!');
+	});
+
 	it('falls back to the driver base when no translated declaration accepts the call', async () => {
 		const { exported } = await run(
 			`

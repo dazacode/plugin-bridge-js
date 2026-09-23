@@ -964,6 +964,24 @@ export interface OverloadSignature {
 	readonly total: number;
 	readonly types: readonly string[];
 	readonly nullable: readonly boolean[];
+	/**
+	 * Which positions have a default. Not implied by `required`: a default may
+	 * sit *before* a required parameter (`referer = …` then `masterHeaders:
+	 * Headers`), and a call with named arguments arrives with `undefined` in
+	 * every slot it skipped. Without this the dispatcher took `undefined` for a
+	 * `Headers` nobody passed — see `__overloadAccepts`.
+	 */
+	readonly defaults: readonly boolean[];
+	/** The parameters' names, receiver excluded — what a named argument names. */
+	readonly params: readonly string[];
+	/**
+	 * The classes and objects that declare this signature. The dispatch table
+	 * is by name across the whole unit, which is harmless there (a signature an
+	 * object does not have is never picked from it); placing named arguments is
+	 * not, because `videoFromUrl` is declared by dozens of unrelated
+	 * extractors, and only the callee's own overloads may decide a slot.
+	 */
+	readonly owners: readonly string[];
 }
 
 const EMPTY_DECLARED: Declared = {
@@ -1021,7 +1039,15 @@ export function mergeDeclared(parts: readonly Declared[]): Declared {
 		}
 		for (const [name, shapes] of part.overloads) {
 			const into = overloads.get(name) ?? new Map<string, OverloadSignature>();
-			for (const shape of shapes) if (!into.has(shape.key)) into.set(shape.key, shape);
+			for (const shape of shapes) {
+				const known = into.get(shape.key);
+				into.set(
+					shape.key,
+					known === undefined
+						? shape
+						: { ...known, owners: [...new Set([...known.owners, ...shape.owners])] }
+				);
+			}
 			overloads.set(name, into);
 		}
 		for (const [owner, members] of part.classMembers) {
@@ -1430,7 +1456,9 @@ class Emitter {
 				// `classDeclaration` emits as methods and can give a dispatcher.
 				// An `object`'s members, a data class's and an enum's are
 				// emitted elsewhere and keep one name each.
-				if (name !== null && ownerIsClass) this.rememberOverload(name, this.signatureOf(child));
+				if (name !== null && ownerIsClass && owner !== null) {
+					this.rememberOverload(name, { ...this.signatureOf(child), owners: [owner] });
+				}
 				if (name !== null && receiverOf(child) === null) {
 					this.rememberSignature(name, this.parameterNames(child));
 					// Also under the class that declares it.
@@ -1525,7 +1553,13 @@ class Emitter {
 
 	private rememberOverload(name: string, shape: OverloadSignature): void {
 		const into = this.overloadIndex.get(name) ?? new Map<string, OverloadSignature>();
-		if (!into.has(shape.key)) into.set(shape.key, shape);
+		const known = into.get(shape.key);
+		into.set(
+			shape.key,
+			known === undefined
+				? shape
+				: { ...known, owners: [...new Set([...known.owners, ...shape.owners])] }
+		);
 		this.overloadIndex.set(name, into);
 	}
 
@@ -1540,6 +1574,8 @@ class Emitter {
 	private signatureOf(node: KNode): OverloadSignature {
 		const types: string[] = [];
 		const nullable: boolean[] = [];
+		const defaults: boolean[] = [];
+		const params: string[] = [];
 		let required = 0;
 		let total = 0;
 		let spread = false;
@@ -1547,6 +1583,7 @@ class Emitter {
 		if (receiver !== null) {
 			types.push(simpleTypeName(receiver));
 			nullable.push(false);
+			defaults.push(false);
 			required += 1;
 			total += 1;
 		}
@@ -1557,20 +1594,29 @@ class Emitter {
 			if (part.type === 'parameter_modifiers' && /\bvararg\b/.test(part.text)) vararg = true;
 			if (part.type !== 'parameter') continue;
 			const written = kids(part).find((child) => child.type.endsWith('type'));
-			types.push(simpleTypeName(typeName(written)));
+			// A function type keeps its arrow — `(Headers,String)->Headers` — so
+			// the runtime can recognise it as one; its dots are not a package.
+			const spelled = typeName(written);
+			types.push(spelled.includes('->') ? spelled : simpleTypeName(spelled));
 			nullable.push(written !== undefined && written.text.trim().endsWith('?'));
+			const hasDefault = parts[index + 1]?.type === '=';
+			defaults.push(hasDefault || vararg);
+			params.push(this.nameOf(part) ?? '');
 			total += 1;
 			if (vararg) {
 				spread = true;
 				vararg = false;
-			} else if (parts[index + 1]?.type !== '=') required += 1;
+			} else if (!hasDefault) required += 1;
 		}
 		return {
 			key: types.map((type) => type.replace(/\W/g, '_')).join('_'),
 			required,
 			total: spread ? -1 : total,
 			types,
-			nullable
+			nullable,
+			defaults,
+			params,
+			owners: []
 		};
 	}
 
@@ -1654,6 +1700,17 @@ class Emitter {
 		shapes: readonly OverloadSignature[]
 	): string {
 		return `${this.helper('overload')}(${target}, ${self}, ${JSON.stringify(name)}, [${args.join(', ')}], ${overloadTable(name, shapes)}, () => __super)`;
+	}
+
+	/** A class and every base above it, nearest first. */
+	private lineage(owner: string): string[] {
+		const seen: string[] = [];
+		let at: string | undefined = owner;
+		while (at !== undefined && !seen.includes(at)) {
+			seen.push(at);
+			at = this.classBaseIndex.get(at);
+		}
+		return seen;
 	}
 
 	/**
@@ -6192,6 +6249,25 @@ class Emitter {
 		if (name === 'Video' && named_.some((one) => VIDEO_V16_ONLY.has(one))) {
 			return this.videoV16Arguments(args, named_);
 		}
+		// An overloaded name is placed by the overloads that could be the callee,
+		// never by whichever parameter list the table happened to keep last —
+		// `extractFromDash` puts `referer` third in one overload and fifth in
+		// the other, and slotting it by the wrong one sends a referer where a
+		// headers object belongs.
+		// The callee's own overloads when the receiver's class is known, and
+		// otherwise every overload of the name — but then only as an offer:
+		// where they disagree the ordinary path below still gets its say.
+		const everywhere = [...(this.overloadIndex.get(name)?.values() ?? [])];
+		const callee = owner ?? (this.isSourceMember(name) ? this.owner : null);
+		const lineage = callee === null ? [] : this.lineage(callee);
+		const own = everywhere.filter((shape) => shape.owners.some((one) => lineage.includes(one)));
+		if (own.length >= 2) {
+			const placed = this.overloadPlacement(name, args, named_, own, true);
+			if (placed !== null) return placed;
+		} else if (callee === null && everywhere.length >= 2) {
+			const placed = this.overloadPlacement(name, args, named_, everywhere, false);
+			if (placed !== null) return placed;
+		}
 		const qualified = owner === null ? undefined : this.qualifiedSignatures.get(`${owner}.${name}`);
 		// The qualified signature only when it actually accounts for what was
 		// written. An argument the Kotlin passes by name is a parameter of the
@@ -6242,6 +6318,64 @@ class Emitter {
 			slots[index] = values[0];
 		}
 
+		let last = slots.length - 1;
+		while (last >= 0 && slots[last] === null) last -= 1;
+		return slots.slice(0, last + 1).map((slot) => slot ?? 'undefined');
+	}
+
+	/**
+	 * Named arguments to an overloaded function, placed the way Kotlin chooses.
+	 *
+	 * The candidates are the overloads that declare every name written and get
+	 * every parameter without a default from the call. Where they all put each
+	 * argument in the same slot, that placement is the answer whichever of them
+	 * runs — and which one runs is `__k.overload`'s question, which it answers
+	 * from the same defaults: a slot left `undefined` rules out an overload
+	 * that required it. Where they disagree, the call is refused rather than
+	 * placed by a guess. Null when no overload accounts for the call, so the
+	 * ordinary path can say why.
+	 */
+	private overloadPlacement(
+		name: string,
+		args: KNode[],
+		named: readonly string[],
+		shapes: readonly OverloadSignature[],
+		certain: boolean
+	): string[] | null {
+		const positional = args.filter((arg) => !arg.allChildren.some((child) => child.type === '='));
+		const fits = shapes.filter((shape) => {
+			const offset = shape.types.length - shape.params.length;
+			if (positional.length > shape.params.length && shape.total !== -1) return false;
+			if (!named.every((one) => shape.params.includes(one))) return false;
+			return shape.params.every(
+				(param, index) =>
+					shape.defaults[index + offset] === true ||
+					index < positional.length ||
+					named.includes(param)
+			);
+		});
+		if (fits.length === 0) return null;
+		const layout = (shape: OverloadSignature): string =>
+			named.map((one) => shape.params.indexOf(one)).join(',');
+		if (fits.some((shape) => layout(shape) !== layout(fits[0]))) {
+			if (!certain) return null;
+			this.refuse(args[0] ?? args[args.length - 1], `named arguments to an overloaded \`${name}\``);
+		}
+		const signature = fits[0].params;
+		const slots: (string | null)[] = signature.map(() => null);
+		let position = 0;
+		for (const arg of args) {
+			const values = this.argumentExpressions(arg);
+			if (values.length !== 1 || values[0]?.startsWith('...')) {
+				this.refuse(arg, 'a spread mixed with named arguments');
+			}
+			if (!arg.allChildren.some((child) => child.type === '=')) {
+				slots[position] = values[0];
+				position += 1;
+				continue;
+			}
+			slots[signature.indexOf(kids(arg)[0]?.text ?? '')] = values[0];
+		}
 		let last = slots.length - 1;
 		while (last >= 0 && slots[last] === null) last -= 1;
 		return slots.slice(0, last + 1).map((slot) => slot ?? 'undefined');
@@ -8469,7 +8603,8 @@ function overloadTable(name: string, shapes: readonly OverloadSignature[]): stri
 			shape.required,
 			shape.total,
 			shape.types,
-			shape.nullable
+			shape.nullable,
+			shape.defaults
 		])
 	);
 }
