@@ -1980,3 +1980,21 @@ describe('a request tag keyed by a class', () => {
 		expect(demo.other(request)).toBe('absent');
 	});
 });
+
+describe('okhttp Credentials', () => {
+	it('builds a Basic header value, ISO-8859-1 unless told otherwise', async () => {
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    fun plain(): String = Credentials.basic("user", "pass")',
+				'    fun latin(): String = Credentials.basic("é", "x")',
+				'    fun utf8(): String = Credentials.basic("é", "x", Charsets.UTF_8)',
+				'}'
+			)
+		);
+		expect(demo.plain()).toBe('Basic dXNlcjpwYXNz');
+		expect(demo.latin()).toBe(`Basic ${Buffer.from('é:x', 'latin1').toString('base64')}`);
+		expect(demo.utf8()).toBe(`Basic ${Buffer.from('é:x', 'utf8').toString('base64')}`);
+	});
+});

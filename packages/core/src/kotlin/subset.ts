@@ -2365,10 +2365,14 @@ export const GLOBAL_NAMES: ReadonlySet<string> = new Set([
 	'InputStreamReader',
 	'Collator',
 
-	/* kotlinx.serialization's names a hand-written KSerializer declares, and
-	   JsonNull, which is JSON's null — see the typed decoder in the runtime. */
+	/* okhttp's Credentials, and java.math.BigDecimal with its rounding modes —
+	   see RUNTIME_GLOBALS. */
+	'Credentials',
 	'BigDecimal',
 	'RoundingMode',
+
+	/* kotlinx.serialization's names a hand-written KSerializer declares, and
+	   JsonNull, which is JSON's null — see the typed decoder in the runtime. */
 	'PrimitiveSerialDescriptor',
 	'PrimitiveKind',
 	'JsonNull',

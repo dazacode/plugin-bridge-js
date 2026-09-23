@@ -2484,6 +2484,20 @@ var Charsets = {
 
 var StandardCharsets = Charsets;
 
+/**
+ * okhttp's Credentials.basic: the value of a Basic 'Authorization' header,
+ * "Basic " and the base64 of "user:password" in the charset given -
+ * ISO-8859-1 unless one is named, as okhttp's default is.
+ */
+var Credentials = {
+  basic: function (username, password, charset) {
+    var kind = charset === undefined || charset === null ? 'latin1' : __charsetOf(charset);
+    var text = __str(username) + ':' + __str(password);
+    var bytes = kind === 'utf8' ? __host().text.encode(text) : __singleByteEncode(text, kind);
+    return 'Basic ' + __host().bytes.toBase64(bytes);
+  }
+};
+
 /* Which of the three a charset argument names: 'utf8', 'latin1' or 'ascii'. */
 function __charsetOf(charset) {
   if (charset === null || charset === undefined) return 'utf8';

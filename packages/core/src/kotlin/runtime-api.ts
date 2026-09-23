@@ -1086,6 +1086,9 @@ export const RUNTIME_GLOBALS = [
 	'PrimitiveKind',
 	'JsonNull',
 
+	/* okhttp's Credentials.basic, a Basic `Authorization` header value. */
+	'Credentials',
+
 	/* java.math.BigDecimal over a BigInt, and the rounding modes it divides
 	   with. */
 	'BigDecimal',
