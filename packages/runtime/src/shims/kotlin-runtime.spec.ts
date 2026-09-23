@@ -813,6 +813,28 @@ describe('the scope functions', () => {
 		expect(built.title).toBe('later');
 	});
 
+	it('hands a receiver lambda its receiver however it is called', () => {
+		// `block: Builder.() -> Unit` is called receiver-first by the translated
+		// function — `block(builder)` — and receiver-as-`this` by `apply(block)`,
+		// which passes both. The block reads `this` either way.
+		const block = k.receiverLambda(function (this: { tags: string[] }, tag: string) {
+			this.tags.push(tag);
+			return this;
+		});
+		const builder = { tags: [] as string[] };
+		expect(block(builder, 'a')).toBe(builder);
+		expect(
+			k.apply(
+				builder,
+				k.receiverLambda(function (this: { tags: string[] }) {
+					this.tags.push('b');
+				})
+			)
+		).toBe(builder);
+		expect(block.call(builder)).toBe(builder);
+		expect(builder.tags).toEqual(['a', 'b', undefined]);
+	});
+
 	it('answers null from takeIf and takeUnless rather than false', () => {
 		expect(k.takeIf('x', (it: string) => it.length > 0)).toBe('x');
 		expect(k.takeIf('', (it: string) => it.length > 0)).toBeNull();

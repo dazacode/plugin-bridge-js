@@ -221,11 +221,11 @@ function findHeaderEnd(source: string, start: number): number {
  * still be refused, and several of these are. That is the point: the rewrite
  * buys an honest obstacle in place of "could not parse", nothing more.
  *
- * A third gap — a dotted receiver in a function type, `Headers.Builder.() ->
- * Unit` — is deliberately absent. The parse repair is clean, but the one real
- * file it unlocks then emits a receiver lambda this emitter does not model and
- * throws at run time. An honest "could not parse" is worth more than a plugin
- * that looks complete and does not work.
+ * A dotted receiver in a function type, `Headers.Builder.() -> Unit`, was
+ * once deliberately absent from this list: the parse repair was clean, but
+ * the file it unlocked emitted a receiver lambda the emitter did not model and
+ * threw at run time. It is here now because the emitter does model one — see
+ * `ReceiverSlots` in `emit.ts` — which was the condition, not the repair.
  */
 function repairKnownGrammarGaps(source: string): string {
 	// Ahead of the mask, because the mask cannot read a multi-dollar string
@@ -241,7 +241,11 @@ function repairKnownGrammarGaps(source: string): string {
 	const edits = [
 		...whenEntryBodies(masked),
 		...assignmentsThroughCalls(masked),
-		...whenInConditions(masked)
+		...whenInConditions(masked),
+		...trailingCommas(masked),
+		...dottedReceiverTypes(masked),
+		...rangeUntil(masked),
+		...nullableCallableReceivers(masked)
 	].sort((left, right) => right.start - left.start);
 	let output = plain;
 	for (const edit of edits) {
@@ -609,6 +613,17 @@ function whenEntryBodies(masked: string): Edit[] {
  * `lib/`. Each refused every extension built on it as "a passage this build
  * could not parse".
  *
+ * A condition in parentheses has the same gap, and a worse reading of it:
+ *
+ *     licensed -> SManga.LICENSED
+ *     (status == "done") && (title == "paused") -> SManga.ON_HIATUS
+ *
+ * reads as a *call* of `SManga.LICENSED`, and the second entry is left with no
+ * condition. The same `;` settles it, with one extra requirement: the line
+ * above has to be an entry of its own, arrow and all (`endsAnEntry`), because
+ * a condition broken after an infix name — `a or` above `(b) -> 1` — ends in a
+ * name too and is one condition, not two.
+ *
  * The repair is a `;` at the end of the line above, which Kotlin permits
  * after a when entry and which settles the question the newline should have.
  * It is inserted after the last code character — a trailing comment is filler
@@ -621,22 +636,178 @@ function whenEntryBodies(masked: string): Edit[] {
 function whenInConditions(masked: string): Edit[] {
 	const edits: Edit[] = [];
 	const lead = /^[ \t]*!?in[ \t(]/;
+	const parenthesised = /^[ \t]*\(/;
 	let lineStart = 0;
 	while (lineStart < masked.length) {
 		let lineEnd = masked.indexOf('\n', lineStart);
 		if (lineEnd === -1) lineEnd = masked.length;
 		const line = masked.slice(lineStart, lineEnd);
-		if (lead.test(line)) {
+		const opensParenthesised = parenthesised.test(line);
+		if (lead.test(line) || opensParenthesised) {
 			const arrow = entryArrow(masked, lineStart, lineEnd);
 			if (arrow !== -1 && isWhenEntryArrow(masked, arrow)) {
 				let before = lineStart - 1;
 				while (before >= 0 && /[\s\u0002]/.test(masked.charAt(before))) before -= 1;
-				if (before >= 0 && /[\w)\]\u0001!]/.test(masked.charAt(before))) {
+				// A `}` ends an entry as surely as a name does — a braced body, or
+				// a trailing lambda at the end of one (`-> genre = xs.joinToString {
+				// it.text() }`) — and a `;` after it is still Kotlin's own optional
+				// entry terminator. Only for the `in` form: the parenthesised one
+				// needs `endsAnEntry` to find the arrow the line above ends, and
+				// the arrow of a body that closes on a later line is not there.
+				const ender = opensParenthesised ? /[\w)\]\u0001!]/ : /[\w)\]}\u0001!]/;
+				if (
+					before >= 0 &&
+					ender.test(masked.charAt(before)) &&
+					(!opensParenthesised || endsAnEntry(masked, before))
+				) {
 					edits.push({ start: before + 1, end: before + 1, text: ';' });
 				}
 			}
 		}
 		lineStart = lineEnd + 1;
+	}
+	return edits;
+}
+
+/**
+ * Whether the code line holding `at` is itself a whole `when` entry — its own
+ * arrow, at its own depth — so that what follows it cannot be its condition.
+ *
+ * Asked only of the parenthesised form, which has a reading `in` does not: a
+ * condition broken after an infix *name* — `a or` above `(b) -> x` — continues
+ * onto the parenthesis, and a name is exactly the kind of character this would
+ * otherwise put a `;` after. A line with an entry arrow of its own has already
+ * finished its condition, and its body ends at the newline.
+ */
+function endsAnEntry(masked: string, at: number): boolean {
+	const start = masked.lastIndexOf('\n', at) + 1;
+	const arrow = entryArrow(masked, start, at + 1);
+	return arrow !== -1 && isWhenEntryArrow(masked, arrow);
+}
+
+/**
+ * A trailing comma the pinned grammar predates, in the three places it cannot
+ * read one: before the `>` closing a type-argument or type-parameter list,
+ * before the `->` ending a `when` entry's conditions or a lambda's parameters,
+ * and before the `]` closing an index broken across lines — `table[\n (…),\n]`,
+ * a cipher's lookup.
+ *
+ *     val children: List<
+ *         @Serializable(RankingMangaSerializer::class)
+ *         Ranking,
+ *     >,
+ *
+ *     is ActressFilter,
+ *     is MakerFilter,
+ *     -> { … }
+ *
+ * Kotlin 1.4 made every one of these legal and ktlint's default style writes
+ * them wherever a list breaks across lines, so they arrive exactly where a
+ * formatter put them. Value arguments and parameters already parse with one;
+ * these two do not, and the first is a whole theme's DTO file — a class header,
+ * so every extension on the theme was refused for a comma.
+ *
+ * A trailing comma means nothing: the list is the list without it. So the
+ * comma is blanked to a space, which moves no offset and no newline. The shape
+ * is safe to match without asking what encloses it, because a comma followed
+ * by `>`, `->` or `]` has no other reading in Kotlin — `f(a, > b)` is not an
+ * expression, a comparison never begins with `>`, and nothing begins with `]`.
+ */
+function trailingCommas(masked: string): Edit[] {
+	const edits: Edit[] = [];
+	for (let at = masked.indexOf(','); at !== -1; at = masked.indexOf(',', at + 1)) {
+		let next = at + 1;
+		while (
+			next < masked.length &&
+			(/\s/.test(masked.charAt(next)) || masked.charAt(next) === COMMENT_FILL)
+		) {
+			next += 1;
+		}
+		const character = masked.charAt(next);
+		if (
+			character === '>' ||
+			character === ']' ||
+			(character === '-' && masked.charAt(next + 1) === '>')
+		) {
+			edits.push({ start: at, end: at + 1, text: ' ' });
+		}
+	}
+	return edits;
+}
+
+/**
+ * `HttpUrl.Builder.() -> Unit` — a function type whose receiver is a dotted
+ * name, which the pinned grammar cannot read (`Builder.() -> Unit` it can).
+ *
+ * The receiver's own dots become underscores, `HttpUrl_Builder.() -> Unit`:
+ * the same length, so no offset moves, and a name the grammar reads as one
+ * type identifier. Nothing is lost by it, because a type is never emitted —
+ * what the emitter needs from a function type is only *that* it has a
+ * receiver, which is the `.` in front of the parameter list, and that is kept.
+ * See `receiverArity` in `emit.ts` for what it does with that.
+ *
+ * Matched only in front of `.(`, whose closing parenthesis is followed by
+ * `->`: no Kotlin expression has that shape — `a.b.(c)` is not a call — so a
+ * navigation chain in code is never touched.
+ */
+function dottedReceiverTypes(masked: string): Edit[] {
+	const edits: Edit[] = [];
+	const receiver = /\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+(?=(?:<[^<>()]*>)?\.\()/g;
+	let match: RegExpExecArray | null;
+	while ((match = receiver.exec(masked)) !== null) {
+		let open = match.index + match[0].length;
+		if (masked.charAt(open) === '<') open = masked.indexOf('>', open) + 1;
+		const close = callEnd(masked, open + 1);
+		if (close === -1 || !/^[ \t]*->/.test(masked.slice(close, close + 16))) continue;
+		for (let at = match.index; at < match.index + match[0].length; at += 1) {
+			if (masked.charAt(at) === '.') edits.push({ start: at, end: at + 1, text: '_' });
+		}
+	}
+	return edits;
+}
+
+/**
+ * `0..<size` — Kotlin 1.9's open-ended range, which this grammar predates —
+ * respelled as the `until` it means: `0 until size`.
+ *
+ * The two agree on every operand, because of where they sit in Kotlin's
+ * precedence table. `..<` binds tighter than an infix call and `until` *is*
+ * one, but nothing lies between the two levels, so each side of the operator
+ * gathers the same operands either way — `0..<n + 1` and `0 until n + 1` are
+ * both `0` to `n + 1`, and `i in 0..<n` is `i in (0 until n)` in both. The one
+ * shape that would differ is a range as the right operand of *another* infix
+ * call, `a step 0..<n`, which is not Kotlin anyone writes.
+ *
+ * The respelling is four characters longer, all within its own line: no
+ * newline moves, so every line a refusal names is still the one it was.
+ */
+function rangeUntil(masked: string): Edit[] {
+	const edits: Edit[] = [];
+	for (let at = masked.indexOf('..<'); at !== -1; at = masked.indexOf('..<', at + 3)) {
+		edits.push({ start: at, end: at + 3, text: ' until ' });
+	}
+	return edits;
+}
+
+/**
+ * `String?::isNullOrBlank` — a callable reference whose receiver type is
+ * nullable, which the pinned grammar cannot read; `String::isNullOrBlank` it
+ * can.
+ *
+ * The `?` is blanked. The reference names the same function either way —
+ * `isNullOrBlank` is declared on `String?`, and the nullability only widens
+ * what Kotlin's type checker lets it be applied to — and a type is never
+ * emitted, so the reference emits exactly what it would have. It is the
+ * spelling a `takeUnless(String?::isNullOrBlank)` needs to compile in Kotlin,
+ * which is why three extensions wrote it.
+ */
+function nullableCallableReceivers(masked: string): Edit[] {
+	const edits: Edit[] = [];
+	const reference = /\b[A-Z][\w.]*(\?)::/g;
+	let match: RegExpExecArray | null;
+	while ((match = reference.exec(masked)) !== null) {
+		const at = match.index + match[0].length - 3;
+		edits.push({ start: at, end: at + 1, text: ' ' });
 	}
 	return edits;
 }
@@ -688,16 +859,26 @@ function entryArrow(masked: string, from: number, to: number): number {
  * ## What it will not match
  *
  * The target has to be a plain postfix chain on one line — identifiers, dots,
- * safe calls, `!!`, calls, indices and type arguments, and nothing else. A line
- * carrying a brace (`list.forEach { (it.f()).n = 1 }`), a comma, or an operator
- * at depth zero is skipped rather than wrapped around text that was never the
- * target. Named arguments and default parameter values are inside parentheses
+ * safe calls, `!!`, calls, indices and type arguments, and nothing else. A
+ * target carrying a brace, a comma, or an operator at depth zero is skipped
+ * rather than wrapped around text that was never the target. Named arguments and default parameter values are inside parentheses
  * and so are never at depth zero to begin with; `==`, `!=`, `<=` and `>=` are
  * not assignments and are read as such.
  *
+ * Three widenings of the same gap, each measured in a real file:
+ *
+ * - **An index behind a call** — `getTarget(c and 12)[s] = v`, a cipher's
+ *   inner loop — wrapped the same way, `(getTarget(c and 12))[s] = v`.
+ * - **A safe step behind a call** — `firstOrNull()?.date_upload = time`.
+ * - **A statement that starts inside a block opened on the same line** —
+ *   `.apply { firstOrNull()?.date_upload = time }`. Each `{` on the line is a
+ *   candidate start after the line's own; the target is then what follows the
+ *   brace, and `statementLead` sees the brace, which needs no `;`.
+ *
  * It is a no-op on Kotlin this grammar already reads: every shape it matches —
- * a `.name` behind a `)` on the left of an `=` — is one the parser refuses
- * today. `grammar.spec.ts` asserts that over a corpus rather than trusting it.
+ * a `.name` or `[…]` behind a `)` on the left of an `=` — is one the parser
+ * refuses today. `grammar.spec.ts` asserts that over a corpus rather than
+ * trusting it.
  */
 function assignmentsThroughCalls(masked: string): Edit[] {
 	const edits: Edit[] = [];
@@ -705,7 +886,17 @@ function assignmentsThroughCalls(masked: string): Edit[] {
 	while (lineStart < masked.length) {
 		let lineEnd = masked.indexOf('\n', lineStart);
 		if (lineEnd === -1) lineEnd = masked.length;
-		const edit = assignmentThroughCall(masked, lineStart, lineEnd);
+		// The statement may also begin inside a block opened on this line —
+		// `getFilterList().apply { firstInstanceOrNull<SortFilter>()?.state = 1 }`
+		// — so each brace on the line is a candidate start after the line's own.
+		let edit = assignmentThroughCall(masked, lineStart, lineEnd);
+		for (
+			let brace = masked.indexOf('{', lineStart);
+			edit === null && brace !== -1 && brace < lineEnd;
+			brace = masked.indexOf('{', brace + 1)
+		) {
+			edit = assignmentThroughCall(masked, brace + 1, lineEnd);
+		}
 		if (edit !== null) edits.push(...edit);
 		lineStart = lineEnd + 1;
 	}
@@ -753,14 +944,40 @@ function assignmentThroughCall(masked: string, lineStart: number, lineEnd: numbe
 	const operator = assignmentOperator(masked, start, lineEnd);
 	if (operator === -1) return null;
 
+	// `.apply { firstOrNull()?.date_upload = time }` — the statement begins
+	// inside a block opened on this same line, and the target is what follows
+	// that brace rather than the line's first character. Only a brace still
+	// open at the operator counts; one already closed was an argument.
+	const blocks: number[] = [];
+	for (let index = start; index < operator; index += 1) {
+		const character = masked.charAt(index);
+		if (character === '{') blocks.push(index);
+		else if (character === '}') blocks.pop();
+	}
+	if (blocks.length > 0) {
+		start = blocks[blocks.length - 1] + 1;
+		while (start < operator && /[ \t]/.test(masked.charAt(start))) start += 1;
+	}
+
 	let end = operator;
 	while (end > start && /[ \t]/.test(masked.charAt(end - 1))) end -= 1;
 	const target = masked.slice(start, end);
 
-	// The navigation being assigned to, and the call it sits behind.
-	if (!/\.[A-Za-z_$][\w$]*$/.test(target)) return null;
-	const closed = target.lastIndexOf(')');
-	if (closed === -1 || target.charAt(closed + 1) !== '.') return null;
+	// The navigation or index being assigned to, and the call it sits behind:
+	// `a.first().name = x`, or `getTarget(c and 12)[s] = v` — the index form is
+	// the same gap one suffix over, and it took a whole cipher with it.
+	let closed: number;
+	if (/\.[A-Za-z_$][\w$]*$/.test(target)) {
+		closed = target.lastIndexOf(')');
+		const after = target.slice(closed + 1, closed + 3);
+		// `a.first()?.name = x` as well: a safe assignment, skipped when the
+		// receiver is null, and the same gap behind the same call.
+		if (closed === -1 || !(after.startsWith('.') || after === '?.')) return null;
+	} else if (target.endsWith(']')) {
+		const bracket = matchingOpenBracket(target, target.length - 1);
+		if (bracket < 1 || target.charAt(bracket - 1) !== ')') return null;
+		closed = bracket - 1;
+	} else return null;
 	if (!isPostfixChain(target)) return null;
 
 	// A parenthesised expression rather than a call — `(a + b).name = x` parses
@@ -908,6 +1125,20 @@ function enclosingBraceOpener(masked: string, from: number): number {
 		} else if (character === '{') {
 			if (depth === 0) return index;
 			depth -= 1;
+		}
+	}
+	return -1;
+}
+
+/** The `[` opening the index whose `]` is at `close`, or -1. */
+function matchingOpenBracket(text: string, close: number): number {
+	let depth = 0;
+	for (let index = close; index >= 0; index -= 1) {
+		const character = text.charAt(index);
+		if (character === ']') depth += 1;
+		else if (character === '[') {
+			depth -= 1;
+			if (depth === 0) return index;
 		}
 	}
 	return -1;

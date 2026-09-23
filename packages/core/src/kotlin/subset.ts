@@ -160,6 +160,11 @@ export const SUPPORTED_KINDS: ReadonlySet<string> = new Set([
 	// rest parameter. See `Emitter.parameters`.
 	'parameter_modifiers',
 	'variance_modifier',
+	// `List<AnimeFilter<out Any>>`, `Array<out X509Certificate>` — use-site
+	// variance, the container `variance_modifier` sits in when it is written
+	// on a type argument rather than a type parameter. A type is never
+	// emitted, so what it says about subtyping says nothing at run time.
+	'type_projection_modifiers',
 	'reification_modifier',
 	'type_constraints',
 	'type_constraint',
@@ -2693,7 +2698,8 @@ export const SYNTAX_HELPERS: readonly string[] = [
 	'synchronized',
 	'index',
 	'setIndex',
-	'overload'
+	'overload',
+	'receiverLambda'
 ];
 
 /** Helper names referenced by the tables, for the spec that checks the contract. */

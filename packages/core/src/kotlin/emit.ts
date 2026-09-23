@@ -400,6 +400,13 @@ const QUALIFIED_GLOBAL = /^(?:java|javax|kotlin|android)\.[\w.]*?\.?(\w+)$/;
 const INJEKT_GET = /^Injekt\.get<(\w+)>\(\)$/;
 
 /**
+ * File annotations that say something to the compiler or the IDE and nothing
+ * at run time: warning suppression, an opt-in to an experimental API, and the
+ * JVM's name for the file's facade class — which a module has no use for.
+ */
+const INERT_FILE_ANNOTATION = /^@file:(?:Suppress|OptIn|JvmName|JvmMultifileClass|SuppressLint)\b/;
+
+/**
  * The calls that make a member `async` whether or not it said `suspend`.
  *
  * `.execute()` blocks in Kotlin and cannot here; the crypto four are
@@ -542,10 +549,18 @@ const NO_BLOCK_PARAMETER: ReadonlySet<string> = new Set([
 /**
  * Helpers whose reified type argument is the point of the call.
  *
- * Each takes the type as its last parameter and answers "everything" without
- * one, so a dropped type is a wrong value rather than an error.
+ * Each takes the type as its last parameter, and without one answers
+ * something other than what was asked: `filterIsInstance` everything, and
+ * `firstInstance`/`firstInstanceOrNull` nothing — the filter a search reads
+ * its sort from came back null, so `firstInstanceOrNull<SortFilter>()?.state
+ * = 1` set nothing and `firstInstance<OrderFilter>().value` threw on a list
+ * that held one. A dropped type is a wrong value either way.
  */
-const TYPED_HELPERS: ReadonlySet<string> = new Set(['filterIsInstance']);
+const TYPED_HELPERS: ReadonlySet<string> = new Set([
+	'filterIsInstance',
+	'firstInstance',
+	'firstInstanceOrNull'
+]);
 
 const ANIME_FILTER_KINDS: ReadonlySet<string> = new Set([
 	'Header',
@@ -689,6 +704,13 @@ class Refused extends Error {}
 interface Local {
 	readonly text: string;
 	readonly mutable: boolean;
+	/**
+	 * Set on a parameter typed `R.(…) -> T`: how many arguments it takes
+	 * *besides* its receiver. See `invokeReceiverLocal`.
+	 */
+	readonly receiverArity?: number;
+	/** On such a parameter: whether its type is `suspend`, so a call is awaited. */
+	readonly receiverSuspends?: boolean;
 }
 
 /** One `function`-ish emission in progress. */
@@ -946,6 +968,30 @@ export interface Declared {
 	 * `overloadsOf` needs.
 	 */
 	readonly classFunctions: ReadonlyMap<string, ReadonlySet<string>>;
+	/**
+	 * Which parameters of each function are typed `R.() -> T`, by name — or
+	 * null where two declarations of the name disagree. See `ReceiverSlots`.
+	 */
+	readonly receiverLambdas: ReadonlyMap<string, ReceiverSlots | null>;
+}
+
+/**
+ * A function's parameters that take a receiver lambda — `block:
+ * HttpUrl.Builder.() -> Unit` — out of how many it declares.
+ *
+ * A lambda written for one of these reads its receiver as `this` and its bare
+ * calls as calls on it: `searchUrl(page) { addQueryParameter("q", query) }`
+ * adds to the *builder*. Emitted as an ordinary arrow, the same lambda has no
+ * receiver at all, and the bare call lands on the source object instead — a
+ * wrong request, or `this.addQueryParameter is not a function`, depending on
+ * which name it was. So the call site has to know, and knowing is a fact about
+ * the callee's declaration, which may be in the file next door.
+ */
+interface ReceiverSlots {
+	readonly count: number;
+	readonly at: readonly number[];
+	/** The same parameters by name, for a call that passes one by name. */
+	readonly names: readonly string[];
 }
 
 /**
@@ -1002,7 +1048,8 @@ const EMPTY_DECLARED: Declared = {
 	qualifiedSignatures: new Map(),
 	objects: new Set(),
 	overloads: new Map(),
-	classFunctions: new Map()
+	classFunctions: new Map(),
+	receiverLambdas: new Map()
 };
 
 /** What one parsed file declares, without translating any of it. */
@@ -1031,7 +1078,11 @@ export function mergeDeclared(parts: readonly Declared[]): Declared {
 	const overloads = new Map<string, Map<string, OverloadSignature>>();
 	const classFunctions = new Map<string, Set<string>>();
 	const ambiguous = new Set<string>();
+	const receiverLambdas = new Map<string, ReceiverSlots | null>();
 	for (const part of parts) {
+		for (const [name, slots] of part.receiverLambdas) {
+			mergeReceiverSlots(receiverLambdas, name, slots);
+		}
 		for (const [owner, names] of part.classFunctions) {
 			const into = classFunctions.get(owner) ?? new Set<string>();
 			for (const name of names) into.add(name);
@@ -1108,8 +1159,33 @@ export function mergeDeclared(parts: readonly Declared[]): Declared {
 		qualifiedSignatures,
 		objects,
 		overloads: new Map([...overloads].map(([name, shapes]) => [name, [...shapes.values()]])),
-		classFunctions
+		classFunctions,
+		receiverLambdas
 	};
+}
+
+/**
+ * Records `slots` for `name`, or null when a declaration already recorded
+ * disagrees — the call site then cannot tell which lambda it is writing, and
+ * refuses rather than guessing.
+ */
+function mergeReceiverSlots(
+	into: Map<string, ReceiverSlots | null>,
+	name: string,
+	slots: ReceiverSlots | null
+): void {
+	if (!into.has(name)) {
+		into.set(name, slots);
+		return;
+	}
+	const existing = into.get(name) ?? null;
+	const same =
+		existing !== null &&
+		slots !== null &&
+		existing.count === slots.count &&
+		existing.at.join(',') === slots.at.join(',') &&
+		existing.names.join(',') === slots.names.join(',');
+	if (!same) into.set(name, null);
 }
 
 class Emitter {
@@ -1149,6 +1225,9 @@ class Emitter {
 			this.qualifiedSignatures.set(name, shape);
 		}
 		for (const name of neighbours.objects) this.declaredObjects.add(name);
+		for (const [name, slots] of neighbours.receiverLambdas) {
+			mergeReceiverSlots(this.receiverLambdas, name, slots);
+		}
 		for (const [owner, members] of neighbours.classMembers) {
 			const into = this.classMemberIndex.get(owner) ?? new Set<string>();
 			for (const member of members) into.add(member);
@@ -1383,6 +1462,8 @@ class Emitter {
 	private suspendMembers = new Set<string>();
 	private readonly signatures = new Map<string, readonly string[]>(KNOWN_SIGNATURES);
 	private readonly ambiguousSignatures = new Set<string>();
+	/** See `ReceiverSlots`. Declared here and next door, merged by name. */
+	private readonly receiverLambdas = new Map<string, ReceiverSlots | null>();
 	/**
 	 * Every parameter list this build has seen under a name, including the ones
 	 * `signatures` had to give up on.
@@ -1440,7 +1521,8 @@ class Emitter {
 			overloads: new Map(
 				[...this.overloadIndex].map(([name, shapes]) => [name, [...shapes.values()]])
 			),
-			classFunctions: this.classFunctionIndex
+			classFunctions: this.classFunctionIndex,
+			receiverLambdas: this.receiverLambdas
 		};
 	}
 
@@ -1459,6 +1541,8 @@ class Emitter {
 				if (name !== null && ownerIsClass && owner !== null) {
 					this.rememberOverload(name, { ...this.signatureOf(child), owners: [owner] });
 				}
+				const slots = receiverSlots(child);
+				if (name !== null && slots !== null) mergeReceiverSlots(this.receiverLambdas, name, slots);
 				if (name !== null && receiverOf(child) === null) {
 					this.rememberSignature(name, this.parameterNames(child));
 					// Also under the class that declares it.
@@ -1888,6 +1972,18 @@ class Emitter {
 			// *file's* alias as a member, and the extension with it.
 			case 'type_alias':
 				return null;
+			// `@file:Suppress("SpellCheckingInspection")` is an instruction to the
+			// IDE and the compiler's warnings, and has no existence at run time —
+			// and it refused the whole file as a member named after itself, which
+			// took a filter list or a theme with it for a spell-checker hint.
+			// Only the annotations known to be inert are skipped. The one other
+			// that occurs, `@file:UseSerializers(X::class)`, changes how every
+			// matching type in the file *decodes*, and the decoder here has no
+			// custom serializers to switch to — so it stays refused, by name.
+			case 'file_annotation':
+				return INERT_FILE_ANNOTATION.test(node.text.replace(/\s+/g, ''))
+					? null
+					: this.declineMember(this.nameOf(node) ?? spoken(node), node, spoken(node));
 			case 'class_declaration':
 				return this.classDeclaration(node);
 			case 'object_declaration':
@@ -2005,6 +2101,33 @@ class Emitter {
 					'translate members against a guessed class declaration.';
 				return null;
 			}
+		}
+
+		// `List<@Serializable(RankingMangaSerializer::class) Ranking>` — a
+		// custom serializer named on a type argument of a constructor property.
+		// It decodes each element through the extension's own
+		// `transformDeserialize` before the class sees it, and the decoder here
+		// is a structural walk with no custom serializers: the annotation would
+		// be read past, and every element decoded as the raw JSON the serializer
+		// existed to reshape — a tuple array read as a record, every field
+		// `undefined`. Refused by name, and graphed, so it blocks exactly the
+		// members that reach the class and no others. Only reachable at all
+		// since `trailingCommas` in `grammar.ts` let the one file carrying it
+		// parse.
+		const serializer = typeArgumentSerializer(node);
+		if (serializer !== null) {
+			this.graph.push({
+				member: name,
+				owner: this.owner,
+				construction: false,
+				references: mentions(node),
+				calls: callEdges(node)
+			});
+			return this.declineMember(
+				name,
+				node,
+				`a custom serializer \`${serializer}\` on a type argument`
+			);
 		}
 
 		// A supertype this file supplies is emitted as a real `extends`; one it
@@ -3615,9 +3738,30 @@ class Emitter {
 		if (reified.length > 0) {
 			this.reifiedTypes = new Map(reified.map((one) => [one, reifiedBinding(one)]));
 		}
+		// The parameters typed `R.() -> T`, so a call of one inside the body is
+		// given its receiver. See `invokeReceiverLocal`.
+		const list = kids(node).find((child) => child.type === 'function_value_parameters');
+		const receiverParams = kids(list)
+			.filter((child) => child.type === 'parameter')
+			.map((child) => ({
+				name: this.nameOf(child),
+				arity: receiverArity(child),
+				suspends: /^suspend\b/.test(
+					kids(child).find((part) => part.type === 'type_modifiers')?.text ?? ''
+				)
+			}))
+			.filter(
+				(one): one is { name: string; arity: number; suspends: boolean } =>
+					one.name !== null && one.arity !== null
+			);
 		let emitted;
 		try {
-			emitted = this.functionScope('function', null, names, () => this.functionBody(body));
+			emitted = this.functionScope('function', null, names, () => {
+				for (const one of receiverParams) {
+					this.declareReceiverLocal(one.name, one.arity, one.suspends);
+				}
+				return this.functionBody(body);
+			});
 		} finally {
 			this.receiverParam = previousReceiver;
 			this.reifiedTypes = previousReified;
@@ -3749,10 +3893,21 @@ class Emitter {
 				spreadAt = names.length;
 				text.push(`...${this.safe(pending.name)}`);
 			} else {
+				// `block: Headers.Builder.() -> Unit = {}` — a default that is itself
+				// a receiver block, and has to be one for the same reason a block
+				// written at the call does. See `ReceiverSlots`.
+				const receiverDefault =
+					fallback !== null &&
+					fallback.type === 'lambda_literal' &&
+					receiverArity(pending.node) !== null;
 				text.push(
 					fallback === null
 						? this.safe(pending.name)
-						: `${this.safe(pending.name)} = ${this.expr(fallback)}`
+						: `${this.safe(pending.name)} = ${
+								receiverDefault
+									? this.receiverLambdaValue(fallback, pending.name)
+									: this.expr(fallback)
+							}`
 				);
 			}
 			names.push(pending.name);
@@ -4271,8 +4426,9 @@ class Emitter {
 			if (destructuring !== undefined) this.refuse(node, 'a destructuring with no value');
 			const bare = this.propertyName(node);
 			if (bare === null) this.refuse(node, 'an unnamed local');
-			this.declare(bare, true);
-			return `let ${this.safe(bare)};`;
+			const unset = this.localBinding(bare);
+			this.declareAs(bare, unset, true);
+			return `let ${unset};`;
 		}
 
 		if (destructuring !== undefined) {
@@ -4287,14 +4443,15 @@ class Emitter {
 
 		const name = this.propertyName(node);
 		if (name === null) this.refuse(node, 'an unnamed local');
+		const binding = this.localBinding(name);
 
 		const guarded = this.elvisJump(initialiser);
 		if (guarded !== null) {
 			const value = this.expr(guarded.value);
-			this.declare(name, mutable);
+			this.declareAs(name, binding, mutable);
 			return [
-				`${keyword} ${this.safe(name)} = ${value};`,
-				`if (${this.safe(name)} == null) ${this.stmt(guarded.jump, this.jumpValues.get(guarded.jump))}`
+				`${keyword} ${binding} = ${value};`,
+				`if (${binding} == null) ${this.stmt(guarded.jump, this.jumpValues.get(guarded.jump))}`
 			].join('\n');
 		}
 
@@ -4302,24 +4459,45 @@ class Emitter {
 			// `val x = try { … } catch { return … }`: the `return` belongs to the
 			// enclosing function, so the `try` becomes a statement that assigns and
 			// the `return` stays a real return.
-			this.declare(name, mutable);
-			return [`let ${this.safe(name)};`, this.tail(initialiser, { target: this.safe(name) })].join(
-				'\n'
-			);
+			// Declared after the value is written, because the value is emitted
+			// in the scope *before* the name exists: in Kotlin a local's own
+			// initialiser sees whatever it shadows.
+			const lines = this.tail(initialiser, { target: binding });
+			this.declareAs(name, binding, mutable);
+			return [`let ${binding};`, lines].join('\n');
 		}
 
 		if (this.needsInlining(initialiser)) {
 			// `val x = response.use { … return … }`: same argument as the `try`
 			// above, one construct along. The block is emitted into this function
 			// rather than into a callback, so the `return` is this function's.
-			const lines = this.deliver(initialiser, { target: this.safe(name) });
-			this.declare(name, mutable);
-			return [`let ${this.safe(name)};`, ...lines].join('\n');
+			const lines = this.deliver(initialiser, { target: binding });
+			this.declareAs(name, binding, mutable);
+			return [`let ${binding};`, ...lines].join('\n');
 		}
 
 		const value = this.expr(initialiser);
-		this.declare(name, mutable);
-		return `${keyword} ${this.safe(name)} = ${value};`;
+		this.declareAs(name, binding, mutable);
+		return `${keyword} ${binding} = ${value};`;
+	}
+
+	/**
+	 * The JavaScript name a new local is bound under.
+	 *
+	 * Its own name, unless something already in scope has it. Kotlin lets a
+	 * local shadow a parameter or an outer local — `suspend fun
+	 * fetchMangaUpdate(manga: SManga, chapters: …)` goes on to declare `val
+	 * manga = createManga()` and `val chapters = if (…) … else chapters` —
+	 * and JavaScript does not: a `const` naming a parameter in the function's
+	 * own body is a SyntaxError, so the whole bundle failed to build. Where it
+	 * did build, in a nested block, the `else chapters` read the new binding
+	 * in its dead zone instead of the parameter it meant. A fresh spelling —
+	 * `$` cannot occur in a Kotlin name — is what keeps both readings apart.
+	 */
+	private localBinding(name: string): string {
+		if (this.lookupLocal(name) === null) return this.safe(name);
+		this.temporaries += 1;
+		return `${this.safe(name)}$${this.temporaries}`;
 	}
 
 	private assignment(node: KNode): string {
@@ -4407,6 +4585,29 @@ class Emitter {
 
 		const indexed = this.isIndexedTarget(target);
 		if (indexed && operator !== '=') this.refuse(node, `an indexed \`${operator}\``);
+
+		// **A safe assignment.** `firstOrNull()?.date_upload = time` writes when
+		// the receiver is there and does nothing at all when it is null — the
+		// value is not even evaluated. It was emitted as a plain `.` write, which
+		// throws on the empty list Kotlin was written to tolerate. Read into a
+		// temporary once, and the write goes behind the null test.
+		const steps = target.type === 'directly_assignable_expression' ? kids(target) : [];
+		if (!indexed && steps.slice(1).some(isSafeStep)) {
+			if (steps[steps.length - 1]?.type !== 'navigation_suffix') {
+				this.refuse(node, 'a safe assignment this build cannot read');
+			}
+			// The last step is `.name` or `?.name`, and a name has no dot in it.
+			const whole = this.assignable(target);
+			const dot = whole.lastIndexOf('.');
+			const property = whole.slice(dot + 1);
+			const receiver = whole.slice(0, whole.charAt(dot - 1) === '?' ? dot - 1 : dot);
+			const temporary = this.temporary();
+			return [
+				`const ${temporary} = ${receiver};`,
+				`if (${temporary} != null) ${temporary}.${property} ${operator} ${this.expr(value)};`
+			].join('\n');
+		}
+
 		const write = (text: string): string =>
 			indexed
 				? `${this.helper('setIndex')}(${this.indexedTarget(target).join(', ')}, ${text});`
@@ -4550,7 +4751,10 @@ class Emitter {
 			}
 			const name = kids(suffix)[0]?.text ?? suffix.text.replace(/^[.?]+/, '');
 			if (name.length === 0) this.refuse(suffix, 'an assignment to an unnamed property');
-			target = `${target}.${name}`;
+			// `a?.b.c = x`: a safe step on the way to the target is a safe *read*,
+			// and JavaScript's own `?.` is exactly that for a property. The last
+			// step is the write, and its guard is `assignment`'s — see there.
+			target = `${target}${isSafeStep(suffix) ? '?.' : '.'}${name}`;
 		}
 		return target;
 	}
@@ -5484,6 +5688,18 @@ class Emitter {
 		if (name === null) this.refuse(callee, 'a call through something with no name');
 		const safe = suffix.allChildren[0]?.type === '?.';
 
+		// `newBuilder().block()` — a parameter typed `R.() -> T`, invoked on an
+		// explicit receiver. Kotlin resolves a member of the receiver first, and
+		// no receiver type this ecosystem uses has a member called what these
+		// parameters are called (`block`, `query`, `configure`).
+		const receiverLocal = receiver.type === 'super_expression' ? null : this.lookupLocal(name);
+		if (receiverLocal?.receiverArity !== undefined) {
+			const target = this.expr(receiver);
+			if (!safe) return this.invokeReceiverLocal(suffix, receiverLocal, target, args, lambda);
+			const inner = this.invokeReceiverLocal(suffix, receiverLocal, '__r', args, lambda);
+			return `${this.helper('sc')}(${target}, (__r) => ${inner})`;
+		}
+
 		if (receiver.type === 'super_expression') {
 			// **A superclass this build translated is a real JavaScript one.**
 			//
@@ -6015,6 +6231,11 @@ class Emitter {
 			return suspends ? this.awaited(call) : call;
 		}
 
+		const receiverLocal = this.lookupLocal(name);
+		if (receiverLocal?.receiverArity !== undefined) {
+			return this.invokeReceiverLocal(callee, receiverLocal, null, args, lambda);
+		}
+
 		const local = this.lookup(name);
 		if (local !== null) {
 			const call = `${local}(${this.callArguments(name, args, lambda, labelled, false).join(', ')})`;
@@ -6113,6 +6334,12 @@ class Emitter {
 					this.callArguments(name, args, lambda, labelled, RECEIVER_SCOPE.has(name)),
 					1
 				);
+				// The type, as the written-receiver path passes it — see
+				// `TYPED_HELPERS`. `apply { firstInstanceOrNull<SortFilter>() }` is
+				// the implicit spelling of the same call.
+				if (TYPED_HELPERS.has(helper) && typeArgument !== null && args.length === 0) {
+					withLambda.push(this.typeReference(typeArgument));
+				}
 				const call = `${this.helper(helper)}(${[implicit, ...withLambda].join(', ')})`;
 				const suspends = AWAITING_HELPERS.has(helper) || this.asyncLambdas > before;
 				return suspends ? this.awaited(call) : call;
@@ -6211,16 +6438,74 @@ class Emitter {
 		receiverForm: boolean,
 		model: string | null = null
 	): string[] {
+		const slots = receiverForm ? undefined : this.receiverLambdas.get(name);
+		if (slots === null && lambda !== null) {
+			this.refuse(
+				lambda,
+				`a lambda passed to \`${name}\`, declared both with and without a receiver`
+			);
+		}
 		const out = this.plainArguments(name, args);
 		// An unlabelled lambda carries an implicit label: the name of the
 		// function it was passed to. `return@map` inside `.map {}` is ordinary
 		// Kotlin, and it is a return from the lambda, which translates.
 		if (lambda !== null) {
-			out.push(
-				this.lambda(lambda, receiverForm, labelled ?? name, !NO_BLOCK_PARAMETER.has(name), model)
-			);
+			// A trailing lambda is the last parameter, and when that parameter is
+			// typed `R.() -> T` the block is a receiver block. See `ReceiverSlots`.
+			const last = slots === undefined || slots === null ? -1 : slots.count - 1;
+			if (slots !== undefined && slots !== null && slots.at.includes(last)) {
+				out.push(this.receiverLambdaValue(lambda, labelled ?? name));
+			} else {
+				out.push(
+					this.lambda(lambda, receiverForm, labelled ?? name, !NO_BLOCK_PARAMETER.has(name), model)
+				);
+			}
 		}
 		return out;
+	}
+
+	/**
+	 * A block for a parameter typed `R.() -> T`, in the shape such a value
+	 * travels in here: a receiver function, taking its receiver first. See
+	 * `receiverLambda` in the runtime for why the two shapes meet there.
+	 */
+	private receiverLambdaValue(lambda: KNode, label: string): string {
+		return `${this.helper('receiverLambda')}(${this.lambda(lambda, true, label, false)})`;
+	}
+
+	/**
+	 * Refuses the receiver-lambda call shapes this build does not write.
+	 *
+	 * Only a *trailing* block is converted as a receiver block. A lambda passed
+	 * inside the parentheses to a receiver parameter would take the ordinary
+	 * arrow path and lose its receiver without a word, so it is refused; so is
+	 * any lambda to a name declared twice with different receiver parameters,
+	 * where which one this call means is not something the text says. Asked
+	 * of every argument list, because a call with no trailing block never
+	 * reaches `callArguments` at all.
+	 */
+	private checkReceiverArguments(name: string, args: KNode[]): void {
+		const slots = this.receiverLambdas.get(name);
+		if (slots === undefined) return;
+		const literal = (arg: KNode): boolean =>
+			kids(arg).some((part) => part.type === 'lambda_literal' || part.type === 'annotated_lambda');
+		if (slots === null) {
+			const found = args.find(literal);
+			if (found !== undefined) {
+				this.refuse(
+					found,
+					`a lambda passed to \`${name}\`, declared both with and without a receiver`
+				);
+			}
+			return;
+		}
+		args.forEach((arg, index) => {
+			if (!literal(arg)) return;
+			const named = this.argumentName(arg);
+			if (named === null ? slots.at.includes(index) : slots.names.includes(named)) {
+				this.refuse(arg, `a receiver lambda passed to \`${name}\` inside its parentheses`);
+			}
+		});
 	}
 
 	/**
@@ -6262,6 +6547,7 @@ class Emitter {
 	}
 
 	private plainArguments(name: string, args: KNode[], owner: string | null = null): string[] {
+		this.checkReceiverArguments(name, args);
 		const named = args.filter((arg) => arg.allChildren.some((child) => child.type === '='));
 		if (named.length === 0) return args.flatMap((arg) => this.argumentExpressions(arg));
 
@@ -7597,6 +7883,65 @@ class Emitter {
 		});
 	}
 
+	/** A local bound under a JavaScript name other than its own. See `localBinding`. */
+	private declareAs(name: string, text: string, mutable: boolean): void {
+		this.scopes[this.scopes.length - 1]?.set(name, { text, mutable });
+	}
+
+	/** A parameter typed `R.(…) -> T`, taking `arity` arguments besides `R`. */
+	private declareReceiverLocal(name: string, arity: number, suspends: boolean): void {
+		this.scopes[this.scopes.length - 1]?.set(name, {
+			text: this.safe(name),
+			mutable: false,
+			receiverArity: arity,
+			receiverSuspends: suspends
+		});
+	}
+
+	/**
+	 * A call of a parameter typed `R.(…) -> T`, which takes its receiver first.
+	 *
+	 * Kotlin has three spellings of one call and all three land here:
+	 * `builder.block(x)` names the receiver in front, `block(builder, x)` passes
+	 * it as the first argument, and `block(x)` inside `apply { … }` leaves it
+	 * implicit — the innermost receiver in scope, which is `this` in a receiver
+	 * block and `__recv` in an extension function. Where there is no receiver in
+	 * scope but the class itself, the call is refused rather than handed the
+	 * source object: that would be a receiver of a type the block never takes.
+	 *
+	 * Told apart by argument count against the declared arity, which is what
+	 * the Kotlin compiler does too.
+	 */
+	private invokeReceiverLocal(
+		node: KNode,
+		local: Local,
+		explicit: string | null,
+		args: KNode[],
+		lambda: KNode | null
+	): string {
+		const arity = local.receiverArity ?? 0;
+		if (lambda !== null) this.refuse(lambda, 'a lambda passed to a receiver function parameter');
+		const passed = this.plainArguments('', args);
+		let all: string[];
+		if (explicit !== null) {
+			if (passed.length !== arity)
+				this.refuse(node, 'a receiver function called with the wrong arguments');
+			all = [explicit, ...passed];
+		} else if (passed.length === arity + 1) {
+			all = passed;
+		} else if (passed.length === arity) {
+			const implicit = this.receiverAlias() ?? this.receiverParam;
+			if (implicit === null) {
+				this.refuse(node, 'a receiver function called with no receiver in reach');
+			}
+			all = [implicit, ...passed];
+		} else {
+			this.refuse(node, 'a receiver function called with the wrong arguments');
+		}
+		const call = `${local.text}(${all.join(', ')})`;
+		return local.receiverSuspends === true ? this.awaited(call) : call;
+	}
+
 	private lookup(name: string): string | null {
 		return this.lookupLocal(name)?.text ?? null;
 	}
@@ -7853,6 +8198,74 @@ function kids(node: KNode | null | undefined): readonly KNode[] {
 	// operand — is the last one.
 	const nulls = node.allChildren.filter((child) => child.type === 'null');
 	return nulls.length === 0 ? named : [...named, ...nulls];
+}
+
+/**
+ * The function type a parameter is declared with, looking through `( … )?`.
+ */
+function parameterFunctionType(parameter: KNode): KNode | null {
+	let type = kids(parameter).find(
+		(child) => child.type === 'function_type' || child.type === 'nullable_type'
+	);
+	if (type?.type === 'nullable_type') {
+		const inner = kids(type).find((child) => child.type === 'parenthesized_type');
+		type = kids(inner).find((child) => child.type === 'function_type');
+	}
+	return type ?? null;
+}
+
+/**
+ * For a parameter typed `R.(A, B) -> T`, how many arguments it takes besides
+ * its receiver — here, 2. Null for any other parameter.
+ *
+ * The receiver is the `.` in front of the parameter list, which is the only
+ * part of the type that says so; the receiver's own name is not needed, and a
+ * dotted one arrives respelled — see `dottedReceiverTypes` in `grammar.ts`.
+ */
+function receiverArity(parameter: KNode): number | null {
+	const type = parameterFunctionType(parameter);
+	if (type === null) return null;
+	const parts = type.allChildren;
+	const list = parts.findIndex((child) => child.type === 'function_type_parameters');
+	if (list <= 0 || parts[list - 1].type !== '.') return null;
+	return kids(parts[list]).length;
+}
+
+/** See `ReceiverSlots`. Null for a function with no function-typed parameter. */
+function receiverSlots(node: KNode): ReceiverSlots | null {
+	const list = kids(node).find((child) => child.type === 'function_value_parameters');
+	const parameters = kids(list).filter((child) => child.type === 'parameter');
+	if (!parameters.some((parameter) => parameterFunctionType(parameter) !== null)) return null;
+	const at: number[] = [];
+	const names: string[] = [];
+	parameters.forEach((parameter, index) => {
+		if (receiverArity(parameter) === null) return;
+		at.push(index);
+		const name = kids(parameter).find((child) => child.type === 'simple_identifier')?.text;
+		if (name !== undefined) names.push(name);
+	});
+	return { count: parameters.length, at, names };
+}
+
+/**
+ * The serializer a `@Serializable(X::class)` names on a type argument anywhere
+ * in this class's header, or null. See `classDeclaration`.
+ */
+function typeArgumentSerializer(node: KNode): string | null {
+	const header = kids(node).find((child) => child.type === 'primary_constructor');
+	if (header === undefined) return null;
+	for (const child of walk(header)) {
+		if (child.type !== 'type_projection') continue;
+		const modifiers = kids(child).find((part) => part.type === 'type_modifiers');
+		const found = modifiers?.text.match(/@Serializable\s*\(\s*(?:with\s*=\s*)?([\w.]+)::class/);
+		if (found !== undefined && found !== null) return found[1];
+	}
+	return null;
+}
+
+/** True for a `?.name` step, which reads through a null rather than failing on it. */
+function isSafeStep(node: KNode): boolean {
+	return node.type === 'navigation_suffix' && node.allChildren[0]?.type === '?.';
 }
 
 /**

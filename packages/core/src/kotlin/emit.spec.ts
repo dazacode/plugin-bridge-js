@@ -290,6 +290,16 @@ const helpers: Record<string, (...args: never[]) => unknown> = {
 		return value;
 	},
 	run: (value: Any, fn: (this: Any) => Any) => fn.call(value),
+	// As the runtime's: receiver first when there is an argument, `this` when
+	// a caller bound only that — which is what `apply` above does.
+	receiverLambda: (fn: (this: Any, ...rest: Any[]) => Any) =>
+		function (this: Any, ...args: Any[]) {
+			return args.length === 0 ? fn.call(this) : fn.apply(args[0], args.slice(1));
+		},
+	firstInstanceOrNull: (list: Any[], type: Any) =>
+		typeof type === 'function'
+			? (list.find((item) => item instanceof (type as new () => unknown)) ?? null)
+			: null,
 	takeIf: (value: Any, fn: (inner: Any) => boolean) => (fn(value) ? value : null),
 	takeUnless: (value: Any, fn: (inner: Any) => boolean) => (fn(value) ? null : value),
 	// A `Result`, with the members the runtime's own carries. It is not a
@@ -4560,5 +4570,230 @@ describe('the order module-scope declarations are emitted in', () => {
 		);
 
 		expect(found).toBe('https://example.invalid');
+	});
+});
+
+describe('a lambda whose parameter is typed with a receiver', () => {
+	// `block: Headers.Builder.() -> Unit`: the block's bare calls are calls on
+	// the builder, and `this` inside it is the builder. Written as an ordinary
+	// arrow, `set` resolved to the *source* — a wrong request, or `this.set is
+	// not a function` — so both ends have to know: the call site writes a
+	// receiver block, and the function calls it with the receiver first.
+	const builder = {
+		Headers: {
+			Builder: () => ({
+				text: '',
+				set(this: { text: string }, name: string, value: string) {
+					this.text += value;
+					return this;
+				},
+				build(this: { text: string }) {
+					return this.text;
+				}
+			})
+		}
+	};
+
+	it('gives the block its receiver, by every spelling of the call', () => {
+		const found = evaluate(
+			kt(
+				'class Demo : Source() {',
+				'    private fun collect(first: String, block: Headers.Builder.() -> Unit = {}): String =',
+				'        Headers.Builder().apply { set("h", first); block() }.build()',
+				'    private fun viaApply(block: Headers.Builder.() -> Unit): String =',
+				'        Headers.Builder().apply(block).build()',
+				'    private fun explicit(block: Headers.Builder.() -> Unit): String {',
+				'        val made = Headers.Builder()',
+				'        made.block()',
+				'        block(made)',
+				'        return made.build()',
+				'    }',
+				'    private fun Headers.Builder.twice(block: Headers.Builder.(String) -> Unit): String {',
+				'        block("1")',
+				'        block(this, "2")',
+				'        return build()',
+				'    }',
+				'    fun plain() = collect("a")',
+				'    fun trailing(q: String) = collect("a") { set("h", q); set("h", "c") }',
+				'    fun applied() = viaApply { set("h", "x") }',
+				'    fun both() = explicit { set("h", "y") }',
+				'    fun arity() = Headers.Builder().twice { n -> set("h", n) }',
+				'}'
+			),
+			'[new Demo().plain(), new Demo().trailing("b"), new Demo().applied(), new Demo().both(), new Demo().arity()]',
+			builder
+		);
+
+		expect(found).toEqual(['a', 'abc', 'x', 'yy', '12']);
+	});
+
+	it('refuses the shapes whose receiver it would have to guess', () => {
+		// A block inside the parentheses would take the arrow path and lose its
+		// receiver; a call with no receiver in reach but the class would hand
+		// the block the source object.
+		expect(
+			refusalNames(
+				kt(
+					'class Demo : Source() {',
+					'    private fun collect(first: String, block: Headers.Builder.() -> Unit): String = first',
+					'    fun inside() = collect("a", { set("h", "b") })',
+					'    fun named() = collect(first = "a", block = { set("h", "b") })',
+					'    private fun plain(first: String, map: (String) -> String): String = map(first)',
+					'    fun ordinary() = plain(first = "a", map = { it + "b" })',
+					'    fun bare(block: Headers.Builder.() -> Unit) = block()',
+					'}'
+				)
+			)
+		).toEqual([
+			'a receiver lambda passed to `collect` inside its parentheses',
+			'a receiver lambda passed to `collect` inside its parentheses',
+			'a receiver function called with no receiver in reach'
+		]);
+	});
+});
+
+describe('a local that shadows a name already in scope', () => {
+	it('binds it apart, so its own initialiser still reads the outer one', () => {
+		// `suspend fun fetchMangaUpdate(manga, chapters, …)` declaring `val
+		// chapters = if (…) … else chapters` is ordinary Kotlin. As JavaScript a
+		// `const` naming a parameter is a SyntaxError, and in a nested block the
+		// `else chapters` read the new binding before it existed.
+		const demo = instantiate(
+			inClass(
+				'    fun pick(chapters: List<String>, fetch: Boolean): List<String> {',
+				'        val chapters = if (fetch) listOf("new") else chapters',
+				'        return chapters',
+				'    }',
+				'    fun nested(page: Int): Int {',
+				'        var total = page',
+				'        if (page > 0) {',
+				'            val page = page + 1',
+				'            total += page',
+				'        }',
+				'        return total',
+				'    }'
+			)
+		);
+
+		expect(demo.pick(['old'], false)).toEqual(['old']);
+		expect(demo.pick(['old'], true)).toEqual(['new']);
+		expect(demo.nested(2)).toBe(5);
+	});
+});
+
+describe('a safe assignment', () => {
+	it('writes when the receiver is there, and evaluates nothing when it is not', () => {
+		// `firstOrNull()?.date_upload = time` on an empty list does nothing in
+		// Kotlin — not even the right-hand side. It was emitted as a plain `.`
+		// write and threw on exactly the list Kotlin was written to tolerate.
+		const demo = instantiate(
+			kt(
+				'class Row { var name = "" }',
+				'class Demo : Source() {',
+				'    var calls = 0',
+				'    private fun next(): String {',
+				'        calls += 1',
+				'        return "set"',
+				'    }',
+				'    fun mark(rows: List<Row>): List<Row> = rows.apply { firstOrNull()?.name = next() }',
+				'}'
+			)
+		);
+		const Row = function (this: { name: string }) {
+			this.name = '';
+		};
+		expect(demo.mark([])).toEqual([]);
+		expect(demo.calls).toBe(0);
+		const row = new (Row as unknown as new () => { name: string })();
+		demo.mark([row]);
+		expect(row.name).toBe('set');
+		expect(demo.calls).toBe(1);
+	});
+
+	it('passes the type to firstInstanceOrNull, where the call is implicit', () => {
+		// `getFilterList().apply { firstInstanceOrNull<SortFilter>()?.state = 1 }`
+		// — without the type the helper answers null, and the sort the popular
+		// page asks for was silently never set.
+		const found = evaluate(
+			kt(
+				'open class Filter(var state: Int = 0)',
+				'class GenreFilter : Filter()',
+				'class SortFilter : Filter()',
+				'class Demo : Source() {',
+				'    fun popular(filters: List<Filter>) = filters.apply { firstInstanceOrNull<SortFilter>()?.state = 1 }',
+				'}'
+			),
+			'new Demo().popular([new GenreFilter(), new SortFilter()]).map((f) => f.state)'
+		);
+
+		expect(found).toEqual([0, 1]);
+	});
+});
+
+describe('file annotations, and a serializer on a type argument', () => {
+	it('skips an annotation addressed to the IDE, and refuses one that changes decoding', () => {
+		expect(
+			refusalNames(
+				kt(
+					'@file:Suppress("SpellCheckingInspection")',
+					'',
+					'package demo',
+					'',
+					'class Demo : Source() {',
+					'    fun one() = 1',
+					'}'
+				)
+			)
+		).toEqual([]);
+		expect(
+			refusalNames(
+				kt(
+					'@file:UseSerializers(BoxSerializer::class)',
+					'',
+					'package demo',
+					'',
+					'class Box(val a: Int)'
+				)
+			)
+		).toEqual(['`@file:UseSerializers(BoxSerializer::class)`']);
+	});
+
+	it('refuses a custom serializer named on a type argument rather than decoding raw', () => {
+		// `List<@Serializable(RankingMangaSerializer::class) Ranking>` reshapes
+		// each element before the class sees it; decoded structurally, a tuple
+		// array became a record with every field `undefined`.
+		expect(
+			refusalNames(
+				kt(
+					'@Serializable',
+					'class RankingResponse(',
+					'    val children: List<',
+					'        @Serializable(RankingMangaSerializer::class)',
+					'        Ranking,',
+					'        >,',
+					')'
+				)
+			)
+		).toEqual(['a custom serializer `RankingMangaSerializer` on a type argument']);
+	});
+});
+
+describe('use-site variance, which is a fact about types', () => {
+	it('translates a member whose types say `out`', () => {
+		// `mutableListOf<AnimeFilter<out Any>>()` and `chain: Array<out X>?` were
+		// refused as `type_projection_modifiers`, for syntax nothing emits.
+		const demo = instantiate(
+			inClass(
+				'    fun make(): List<Any> {',
+				'        val result = mutableListOf<List<out Any>>()',
+				'        return result',
+				'    }',
+				'    fun count(chain: Array<out String>?) = chain?.size ?: 0'
+			)
+		);
+
+		expect(demo.make()).toEqual([]);
+		expect(demo.count(null)).toBe(0);
+		expect(demo.count(['a', 'b'])).toBe(2);
 	});
 });
