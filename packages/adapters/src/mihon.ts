@@ -700,6 +700,10 @@ export const mihonAdapter: ForeignAdapter = {
 			className: conversion.className,
 			baseUrl,
 			lang,
+			// The `source {}` block's own name when it overrides the module's, as
+			// the generated subclass would have it; the listing's name last, which
+			// is what the index published from the same declaration.
+			name: declared?.name ?? build.name ?? listing.name,
 			keiSource: descendsFromKeiSource(kotlin, conversion.className),
 			// The `.properties` files this extension's own repository keeps
 			// beside its Kotlin, which `Intl` reads through the classloader. An

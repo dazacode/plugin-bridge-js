@@ -60,6 +60,13 @@ export interface MihonEntrypointOptions {
 	readonly baseUrl: string;
 	/** The language this listing serves, which the generated subclass supplies. */
 	readonly lang?: string;
+	/**
+	 * The source's display name, which the generated subclass supplies as well —
+	 * the `source {}` block's own `name`, else the module's. Absent reads as
+	 * the old behaviour: nothing is put on the class, and `name` is whatever the
+	 * translated source makes it.
+	 */
+	readonly name?: string;
 	/** Foreign preference key to manifest setting id. */
 	readonly settingIds?: Readonly<Record<string, string>>;
 	/**
@@ -659,6 +666,7 @@ export function mihonEntrypoint(options: MihonEntrypointOptions): string {
 		`const __PLUGIN_ID = ${JSON.stringify(options.pluginId)};`,
 		`const __BASE_URL = ${JSON.stringify(options.baseUrl.replace(/\/+$/, ''))};`,
 		`const __LANG = ${JSON.stringify(options.lang ?? '')};`,
+		`const __NAME = ${JSON.stringify(options.name ?? '')};`,
 		`const __KEI_SOURCE = ${options.keiSource === true};`
 	].join('\n');
 
@@ -697,7 +705,37 @@ ${options.translatedSource}
  * of them. \`mihon-build-file.ts\` reads those from the module's build file and
  * they are attached here, because a source that builds every request from
  * \`baseUrl\` gets \`undefined/manga/1\` without them.
+ *
+ * **Before the constructor runs, not after it.** The generated class is the
+ * most-derived one, so what it supplies is already there while every class
+ * above it initialises — and extensions rely on that: a single-series template
+ * builds its whole catalogue as \`listOf(Pair(name, baseUrl))\` in a property
+ * initialiser, and its instances list \`"$baseUrl/manga/…"\` the same way.
+ * Attached after \`new\`, every one of those initialisers had already read
+ * \`undefined\`: the shelf listed \`undefined/manga/…\` entries that answered
+ * without a request, in every instance of the template, and nothing was
+ * refused.
+ *
+ * So they go on the class's prototype first, as plain writable values, and
+ * only where nothing in the chain answers the name already. A class that
+ * declares one itself still wins — a constructor parameter or a field
+ * assignment lands on the instance and shadows the prototype, and a getter
+ * (\`by lazy\`, a preference-backed mirror) is found by the \`in\` check and
+ * left alone — which is the order Kotlin resolves an override in. The two
+ * lines after \`new\` stay for a declaration that answered nothing.
  */
+(function (proto) {
+  var supplied = { baseUrl: __BASE_URL, lang: __LANG, name: __NAME };
+  for (var key in supplied) {
+    if (supplied[key].length === 0 || key in proto) continue;
+    Object.defineProperty(proto, key, {
+      value: supplied[key],
+      writable: true,
+      enumerable: false,
+      configurable: true
+    });
+  }
+})(${options.className}.prototype);
 const __source = new ${options.className}();
 if (!__source.baseUrl) __source.baseUrl = __BASE_URL;
 if (!__source.lang && __LANG.length > 0) __source.lang = __LANG;
