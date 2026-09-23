@@ -202,6 +202,13 @@ export const RUNTIME_HELPERS = [
 	'exception',
 	/* MutableList.removeAt/reverse and Map.getValue — see each in the runtime. */
 	'padEnd',
+	'runningFold',
+	'mapIndexedTo',
+	'containsAll',
+	'retainAll',
+	'replaceAfterLast',
+	'windowed',
+	'toByteString',
 	'toStringWith',
 	'findAnyOf',
 	'okioDecodeBase64',
@@ -725,6 +732,7 @@ export const HOST_BACKED_HELPERS: ReadonlySet<RuntimeHelper> = new Set([
 	'toResponseBody',
 	'toStringWith',
 	'okioDecodeBase64',
+	'toByteString',
 	'uri'
 ]);
 

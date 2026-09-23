@@ -1061,6 +1061,13 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 	// StringBuilder has one of its own — see the helper for both.
 	['removeAt', 'removeAt'],
 	['padEnd', 'padEnd'],
+	['runningFold', 'runningFold'],
+	['mapIndexedTo', 'mapIndexedTo'],
+	['containsAll', 'containsAll'],
+	['retainAll', 'retainAll'],
+	['replaceAfterLast', 'replaceAfterLast'],
+	['windowed', 'windowed'],
+	['toByteString', 'toByteString'],
 	['findAnyOf', 'findAnyOf'],
 	// okio's, answering a ByteString or null; an extension's own
 	// `String.decodeBase64()` shadows it, as any declaration does.
@@ -1297,6 +1304,12 @@ export const HOST_METHODS: ReadonlySet<string> = new Set([
 	// preference: without it here the block's implicit receiver lost to the
 	// source object and the default was asked of the extension instead.
 	// java.time's DateTimeFormatterBuilder (`kotlin-time.ts`).
+	// okhttp's CacheControl.Builder (`KOTLIN_HTTP`), which the host's
+	// transport treats as advice; the builder answers these already.
+	'noCache',
+	'noStore',
+	// java.util.Locale's language name — see `getDisplayLanguage`.
+	'getDisplayLanguage',
 	'appendPattern',
 	'parseDefaulting',
 	'toFormatter',
@@ -1940,7 +1953,11 @@ export const FREE_FUNCTIONS: ReadonlyMap<string, string> = new Map([
 	// of its values — see `range` in the runtime.
 	['IntRange', 'range'],
 	['LongRange', 'range'],
+	// `Array(size) { i -> … }` builds, exactly as `List(size) { … }` does.
+	['Array', 'listOfSize'],
 	['HashMap', 'hashMap'],
+	// Thread-safe in Java; there is one thread here, so it is a map.
+	['ConcurrentHashMap', 'hashMap'],
 	['LinkedHashMap', 'hashMap'],
 	['HashSet', 'hashSet'],
 	['LinkedHashSet', 'hashSet'],
@@ -2535,6 +2552,8 @@ export const KNOWN_SIGNATURES: ReadonlyMap<string, readonly string[]> = new Map(
 	// shape as the four above.
 	['equals', ['other', 'ignoreCase']],
 	['findAnyOf', ['strings', 'startIndex', 'ignoreCase']],
+	['windowed', ['size', 'step', 'partialWindows', 'transform']],
+	['replaceAfterLast', ['delimiter', 'replacement', 'missingDelimiterValue']],
 	// `substringBeforeLast('.', missingDelimiterValue = name)` — what the
 	// four answer when the delimiter is absent, which the runtime's helpers
 	// already take third.

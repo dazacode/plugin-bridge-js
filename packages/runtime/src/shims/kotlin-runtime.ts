@@ -1527,6 +1527,16 @@ Locale.prototype.getDisplayName = function (inLocale) {
 };
 
 /**
+ * The language half of that name alone — 'Locale("pt").getDisplayLanguage(
+ * Locale.ENGLISH)' is "Portuguese" — with the same English-only limit, and
+ * java.util's answer for a language it has no name for: the code itself.
+ */
+Locale.prototype.getDisplayLanguage = function (inLocale) {
+  var base = __str(this.language).toLowerCase();
+  return Object.prototype.hasOwnProperty.call(__LANGUAGE_NAMES, base) ? __LANGUAGE_NAMES[base] : base;
+};
+
+/**
  * java.text.Collator, which sorts by a locale's rules.
  *
  * Every use of it here is 'sortedWith(intl.collator)' over filter labels, so
@@ -2610,6 +2620,99 @@ var __k = {
       }
     }
     return null;
+  },
+
+  /**
+   * runningFold(initial) { acc, x -> … }: every accumulator in turn, the
+   * initial one first — a list one longer than the input.
+   */
+  runningFold: function (list, initial, operation) {
+    var items = __arr(list);
+    var out = [initial];
+    var accumulator = initial;
+    for (var i = 0; i < items.length; i += 1) {
+      accumulator = operation(accumulator, items[i]);
+      out.push(accumulator);
+    }
+    return out;
+  },
+
+  /** mapIndexedTo(destination) { index, x -> … }: appended to it, which is answered. */
+  mapIndexedTo: function (list, destination, transform) {
+    return __then(
+      __each(__arr(list), function (item, index) { return transform(index, item); }),
+      function (values) {
+        for (var at = 0; at < values.length; at += 1) __k.add(destination, values[at]);
+        return destination;
+      }
+    );
+  },
+
+  /** containsAll(other): every element of it is in this one, by Kotlin's equality. */
+  containsAll: function (collection, other) {
+    var items = __arr(collection);
+    var wanted = __arr(other);
+    for (var i = 0; i < wanted.length; i += 1) {
+      var found = false;
+      for (var j = 0; j < items.length && !found; j += 1) if (__equal(items[j], wanted[i])) found = true;
+      if (!found) return false;
+    }
+    return true;
+  },
+
+  /**
+   * retainAll { keep }: a MutableList filtered IN PLACE, answering whether
+   * anything went — the list the next line reads is the one that shrank.
+   */
+  retainAll: function (collection, subject) {
+    if (!Array.isArray(collection)) {
+      throw new Error('This converted extension retained elements of something that is not a list.');
+    }
+    var keep = typeof subject === 'function'
+      ? subject
+      : function (item) { return __arr(subject).some(function (one) { return __equal(one, item); }); };
+    var kept = collection.filter(function (item) { return keep(item) === true; });
+    var removed = kept.length !== collection.length;
+    collection.length = 0;
+    for (var i = 0; i < kept.length; i += 1) collection.push(kept[i]);
+    return removed;
+  },
+
+  /**
+   * replaceAfterLast(delimiter, replacement, missing = this): everything after
+   * the last delimiter swapped for the replacement, the delimiter kept.
+   */
+  replaceAfterLast: function (value, delimiter, replacement, missing) {
+    var text = __str(value);
+    var at = text.lastIndexOf(__str(delimiter));
+    if (at === -1) return missing === undefined ? text : __str(missing);
+    return text.slice(0, at + __str(delimiter).length) + __str(replacement);
+  },
+
+  /**
+   * windowed(size, step = 1, partialWindows = false): each run of 'size'
+   * consecutive elements, starting every 'step'; a short tail only when
+   * partial windows were asked for.
+   */
+  windowed: function (list, size, step, partial, transform) {
+    var items = __arr(list);
+    var width = Math.trunc(Number(size));
+    var stride = step === undefined || step === null ? 1 : Math.trunc(Number(step));
+    if (!(width > 0) || !(stride > 0)) {
+      throw new Error('This converted extension asked for windows of size ' + size + ' and step ' + step + '.');
+    }
+    var out = [];
+    for (var at = 0; at < items.length; at += stride) {
+      var window = items.slice(at, at + width);
+      if (window.length < width && partial !== true) break;
+      out.push(typeof transform === 'function' ? transform(window) : window);
+    }
+    return out;
+  },
+
+  /** okio's ByteArray.toByteString(): the same bytes with ByteString's readers. */
+  toByteString: function (bytes) {
+    return __byteString(__bytesOf(bytes).slice());
   },
 
   /** padEnd(length, padChar = ' '), padStart's mirror. */

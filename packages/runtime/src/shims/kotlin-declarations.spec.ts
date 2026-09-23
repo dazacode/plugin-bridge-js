@@ -323,6 +323,57 @@ describe('names a third catalogue pass found, run', () => {
 	});
 });
 
+describe('a fourth pass: collection members, a when-subject binding, qualified constructors', () => {
+	const source = kt(
+		'class Demo {',
+		'    fun running(): String = listOf(1, 2, 3).runningFold(10) { acc, x -> acc + x }.joinToString()',
+		'    fun indexedTo(): String {',
+		'        val into = mutableListOf("start")',
+		'        listOf("a", "b").mapIndexedTo(into) { i, x -> "$i$x" }',
+		'        return into.joinToString()',
+		'    }',
+		'    fun all(): String = "${listOf(1, 2, 3).containsAll(listOf(3, 1))}${listOf(1, 2).containsAll(listOf(4))}"',
+		'    fun retained(): String {',
+		'        val xs = mutableListOf(1, 2, 3, 4)',
+		'        val changed = xs.retainAll { it % 2 == 0 }',
+		'        return "$changed:" + xs.joinToString()',
+		'    }',
+		'    fun afterLast(u: String): String = u.replaceAfterLast("/", "comics.json")',
+		'    fun windows(): String = listOf(1, 2, 3, 4).windowed(size = 2).joinToString { it.joinToString("") } +',
+		'        "|" + listOf(1, 2, 3).windowed(2, 2, true).joinToString { it.joinToString("") }',
+		'    fun built(): String = Array(3) { i -> "x$i" }.joinToString()',
+		'    fun subject(s: String): String = when (val e = s.trim()) {',
+		'        "" -> "empty"',
+		'        else -> "[$e]"',
+		'    }',
+		'    fun path(u: String): String? = java.net.URI(u).path',
+		'    fun language(): String = Locale("pt").getDisplayLanguage(Locale.ENGLISH) + "|" + Locale("xx").getDisplayLanguage(Locale.ENGLISH)',
+		'}'
+	);
+
+	it('runs each with Kotlin’s semantics', async () => {
+		const demo = await instantiate('Demo', source);
+		expect(demo.running()).toBe('10, 11, 13, 16');
+		expect(demo.indexedTo()).toBe('start, 0a, 1b');
+		expect(demo.all()).toBe('truefalse');
+		// In place, answering whether anything went.
+		expect(demo.retained()).toBe('true:2, 4');
+		expect(demo.afterLast('https://a.example.invalid/x/y')).toBe(
+			'https://a.example.invalid/x/comics.json'
+		);
+		expect(demo.windows()).toBe('12, 23, 34|12, 3');
+		expect(demo.built()).toBe('x0, x1, x2');
+		expect(demo.path('https://a.example.invalid/p/q?x=1')).toBe('/p/q');
+		expect(demo.language()).toBe('Portuguese|xx');
+	});
+
+	it('binds a `when` subject for its branches', async () => {
+		const demo = await instantiate('Demo', source);
+		expect(demo.subject('  ')).toBe('empty');
+		expect(demo.subject(' a ')).toBe('[a]');
+	});
+});
+
 describe('a Kotlin Iterable, declared or delegated', () => {
 	// `Iterable<T> by list` was refused; `override fun iterator()` translated
 	// into a class JavaScript could not iterate, and `x.map { }` over it ran

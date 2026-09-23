@@ -391,7 +391,10 @@ const RECEIVER_BUILDERS: ReadonlySet<string> = new Set([
  * blocks on reaches the network through one of them.
  */
 /** `java.net.URLEncoder`, and the other packages written out in full. */
-const QUALIFIED_GLOBAL = /^(?:java|javax|kotlin|android)\.[\w.]*?\.?(\w+)$/;
+const QUALIFIED_GLOBAL = /^(?:java|javax|kotlin|android|rx)\.[\w.]*?\.?(\w+)$/;
+
+/** A package path and nothing else: `java.net`, `java.text`, `rx` — lowercase segments. */
+const PACKAGE_PATH = /^(?:java|javax|kotlin|android|rx)(?:\.[a-z_][a-z0-9_]*)*$/;
 
 /**
  * `Injekt.get<T>()`, whitespace already squeezed out of the text.
@@ -6175,14 +6178,37 @@ class Emitter {
 	 */
 	private whenChain(node: KNode, sink: Sink): string {
 		const subject = kids(node).find((child) => child.type === 'when_subject');
-		const subjectValue = kids(subject)[0];
+		// `when (val e = m.groupValues[1]) { … }` binds the subject to a name
+		// the branches read. The grammar gives the binding first and the value
+		// second; read as the subject, the binding was an undeclared `e`.
+		const binding = kids(subject)[0]?.type === 'variable_declaration' ? kids(subject)[0] : null;
+		const subjectValue = binding === null ? kids(subject)[0] : kids(subject)[1];
+		const bound =
+			binding === null
+				? null
+				: (kids(binding).find((child) => child.type === 'simple_identifier')?.text ?? null);
+		if (binding !== null && (bound === null || subjectValue === undefined)) {
+			this.refuse(binding, 'a `when` subject binding this build could not read');
+		}
 		const name = subjectValue === undefined ? null : this.temporary();
 
 		const lines: string[] = [];
 		if (name !== null && subjectValue !== undefined) {
 			lines.push(`const ${name} = ${this.expr(subjectValue)};`);
 		}
+		// The name is in scope for the branches and nowhere else, as Kotlin's.
+		if (bound !== null && name !== null) {
+			this.pushScope();
+			this.declareAs(bound, name, false);
+		}
+		try {
+			return this.whenBranches(node, sink, name, lines);
+		} finally {
+			if (bound !== null && name !== null) this.popScope();
+		}
+	}
 
+	private whenBranches(node: KNode, sink: Sink, name: string | null, lines: string[]): string {
 		const clauses: string[] = [];
 		let fallback: string | null = null;
 		for (const entry of kids(node)) {
@@ -7224,6 +7250,23 @@ class Emitter {
 		const name = fieldName(written);
 		if (!JS_IDENTIFIER.test(name)) this.refuse(suffix, `\`.${written}()\``);
 		const safe = suffix.allChildren[0]?.type === '?.';
+
+		// `java.net.URI(url)` and `java.text.SimpleDateFormat(…)` — a constructor
+		// written with its package, which is the bare constructor the imported
+		// spelling already reaches. Only a package path in front and only a
+		// name the bare path knows (`FREE_FUNCTIONS`, or a runtime global), so
+		// an unknown qualified class still refuses.
+		if (
+			!safe &&
+			/^[A-Z]/.test(name) &&
+			PACKAGE_PATH.test(receiver.text.replace(/\s+/g, '')) &&
+			(FREE_FUNCTIONS.has(name) || GLOBAL_NAMES.has(name))
+		) {
+			const bare = kids(suffix).find((child) => child.type === 'simple_identifier');
+			if (bare !== undefined) {
+				return this.bareCall(bare, args, lambda, labelled, typeArgument, expected);
+			}
+		}
 
 		// `newBuilder().block()` — a parameter typed `R.() -> T`, invoked on an
 		// explicit receiver. Kotlin resolves a member of the receiver first, and
