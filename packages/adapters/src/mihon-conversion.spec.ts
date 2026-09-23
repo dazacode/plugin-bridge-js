@@ -54,6 +54,7 @@ async function convert(
 			className: 'Extension',
 			baseUrl: BASE_URL,
 			lang: 'en',
+			name: 'Example',
 			resources,
 			keiSource
 		}),
@@ -156,6 +157,94 @@ class Extension {
 		const page = await module.searchCatalog('anything', 1, context());
 		expect(page.entries).toHaveLength(1);
 		expect(page.entries[0].title).toBe('From fetchSearchManga');
+	});
+
+	it('supplies the generated name, lang and baseUrl before the constructor runs', async () => {
+		// The generated subclass is the most-derived class, so what it supplies
+		// is there while the classes above it initialise. A single-series
+		// template builds its catalogue from both in a property initialiser;
+		// attached after construction, every entry read \`undefined/manga/…\`.
+		const module = await load(`
+class Template {
+  constructor() { this.sourceList = [[this.name, this.baseUrl + '/manga/one/', this.lang]]; }
+  fetchPopularManga(page) {
+    return Observable.just(MangasPage(this.sourceList.map((it) => ({ title: it[0] + ' ' + it[2], url: it[1] })), false));
+  }
+}
+class Extension extends Template {}
+`);
+
+		const page = await module.browse('popular', 1, context());
+		expect(page.entries.map((entry) => entry.title)).toEqual(['Example en']);
+		expect((page.entries[0] as { sourceMediaId?: string }).sourceMediaId).toBe(
+			`${BASE_URL}/manga/one/`
+		);
+	});
+
+	it('has the base class’s client, network and headers while the constructor runs', async () => {
+		// `override val client = network.client.newBuilder()…` and `private val
+		// apiHeaders = headers.newBuilder()…` are property initialisers. With
+		// these attached after `new`, the first died at load on
+		// `this.network.client` and the second built from nothing.
+		const module = await load(
+			`
+class Extension {
+  constructor() {
+    this.ownClient = this.network.client.newBuilder().build();
+    this.apiHeaders = this.headers.newBuilder().set('X-Api', '1').build();
+  }
+  fetchPopularManga(page) {
+    const referer = this.apiHeaders.get('Referer');
+    return Observable.just(MangasPage([{ title: referer + ' ' + this.apiHeaders.get('X-Api'), url: '/x' }], false));
+  }
+}
+`,
+			{},
+			true
+		);
+
+		const page = await module.browse('popular', 1, context());
+		expect(page.entries[0].title).toBe(`${BASE_URL}/ 1`);
+	});
+
+	it('answers the base class’s empty getFilterList when the extension calls it undeclared', async () => {
+		// `getSearchMangaList(page, "", getFilterList(null))` in an extension
+		// that declares no filters: KeiSource's answers an empty FilterList.
+		const module = await load(
+			`
+class Extension {
+  async getPopularManga(page) {
+    const filters = this.getFilterList(null);
+    return MangasPage([{ title: 'filters: ' + filters.length, url: '/x' }], false);
+  }
+}
+`,
+			{},
+			true
+		);
+
+		const page = await module.browse('popular', 1, context());
+		expect(page.entries[0].title).toBe('filters: 0');
+	});
+
+	it('leaves a base URL the extension declares itself to win over the generated one', async () => {
+		// A constructor parameter or field lands on the instance and shadows the
+		// prototype; a getter is found in the chain and nothing is put beside it.
+		const module = await load(`
+class Extension {
+  get baseUrl() { return 'https://mirror.example.invalid'; }
+  constructor() { this.name = 'Own name'; }
+  fetchPopularManga(page) {
+    return Observable.just(MangasPage([{ title: this.name, url: this.baseUrl + '/x' }], false));
+  }
+}
+`);
+
+		const page = await module.browse('popular', 1, context());
+		expect(page.entries[0].title).toBe('Own name');
+		expect((page.entries[0] as { sourceMediaId?: string }).sourceMediaId).toBe(
+			'https://mirror.example.invalid/x'
+		);
 	});
 
 	it('awaits a fetchX that suspends, rather than handing back the Observable', async () => {

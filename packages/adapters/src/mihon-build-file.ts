@@ -185,6 +185,25 @@ function callArguments(body: string, call: string): readonly string[] {
 	return Array.from(match[2].matchAll(/"([^"]*)"/g), (found) => found[1]);
 }
 
+/**
+ * The URLs a `mirrors(…)` block offers, in order.
+ *
+ * Two spellings occur: the URLs alone, and each one labelled for the picker —
+ * `mirrors("Label" to "https://…", …)`. Reading every literal of the second
+ * took the first *label* as the base URL, which is not https, so three
+ * listings were turned away as declaring none. A labelled list is read as its
+ * right-hand sides; one mixing the two spellings is not a list this can read.
+ */
+function mirrorUrls(body: string): readonly string[] {
+	const match = /(^|[^A-Za-z0-9_.])mirrors\s*\(([^)]*)\)/.exec(body);
+	if (match === null) return [];
+	const inner = match[2];
+	const labelled = Array.from(inner.matchAll(/"([^"]*)"\s*to\s*"([^"]*)"/g), (found) => found[2]);
+	if (labelled.length === 0) return callArguments(body, 'mirrors');
+	const literals = Array.from(inner.matchAll(/"([^"]*)"/g)).length;
+	return literals === labelled.length * 2 ? labelled : [];
+}
+
 function readBaseUrl(sourceBody: string): MihonBaseUrl | null {
 	// `baseUrl = "…"` — the common case, and the only one a concrete class may use.
 	const flat = stringOf(shallow(sourceBody), 'baseUrl');
@@ -193,7 +212,7 @@ function readBaseUrl(sourceBody: string): MihonBaseUrl | null {
 	const nested = block(sourceBody, 'baseUrl');
 	if (nested === null) return null;
 
-	const mirrors = callArguments(nested.body, 'mirrors');
+	const mirrors = mirrorUrls(nested.body);
 	if (mirrors.length > 0) return { kind: 'mirrors', urls: mirrors };
 
 	// `custom(…)` — the viewer supplies the URL. It may carry a default, and a

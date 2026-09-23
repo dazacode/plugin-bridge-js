@@ -146,7 +146,17 @@ describe('the runtime contract', () => {
 			'subtitleList',
 			'audioList'
 		]);
-		expect(KNOWN_SIGNATURES.get('graphQLPost')).toEqual(['url', 'query', 'variables', 'headers']);
+		// Core's own declaration: headers second, every later parameter defaulted.
+		expect(KNOWN_SIGNATURES.get('graphQLPost')).toEqual([
+			'url',
+			'headers',
+			'query',
+			'operationName',
+			'variables',
+			'extensions',
+			'cache',
+			'json'
+		]);
 	});
 
 	it('does not claim to know an extractor signature this ecosystem reuses', () => {

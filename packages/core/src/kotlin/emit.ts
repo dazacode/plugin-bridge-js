@@ -461,6 +461,13 @@ const LOG_CALL = /^Log\.(?:v|d|i|w|e|wtf)$/;
 const BLOCKING_CALLS =
 	/\.(?:execute|awaitSuccess|await|doFinal|generateKeyPair|verify|proceed)\s*\(|(?<!\bMath)\.sign\s*\(|\bThread\s*\.\s*sleep\s*\(|\b(?:client|[a-z]\w*Client)\s*\.\s*(?:get|post|put|head)\s*\(/;
 
+/**
+ * Members the host calls synchronously, which therefore cannot be emitted
+ * `async`: the headers are built inside every request the extension writes,
+ * `GET(url, headers)`, with no await anywhere to put.
+ */
+const SYNC_HOST_MEMBERS: ReadonlySet<string> = new Set(['headersBuilder', 'configureHeaders']);
+
 /** `BLOCKING_CALLS` less `.proceed(`, for a member called from another file. */
 const CROSS_FILE_BLOCKING_CALLS = new RegExp(
 	BLOCKING_CALLS.source.replace('|verify|proceed)', '|verify)'),
@@ -1140,6 +1147,34 @@ export interface Declared {
 	 * whether to await, from another file.
 	 */
 	readonly entrySuspends: ReadonlySet<string>;
+	/**
+	 * `typealias` declarations: the alias to the type it names (its head, as a
+	 * constructor is called by), and — for an alias with no type parameters of
+	 * its own — to the whole type it stands for, arguments included.
+	 *
+	 * Erased as Kotlin erases them, but only within the file that declared
+	 * them: `typealias LatestQueryVariables = PopularQueryVariables` in a DTO
+	 * file, and `LatestQueryVariables(offset = …)` in the extension next door,
+	 * refused as the constructor of a class nothing declares. And a decode typed
+	 * with one — `parseAs<MangaListDto>()` over `typealias MangaListDto =
+	 * PaginatedResponseDto<MangaDataDto>` — named a type the decoder had no
+	 * registration for, and fell back to the structural walk the typed decoder
+	 * exists to replace.
+	 */
+	readonly aliases: ReadonlyMap<string, string>;
+	readonly aliasTexts: ReadonlyMap<string, string>;
+	/**
+	 * The *computed* properties each class declares — a getter and no backing
+	 * value — which are emitted as a JavaScript `get` on the class's
+	 * prototype rather than assigned in its constructor.
+	 *
+	 * One question needs it: whether an override's `super.popularMangaUrl`
+	 * can be JavaScript's own `super.popularMangaUrl`. For a getter it can —
+	 * the base's getter runs against this instance, which is what Kotlin's
+	 * `super` read does. For a stored property it cannot: the value is on the
+	 * instance, and the override has replaced it.
+	 */
+	readonly classGetters: ReadonlyMap<string, ReadonlySet<string>>;
 }
 
 /**
@@ -1219,7 +1254,10 @@ const EMPTY_DECLARED: Declared = {
 	classFunctions: new Map(),
 	receiverLambdas: new Map(),
 	propertyTypes: new Map(),
-	entrySuspends: new Set()
+	entrySuspends: new Set(),
+	aliases: new Map(),
+	aliasTexts: new Map(),
+	classGetters: new Map()
 };
 
 /** What one parsed file declares, without translating any of it. */
@@ -1252,6 +1290,9 @@ export function mergeDeclared(parts: readonly Declared[]): Declared {
 	const receiverLambdas = new Map<string, ReceiverSlots | null>();
 	const propertyTypes = new Map<string, Map<string, string>>();
 	const entrySuspends = new Set<string>();
+	const aliases = new Map<string, string>();
+	const aliasTexts = new Map<string, string>();
+	const classGetters = new Map<string, Set<string>>();
 	for (const part of parts) {
 		for (const [owner, typed] of part.propertyTypes) {
 			const into = propertyTypes.get(owner) ?? new Map<string, string>();
@@ -1265,6 +1306,14 @@ export function mergeDeclared(parts: readonly Declared[]): Declared {
 			propertyTypes.set(owner, into);
 		}
 		for (const name of part.entrySuspends) entrySuspends.add(name);
+		for (const [owner, names] of part.classGetters) {
+			const into = classGetters.get(owner) ?? new Set<string>();
+			for (const name of names) into.add(name);
+			classGetters.set(owner, into);
+		}
+		for (const [name, head] of part.aliases) if (!aliases.has(name)) aliases.set(name, head);
+		for (const [name, text] of part.aliasTexts)
+			if (!aliasTexts.has(name)) aliasTexts.set(name, text);
 		for (const [name, slots] of part.receiverLambdas) {
 			mergeReceiverSlots(receiverLambdas, name, slots);
 		}
@@ -1349,7 +1398,10 @@ export function mergeDeclared(parts: readonly Declared[]): Declared {
 		classFunctions,
 		receiverLambdas,
 		propertyTypes,
-		entrySuspends
+		entrySuspends,
+		aliases,
+		aliasTexts,
+		classGetters
 	};
 }
 
@@ -1436,6 +1488,15 @@ class Emitter {
 		}
 		for (const name of neighbours.entrySuspends) this.entrySuspends.add(name);
 		for (const [owner, base] of neighbours.classBases) this.classBaseIndex.set(owner, base);
+		// A file's own alias still wins over a neighbour's: `registerAlias` runs
+		// after this and overwrites.
+		for (const [name, head] of neighbours.aliases) this.typeAliases.set(name, head);
+		for (const [owner, names] of neighbours.classGetters) {
+			const into = this.classGetterIndex.get(owner) ?? new Set<string>();
+			for (const name of names) into.add(name);
+			this.classGetterIndex.set(owner, into);
+		}
+		for (const [name, text] of neighbours.aliasTexts) this.typeAliasTexts.set(name, text);
 		for (const [name, shapes] of neighbours.overloads) {
 			for (const shape of shapes) this.rememberOverload(name, shape);
 		}
@@ -1594,6 +1655,8 @@ class Emitter {
 	 * one, because a bare `Rows(...)` is not something this build can build.
 	 */
 	private readonly typeAliases = new Map<string, string>();
+	/** The whole type an alias stands for, where it has no parameters of its own. */
+	private readonly typeAliasTexts = new Map<string, string>();
 	/**
 	 * Types this file declares, registered before anything is emitted.
 	 *
@@ -1848,6 +1911,12 @@ class Emitter {
 	private ownerLabel: string | null = null;
 	private classMembers = new Set<string>();
 	private suspendMembers = new Set<string>();
+	/**
+	 * Properties of the class being emitted whose value is a Promise here: a
+	 * `by lazy { … }` or a getter whose body blocks — see `blockingProperties`.
+	 * A read of one is awaited, as a call to a blocking member is.
+	 */
+	private asyncProperties = new Set<string>();
 	private readonly signatures = new Map<string, readonly string[]>(KNOWN_SIGNATURES);
 	private readonly ambiguousSignatures = new Set<string>();
 	/** See `ReceiverSlots`. Declared here and next door, merged by name. */
@@ -1913,7 +1982,10 @@ class Emitter {
 			classFunctions: this.classFunctionIndex,
 			receiverLambdas: this.receiverLambdas,
 			propertyTypes: this.classPropertyTypes,
-			entrySuspends: this.entrySuspends
+			entrySuspends: this.entrySuspends,
+			aliases: this.typeAliases,
+			aliasTexts: this.typeAliasTexts,
+			classGetters: this.classGetterIndex
 		};
 	}
 
@@ -1996,6 +2068,23 @@ class Emitter {
 						if (param.type !== null) typed.set(param.name, param.type);
 					}
 				}
+				const getters = this.classGetterIndex.get(name) ?? new Set<string>();
+				const bodyMembers = kids(body);
+				for (const [at, member] of bodyMembers.entries()) {
+					// A computed property — a getter and nothing to store — which is
+					// emitted as a real JavaScript `get` on the prototype. See
+					// `Declared.classGetters`.
+					if (
+						member.type === 'property_declaration' &&
+						accessorOf(member, bodyMembers[at + 1], 'getter') !== undefined &&
+						!member.allChildren.some((part) => part.type === '=') &&
+						!kids(member).some((part) => part.type === 'property_delegate')
+					) {
+						const held = this.propertyName(member);
+						if (held !== null) getters.add(held);
+					}
+				}
+				this.classGetterIndex.set(name, getters);
 				for (const member of kids(body)) {
 					if (member.type !== 'property_declaration') continue;
 					const held = this.propertyName(member);
@@ -2046,6 +2135,8 @@ class Emitter {
 	private readonly overloadIndex = new Map<string, Map<string, OverloadSignature>>();
 	/** See `Declared.classFunctions`. */
 	private readonly classFunctionIndex = new Map<string, Set<string>>();
+	/** See `Declared.classGetters`. */
+	private readonly classGetterIndex = new Map<string, Set<string>>();
 	private fieldNameCache: Set<string> | null = null;
 
 	private rememberOverload(name: string, shape: OverloadSignature): void {
@@ -2243,6 +2334,20 @@ class Emitter {
 	 * something, and a cycle here would otherwise hang the emitter rather than
 	 * refuse a member.
 	 */
+	/** Whether the nearest class above that declares `name` declares it as a getter. */
+	private inheritedGetter(base: string, name: string): boolean {
+		const seen = new Set<string>();
+		let at: string | undefined = base;
+		while (at !== undefined && !seen.has(at)) {
+			seen.add(at);
+			if (this.classMemberIndex.get(at)?.has(name) === true) {
+				return this.classGetterIndex.get(at)?.has(name) === true;
+			}
+			at = this.classBaseIndex.get(at);
+		}
+		return false;
+	}
+
 	private baseDeclares(base: string, name: string): boolean {
 		const seen = new Set<string>();
 		let at: string | undefined = base;
@@ -2648,6 +2753,7 @@ class Emitter {
 		// forty lines further down.
 		const outerMembers = this.classMembers;
 		const outerSuspends = this.suspendMembers;
+		const outerAsyncProperties = this.asyncProperties;
 		const outerLabel = this.ownerLabel;
 		const outerSelf = this.selfClass;
 		const outerExtensionProperties = this.extensionProperties;
@@ -2723,6 +2829,7 @@ class Emitter {
 				.filter((found): found is string => found !== null)
 		);
 		for (const name of this.blockingMembers(members)) this.suspendMembers.add(name);
+		this.asyncProperties = this.blockingProperties(members, this.suspendMembers);
 
 		this.registerExtensions(members, 'method');
 		// A companion's members hoist to module scope, so an extension function
@@ -2798,7 +2905,17 @@ class Emitter {
 					this.pushScope();
 					let emitted;
 					try {
-						for (const param of initialiserOnly) this.declare(param.name);
+						// A plain constructor parameter is in scope in an initialiser
+						// and nowhere else. A getter is a member body, where the same
+						// name means the class's property — `state` in a filter group
+						// is the inherited `Filter.Group.state` — and declared here it
+						// read the parameter, which does not exist once the constructor
+						// has returned: "state is not defined" on the first search.
+						const getterOnly =
+							accessorOf(child, detached[0], 'getter') !== undefined &&
+							!child.allChildren.some((part) => part.type === '=') &&
+							!kids(child).some((part) => part.type === 'property_delegate');
+						if (!getterOnly) for (const param of initialiserOnly) this.declare(param.name);
 						emitted = this.classProperty(child, detached);
 					} finally {
 						this.popScope();
@@ -2950,6 +3067,7 @@ class Emitter {
 		this.selfClass = outerSelf;
 		this.classMembers = outerMembers;
 		this.suspendMembers = outerSuspends;
+		this.asyncProperties = outerAsyncProperties;
 		this.extensionProperties = outerExtensionProperties;
 		this.extensionSetters = outerSetters;
 		this.preferenceStores = outerStores;
@@ -3119,9 +3237,19 @@ class Emitter {
 	 * it was emitted — for the text handed to the typed decoder, which looks
 	 * a class up by its registered name rather than through `safe`.
 	 */
-	private scopedTypeText(text: string, own: ReadonlyMap<string, string> = new Map()): string {
+	private scopedTypeText(
+		text: string,
+		own: ReadonlyMap<string, string> = new Map(),
+		depth = 0
+	): string {
 		return text.replace(/\b[A-Z]\w*(?:\.[A-Z]\w*)*/g, (written) => {
 			if (written.includes('.')) return this.qualifiedTypes.get(written) ?? written;
+			// A closed `typealias` is the type it names, arguments and all — see
+			// `Declared.aliasTexts`. Bounded, as `aliased` is: a cycle does not
+			// compile, so one here is a file already being read wrongly.
+			const aliasText = own.has(written) ? undefined : this.typeAliasTexts.get(written);
+			if (aliasText !== undefined && depth < 8)
+				return this.scopedTypeText(aliasText, own, depth + 1);
 			return own.get(written) ?? this.localTypes.get(written) ?? written;
 		});
 	}
@@ -3183,6 +3311,80 @@ class Emitter {
 			}
 		}
 		return blocking;
+	}
+
+	/**
+	 * Properties whose value is a Promise here, and the members that read one.
+	 *
+	 * Kotlin's \`lazy\` blocks: \`override val client by lazy {
+	 * fetchedDomainUrl(); network.client.newBuilder()… }\`, where the helper
+	 * makes a request. The thunk is emitted \`async\`, the memo holds its
+	 * Promise, and every read was \`this.client.newCall(…)\` on the Promise —
+	 * "newCall is not a function" at the first search, out of a bundle that
+	 * reported nothing refused. Measured: sixteen loaded bundles across both
+	 * catalogues held one, and not one read of any was awaited.
+	 *
+	 * So such a property is found the way \`blockingMembers\` finds a method —
+	 * off its source text, a lazy block or a getter that blocks or calls a
+	 * member that does — and every read of it is awaited. A member that reads
+	 * one is itself async, so it joins \`suspends\` and its callers await it
+	 * too; the two grow together to a fixpoint. A read from a property
+	 * initialiser still cannot be awaited, and is refused where it is, as a
+	 * suspending initialiser always was.
+	 */
+	private blockingProperties(members: readonly KNode[], suspends: Set<string>): Set<string> {
+		const properties = new Map<string, string>();
+		for (const [index, child] of members.entries()) {
+			if (child.type !== 'property_declaration') continue;
+			const name = this.propertyName(child);
+			if (name === null) continue;
+			const delegate = kids(child).find((part) => part.type === 'property_delegate');
+			const lazy = delegate !== undefined && /^by\s+lazy\b/.test(delegate.text);
+			const getter = accessorOf(child, members[index + 1], 'getter');
+			if (!lazy && getter === undefined) continue;
+			properties.set(
+				name,
+				getter !== undefined && !kids(child).includes(getter)
+					? `${child.text}\n${getter.text}`
+					: child.text
+			);
+		}
+		const found = new Set<string>();
+		if (properties.size === 0) return found;
+		const functions = new Map<string, string>();
+		for (const child of members) {
+			if (child.type !== 'function_declaration') continue;
+			const name = this.nameOf(child);
+			if (name !== null) functions.set(name, child.text);
+		}
+		const calls = (text: string, name: string) => new RegExp(`\\b${name}\\s*\\(`).test(text);
+		const reads = (text: string, name: string) =>
+			new RegExp(`(?:^|[^\\w.]|this\\.)${name}\\b(?!\\s*[(=])`).test(text);
+		for (let grew = true; grew;) {
+			grew = false;
+			for (const [name, text] of properties) {
+				if (found.has(name)) continue;
+				const blocks =
+					BLOCKING_CALLS.test(text) ||
+					[...suspends].some((other) => calls(text, other)) ||
+					[...found].some((other) => other !== name && reads(text, other));
+				if (blocks) {
+					found.add(name);
+					grew = true;
+				}
+			}
+			for (const [name, text] of functions) {
+				// The host builds these synchronously, so they cannot become
+				// async by reading one; the read is refused there instead — see
+				// `awaitedProperty`.
+				if (suspends.has(name) || SYNC_HOST_MEMBERS.has(name)) continue;
+				if ([...found].some((other) => reads(text, other))) {
+					suspends.add(name);
+					grew = true;
+				}
+			}
+		}
+		return found;
 	}
 
 	/**
@@ -3461,6 +3663,20 @@ class Emitter {
 			}
 			const listed = entries.map((entry) => `${owner}.${this.nameOf(entry) ?? ''}`);
 			lines.push(`${owner}.entries = Object.freeze([${listed.join(', ')}]);`);
+			// What kotlinx writes for an entry renamed by `@SerialName("m")`, for the
+			// encoder. Only the renamed ones; the rest are written as their names.
+			const renamed: Record<string, string> = {};
+			for (const entry of entries) {
+				const entryName = this.nameOf(entry);
+				const written = kids(entry).find((part) => part.type === 'modifiers')?.text ?? '';
+				const serial = /@SerialName\s*\(\s*"([^"]*)"/.exec(written);
+				if (entryName !== null && serial !== null) renamed[entryName] = serial[1];
+			}
+			if (Object.keys(renamed).length > 0) {
+				lines.push(
+					`Object.defineProperty(${owner}, "__kSerialNames", { value: ${JSON.stringify(renamed)} });`
+				);
+			}
 			lines.push(`${owner}.values = function () { return ${owner}.entries.slice(); };`);
 			lines.push(
 				`${owner}.valueOf = function (value) { for (const entry of ${owner}.entries) if (entry.name === value) return entry; throw new Error(${JSON.stringify(`No enum constant ${name}.`)} + value); };`
@@ -3516,14 +3732,17 @@ class Emitter {
 						let emitted: string | null;
 						try {
 							emitted = this.member(key, child, () => {
-								const accessor = this.moduleGetter(child, members[index + 1], key);
 								// An object's getter is a member of the literal, where
 								// JavaScript has a `get` of its own to say it with. Its
-								// body runs on read, so it may reach a sibling.
-								if (accessor !== null) {
-									this.emittingObjectProperty = outerProperty;
-									return `get ${JSON.stringify(key)}() ${accessor}`;
-								}
+								// body runs on read, so it may reach a sibling — and
+								// reaches it through the object, not the hoisted const:
+								// emitted while this was still the object's, a getter
+								// over a `var` read the value it was declared with
+								// forever, whatever was assigned since.
+								this.emittingObjectProperty = outerProperty;
+								const accessor = this.moduleGetter(child, members[index + 1], key);
+								if (accessor !== null) return `get ${JSON.stringify(key)}() ${accessor}`;
+								this.emittingObjectProperty = name;
 								// `private val GENRES_LIST by lazy { getPairListByIndex(0) }`
 								// — inside an `object`, `lazy` is load-bearing rather than
 								// decorative. The block reads a `lateinit` that the first
@@ -3614,7 +3833,17 @@ class Emitter {
 				);
 			}
 
-			const literal = `const ${self} = Object.freeze(${block(fields.map(comma))});`;
+			// Frozen, unless the object declares a `var`: `object Intl { var lang =
+			// "zh" }` is assigned from a template's constructor, and a frozen
+			// literal made that assignment a TypeError at load. Sealed instead,
+			// so the shape still cannot grow and a `var` can be written — a
+			// `val` cannot be assigned in Kotlin in the first place.
+			const mutable = members.some(
+				(child) =>
+					child.type === 'property_declaration' &&
+					kids(child).some((part) => part.type === 'binding_pattern_kind' && part.text === 'var')
+			);
+			const literal = `const ${self} = Object.${mutable ? 'seal' : 'freeze'}(${block(fields.map(comma))});`;
 			// `object X : JsonTransformingSerializer<T>(ListSerializer(Item.serializer()))`
 			// — the typed decoder runs X's `transformDeserialize` and then the
 			// base serializer, which it can only do as "decode as this type".
@@ -4755,6 +4984,13 @@ class Emitter {
 		const head = kids(target).find((child) => child.type === 'type_identifier');
 		if (name === null || head === undefined || head.text === name) return;
 		this.typeAliases.set(name, head.text);
+		// A generic alias — `typealias Page<T> = Response<List<T>>` — would need
+		// its arguments substituted, which is a type checker; only a closed one
+		// stands for a whole type.
+		const generic = kids(node).some((child) => child.type === 'type_parameters');
+		if (!generic && target !== undefined) {
+			this.typeAliasTexts.set(name, target.text.replace(/\s+/g, ''));
+		}
 	}
 
 	/**
@@ -4893,7 +5129,8 @@ class Emitter {
 				typeOf(parameter),
 				parameter.allChildren.some((part) => part.type === '='),
 				CONTEXTUAL.test(written) ? CONTEXTUAL_FIELD : named(written),
-				/@Transient\b/.test(written)
+				/@Transient\b/.test(written),
+				encodeDefaultMode(written)
 			]);
 		}
 
@@ -4917,7 +5154,8 @@ class Emitter {
 				typeOf(kids(member).find((part) => part.type === 'variable_declaration')),
 				true,
 				CONTEXTUAL.test(written) ? CONTEXTUAL_FIELD : named(written),
-				false
+				false,
+				encodeDefaultMode(written)
 			]);
 		});
 
@@ -4950,7 +5188,10 @@ class Emitter {
 		const make = `(__a) => ${isData ? '' : 'new '}${this.safe(name)}(...__a)`;
 		const map = custom.length === 0 ? 'null' : `{ ${custom.join(', ')} }`;
 		return {
-			text: `${this.helper('serial')}(${JSON.stringify(name)}, ${make}, ${JSON.stringify(meta)}, ${map});`
+			// The class last, so an instance can be traced back to this — the
+			// encoder writes a record from the same registration the decoder
+			// builds one from.
+			text: `${this.helper('serial')}(${JSON.stringify(name)}, ${make}, ${JSON.stringify(meta)}, ${map}, ${this.safe(name)});`
 		};
 	}
 
@@ -5186,6 +5427,29 @@ class Emitter {
 				case 'statements':
 					this.expectAssignments(node);
 					break;
+			}
+			// A getter written on its own line is a *sibling* of its property in
+			// a class body, not a child of it — the case above never saw it, and
+			// `val token: Dto get() { …; return text.parseAs() }` was refused
+			// for a type argument the declaration had written down. The same
+			// siblings `classProperty` is handed: the next one or two, getter
+			// or setter, in either order.
+			const members = kids(node);
+			for (const [index, member] of members.entries()) {
+				if (member.type !== 'property_declaration') continue;
+				if (kids(member).some((child) => child.type === 'getter')) continue;
+				const declaration = kids(member).find((child) => child.type === 'variable_declaration');
+				const type = typeText(kids(declaration).find((child) => child.type.endsWith('type')));
+				if (type === null) continue;
+				for (const next of members.slice(index + 1, index + 3)) {
+					if (next.type !== 'getter' && next.type !== 'setter') break;
+					if (next.type !== 'getter') continue;
+					this.expectBody(
+						kids(next).find((child) => child.type === 'function_body'),
+						type
+					);
+					break;
+				}
 			}
 		}
 	}
@@ -5904,7 +6168,38 @@ class Emitter {
 			}
 			case 'do_while_statement': {
 				const body = kids(node).find((child) => child.type === 'control_structure_body') ?? null;
-				return `do ${block(this.loopBody(body))} while (${this.expr(kids(node)[kids(node).length - 1])});`;
+				const condition = kids(node)[kids(node).length - 1];
+				// Kotlin's `do { val document = … } while (document.selectFirst(…)
+				// != null)` reads, in the condition, a name the body declared — its
+				// scope reaches the condition. JavaScript's block scope ends at the
+				// `}`, so emitted as written the condition read a name nothing
+				// declared: "document is not defined" on the first chapter list.
+				// Such a loop is written as the body followed by the test, inside
+				// the block. A `continue` there would skip the test, which in Kotlin
+				// it does not, so that one combination is refused.
+				const declared = new Set(
+					kids(kids(body).find((child) => child.type === 'statements'))
+						.filter((child) => child.type === 'property_declaration')
+						.map((child) => this.propertyName(child))
+						.filter((found): found is string => found !== null)
+				);
+				const reads = [...walk(condition)].some(
+					(part) => part.type === 'simple_identifier' && declared.has(part.text)
+				);
+				if (reads) {
+					if (body !== null && /\bcontinue\b/.test(body.text)) {
+						this.refuse(node, 'a `continue` in a `do … while` whose condition reads the body');
+					}
+					this.loops.push('loop');
+					try {
+						const lines = this.bodyLines(body);
+						const test = this.expr(condition);
+						return `for (;;) ${block([...lines, `if (!(${test})) break;`])}`;
+					} finally {
+						this.loops.pop();
+					}
+				}
+				return `do ${block(this.loopBody(body))} while (${this.expr(condition)});`;
 			}
 			case 'jump_expression':
 				return this.jump(node, detached);
@@ -6413,7 +6708,13 @@ class Emitter {
 			// which is not JavaScript at all — the bundle failed to parse.
 			const receiverSelf = inner !== undefined && inner.type === 'this_expression';
 			if (receiverSelf || (local !== null && !local.mutable)) {
-				const receiver = this.assignable(target);
+				// The local itself, as Kotlin resolves it: a name declared in this
+				// scope wins over any implicit receiver. Asked of `assignable`,
+				// which writes an `apply {}` block's bare names to its receiver,
+				// `chapters += …` inside `Observable.fromCallable { … }` mutated
+				// `this.chapters` — undefined — and the page loop died on the
+				// first chapter list.
+				const receiver = local !== null && !receiverSelf ? local.text : this.assignable(target);
 				// `all += page.entries ?: throw Exception("…")` — the elvis guard
 				// below, on the one path that returned before reaching it. The
 				// guard is a statement in front of the mutation, which is where
@@ -6623,7 +6924,14 @@ class Emitter {
 				target = backing;
 			} else if (
 				local !== null &&
-				(receiver === null || this.lookupLocal(inner.text)?.mutable === true)
+				(receiver === null ||
+					this.lookupLocal(inner.text)?.mutable === true ||
+					// `state.forEach { it.state = true }` inside an `apply`: the
+					// write is to a member *of* the local, which only reads the
+					// local — and reading a `val` is exactly what one is for. The
+					// argument above is about assigning the name itself. Sent to
+					// the receiver, this wrote `this.it.state` and threw.
+					parts.length > 1)
 			) {
 				target = local;
 			} else if (receiver !== null) {
@@ -7545,6 +7853,20 @@ class Emitter {
 					return `(...__a) => ${this.helper(extension)}(...__a)`;
 				}
 			}
+			// `.map(::TagCheckBox)` — a *constructor* reference, to a class this
+			// build emits as an ES6 class. Called as a function, as the reference
+			// below would, it throws "Cannot call a class constructor without
+			// new" at the first search; Kotlin constructs, and so does this, with
+			// the arguments the function type hands it (one, for a `map`).
+			if (
+				this.lookup(member.text) === null &&
+				!this.isSourceMember(member.text) &&
+				this.newableTypes.has(this.aliased(member.text))
+			) {
+				const declared = this.aliased(member.text);
+				const target = this.safe(this.localTypes.get(declared) ?? declared);
+				return `(__a) => new ${target}(__a)`;
+			}
 			// As many arguments as the function needs, and no more.
 			//
 			// One was the rule, and it is right for the commonest use —
@@ -8145,6 +8467,21 @@ class Emitter {
 				: `${this.helper('launch')}(${scope}, ${started})`;
 		}
 
+		// okhttp's typed tag: `request.newBuilder().tag(PageTag::class.java,
+		// PageTag(page))` then `response.request.tag(PageTag::class.java)`. The
+		// class literal is only ever a *key* there — see `classKey` — so it is
+		// read as one in exactly that position, and `::class` stays refused
+		// everywhere else, where it would be asked a question.
+		if (name === 'tag' && lambda === null && (args.length === 1 || args.length === 2)) {
+			const key = this.classKey(args[0]);
+			if (key !== null) {
+				const rest = args.slice(1).map((arg) => this.expr(this.argumentValue(arg)));
+				const target = this.expr(receiver);
+				const call = (on: string) => `${on}.tag(${[key, ...rest].join(', ')})`;
+				return safe ? `${this.helper('sc')}(${target}, (__r) => ${call('__r')})` : call(target);
+			}
+		}
+
 		if (name === 'not' && args.length === 0 && lambda === null && !safe) {
 			// `Boolean.not()` is the operator written as a call, which this
 			// ecosystem reaches for when negating something already parenthesised:
@@ -8189,8 +8526,30 @@ class Emitter {
 			// `val list: List<Foo> = response.parseAs()` — and so does this,
 			// through `expectedTypes`, which only answers where the type is
 			// written down. Nowhere to read it from is still a refusal.
-			const shape = typeArgument ?? expected;
+			//
+			// kotlinx's other spelling names the shape by its serializer instead:
+			// `json.decodeFromString(Payload.serializer(), text)`. A generated
+			// serializer — `X.serializer()`, `ListSerializer(…)` over them — IS
+			// the type, so it is read as one and dropped from the arguments; an
+			// extension's own KSerializer object is not, and stays refused.
+			const serializerForm =
+				typeArgument === null &&
+				(name === 'decodeFromString' || name === 'decodeFromJsonElement') &&
+				args.length === 2 &&
+				this.argumentName(args[0]) === null
+					? defaultSerializerType(this.argumentValue(args[0]).text.replace(/\s+/g, ''))
+					: null;
+			if (serializerForm !== null) args = args.slice(1);
+			const shape = typeArgument ?? serializerForm ?? expected;
 			if (shape === null) this.refuse(suffix, `\`.${name}()\` with no type argument`);
+			// keiyoushi core's `parseGraphQLAs<T>()`: the envelope's `data` decoded
+			// as T, its `errors` thrown — the runtime's reader, over the same type.
+			// Its one parameter is the Json, which the runtime already is.
+			if (name === 'parseGraphQLAs') {
+				if (lambda !== null) this.refuse(lambda, 'a block passed to `.parseGraphQLAs()`');
+				const json = this.plainArguments(name, args);
+				return `${this.helper('parseGraphQLAs')}(${[this.expr(receiver), this.decodeType(shape), ...json].join(', ')})`;
+			}
 			if (lambda !== null) {
 				// `parseAs<T> { it.substringAfter("…") }` — the block runs BEFORE
 				// the parse, and what it digs out is a JSON document embedded in
@@ -8436,7 +8795,7 @@ class Emitter {
 		const shadowed =
 			objectMember ||
 			(lambda === null &&
-				(this.extensionFunctions.has(name) ||
+				(this.reachableExtension(name) ||
 					(importedExtension !== null &&
 						this.neighbourExtensions.has(`${importedExtension}.${name}`))));
 		// The two rate-limit helpers take their period as a *unit plus a number*,
@@ -8566,6 +8925,14 @@ class Emitter {
 		// implements and a declaration on the class both still win: what is
 		// filled here is only the gap where nothing else answered at all.
 		if (extension === undefined && this.neighbourModuleExtensions.has(name)) extension = 'module';
+		// A *member* extension needs the class's instance as its dispatch
+		// receiver, and a companion or a file-scope declaration has none — so
+		// Kotlin never resolves to one from there. `companion object { val re =
+		// names.joinToString("|").toRegex() }` in a class that also declares
+		// `private fun JsonElement.joinToString()` is the standard library's
+		// `joinToString`; emitted as the member it was `this.joinToString(…)` at
+		// module scope, and the bundle died at load.
+		if (extension === 'method' && this.selfClass === null) extension = undefined;
 		// Imported by name from a shared `object` — see `importedMembers`.
 		const importedFrom = extension === undefined ? this.importedOwner(name) : null;
 		if (importedFrom !== null && this.neighbourExtensions.has(`${importedFrom}.${name}`)) {
@@ -9096,9 +9463,27 @@ class Emitter {
 		) {
 			const shape = typeArgument ?? expected;
 			if (shape === null) this.refuse(callee, `\`${name}()\` with no type argument`);
-			return `${this.helper('decode')}(${[implicit, this.decodeType(shape), ...tail].join(', ')})`;
+			const reader = name === 'parseGraphQLAs' ? 'parseGraphQLAs' : 'decode';
+			return `${this.helper(reader)}(${[implicit, this.decodeType(shape), ...tail].join(', ')})`;
 		}
-		if (implicit !== null && !this.isSourceMember(name)) {
+		// A method the class's translated *base* declares, called bare from an
+		// extension function whose receiver does not have it —
+		// `override fun OkHttpClient.Builder.configureClient() =
+		// addInterceptor(acceptHeaderInterceptor())` in an extension whose
+		// template declares that helper. Kotlin looks through the extension
+		// receiver first and then the dispatch receiver, and the builder has no
+		// such method, so it is the source's. Emitted on the receiver it was
+		// `__recv.acceptHeaderInterceptor is not a function` at the first
+		// request. Only a name no shim or stdlib helper also answers, because
+		// for one of those the innermost receiver may well be the one.
+		const inheritedCall =
+			implicit !== null &&
+			!this.isSourceMember(name) &&
+			this.ownerBase !== null &&
+			this.baseDeclares(this.ownerBase, name) &&
+			!HOST_METHODS.has(name) &&
+			!EXTENSION_METHODS.has(name);
+		if (implicit !== null && !this.isSourceMember(name) && !inheritedCall) {
 			const helper = EXTENSION_METHODS.get(name);
 			if (helper !== undefined) {
 				// With its trailing lambda, which this dropped.
@@ -9987,6 +10372,22 @@ class Emitter {
 					return `${this.selfReference()}.${property}`;
 				}
 				if (!this.classMembers.has(property)) return `${this.selfReference()}.${property}`;
+				// A *computed* property of the base — `protected open val
+				// popularMangaUrl get() = buildString { … }` — overridden by one
+				// that falls back to it. The base's getter is on its prototype, so
+				// JavaScript's own `super.popularMangaUrl` runs it against this
+				// instance, which is exactly Kotlin's read. Only where `super` is
+				// JavaScript's to use: directly in a method or accessor, not inside
+				// a receiver block emitted as a `function`, where it is a syntax
+				// error at load.
+				if (
+					this.selfClass !== null &&
+					this.selfReference() === 'this' &&
+					this.frames.some((frame) => frame.kind === 'function') &&
+					this.inheritedGetter(this.ownerBase, property)
+				) {
+					return `super.${property}`;
+				}
 			}
 			// Everything else: `__super` holds methods, not fields, and the rest
 			// of the base's state lives on the source object, which `this`
@@ -10053,6 +10454,17 @@ class Emitter {
 			const target = safe ? '__r' : this.expr(receiver);
 			const read = `${this.helper('inWhole')}(${target}, ${jsString(name)})`;
 			return safe ? `${this.helper('sc')}(${this.expr(receiver)}, (__r) => ${read})` : read;
+		}
+
+		// `this.token` over a property whose value is a Promise here — the
+		// written-out spelling of the bare read `read` already awaits.
+		if (
+			this.asyncProperties.has(name) &&
+			!safe &&
+			(receiver.type === 'this_expression' || receiver.text === 'this')
+		) {
+			const self = this.expr(receiver);
+			if (self === this.selfReference()) return this.awaitedProperty(self, name, node);
 		}
 
 		return this.propertyAccess(this.expr(receiver), name, safe);
@@ -10789,6 +11201,18 @@ class Emitter {
 		// it is a call. Emitting the bare name hands out the function itself.
 		if (this.moduleGetters.has(name)) return `${this.safe(name)}()`;
 		if (this.moduleNames.has(name)) return this.safe(name);
+		// keiyoushi core's `jsonInstance` — the injected Json, imported by name.
+		// This runtime has one parser, so it is `Json`; read as a member of the
+		// source it was undefined, and `jsonInstance.decodeFromString(…)` threw
+		// into the `runCatching` around it and answered null. After the module's
+		// own names, so a file that declares one keeps it.
+		if (
+			name === 'jsonInstance' &&
+			this.keiyoushiImports.get(name) === 'keiyoushi.utils' &&
+			!this.classMembers.has(name)
+		) {
+			return 'Json';
+		}
 		const hoisted = this.localTypes.get(name);
 		if (hoisted !== undefined) return this.safe(hoisted);
 		// A member of the `object` this code is being emitted into, reached the
@@ -10891,6 +11315,9 @@ class Emitter {
 		if (this.receiverParam !== null && !this.isSourceMember(name)) {
 			return `${this.receiverParam}.${name}`;
 		}
+		// A property whose value is a Promise here — see `blockingProperties`.
+		if (this.asyncProperties.has(name))
+			return this.awaitedProperty(this.selfReference(), name, node);
 		return `${this.selfReference()}.${name}`;
 	}
 
@@ -10916,6 +11343,42 @@ class Emitter {
 	private receiverDeclares(name: string): boolean {
 		if (this.receiverType === null) return false;
 		return this.classMemberIndex.get(this.receiverType)?.has(name) === true;
+	}
+
+	/**
+	 * A class literal written as an okhttp tag key — `X::class.java`,
+	 * `X::class.javaObjectType` or `X::class` — as the key this runtime
+	 * stores the tag under, or null for anything else.
+	 *
+	 * okhttp keys a request's tags by class, and the one thing a key is asked
+	 * is whether it is the same key again. Every spelling of one class is the
+	 * same key (okhttp 5 turns each into the KClass), so the key is the class's
+	 * name as written, resolved through an alias, and never an object anything
+	 * could call. A qualified or generic class, or `T::class` for a type
+	 * parameter, is not read — those need a type checker to say which class.
+	 */
+	private classKey(arg: KNode): string | null {
+		if (arg.type !== 'value_argument' || arg.allChildren.some((child) => child.type === '=')) {
+			return null;
+		}
+		const text = this.argumentValue(arg).text.replace(/\s+/g, '');
+		const found = /^([A-Z]\w*)::class(?:\.(?:java|javaObjectType))?$/.exec(text);
+		if (found === null) return null;
+		const name = this.aliased(found[1]);
+		if (this.reifiedTypes?.has(name) === true) return null;
+		return JSON.stringify(`class:${name}`);
+	}
+
+	/**
+	 * Whether an extension function this file declares can be the one a call
+	 * here means. A *member* extension needs the class's instance as its
+	 * dispatch receiver, and a companion or file-scope declaration has none, so
+	 * from there Kotlin never resolves to it — see the explicit-receiver call.
+	 */
+	private reachableExtension(name: string): boolean {
+		const kind = this.extensionFunctions.get(name);
+		if (kind === undefined) return false;
+		return kind !== 'method' || this.selfClass !== null;
 	}
 
 	private isSourceMember(name: string): boolean {
@@ -11249,6 +11712,22 @@ class Emitter {
 	 * An inlined block has no `function` of its own to be made `async`, so the
 	 * mark travels out to whichever one is actually emitting the `await`.
 	 */
+	/**
+	 * A read of a property whose value is a Promise here, awaited — unless the
+	 * member reading it is one the host calls synchronously, where awaiting is
+	 * not available and the unawaited value is a Promise in a header. Refused
+	 * there by name: `headersBuilder()` reading a token fetched in a `lazy`.
+	 */
+	private awaitedProperty(self: string, name: string, node: KNode): string {
+		if (this.memberName !== null && SYNC_HOST_MEMBERS.has(this.memberName)) {
+			this.refuse(
+				node,
+				`a read of \`${name}\`, which is fetched, from \`${this.memberName}\`, which the host calls synchronously`
+			);
+		}
+		return this.awaited(`${self}.${name}`);
+	}
+
 	private awaited(expression: string): string {
 		for (let index = this.frames.length - 1; index >= 0; index -= 1) {
 			if (this.frames[index].kind === 'inline') continue;
@@ -12609,6 +13088,17 @@ function namesField(accessor: KNode): boolean {
 		if (found.type === 'interpolated_identifier' && found.text === 'field') return true;
 	}
 	return false;
+}
+
+/**
+ * A property's `@EncodeDefault`, for the encoder: `'ALWAYS'` (the bare
+ * annotation's mode) writes it even when it holds its default, `'NEVER'` leaves
+ * it out even under `encodeDefaults = true`, and null is the Json's own rule.
+ */
+function encodeDefaultMode(written: string): 'ALWAYS' | 'NEVER' | null {
+	const found = /@EncodeDefault\b(?:\s*\(\s*(?:[\w.]*\.)?(ALWAYS|NEVER)\s*\))?/.exec(written);
+	if (found === null) return null;
+	return found[1] === 'NEVER' ? 'NEVER' : 'ALWAYS';
 }
 
 function accessorOf(

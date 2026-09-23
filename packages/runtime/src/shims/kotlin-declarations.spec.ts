@@ -295,6 +295,50 @@ describe('names a third catalogue pass found, run', () => {
 		expect(demo.status(false)).toBe(1);
 	});
 
+	it('sorts with a `Comparator { a, b -> … }`, reversed and chained', async () => {
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    private val byLength = Comparator<String> { a, b -> a.length - b.length }',
+				'    fun sorted(l: List<String>) = l.sortedWith(byLength)',
+				'    fun reversed(l: List<String>) = l.sortedWith(byLength.reversed())',
+				'    fun chained(l: List<String>) = l.sortedWith(byLength.thenBy { it })',
+				'}'
+			)
+		);
+		expect(demo.sorted(['ccc', 'a', 'bb'])).toEqual(['a', 'bb', 'ccc']);
+		expect(demo.reversed(['ccc', 'a', 'bb'])).toEqual(['ccc', 'bb', 'a']);
+		// Stable, as Kotlin's sort is: equal lengths keep their order until
+		// `thenBy` breaks the tie.
+		expect(demo.sorted(['b', 'a'])).toEqual(['b', 'a']);
+		expect(demo.chained(['b', 'a', 'cc'])).toEqual(['a', 'b', 'cc']);
+	});
+
+	it('reads letters in any case after `parseCaseInsensitive()`, and only then', async () => {
+		// A template's lazy chapter-date formatter is built this way. Without the
+		// flag java.time is case-sensitive, and so is this reader for a literal.
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    private val loose by lazy {',
+				'        DateTimeFormatterBuilder().parseCaseInsensitive()',
+				'            .appendPattern("MMMM d, yyyy \'at\' HH:mm").toFormatter(Locale.forLanguageTag("en"))',
+				'    }',
+				'    private val strict = DateTimeFormatterBuilder().appendPattern("MMMM d, yyyy \'at\' HH:mm").toFormatter(Locale.ENGLISH)',
+				'    fun a(s: String): Long = LocalDateTime.parse(s, loose).toInstant(ZoneOffset.UTC).toEpochMilli()',
+				'    fun b(s: String): Long = LocalDateTime.parse(s, strict).toInstant(ZoneOffset.UTC).toEpochMilli()',
+				'    fun late(): Any = DateTimeFormatterBuilder().appendPattern("d").parseCaseInsensitive()',
+				'}'
+			)
+		);
+		expect(demo.a('MARCH 5, 2024 AT 10:30')).toBe(Date.UTC(2024, 2, 5, 10, 30));
+		expect(demo.b('March 5, 2024 at 10:30')).toBe(Date.UTC(2024, 2, 5, 10, 30));
+		expect(() => demo.b('March 5, 2024 AT 10:30')).toThrow(/does not match/);
+		expect(() => demo.late()).toThrow(/after a pattern/);
+	});
+
 	it('defaults a field the pattern leaves out, and only that one', async () => {
 		const demo = await instantiate('Demo', source);
 		expect(demo.date('12 March', 2024)).toBe(Date.UTC(2024, 2, 12));
@@ -625,6 +669,200 @@ describe('a reference to a member the template declares', () => {
 	});
 });
 
+describe('a constructor reference, and a local mutated inside a receiver block', () => {
+	it('constructs through `::Type`, and adds to the local rather than the receiver', async () => {
+		// `.map(::TagCheckBox)` called the class without `new`; and
+		// `chapters += …` inside `Observable.fromCallable { … }` mutated
+		// `this.chapters`, which the block's receiver does not have.
+		const d = await instantiate(
+			'Demo',
+			kt(
+				'open class Box(val name: String)',
+				'class TagBox(name: String) : Box(name)',
+				'class Demo {',
+				'    fun boxes(): List<String> = listOf("a", "b").map(::TagBox).map { it.name }',
+				'    fun collected(): List<String> = listOf(1).run {',
+				'        val out = mutableListOf<String>()',
+				'        out += map { "n$it" }',
+				'        out',
+				'    }',
+				'}'
+			)
+		);
+		expect(d.boxes()).toEqual(['a', 'b']);
+		expect(d.collected()).toEqual(['n1']);
+	});
+
+	it('reads the inherited property in a getter, not the constructor parameter of that name', async () => {
+		// `abstract class G(name, state: List<T>) : Filter.Group<T>(name, state)
+		// { val values get() = state.filter { it.state } … }` — in the getter,
+		// `state` is the group's property; the parameter is gone by then.
+		const d = await instantiate(
+			'Demo',
+			kt(
+				'open class Base(val state: List<String>)',
+				'class Grouped(state: List<String>) : Base(state) {',
+				'    val joined: String',
+				'        get() = state.joinToString(",")',
+				'    val first = state.first()',
+				'}',
+				'class Demo { fun g(): String { val g = Grouped(listOf("a", "b")); return g.joined + "|" + g.first } }'
+			)
+		);
+		expect(d.g()).toBe('a,b|a');
+	});
+});
+
+describe('three statements the loaded bundles died on', () => {
+	it('reads toBoolean off a nullable string, writes a member of `it` inside apply, and loops on a body local', async () => {
+		// `response.headers["X"].toBoolean()` on an absent header; `state.forEach
+		// { it.state = true }` inside an `apply`; and `do { val page = … } while
+		// (page.hasNext)`, whose condition reads the body's local.
+		const d = await instantiate(
+			'Demo',
+			kt(
+				'class Box(var state: Boolean)',
+				'class Holder(val state: List<Box>)',
+				'class Demo {',
+				'    fun flags(): List<Boolean> = listOf(null, "TRUE", "no").map { it.toBoolean() }',
+				'    fun strict(v: String): Boolean? = v.toBooleanStrictOrNull()',
+				'    fun ticked(): List<Boolean> = Holder(listOf(Box(false), Box(false))).apply { state.forEach { it.state = true } }.state.map { it.state }',
+				'    fun counted(): Int {',
+				'        var n = 0',
+				'        do {',
+				'            val next = n + 1',
+				'            n = next',
+				'        } while (next < 3)',
+				'        return n',
+				'    }',
+				'}'
+			)
+		);
+		expect(d.flags()).toEqual([false, true, false]);
+		expect(d.strict('true')).toBe(true);
+		expect(d.strict('True')).toBeNull();
+		expect(d.ticked()).toEqual([true, true]);
+		expect(d.counted()).toBe(3);
+	});
+});
+
+describe('a lazy property whose block blocks', () => {
+	it('awaits every read, and every member that reads one', async () => {
+		// `override val client by lazy { fetchDomain(); … }` where the helper
+		// makes a request: the memo held a Promise and `client.newCall(…)` was
+		// called on it.
+		const d = await instantiate(
+			'Demo',
+			kt(
+				'class Box(val value: String) { fun execute(): Box = this }',
+				'class Demo {',
+				'    var calls = 0',
+				'    private fun fetchToken(): String { calls += 1; return Box("t").execute().value }',
+				'    private val token by lazy { fetchToken() + "1" }',
+				'    private fun header() = "Bearer $token"',
+				'    fun twice(): String = token + this.token',
+				'    fun bearer(): String = header()',
+				'}'
+			)
+		);
+		expect(await d.twice()).toBe('t1t1');
+		expect(await d.bearer()).toBe('Bearer t1');
+		// Memoised, as `lazy` promises: the block ran once.
+		expect(d.calls).toBe(1);
+	});
+
+	it('refuses the read in a member the host calls synchronously', () => {
+		expect(
+			refusalNames(
+				kt(
+					'class Box(val value: String) { fun execute(): Box = this }',
+					'class Demo : HttpSource() {',
+					'    private val token by lazy { Box("t").execute().value }',
+					'    override fun headersBuilder() = super.headersBuilder().set("X-Token", token)',
+					'}'
+				)
+			)
+		).toContain(
+			'a read of `token`, which is fetched, from `headersBuilder`, which the host calls synchronously'
+		);
+		// A getter cannot be async either; one reading it is refused as a
+		// getter that suspends, which it now is.
+		expect(
+			refusalNames(
+				kt(
+					'class Box(val value: String) { fun execute(): Box = this }',
+					'class Demo {',
+					'    private val token by lazy { Box("t").execute().value }',
+					'    private val header get() = "Bearer $token"',
+					'    fun bearer(): String = header',
+					'}'
+				)
+			)
+		).toContain('a suspending getter');
+	});
+});
+
+describe('`super.` read of a computed property', () => {
+	it('runs the template’s getter against this instance', async () => {
+		// `override val popularMangaUrl get() = if (…) … else super.popularMangaUrl`
+		// over a template's `open val popularMangaUrl get() = buildString { … }`.
+		const sub = await instantiate(
+			'Sub',
+			kt(
+				'open class Base {',
+				'    open val lang = "en"',
+				'    protected open val listUrl: String',
+				'        get() = buildString { append("/list/"); append(lang) }',
+				'}'
+			),
+			kt(
+				'class Sub : Base() {',
+				'    var multi = false',
+				'    override val listUrl get() = if (multi) "/all" else super.listUrl',
+				'    fun url(): String = listUrl',
+				'}'
+			)
+		);
+		expect(sub.url()).toBe('/list/en');
+		sub.multi = true;
+		expect(sub.url()).toBe('/all');
+	});
+
+	it('still refuses one over a stored property the override replaced', () => {
+		expect(
+			refusalNames(
+				kt(
+					'open class Base { open val tag = "a" }',
+					'class Sub : Base() {',
+					'    override val tag = "b"',
+					'    fun both(): String = tag + super.tag',
+					'}'
+				)
+			)
+		).toEqual(['`super.` used as a property']);
+	});
+});
+
+describe('a template method called bare from an extension function', () => {
+	it('calls the source, since the extension receiver does not have it', async () => {
+		// `override fun OkHttpClient.Builder.configureClient() =
+		// addInterceptor(acceptHeaderInterceptor())` with the helper declared by
+		// the template. Kotlin tries the builder, then the source; emitted on
+		// the builder it was `__recv.acceptHeaderInterceptor is not a function`.
+		const sub = await instantiate(
+			'Sub',
+			kt('open class Base {', '    open fun marker(): String = "from the template"', '}'),
+			kt(
+				'class Sub : Base() {',
+				'    fun StringBuilder.tagged(): String = append(marker()).toString()',
+				'    fun run(): String = StringBuilder("> ").tagged()',
+				'}'
+			)
+		);
+		expect(sub.run()).toBe('> from the template');
+	});
+});
+
 describe('a decode that names a @Serializable class', () => {
 	// The structural decoder recognised a record by its field set, and a class
 	// whose fields are all optional fits every record — so `Filters` below made
@@ -776,11 +1014,220 @@ describe('a decode that names a @Serializable class', () => {
 		expect(d.one()).toEqual({ a: 1 });
 	});
 
-	it('refuses to encode a record whose class runs a custom serializer', async () => {
-		// Encoding it as its decoded fields is not what the serializer writes.
+	it('refuses to encode a field a custom serializer writes, unless kotlinx would skip it', async () => {
+		// Encoding it as its decoded value is not what the serializer writes.
+		// At its default the property is left out before any serializer runs,
+		// so there is nothing to refuse — and `@JsonNames` is read-only: the
+		// name written is the property's own.
 		const d = await instantiate('Demo', demo, dtos);
-		const chapter = d.chapter('{"cap_id":7,"cap_nome":"n"}');
-		expect(() => d.encode(chapter)).toThrow(/custom serializer/);
+		const bare = d.chapter('{"cap_id":7,"cap_nome":"n"}');
+		expect(d.encode(bare)).toEqual({ cap_id: 7, name: 'n' });
+		const paged = d.chapter('{"cap_id":7,"cap_nome":"n","cap_paginas":["a.jpg"]}');
+		expect(() => d.encode(paged)).toThrow(/custom serializer/);
+	});
+});
+
+describe('an encode of a @Serializable class, the way kotlinx writes it', () => {
+	const source = kt(
+		'@Serializable',
+		'enum class Kind { @SerialName("m") MANGA, NOVEL }',
+		'@Serializable',
+		'data class Inner(@SerialName("v") val value: Int, val note: String? = null)',
+		'@Serializable',
+		'class Search(',
+		'    @SerialName("q") val query: String,',
+		'    val page: Int = 1,',
+		'    val size: Int = page * 10,',
+		'    val tag: String? = null,',
+		'    val cursor: String?,',
+		'    val kinds: List<Kind> = listOf(Kind.MANGA),',
+		'    val inner: Inner = Inner(1),',
+		'    @Transient val local: String = "never sent",',
+		'    @EncodeDefault val always: Boolean = true,',
+		') {',
+		'    val version: Int = 2',
+		'}',
+		'class Plain(val q: String)',
+		'class Demo {',
+		'    fun list(q: String): String = listOf(q, "b").toJsonRequestBody().text',
+		'    fun pair(): String = Pair("a", Kind.NOVEL).toJsonString()',
+		'    fun bare(): String = Search("x", cursor = null).toJsonString()',
+		'    fun full(): String = Search("x", 3, 30, "t", "c", listOf(Kind.NOVEL, Kind.MANGA), Inner(5, "n")).toJsonString()',
+		'    fun derived(): String = Search("x", page = 3, cursor = null).toJsonString()',
+		'    fun viaBody(): String = Search("y", 2, cursor = "z").toJsonRequestBody().text',
+		'    fun viaElement(): JsonElement = Search("w", cursor = null, inner = Inner(1, "set")).toJsonElement()',
+		'    fun plain(): Any = Plain("x").toJsonRequestBody()',
+		'}'
+	);
+
+	it('writes wire names and leaves out defaults and nulls, as the injected Json does', async () => {
+		const d = await instantiate('Demo', source);
+		// Every property at its default, and the one without a default null:
+		// kotlinx writes only the required name.
+		expect(JSON.parse(d.bare())).toEqual({ q: 'x', always: true });
+		// A default that reads an earlier parameter is compared with what it
+		// gives for *this* page: 3 * 10 is the default, so it is left out.
+		expect(JSON.parse(d.derived())).toEqual({ q: 'x', page: 3, always: true });
+		expect(JSON.parse(d.full())).toEqual({
+			q: 'x',
+			page: 3,
+			tag: 't',
+			cursor: 'c',
+			kinds: ['NOVEL', 'm'],
+			inner: { v: 5, note: 'n' },
+			always: true
+		});
+		expect(JSON.parse(d.viaBody())).toEqual({ q: 'y', page: 2, cursor: 'z', always: true });
+		// A data class default is compared structurally, as Kotlin's == does.
+		expect(d.viaElement()).toEqual({ q: 'w', inner: { v: 1, note: 'set' }, always: true });
+	});
+
+	it('writes lists, pairs and enums, and refuses a class it has no registration for', async () => {
+		const d = await instantiate('Demo', source);
+		expect(JSON.parse(d.list('a'))).toEqual(['a', 'b']);
+		expect(JSON.parse(d.pair())).toEqual({ first: 'a', second: 'NOVEL' });
+		expect(() => d.plain()).toThrow(/no @Serializable registration/);
+	});
+});
+
+describe('core’s date readers and kotlinx’s array builders, called with their names', () => {
+	it('passes a named zone, and builds nested JSON inside an array', async () => {
+		const d = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    private val f = DateTimeFormatter.ofPattern("dd/MM/yyyy")',
+				'    fun at(t: String?, zone: String): Long = f.tryParseDate(t, zone = ZoneId.of(zone))',
+				'    fun time(t: String?): Long = DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm").tryParseDateTime(date = t, zone = ZoneOffset.UTC)',
+				'    fun array(): JsonArray = buildJsonArray { addJsonObject { put("a", 1) }; addJsonArray { add(2) } }',
+				'}'
+			)
+		);
+		expect(d.at('02/01/2024', 'UTC')).toBe(Date.UTC(2024, 0, 2));
+		expect(d.at('02/01/2024', '+02:00')).toBe(Date.UTC(2024, 0, 1, 22));
+		expect(d.at(null, 'UTC')).toBe(0);
+		expect(d.time('02/01/2024 10:30')).toBe(Date.UTC(2024, 0, 2, 10, 30));
+		expect(d.array()).toEqual([{ a: 1 }, [2]]);
+	});
+
+	it('reads a byte as 0–255 through `toUByte()`', async () => {
+		const d = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    fun u(v: Int): List<Int> = listOf(v.toByte(), 5.toByte()).map { it.toUByte().toInt() }',
+				'}'
+			)
+		);
+		expect(d.u(-1)).toEqual([255, 5]);
+		expect(d.u(200)).toEqual([200, 5]);
+	});
+});
+
+describe('an okhttp tag keyed by a class literal', () => {
+	it('stores and reads the tag under the class, whichever spelling names it', async () => {
+		// `.tag(PageTag::class.java, PageTag(page))` on the request, read back
+		// off the response's request. `::class` stays refused anywhere else.
+		const d = await instantiate(
+			'Demo',
+			kt(
+				'class PageTag(val page: Int)',
+				'class Demo {',
+				'    fun tagged(): Request = GET("https://example.invalid/a").newBuilder().tag(PageTag::class.java, PageTag(3)).build()',
+				'    fun page(r: Request): Int = r.tag(PageTag::class)?.page ?: -1',
+				'    fun text(r: Request): String? = r.tag(String::class.java)',
+				'}'
+			)
+		);
+		const request = d.tagged();
+		expect(d.page(request)).toBe(3);
+		expect(d.page(request.newBuilder().build())).toBe(3);
+		expect(d.text(request)).toBeNull();
+		expect(refusalNames(kt('class Demo {', '    fun k(): Any = PageTag::class.java', '}'))).toEqual(
+			['`::class` reflection']
+		);
+	});
+});
+
+describe('a typealias declared in the file next door', () => {
+	it('constructs through it, and decodes as the whole type it names', async () => {
+		// Erased within its own file only: the extension's
+		// `LatestVariables(offset = 1)` was refused as the constructor of a
+		// class nothing declares, and `parseAs<ItemPage>()` named a type the
+		// typed decoder had no registration for — so the `@SerialName` below
+		// was lost to the structural walk.
+		const d = await instantiate(
+			'Demo',
+			kt(
+				'@Serializable',
+				'class Vars(val offset: Int = 0, val limit: Int = 20)',
+				'typealias LatestVariables = Vars',
+				'@Serializable',
+				'class Listing<T>(val items: List<T>)',
+				'@Serializable',
+				'class Item(@SerialName("t") val title: String)',
+				'typealias ItemPage = Listing<Item>'
+			),
+			kt(
+				'class Demo {',
+				'    fun made(): String = LatestVariables(offset = 5).toJsonString()',
+				'    fun read(text: String): List<String> = text.parseAs<ItemPage>().items.map { it.title }',
+				'}'
+			)
+		);
+		expect(JSON.parse(d.made())).toEqual({ offset: 5 });
+		expect(d.read('{"items":[{"t":"One"},{"t":"Two"}]}')).toEqual(['One', 'Two']);
+	});
+});
+
+describe('keiyoushi core’s GraphQL helpers', () => {
+	const source = kt(
+		'@Serializable',
+		'class Vars(@SerialName("p") val page: Int, val q: String? = null)',
+		'@Serializable',
+		'class Data(val items: List<Item>)',
+		'@Serializable',
+		'class Item(@SerialName("t") val title: String)',
+		'class Demo {',
+		'    fun typed(page: Int): String = graphQLPost("https://api.example.invalid/gql", Headers.Builder().build(), "query Op { x }", "Op", Vars(page)).body!!.text',
+		'    fun named(): String = graphQLPost(',
+		'        url = "https://api.example.invalid/gql",',
+		'        headers = Headers.Builder().build(),',
+		'        operationName = "Op",',
+		'        variables = buildJsonObject { put("id", 3) },',
+		'        extensions = persistedQueryExtension("abc"),',
+		'    ).body!!.text',
+		'    fun method(): String = graphQLPost("https://api.example.invalid/gql", Headers.Builder().build(), "q").method',
+		'    fun viaGet(): String = graphQLGet("https://api.example.invalid/gql", Headers.Builder().build(), operationName = "Op", variables = Vars(2, "x")).url.toString()',
+		'    fun read(text: String): List<String> = text.parseGraphQLAs<Data>().items.map { it.title }',
+		'}'
+	);
+
+	it('builds the request core builds, for typed and element variables alike', async () => {
+		const d = await instantiate('Demo', source);
+		expect(JSON.parse(d.typed(2))).toEqual({
+			operationName: 'Op',
+			query: 'query Op { x }',
+			variables: { p: 2 }
+		});
+		expect(JSON.parse(d.named())).toEqual({
+			operationName: 'Op',
+			variables: { id: 3 },
+			extensions: { persistedQuery: { version: 1, sha256Hash: 'abc' } }
+		});
+		expect(d.method()).toBe('POST');
+		expect(decodeURIComponent(d.viaGet())).toBe(
+			'https://api.example.invalid/gql?operationName=Op&variables={"p":2,"q":"x"}'
+		);
+	});
+
+	it('reads the envelope: data as its type, errors thrown, a missing data refused', async () => {
+		const d = await instantiate('Demo', source);
+		expect(d.read('{"data":{"items":[{"t":"One"}]}}')).toEqual(['One']);
+		expect(() => d.read('{"data":null,"errors":[{"message":"a"},{"message":"b"}]}')).toThrow(
+			'a\nb'
+		);
+		expect(() => d.read('{"errors":[]}')).toThrow(/missing the 'data' field/);
 	});
 });
 
@@ -867,6 +1314,65 @@ describe('a decode whose type is written where the value goes', () => {
 				)
 			)
 		).toEqual(['`.decodeFromString()` with no type argument']);
+	});
+
+	it('reads the type off a property whose getter sits on its own line', async () => {
+		// In a class body the getter is the property's *sibling*, and the walk
+		// that reads declared types looked only at children — so this was
+		// refused for a type argument the declaration names.
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    private val json = Json { ignoreUnknownKeys = true }',
+				'    var text = "[1,2]"',
+				'    private val numbers: List<Int>',
+				'        get() {',
+				'            val raw = text',
+				'            return json.decodeFromString(raw)',
+				'        }',
+				'    private var word: String',
+				'        get() = json.decodeFromString(text)',
+				'        set(value) { text = value }',
+				'    fun n(): List<Int> = numbers',
+				'    fun w(): String { word = "42"; return word }',
+				'}'
+			)
+		);
+		expect(demo.n()).toEqual([1, 2]);
+		expect(demo.w()).toBe('42');
+	});
+
+	it('reads the type off a generated serializer, through core’s jsonInstance', async () => {
+		// `jsonInstance.decodeFromString(Payload.serializer(), text)`: the
+		// serializer names the type, and `jsonInstance` is the injected Json —
+		// read as a member of the source it was undefined, and the decode threw
+		// into the `runCatching` and answered null.
+		const d = await instantiate(
+			'Demo',
+			kt(
+				'import keiyoushi.utils.jsonInstance',
+				'@Serializable',
+				'class Payload(@SerialName("n") val name: String)',
+				'class Demo {',
+				'    fun one(t: String): String? = runCatching { jsonInstance.decodeFromString(Payload.serializer(), t) }.getOrNull()?.name',
+				'    fun many(t: String): List<String> = jsonInstance.decodeFromString(ListSerializer(Payload.serializer()), t).map { it.name }',
+				'}'
+			)
+		);
+		expect(d.one('{"n":"x"}')).toBe('x');
+		expect(d.many('[{"n":"a"},{"n":"b"}]')).toEqual(['a', 'b']);
+		expect(
+			refusalNames(
+				kt(
+					'object Own : KSerializer<String> { }',
+					'class Demo {',
+					'    private val json = Json { ignoreUnknownKeys = true }',
+					'    fun own(t: String) = json.decodeFromString(Own, t)',
+					'}'
+				)
+			)
+		).toContain('`.decodeFromString()` with no type argument');
 	});
 
 	it('still refuses a decode with nowhere to read its type from', () => {
@@ -1039,6 +1545,54 @@ describe('a member imported by name from a shared object', () => {
 		// list instead of the declared extension, it answered an encoded list.
 		const demo = await instantiate('Demo', shared, importing);
 		expect(demo.query()).toBe('a b');
+	});
+});
+
+describe('a member extension, from where it cannot be called', () => {
+	it('leaves a companion’s call to the standard library', async () => {
+		// A member extension needs the instance as its dispatch receiver, and a
+		// companion has none. Read as the member, this was `this.joinToString`
+		// at module scope, and the bundle died at load.
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class Demo(private val words: List<String> = listOf("x", "y")) {',
+				'    private fun List<String>.joinToString(): String = "member"',
+				'    fun own(): String = words.joinToString()',
+				'    fun shared(): String = PATTERN',
+				'    companion object {',
+				'        val NAMES = listOf("a", "b")',
+				'        val PATTERN = NAMES.joinToString("|")',
+				'    }',
+				'}'
+			)
+		);
+		expect(demo.shared()).toBe('a|b');
+		expect(demo.own()).toBe('member');
+	});
+});
+
+describe('an object with a var', () => {
+	it('can be assigned, and its getters read what was assigned', async () => {
+		// `object Labels { var lang = "zh"; val sort get() = when (lang) … }`,
+		// assigned from a template's constructor. Frozen, the assignment threw
+		// at load; and a getter emitted against the hoisted constant read the
+		// declared value forever.
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'object Labels {',
+				'    var lang = "zh"',
+				'    val sort get() = if (lang == "zh") "排序" else "Sort by"',
+				'    val initial = lang + "!"',
+				'}',
+				'class Demo {',
+				'    init { Labels.lang = "en" }',
+				'    fun read(): String = Labels.sort + "|" + Labels.initial + "|" + Labels.lang',
+				'}'
+			)
+		);
+		expect(demo.read()).toBe('Sort by|zh!|en');
 	});
 });
 
