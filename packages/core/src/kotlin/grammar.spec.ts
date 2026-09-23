@@ -360,6 +360,37 @@ class Demo {
 		expect(elvis?.allChildren.at(-1)?.text).toBe('(emptyList<Track>())');
 	});
 
+	it('reads a `by` delegate written on the line below its property', async () => {
+		// Kotlin reads the two lines as one declaration; the grammar ended the
+		// declaration at the newline and recovered `by preferences` as an error.
+		const parse = await loadKotlinGrammar(vendorWasm);
+		const tree = parse(`
+class Demo {
+    override var baseUrl: String
+        by preferences.delegate(PREF_DOMAIN_KEY, DEFAULT_DOMAIN)
+
+    private val SharedPreferences.ignorePreview
+        by preferences.delegate(IGNORE_PREVIEW_KEY, IGNORE_PREVIEW_DEFAULT)
+
+    fun after() = 1
+}
+`);
+
+		expect(tree.hasError).toBe(false);
+		const delegates: string[] = [];
+		const visit = (node: KNode): void => {
+			if (node.type === 'property_delegate') delegates.push(node.text);
+			for (const child of node.allChildren) visit(child);
+		};
+		visit(tree.root);
+		expect(delegates).toEqual([
+			'by preferences.delegate(PREF_DOMAIN_KEY, DEFAULT_DOMAIN)',
+			'by preferences.delegate(IGNORE_PREVIEW_KEY, IGNORE_PREVIEW_DEFAULT)'
+		]);
+		// No line moved: what follows is still where it was written.
+		expect(firstOfType(tree.root, 'function_declaration')?.line).toBe(9);
+	});
+
 	it('leaves a genuine pair of comparisons alone', async () => {
 		// `x + a < b && c > (d)` has the same characters in the same order and is
 		// two comparisons. The angle brackets have to hold nothing but type

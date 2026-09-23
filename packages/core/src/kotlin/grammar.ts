@@ -271,7 +271,8 @@ function repairKnownGrammarGaps(source: string): string {
 		...trailingCommas(masked),
 		...dottedReceiverTypes(masked),
 		...rangeUntil(masked),
-		...nullableCallableReceivers(masked)
+		...nullableCallableReceivers(masked),
+		...delegateOnNextLine(masked)
 	].sort((left, right) => right.start - left.start);
 	let output = plain;
 	for (const edit of edits) {
@@ -811,6 +812,48 @@ function rangeUntil(masked: string): Edit[] {
 	const edits: Edit[] = [];
 	for (let at = masked.indexOf('..<'); at !== -1; at = masked.indexOf('..<', at + 3)) {
 		edits.push({ start: at, end: at + 3, text: ' until ' });
+	}
+	return edits;
+}
+
+/**
+ * A property's `by` delegate written on the line below it:
+ *
+ *     private val SharedPreferences.ignorePreview
+ *         by preferences.delegate(IGNORE_PREVIEW_KEY, IGNORE_PREVIEW_DEFAULT)
+ *
+ * Kotlin reads the two lines as one declaration; the pinned grammar ends the
+ * declaration at the newline and recovers `by preferences` as an error. Every
+ * multisrc theme that keeps its settings this way, and three extensions with
+ * `override var baseUrl: String` above its delegate, lost the property to it.
+ *
+ * The `by` line is joined to its declaration — the newline and indentation in
+ * front of `by` become one space — and a newline is put back at the end of the
+ * joined line, so the line count is unchanged and everything below reads at
+ * the line it was written on. The delegate itself is reported one line up.
+ *
+ * Only after a line that is a whole property header and nothing more: `val` or
+ * `var` after modifiers, no `=`, no brace, no trailing operator. Anything else
+ * ending above a line that starts with `by` is left as it was.
+ */
+function delegateOnNextLine(masked: string): Edit[] {
+	const edits: Edit[] = [];
+	const header =
+		/^[ \t]*(?:(?:private|protected|internal|public|override|open|final|lateinit)[ \t]+)*va[lr][ \t]+[^=\n{}]*[\w>?)][ \t]*$/;
+	let lineStart = 0;
+	while (lineStart < masked.length) {
+		const newline = masked.indexOf('\n', lineStart);
+		if (newline === -1) break;
+		const line = masked.slice(lineStart, newline);
+		const next = /^[ \t]+by[ \t]/.exec(masked.slice(newline + 1));
+		if (header.test(line) && next !== null) {
+			const by = newline + 1 + next[0].search(/by/);
+			const end = masked.indexOf('\n', by);
+			const close = end === -1 ? masked.length : end;
+			edits.push({ start: close, end: close, text: '\n' });
+			edits.push({ start: newline, end: by, text: ' ' });
+		}
+		lineStart = newline + 1;
 	}
 	return edits;
 }

@@ -44,6 +44,9 @@ beforeAll(async () => {
 
 function context() {
 	return {
+		// Nothing chosen, so a setting read answers the default its call site
+		// gives — which is what a fixture asserting defaults wants.
+		settings: { string: () => '', boolean: () => false, list: () => [] as string[] },
 		text: {
 			encode: (value: string) => new TextEncoder().encode(value),
 			decode: (bytes: Uint8Array) => new TextDecoder().decode(bytes)
@@ -875,5 +878,89 @@ describe('an interceptor whose recovery needs the WebView', () => {
 		);
 		expect(emission.refusals.map((one) => one.member)).toEqual(['intercept']);
 		expect(emission.deferred).toEqual([]);
+	});
+});
+
+describe('an extension property on the settings store', () => {
+	// `private val SharedPreferences.quality get() = getString(KEY, DEFAULT)!!`,
+	// read as `preferences.quality`. Emitted as the extension's own getter, it
+	// read `getString` off the extension and the read went to the store, which
+	// has no such field: every setting answered `undefined`, nothing refused.
+	const source = kt(
+		'class Demo {',
+		'    private val preferences by getPreferencesLazy()',
+		'    private val SharedPreferences.quality get() = getString(PREF_QUALITY_KEY, "1080p")!!',
+		'    private val SharedPreferences.server: String',
+		'        get() = getString(PREF_SERVER_KEY, "alpha")!!',
+		'    private val SharedPreferences.ignorePreview',
+		'        by preferences.delegate(PREF_PREVIEW_KEY, true)',
+		'    private var SharedPreferences.markFiller',
+		'        by LazyMutable { preferences.getBoolean(PREF_FILLER_KEY, false) }',
+		'    fun settings() = listOf(preferences.quality, preferences.server, preferences.ignorePreview, preferences.markFiller)',
+		'    fun label(video: Video) = video.quality',
+		'    fun nested() = buildList { add(preferences.quality) }',
+		'    companion object {',
+		'        private const val PREF_QUALITY_KEY = "quality"',
+		'        private const val PREF_SERVER_KEY = "server"',
+		'        private const val PREF_PREVIEW_KEY = "preview"',
+		'        private const val PREF_FILLER_KEY = "filler"',
+		'    }',
+		'}'
+	);
+
+	it('reads each through the store, with the defaults its declaration gives', async () => {
+		const demo = await instantiate('Demo', source);
+		expect(demo.settings()).toEqual(['1080p', 'alpha', true, false]);
+		// A field of the same name on another object is still that object's.
+		expect(demo.label({ quality: '720p' })).toBe('720p');
+		expect(demo.nested()).toEqual(['1080p']);
+	});
+
+	it('refuses what it cannot read rather than reading it off the wrong object', () => {
+		const refused = (...lines: string[]) =>
+			refusalNames(
+				kt(
+					'class Demo {',
+					'    private val preferences by getPreferencesLazy()',
+					'    private val SharedPreferences.quality get() = getString("q", "1080p")!!',
+					...lines,
+					'}'
+				)
+			);
+		// A write: there is no setter to call, and a field on the store is read
+		// back by nothing.
+		expect(refused('    fun set(v: String) { preferences.quality = v }')).toContain(
+			'a write to extension property `quality`'
+		);
+		// A bare read through an implicit receiver this build does not track.
+		expect(refused('    fun read() = with(preferences) { quality }')).toContain(
+			'a bare read of extension property `quality`'
+		);
+	});
+
+	it('writes through a setter, and `+=` as a read, a plus and a write', async () => {
+		// OlympusScanlation's shape: a cached map behind the store, replaced
+		// wholesale — `slugMap += more` on a read-only Map is `slugMap =
+		// slugMap + more`, through both accessors.
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    private val preference by getPreferencesLazy()',
+				'    private var cache: List<String>? = null',
+				'    private var SharedPreferences.seen: List<String>',
+				'        get() = cache ?: emptyList()',
+				'        set(value) {',
+				'            cache = value',
+				'        }',
+				'    fun add(more: List<String>): List<String> {',
+				'        preference.seen = listOf("a")',
+				'        preference.seen += more',
+				'        return preference.seen',
+				'    }',
+				'}'
+			)
+		);
+		expect(demo.add(['b', 'c'])).toEqual(['a', 'b', 'c']);
 	});
 });

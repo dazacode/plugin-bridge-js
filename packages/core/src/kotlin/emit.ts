@@ -1501,6 +1501,15 @@ class Emitter {
 	private readonly destructuredParts: string[] = [];
 	/** What each member mentions; see `MemberEdges`. */
 	private readonly graph: MemberEdges[] = [];
+	/**
+	 * The extension properties the class being emitted declares on the
+	 * settings store, by name. See `extensionProperty`.
+	 */
+	private extensionProperties = new Set<string>();
+	/** The subset of `extensionProperties` with a setter to write through. */
+	private extensionSetters = new Set<string>();
+	/** What the settings store is called in the class being emitted. */
+	private preferenceStores = new Set<string>(['preferences']);
 	/** Members translated with a boundary-reaching tail cut off; see `recoveryCut`. */
 	private readonly deferred: Refusal[] = [];
 	/**
@@ -2448,6 +2457,9 @@ class Emitter {
 		const outerSuspends = this.suspendMembers;
 		const outerLabel = this.ownerLabel;
 		const outerSelf = this.selfClass;
+		const outerExtensionProperties = this.extensionProperties;
+		const outerSetters = this.extensionSetters;
+		const outerStores = this.preferenceStores;
 		this.owner = name;
 		this.ownerLabel = this.nameOf(node) ?? name;
 		this.ownerBase = base;
@@ -2456,12 +2468,53 @@ class Emitter {
 			exact: !modifiers.has('open') && !modifiers.has('abstract') && !modifiers.has('sealed')
 		};
 
+		// An extension property is not a member of the instance: `private val
+		// SharedPreferences.quality get() = …` is read as `preferences.quality`,
+		// and naming it here made `this.quality` look like a field. See
+		// `extensionProperty`.
+		this.extensionProperties = new Set(
+			members
+				.filter(
+					(child) =>
+						child.type === 'property_declaration' &&
+						extensionReceiverOf(child) === 'SharedPreferences'
+				)
+				.map((child) => this.propertyName(child))
+				.filter((found): found is string => found !== null)
+		);
+		this.extensionSetters = new Set(
+			members
+				.filter(
+					(child, at) =>
+						child.type === 'property_declaration' &&
+						extensionReceiverOf(child) === 'SharedPreferences' &&
+						(accessorOf(child, undefined, 'setter') !== undefined ||
+							members.slice(at + 1, at + 3).some((next) => next.type === 'setter'))
+				)
+				.map((child) => this.propertyName(child))
+				.filter((found): found is string => found !== null)
+		);
+		// The names the settings store goes by here: `preferences`, which is
+		// also what an inherited one is called, and any property this class
+		// builds from `getPreferencesLazy()`/`getPreferences()` or types as a
+		// `SharedPreferences` — NovelCool's is `preference`.
+		this.preferenceStores = new Set(['preferences']);
+		for (const child of members) {
+			if (child.type !== 'property_declaration' || extensionReceiverOf(child) !== null) continue;
+			const declared = this.propertyName(child);
+			if (declared === null) continue;
+			const shape = child.text.replace(/\s+/g, ' ');
+			if (/(?:\bby getPreferencesLazy\b|= getPreferences\(|: SharedPreferences\b)/.test(shape)) {
+				this.preferenceStores.add(declared);
+			}
+		}
 		this.classMembers = new Set(
 			members
 				.map((child) =>
 					child.type === 'function_declaration'
 						? this.nameOf(child)
-						: child.type === 'property_declaration'
+						: child.type === 'property_declaration' &&
+							  extensionReceiverOf(child) !== 'SharedPreferences'
 							? this.propertyName(child)
 							: null
 				)
@@ -2700,6 +2753,9 @@ class Emitter {
 		this.selfClass = outerSelf;
 		this.classMembers = outerMembers;
 		this.suspendMembers = outerSuspends;
+		this.extensionProperties = outerExtensionProperties;
+		this.extensionSetters = outerSetters;
+		this.preferenceStores = outerStores;
 		const companionMembers = this.companionMembers;
 		this.companionRenames = outerRenames;
 		this.companionMembers = outerCompanion;
@@ -3683,6 +3739,12 @@ class Emitter {
 		const name = this.propertyName(node);
 		if (name === null) return this.declineMember('val', node, 'an unnamed property');
 
+		const receiver = extensionReceiverOf(node);
+		if (receiver === 'SharedPreferences' && this.extensionProperties.has(name)) {
+			const text = this.extensionProperty(node, name, detached);
+			return text === null ? null : { kind: 'member', text };
+		}
+
 		// `protected abstract val isHentaiSite: Boolean` — a property this class
 		// deliberately does not define, because the subclass is required to.
 		// The same argument the abstract *function* above makes: there is
@@ -3808,6 +3870,142 @@ class Emitter {
 		return text === null ? null : { kind: deferred ? 'member' : 'assign', text };
 	}
 
+	/**
+	 * `private val SharedPreferences.quality get() = getString(KEY, DEFAULT)!!`
+	 * — a property of the settings store, declared inside the extension.
+	 *
+	 * This ecosystem keeps every setting behind one of these, and reads it as
+	 * `preferences.quality`. The receiver used to be dropped: the property was
+	 * emitted as the *extension's* own getter, `getString` inside it resolved
+	 * to the extension, and the read went to the store object, which has no
+	 * such field. Every setting read answered `undefined` with nothing refused
+	 * — AniSama sorted its videos by `undefined`, AniList never knew whether
+	 * adult titles were allowed, Subsplease put the string "undefined" in the
+	 * URL where the debrid token goes. The delegated spelling on its own line
+	 * did not parse at all (see `delegateOnNextLine` in `grammar.ts`).
+	 *
+	 * Now it is a method taking its receiver, `__ext_quality(__recv)`, and a
+	 * read through the store calls it (`extensionPropertyRead`). Three bodies:
+	 *
+	 * - a getter, run with `this` meaning the receiver, exactly as an extension
+	 *   function's body is — and a setter beside it becomes
+	 *   `__ext_set_quality(__recv, value)`, which a write through the store
+	 *   calls (`preferences.slugMap += more` reads, adds and writes);
+	 * - `by preferences.delegate(KEY, DEFAULT)`, the store's own delegate, read
+	 *   on every access as Kotlin reads it — the receiver is not consulted,
+	 *   because the delegate was bound to `preferences` where it was declared;
+	 * - `by lazy { … }` / `by LazyMutable { … }`, whose one delegate object
+	 *   lives in the extension instance, so the value is computed once per
+	 *   instance whatever receiver it is read through — memoised on `this`.
+	 *
+	 * Only on `SharedPreferences`, which is the receiver every read can be
+	 * recognised by (`isPreferencesStore`). A write with no setter to call, a
+	 * delegated one, and a bare read through an implicit receiver are refused.
+	 *
+	 * **Not done: any other receiver.** `private val Element.imgSrc get() = …`
+	 * read as `img.imgSrc` still goes out the way it always did — as the
+	 * extension's own getter, read off the element, which answers `undefined`.
+	 * Telling `chapter.id` (the extension property on `SChapter`) from `tag.id`
+	 * (a DTO's field) needs the receiver's type, which this build does not
+	 * have. Refusing them instead would drop the handful of listings that load
+	 * today with one wrong field, and that is a decision, not a fix.
+	 */
+	private extensionProperty(node: KNode, name: string, detached: readonly KNode[]): string | null {
+		const getter =
+			accessorOf(node, undefined, 'getter') ?? detached.find((one) => one.type === 'getter');
+		const setter =
+			accessorOf(node, undefined, 'setter') ?? detached.find((one) => one.type === 'setter');
+		const delegate = kids(node).find((child) => child.type === 'property_delegate');
+		const method = `__ext_${name}`;
+		return this.member(
+			name,
+			node,
+			() => {
+				if (delegate !== undefined) {
+					if (setter !== undefined) this.refuse(setter, 'a setter beside a `by` delegate');
+					const thunk = this.delegateValue(delegate, node, name);
+					const memoised = /^by\s+(?:lazy|LazyMutable)\b/.test(delegate.text);
+					const value = memoised
+						? `${this.helper('lazy')}(this, ${JSON.stringify(method)}, ${thunk})`
+						: `(${thunk})()`;
+					return `${method}(__recv) ${block([`return ${value};`])}`;
+				}
+				if (getter === undefined) this.refuse(node, 'an extension property with no getter');
+				const read = this.extensionAccessor(getter, name, []);
+				if (setter === undefined) return `${method}(__recv) ${read}`;
+				// `set(map) { cache = map; edit().putString(KEY, …).apply() }`: the
+				// setter's own parameter, and the receiver as `this`, as the getter.
+				const parameter = [...walk(setter)].find((one) => one.type === 'simple_identifier')?.text;
+				if (parameter === undefined) this.refuse(setter, 'a setter with no parameter');
+				const write = this.extensionAccessor(setter, name, [parameter]);
+				return `${method}(__recv) ${read}\n__ext_set_${name}(__recv, ${this.safe(parameter)}) ${write}`;
+			},
+			[...(getter === undefined ? [] : [getter]), ...(setter === undefined ? [] : [setter])]
+		);
+	}
+
+	/** A getter or setter body, run with the receiver as `this`. */
+	private extensionAccessor(accessor: KNode, name: string, params: readonly string[]): string {
+		const body = kids(accessor).find((child) => child.type === 'function_body');
+		if (body === undefined) this.refuse(accessor, 'an accessor with no body');
+		const previousReceiver = this.receiverParam;
+		const previousLabel = this.receiverLabel;
+		const previousType = this.receiverType;
+		this.receiverParam = '__recv';
+		this.receiverLabel = name;
+		this.receiverType = 'SharedPreferences';
+		let emitted;
+		try {
+			emitted = this.accessorScope(null, () =>
+				this.functionScope('function', null, ['__recv', ...params], () => this.functionBody(body))
+			);
+		} finally {
+			this.receiverParam = previousReceiver;
+			this.receiverLabel = previousLabel;
+			this.receiverType = previousType;
+		}
+		if (emitted.isAsync) this.refuse(accessor, 'a suspending accessor');
+		return emitted.text;
+	}
+
+	/**
+	 * `preferences.quality`, where `quality` is an extension property this
+	 * class declares on the store: a call of the method it became. Null when
+	 * the read is not one of those.
+	 *
+	 * The receiver has to be the store for the rewrite, and the Kotlin says it
+	 * is: the source compiled, and a `SharedPreferences` has no member of its
+	 * own by these names, so `preferences.quality` resolving to the extension
+	 * is what made it compile. Any other receiver reading the same name is
+	 * some other object's field — `video.quality` — and is left alone, unless
+	 * it looks like a store this build cannot type, which is refused rather
+	 * than read off the wrong object.
+	 */
+	private extensionPropertyRead(node: KNode): string | null {
+		const parts = kids(node);
+		if (parts.length !== 2 || parts[1].type !== 'navigation_suffix') return null;
+		const name = kids(parts[1]).find((child) => child.type === 'simple_identifier')?.text;
+		if (name === undefined || !this.extensionProperties.has(name)) return null;
+		const receiver = parts[0];
+		if (this.isPreferencesStore(receiver)) {
+			// The receiver first: emitting it is what marks a receiver block as
+			// needing `__self`, which `selfReference` then answers with.
+			const store = this.expr(receiver);
+			return `${this.selfReference()}.__ext_${name}(${store})`;
+		}
+		if (/pref/i.test(receiver.text)) {
+			this.refuse(node, `a read of extension property \`${name}\` this build cannot type`);
+		}
+		return null;
+	}
+
+	/** A name in `preferenceStores`, bare or through `this.`, meaning the class's store. */
+	private isPreferencesStore(receiver: KNode): boolean {
+		const text = receiver.text.replace(/\s+/g, '');
+		const named = text.startsWith('this.') ? text.slice(5) : text;
+		if (!this.preferenceStores.has(named)) return false;
+		return text !== named || this.lookup(named) === null;
+	}
 	/**
 	 * A property whose accessors need a backing field, or that has a setter.
 	 *
@@ -5747,6 +5945,38 @@ class Emitter {
 		const target = kids(node)[0];
 		const value = kids(node)[kids(node).length - 1];
 		const operator = node.allChildren.find((child) => ASSIGN_OPS.has(child.type))?.type ?? '=';
+		// `preferences.token = value` — a write through an extension property,
+		// which `extensionProperty` does not give a setter. Refused by name:
+		// read as an ordinary assignment it would set a field on the store
+		// object that nothing ever reads back.
+		const written = kids(target);
+		const writtenName = kids(written[written.length - 1])
+			.filter((child) => child.type === 'simple_identifier')
+			.pop()?.text;
+		if (
+			written.length === 2 &&
+			written[1].type === 'navigation_suffix' &&
+			writtenName !== undefined &&
+			this.extensionProperties.has(writtenName)
+		) {
+			if (!this.isPreferencesStore(written[0]) || !this.extensionSetters.has(writtenName)) {
+				this.refuse(target, `a write to extension property \`${writtenName}\``);
+			}
+			const store = this.expr(written[0]);
+			const self = this.selfReference();
+			const given = this.expr(value);
+			// `preferences.slugMap += more` on a read-only `Map` is `slugMap =
+			// slugMap + more`: Kotlin's `+`, read and written through the
+			// accessors, the way a rebound `var` takes it.
+			if (operator !== '=' && operator !== '+=' && operator !== '-=') {
+				this.refuse(node, `\`${operator}\` on extension property \`${writtenName}\``);
+			}
+			const next =
+				operator === '='
+					? given
+					: `${this.helper(operator === '+=' ? 'plus' : 'minus')}(${self}.__ext_${writtenName}(${store}), ${given})`;
+			return `${self}.__ext_set_${writtenName}(${store}, ${next});`;
+		}
 
 		// **The `if` that swallowed its own assignment.**
 		//
@@ -8878,6 +9108,9 @@ class Emitter {
 		const simple = SIMPLE_NAME.exec(node.text.replace(/\s+/g, ''));
 		if (simple !== null) return this.simpleName(node, simple[1] ?? null);
 
+		const extension = this.extensionPropertyRead(node);
+		if (extension !== null) return extension;
+
 		const receiver = kids(node)[0];
 		if (receiver.type === 'super_expression') {
 			// `override val client = super.client.newBuilder()…` — by far the
@@ -9671,6 +9904,12 @@ class Emitter {
 	private read(name: string, node: KNode): string {
 		const local = this.lookup(name);
 		if (local !== null) return local;
+		// A bare `quality` naming an extension property is a read through an
+		// implicit receiver — `with(preferences) { quality }` — which this
+		// build does not track. Refused, rather than read off the extension.
+		if (this.extensionProperties.has(name) && !this.classMembers.has(name)) {
+			this.refuse(node, `a bare read of extension property \`${name}\``);
+		}
 		// Inside an enum: an entry by its bare name, and the entry list.
 		const inEnum = this.enumMember(name);
 		if (inEnum !== null) return inEnum;
@@ -11387,6 +11626,20 @@ function passThrough(node: KNode): { condition: KNode; returned: string } | null
 	const value = kids(jump);
 	if (value.length !== 1 || value[0].type !== 'simple_identifier') return null;
 	return { condition: parts[0], returned: value[0].text };
+}
+
+/**
+ * The receiver type of an extension property, `SharedPreferences` in `val
+ * SharedPreferences.quality`, or null for an ordinary property. The grammar
+ * puts the receiver's `user_type` directly under the declaration, where an
+ * ordinary property's type sits inside its `variable_declaration`.
+ */
+function extensionReceiverOf(node: KNode): string | null {
+	const parts = kids(node);
+	const at = parts.findIndex((child) => child.type === 'user_type');
+	const declared = parts.findIndex((child) => child.type === 'variable_declaration');
+	if (at === -1 || declared === -1 || at > declared) return null;
+	return typeName(parts[at]);
 }
 
 /** Whether a class lists okhttp's `Interceptor` among its supertypes. */
