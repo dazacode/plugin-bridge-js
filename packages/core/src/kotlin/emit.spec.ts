@@ -1096,6 +1096,88 @@ describe('control flow', () => {
 		expect(demo.swap('x', 'y')).toBe('yx');
 	});
 
+	it('keeps a branch’s own local apart from the value it becomes', () => {
+		// `val url = if (…) { val url = …; url } else …`: the branch's write
+		// came out as `url = url` against the inner `const` — a bundle that
+		// threw "assignment to constant" at import, nothing refused.
+		const demo = instantiate(
+			inClass(
+				'    fun pick(q: String): String {',
+				'        val url = if (q.isNotBlank()) {',
+				'            val url = q + "!"',
+				'            url',
+				'        } else {',
+				'            "none"',
+				'        }',
+				'        return url',
+				'    }'
+			)
+		);
+
+		expect(demo.pick('a')).toBe('a!');
+		expect(demo.pick(' ')).toBe('none');
+	});
+
+	it('adds to the receiver of an `apply` with `this +=`, in place', () => {
+		// `this` cannot be rebound, so `this += more` is `plusAssign`. Read as a
+		// rebinding it was `this = …`, which JavaScript will not even parse.
+		const demo = instantiate(
+			inClass(
+				'    fun genres(more: List<String>): List<String> = mutableListOf("All").apply {',
+				'        this += more.map { it.uppercase() }',
+				'    }'
+			)
+		);
+
+		expect(demo.genres(['a', 'b'])).toEqual(['All', 'A', 'B']);
+	});
+
+	it('lets a destructuring shadow the parameters it is built from', () => {
+		// `val (manga, chapters) = …` inside `fetchMangaUpdate(manga, chapters,
+		// …)` redeclared two parameters: a SyntaxError at import.
+		const demo = instantiate(
+			inClass(
+				'    fun update(manga: String, chapters: Int): String {',
+				'        val (manga, chapters) = manga + "!" to chapters + 1',
+				'        return manga + chapters',
+				'    }'
+			)
+		);
+
+		expect(demo.update('m', 1)).toBe('m!2');
+	});
+
+	it('reads a backtick-quoted name as the name inside the quotes', () => {
+		// `` val `data`: Wrapper `` was written out as `` this.`data` = data ``,
+		// which JavaScript cannot parse: the bundle died on import.
+		const demo = instantiate(
+			inClass(
+				'    class Box(val `data`: String, val `in`: Int)',
+				'    fun `object`(): String = Box("d", 2).let { it.`data` + it.data + it.`in` }',
+				'    fun read(): String = `object`()'
+			)
+		);
+
+		expect(demo.read()).toBe('dd2');
+	});
+
+	it('skips each `_` in a destructuring, however many there are', () => {
+		// `val (id, _, _) = …` was two `const` bindings of `_` — a SyntaxError
+		// at import, with nothing refused. Each `_` is a hole: not read.
+		const demo = instantiate(
+			inClass(
+				'    fun pick(a: String, b: String): String {',
+				'        val (first, _) = a to b',
+				'        val (_, second) = a to b',
+				'        val (_, _) = a to b',
+				'        return first + second + listOf("x", "y", "z").map { it }.let { (_, mid, _) -> mid }',
+				'    }'
+			)
+		);
+
+		expect(demo.pick('p', 'q')).toBe('pqy');
+	});
+
 	it('unwraps `?: return` into a guard rather than refusing it', () => {
 		const demo = instantiate(
 			inClass(

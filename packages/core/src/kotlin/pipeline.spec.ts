@@ -1310,6 +1310,98 @@ describe('which refusals the host can reach', () => {
 		expect(result.reachable).toContain('readEpisodes');
 		expect(result.blocking.map((one) => one.member)).toContain('readEpisodes');
 	});
+
+	it('blocks on a refused class a surviving class extends, whatever it is called', async () => {
+		// `class StatusList : MultiValueFilter(…)` runs `extends` when the module
+		// loads. The base refused, its name ends in `Filter` so it was exempted
+		// as host-drawn, and a class header draws no edge — so nothing blocked,
+		// and the bundle died on import with "MultiValueFilter is not defined".
+		const result = await convertKotlin(
+			[
+				{
+					path: 'Demo.kt',
+					source: kt(
+						'class Demo : Source() {',
+						'    override val baseUrl = "https://example.invalid"',
+						'    override fun getFilterList() = FilterList(StatusFilter())',
+						'}'
+					)
+				},
+				{
+					path: 'Filters.kt',
+					source: kt(
+						'abstract class MultiValueFilter(name: String) : Filter.Group<Filter.CheckBox>(name = name, options = emptyList())',
+						'class StatusFilter : MultiValueFilter("Status")'
+					)
+				}
+			],
+			{ parser }
+		);
+
+		expect(result.blocking.map((one) => one.member)).toContain('MultiValueFilter');
+		expect(result.complete).toBe(false);
+	});
+
+	it('follows a member reference, which is a call made later', async () => {
+		// `.addInterceptor(::checkForToken)` on a template's client: nothing
+		// *calls* `checkForToken` in the text, so it and the refused login it
+		// calls were pruned, and the bundle threw `this.refresh is not a
+		// function` on its first request with nothing refused.
+		const result = await convertKotlin(
+			[
+				{ path: 'Demo.kt', source: kt('class Demo : Base() {', '}') },
+				{
+					path: 'Base.kt',
+					source: kt(
+						'abstract class Base : Source() {',
+						'    override val client = network.client.newBuilder().addInterceptor(::checkForToken).build()',
+						'    private fun checkForToken(chain: Interceptor.Chain): Response {',
+						'        refresh()',
+						'        return chain.proceed(chain.request())',
+						'    }',
+						'    private fun refresh() = Injekt.get<Loader>()',
+						'}'
+					)
+				}
+			],
+			{ parser }
+		);
+
+		expect(result.reachable).toContain('checkForToken');
+		expect(result.blocking.map((one) => one.member)).toContain('refresh');
+	});
+
+	it('does not read `::x.isInitialized` as a call to `x`', async () => {
+		// It asks whether a `lateinit` was written. Followed as a call, a
+		// template's refused-but-unread `lateinit` blocked four listings that
+		// had been loading and requesting.
+		const result = await convertKotlin(
+			[
+				{
+					path: 'Demo.kt',
+					source: kt(
+						'class Demo : Source() {',
+						'    override val baseUrl = "https://example.invalid"',
+						'    fun popular(): Boolean = Cache.ready()',
+						'}'
+					)
+				},
+				{
+					path: 'Cache.kt',
+					source: kt(
+						'object Cache {',
+						'    lateinit var elements: Elements',
+						'    fun ready() = ::elements.isInitialized',
+						'}'
+					)
+				}
+			],
+			{ parser }
+		);
+
+		expect(result.reachable).toContain('ready');
+		expect(result.blocking.map((one) => one.member)).not.toContain('elements');
+	});
 });
 
 describe('what the runtime is asked for', () => {

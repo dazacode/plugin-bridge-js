@@ -2090,6 +2090,32 @@ function __utf8Only(charset) {
 /* --- android.util.Base64 -------------------------------------------------- */
 
 /**
+ * Standard, padded base64 to bytes, in plain JavaScript — for Base64.decode
+ * when no host has been entered yet (see there). Characters outside the
+ * alphabet are an error, as they are to the host's decoder, rather than
+ * skipped into different bytes.
+ */
+function __base64Decode(text) {
+  var alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  var body = text.replace(/=+$/, '');
+  var out = new Uint8Array(Math.floor((body.length * 3) / 4));
+  var bits = 0;
+  var count = 0;
+  var at = 0;
+  for (var i = 0; i < body.length; i++) {
+    var index = alphabet.indexOf(body.charAt(i));
+    if (index < 0) throw new Error('Base64.decode was handed a character that is not base64.');
+    bits = (bits << 6) | index;
+    count += 6;
+    if (count >= 8) {
+      count -= 8;
+      out[at++] = (bits >> count) & 255;
+    }
+  }
+  return at === out.length ? out : out.slice(0, at);
+}
+
+/**
  * Android's Base64, whose flags are the part that catches people out.
  *
  * The values are Android's own, so 'Base64.URL_SAFE or Base64.NO_WRAP' is the
@@ -2114,10 +2140,21 @@ var Base64 = {
   URL_SAFE: 8,
 
   decode: function (value, flags) {
-    var text = typeof value === 'string' ? value : __host().text.decode(__bytesOf(value));
+    // Before any plugin call there is no host to lend a decoder, and a
+    // companion constant is evaluated exactly then: 'private val KEY =
+    // Base64.decode("…", Base64.DEFAULT)' hoists to module scope and killed
+    // the bundle on import. Base64 is arithmetic on ASCII, so that one moment
+    // is served by __base64Decode below; with a host, the host's decoder is
+    // used as it always was.
+    var early = __ctx === null;
+    var text = typeof value === 'string'
+      ? value
+      : early
+        ? String.fromCharCode.apply(null, Array.prototype.slice.call(__bytesOf(value)))
+        : __host().text.decode(__bytesOf(value));
     var normalised = text.replace(/[-]/g, '+').replace(/_/g, '/').replace(/[\\r\\n\\s]/g, '');
     while (normalised.length % 4 !== 0) normalised += '=';
-    return __host().bytes.fromBase64(normalised);
+    return early ? __base64Decode(normalised) : __host().bytes.fromBase64(normalised);
   },
 
   encodeToString: function (bytes, flags) {
