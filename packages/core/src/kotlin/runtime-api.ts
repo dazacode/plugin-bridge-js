@@ -833,6 +833,9 @@ export const RUNTIME_GLOBALS = [
 	'OffsetDateTime',
 	'ZonedDateTime',
 	'LocalDateTime',
+	/* okhttp's MultipartBody: `MultipartBody.Builder().setType(MultipartBody
+	   .FORM)` reads a constant off the type, so it has to be a name. */
+	'MultipartBody',
 	/* The rest of the java.time subset `kotlin-time.ts` implements, and
 	   kotlin.time's `Clock` and `Duration`. Each is a capitalised receiver the
 	   emitter passes through — `ZoneId.of(…)` in a property initialiser died at

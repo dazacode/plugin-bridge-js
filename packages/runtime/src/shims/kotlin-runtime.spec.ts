@@ -286,7 +286,8 @@ describe('a response whose body the relay would not read', () => {
 
 		// okhttp's `response.request` is the request that produced the response,
 		// which after a redirect is the last one — the whole point of the idiom.
-		expect(response.request.url).toBe('https://cdn.example.invalid/final.mp4');
+		expect(String(response.request.url)).toBe('https://cdn.example.invalid/final.mp4');
+		expect(response.request.url.host).toBe('cdn.example.invalid');
 		expect(response.url).toBe('https://cdn.example.invalid/final.mp4');
 
 		// And an extension that did want the body is told why, rather than being
@@ -3145,7 +3146,9 @@ describe('a request body an extension builds itself', () => {
 			.build();
 
 		expect(request.method).toBe('POST');
-		expect(request.url).toBe('https://example.invalid/submit');
+		// An HttpUrl, as okhttp's is, printing as the url it was built from.
+		expect(String(request.url)).toBe('https://example.invalid/submit');
+		expect(request.url.encodedPath).toBe('/submit');
 		expect(request.headers.get('X-Test')).toBe('yes');
 		expect(request.body.text).toBe('payload');
 	});
@@ -4514,6 +4517,197 @@ describe('toCollection and the response an interceptor rebuilds', () => {
 		// something that only looks like the image.
 		expect(() => k.toResponseBody(new Uint8Array([0xff, 0xd8, 0xff]), 'image/jpeg')).toThrow(
 			/not text/
+		);
+	});
+});
+
+/* ── okhttp's request side, HttpUrl's builder, and android.net.Uri ──────── */
+
+describe('a request is an okhttp Request, and its url an HttpUrl', () => {
+	const g = () => runtime.globals;
+
+	it('reads the url of the request that produced a response as an HttpUrl', async () => {
+		// `response.request.url.pathSegments` and `.queryParameter("id")` are
+		// read about six hundred times in one catalogue; on a string both were
+		// undefined.
+		const { ctx } = context();
+		runtime.enter(ctx);
+		const response = await runtime.client
+			.newCall(g().GET('https://example.invalid/manga/42/ch-1?id=7#page'))
+			.execute();
+		const url = response.request.url;
+		expect(url.pathSegments).toEqual(['manga', '42', 'ch-1']);
+		expect(url.queryParameter('id')).toBe('7');
+		expect(url.fragment).toBe('page');
+		expect(url.host).toBe('example.invalid');
+		expect(url.port).toBe(443);
+		// And it prints as exactly what was written — a template, a GET(…) of it
+		// and the host transport all see the same text.
+		expect(`${url}`).toBe('https://example.invalid/manga/42/ch-1?id=7#page');
+	});
+
+	it('rewrites a request in an interceptor through newBuilder()', async () => {
+		const { ctx, sent } = context();
+		runtime.enter(ctx);
+		const client = runtime.client
+			.newBuilder()
+			.addInterceptor(function (chain: any) {
+				const request = chain.request();
+				return chain.proceed(
+					request.newBuilder().removeHeader('Referer').header('X-A', '1').build()
+				);
+			})
+			.build();
+		await client
+			.newCall(
+				g().GET('https://example.invalid/a', g().Headers.headersOf('Referer', 'r', 'X-A', '0'))
+			)
+			.execute();
+		expect(sent.at(-1)?.headers).toEqual({ 'X-A': '1' });
+	});
+
+	it('carries a tag from the request to the response built from it', async () => {
+		const { ctx } = context();
+		runtime.enter(ctx);
+		const request = g().GET('https://example.invalid/search').newBuilder().tag('search').build();
+		const response = await runtime.client.newCall(request).execute();
+		expect(response.request.tag()).toBe('search');
+		expect(g().GET('https://example.invalid/').tag()).toBeNull();
+	});
+
+	it('waits for a request a suspending member was still building', async () => {
+		// `pageListRequest` that fetches a page first arrives as a promise, and
+		// `request.headers.toMap` was read off the promise.
+		const { ctx, sent } = context();
+		runtime.enter(ctx);
+		await runtime.client
+			.newCall(Promise.resolve(g().GET('https://example.invalid/late')))
+			.execute();
+		expect(sent.at(-1)?.url).toBe('https://example.invalid/late');
+	});
+
+	it('peeks at most the bytes it was asked for, and counts a body in bytes', async () => {
+		const { ctx } = context({ 'https://example.invalid/p': { body: '<!DOCTYPE html><p>é</p>' } });
+		runtime.enter(ctx);
+		const response = await runtime.client.newCall(g().GET('https://example.invalid/p')).execute();
+		expect(response.peekBody(15).string()).toBe('<!DOCTYPE html>');
+		expect(response.body.string()).toBe('<!DOCTYPE html><p>é</p>');
+		expect(response.body.contentLength()).toBe(24);
+		const form = g().FormBody.Builder().add('q', 'é').build();
+		expect(form.contentLength()).toBe(8);
+	});
+
+	it('builds a multipart form the way okhttp writes one', () => {
+		const { ctx } = context();
+		runtime.enter(ctx);
+		const { MultipartBody } = g();
+		const body = MultipartBody.Builder('b0')
+			.setType(MultipartBody.FORM)
+			.addFormDataPart('page', '2')
+			.addFormDataPart('file', 'a.txt', k.toRequestBody('hi', 'text/plain'))
+			.build();
+		expect(body.contentType).toBe('multipart/form-data; boundary=b0');
+		expect(body.text).toBe(
+			'--b0\r\nContent-Disposition: form-data; name="page"\r\n\r\n2\r\n' +
+				'--b0\r\nContent-Disposition: form-data; name="file"; filename="a.txt"\r\nContent-Type: text/plain\r\n\r\nhi\r\n' +
+				'--b0--\r\n'
+		);
+	});
+});
+
+describe('addCookie, as a Cookie header on the source’s own requests', () => {
+	const g = () => runtime.globals;
+
+	it('adds the cookie on a request to the named domain and merges with one already there', async () => {
+		const { ctx, sent } = context();
+		runtime.enter(ctx);
+		const client = runtime.client
+			.newBuilder()
+			.addCookie(() => 'example.invalid', k.to('is_mature', 'true'))
+			.build();
+		await client
+			.newCall(
+				g().GET(
+					'https://www.example.invalid/a',
+					g().Headers.headersOf('Cookie', 'is_mature=false; s=1')
+				)
+			)
+			.execute();
+		expect(sent.at(-1)?.headers.Cookie).toBe('s=1; is_mature=true');
+		// Another host is left alone.
+		await client.newCall(g().GET('https://other.invalid/a')).execute();
+		expect(sent.at(-1)?.headers.Cookie).toBeUndefined();
+	});
+
+	it('asks a lambda for its cookies at each request', async () => {
+		const { ctx, sent } = context();
+		runtime.enter(ctx);
+		let adult = '0';
+		const client = runtime.client
+			.newBuilder()
+			.addCookie(
+				() => 'example.invalid',
+				() => [k.to('eighteen', adult)]
+			)
+			.build();
+		await client.newCall(g().GET('https://example.invalid/a')).execute();
+		adult = '1';
+		await client.newCall(g().GET('https://example.invalid/a')).execute();
+		expect(sent.map((one) => one.headers.Cookie)).toEqual(['eighteen=0', 'eighteen=1']);
+	});
+});
+
+describe('HttpUrl.Builder, and android.net.Uri over the same parse', () => {
+	const url = (text: string) => k.httpUrl(text);
+
+	it('replaces or strips the whole query', () => {
+		expect(String(url('https://example.invalid/a?x=1#f').newBuilder().query(null).build())).toBe(
+			'https://example.invalid/a#f'
+		);
+		expect(String(url('https://example.invalid/a').newBuilder().query('a=b c&d').build())).toBe(
+			'https://example.invalid/a?a=b%20c&d'
+		);
+		expect(
+			String(url('https://example.invalid/a').newBuilder().encodedQuery('s=%2B').build())
+		).toBe('https://example.invalid/a?s=%2B');
+	});
+
+	it('removes a segment, sets an encoded parameter, and takes a whole encoded path', () => {
+		const built = url('https://example.invalid/a/b/c?k=1')
+			.newBuilder()
+			.removePathSegment(2)
+			.setEncodedQueryParameter('k', '165,225')
+			.addEncodedPathSegment('d%20e')
+			.build();
+		expect(String(built)).toBe('https://example.invalid/a/b/d%20e?k=165,225');
+		expect(String(url('https://example.invalid/x').newBuilder().encodedPath('/y/z').build())).toBe(
+			'https://example.invalid/y/z'
+		);
+		expect(() => url('https://example.invalid/x').newBuilder().encodedPath('y')).toThrow(
+			/encodedPath/
+		);
+		expect(String(url('https://u:p@example.invalid/').newBuilder().username('').build())).toBe(
+			'https://example.invalid/'
+		);
+	});
+
+	it('answers the query readers okhttp has', () => {
+		const parsed = url('https://example.invalid/a?t=1&t=2&q=a%20b');
+		expect(parsed.queryParameterValues('t')).toEqual(['1', '2']);
+		expect(parsed.query).toBe('t=1&t=2&q=a b');
+		expect(parsed.encodedQuery).toBe('t=1&t=2&q=a%20b');
+		expect(parsed.querySize).toBe(3);
+		expect(url('https://example.invalid/a').encodedQuery).toBeNull();
+	});
+
+	it('builds upon an android Uri with appendQueryParameter and appendPath', () => {
+		const built = runtime.globals.Uri.parse('https://example.invalid/page/2/')
+			.buildUpon()
+			.appendQueryParameter('s', 'a b&c')
+			.appendPath('x y');
+		expect(String(built)).toBe('https://example.invalid/page/2/x%20y?s=a%20b%26c');
+		expect(runtime.globals.Uri.parse('https://example.invalid/a/b.html').lastPathSegment).toBe(
+			'b.html'
 		);
 	});
 });

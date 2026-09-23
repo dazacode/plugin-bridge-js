@@ -6072,33 +6072,168 @@ var FormBody = {
               : encodeURIComponent(pairs[i][0]) + '=' + encodeURIComponent(pairs[i][1])
           );
         }
-        return {
-          __kBody: true,
-          contentType: 'application/x-www-form-urlencoded; charset=utf-8',
-          text: parts.join('&')
-        };
+        return __requestBody('application/x-www-form-urlencoded; charset=utf-8', parts.join('&'));
       }
     };
     return builder;
   }
 };
 
+/**
+ * A request body: its content type and the text the host transport sends.
+ *
+ * A constructor rather than a literal so every body answers okhttp's
+ * 'contentLength()' — which the catalogue reads to write a Content-Length
+ * header by hand — in BYTES, as okhttp counts it, rather than in characters.
+ */
+function __RequestBody(contentType, text) {
+  this.__kBody = true;
+  this.contentType = contentType;
+  this.text = text;
+}
+__RequestBody.prototype.contentLength = function () {
+  return __host().text.encode(__str(this.text)).length;
+};
+
+function __requestBody(contentType, text) {
+  return new __RequestBody(contentType === undefined ? null : contentType, __str(text));
+}
+
 /** A body, whatever shape the extension built it in. */
 function __bodyOf(body) {
   if (body === null || body === undefined) return null;
-  if (body.__kBody === true) return body;
-  if (typeof body === 'string') return { __kBody: true, contentType: null, text: body };
-  if (typeof body.text === 'string') return { __kBody: true, contentType: body.contentType || null, text: body.text };
-  return { __kBody: true, contentType: 'application/json; charset=utf-8', text: JSON.stringify(body) };
+  if (body instanceof __RequestBody) return body;
+  if (body.__kBody === true) return __requestBody(body.contentType, body.text);
+  if (typeof body === 'string') return __requestBody(null, body);
+  if (typeof body.text === 'string') return __requestBody(body.contentType || null, body.text);
+  return __requestBody('application/json; charset=utf-8', JSON.stringify(body));
 }
 
-function __kRequest(method, url, headers, body) {
-  return {
+/**
+ * okhttp's MultipartBody, for a form an extension posts the way a browser
+ * would post a file-upload form: 'MultipartBody.Builder().setType(FORM)
+ * .addFormDataPart("page", "2").build()'.
+ *
+ * The parts are text, because the host transport carries text. A part built
+ * from bytes is taken when those bytes are UTF-8 — the same test a response
+ * body gets in 'toResponseBody' — and refused by name when they are not,
+ * rather than sent mangled.
+ */
+var MultipartBody = {
+  FORM: 'multipart/form-data',
+  MIXED: 'multipart/mixed',
+  ALTERNATIVE: 'multipart/alternative',
+  DIGEST: 'multipart/digest',
+  PARALLEL: 'multipart/parallel',
+  Builder: function (boundary) {
+    var mark = boundary === undefined || boundary === null
+      ? 'yorozo-' + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2)
+      : __str(boundary);
+    var type = 'multipart/mixed';
+    var parts = [];
+    function textOf(body) {
+      if (body === null || body === undefined) return { type: null, text: '' };
+      if (typeof body === 'string') return { type: null, text: body };
+      var made = __bodyOf(body);
+      return { type: made.contentType, text: made.text };
+    }
+    function quoted(value) { return __str(value).replace(/"/g, '%22').replace(/\\r/g, '%0D').replace(/\\n/g, '%0A'); }
+    var builder = {
+      setType: function (value) { type = __str(value); return builder; },
+      addFormDataPart: function (name, a, b) {
+        var disposition = 'form-data; name="' + quoted(name) + '"';
+        if (b === undefined) {
+          parts.push({ headers: ['Content-Disposition: ' + disposition], text: __str(a) });
+          return builder;
+        }
+        if (a !== null && a !== undefined) disposition += '; filename="' + quoted(a) + '"';
+        var body = textOf(b);
+        var headers = ['Content-Disposition: ' + disposition];
+        if (body.type !== null) headers.push('Content-Type: ' + body.type);
+        parts.push({ headers: headers, text: body.text });
+        return builder;
+      },
+      addPart: function (a, b) {
+        var body = textOf(b === undefined ? a : b);
+        var headers = [];
+        if (b !== undefined && a !== null && a !== undefined) {
+          __headerPairs(a).forEach(function (pair) { headers.push(pair[0] + ': ' + pair[1]); });
+        }
+        if (body.type !== null) headers.push('Content-Type: ' + body.type);
+        parts.push({ headers: headers, text: body.text });
+        return builder;
+      },
+      build: function () {
+        if (parts.length === 0) throw new Error('Multipart body must have at least one part.');
+        var text = '';
+        for (var i = 0; i < parts.length; i += 1) {
+          text += '--' + mark + '\\r\\n' + parts[i].headers.join('\\r\\n') + '\\r\\n\\r\\n' + parts[i].text + '\\r\\n';
+        }
+        text += '--' + mark + '--\\r\\n';
+        return __requestBody(type + '; boundary=' + mark, text);
+      }
+    };
+    return builder;
+  }
+};
+
+/**
+ * okhttp's Request.
+ *
+ * 'url' is an HttpUrl, as okhttp's is, and not the string it used to be here:
+ * the catalogue reads 'response.request.url.pathSegments', '.fragment',
+ * '.queryParameter("id")' and '.host' about six hundred times, and every one
+ * of those was undefined on a string — a wrong value, with nothing refused. It
+ * prints as exactly the text it was built from, so a template, a 'GET(…)' and
+ * the host transport all see the same url they always did.
+ *
+ * 'tag' is okhttp's per-request label, which an extension sets on the request
+ * and reads back off 'response.request' to know which of its requests this was.
+ */
+function __kRequest(method, url, headers, body, tags) {
+  var request = {
     method: method,
-    url: __str(url),
+    url: __urlOfRequest(url),
     headers: __headersObject(__headerPairs(headers)),
     body: __bodyOf(body)
   };
+  var labels = tags === undefined || tags === null ? new Map() : tags;
+  Object.defineProperty(request, '__tags', { value: labels, enumerable: false });
+  Object.defineProperty(request, 'header', {
+    value: function (name) { return request.headers.get(name); },
+    enumerable: false
+  });
+  Object.defineProperty(request, 'tag', {
+    value: function (type) { return __readTag(labels, type); },
+    enumerable: false
+  });
+  Object.defineProperty(request, 'isHttps', {
+    get: function () { return request.url.scheme === 'https'; },
+    enumerable: false
+  });
+  Object.defineProperty(request, 'newBuilder', {
+    value: function () { return __requestBuilder(request.method, request.url, request.headers, request.body, labels); },
+    enumerable: false
+  });
+  return request;
+}
+
+function __urlOfRequest(value) {
+  if (value !== null && value !== undefined && typeof value === 'object' && value.__kUrl === true) return value;
+  var text = __str(value);
+  return __httpUrlOf(text, true);
+}
+
+/*
+ * A tag's key. okhttp keys a tag by its Class; 'String::class.java' reaches
+ * here as whatever the emitter made of the class — a constructor or a name —
+ * so the key is that value's own identity, and the untyped 'tag(value)' form
+ * is keyed as Object, which is what okhttp does with it.
+ */
+var __OBJECT_TAG = { name: 'Object' };
+function __readTag(labels, type) {
+  var key = type === undefined ? __OBJECT_TAG : type;
+  return labels.has(key) ? labels.get(key) : null;
 }
 
 function GET(url, headers, cache) { return __kRequest('GET', url, headers, null); }
@@ -6107,35 +6242,67 @@ function PUT(url, headers, body) { return __kRequest('PUT', url, headers, body);
 function DELETE(url, headers, body) { return __kRequest('DELETE', url, headers, body); }
 function HEAD(url, headers) { return __kRequest('HEAD', url, headers, null); }
 
+/**
+ * okhttp's Request.Builder — for a request built from nothing, and for
+ * 'request.newBuilder()', which is how an interceptor changes the request it
+ * was handed before proceeding with it.
+ *
+ * The cache setting is the host's to decide (see CacheControl), so it is
+ * accepted and changes nothing; everything else is carried.
+ */
+function __requestBuilder(method, url, headers, body, tags) {
+  var labels = new Map(tags === undefined || tags === null ? [] : tags);
+  var builder = {
+    url: function (value) { url = value; return builder; },
+    headers: function (value) { headers = value || {}; return builder; },
+    header: function (name, value) {
+      var wanted = String(name).toLowerCase();
+      var next = __headerPairs(headers).filter(function (pair) { return pair[0].toLowerCase() !== wanted; });
+      next.push([String(name), __str(value)]);
+      headers = __headersObject(next);
+      return builder;
+    },
+    addHeader: function (name, value) {
+      var next = __headerPairs(headers);
+      next.push([String(name), __str(value)]);
+      headers = __headersObject(next);
+      return builder;
+    },
+    removeHeader: function (name) {
+      var wanted = String(name).toLowerCase();
+      headers = __headersObject(__headerPairs(headers).filter(function (pair) {
+        return pair[0].toLowerCase() !== wanted;
+      }));
+      return builder;
+    },
+    method: function (value, valueBody) {
+      method = String(value).toUpperCase();
+      body = valueBody === undefined ? null : valueBody;
+      return builder;
+    },
+    get: function () { method = 'GET'; body = null; return builder; },
+    head: function () { method = 'HEAD'; body = null; return builder; },
+    post: function (value) { method = 'POST'; body = value; return builder; },
+    put: function (value) { method = 'PUT'; body = value; return builder; },
+    patch: function (value) { method = 'PATCH'; body = value; return builder; },
+    delete: function (value) { method = 'DELETE'; body = value || null; return builder; },
+    cacheControl: function () { return builder; },
+    /* 'tag(value)', or 'tag(type, value)'; a null value removes the tag. */
+    tag: function (a, b) {
+      var key = b === undefined ? __OBJECT_TAG : a;
+      var value = b === undefined ? a : b;
+      if (value === null || value === undefined) labels.delete(key);
+      else labels.set(key, value);
+      return builder;
+    },
+    build: function () { return __kRequest(method, url, headers, body, labels); }
+  };
+  return builder;
+}
+
 /** okhttp's Request.Builder, for extensions that need a request body. */
 var Request = {
-  Builder: function () {
-    var method = 'GET';
-    var url = '';
-    var headers = {};
-    var body = null;
-    var builder = {
-      url: function (value) { url = __str(value); return builder; },
-      headers: function (value) { headers = value || {}; return builder; },
-      addHeader: function (name, value) {
-        var next = __headerPairs(headers);
-        next.push([String(name), __str(value)]);
-        headers = __headersObject(next);
-        return builder;
-      },
-      method: function (value, valueBody) {
-        method = String(value).toUpperCase();
-        body = valueBody === undefined ? null : valueBody;
-        return builder;
-      },
-      get: function () { method = 'GET'; body = null; return builder; },
-      post: function (value) { method = 'POST'; body = value; return builder; },
-      put: function (value) { method = 'PUT'; body = value; return builder; },
-      delete: function (value) { method = 'DELETE'; body = value || null; return builder; },
-      build: function () { return __kRequest(method, url, headers, body); }
-    };
-    return builder;
-  }
+  Builder: function () { return __requestBuilder('GET', '', {}, null, null); }
 };
 
 /**
@@ -6146,7 +6313,7 @@ var Request = {
  * 'await' through arbitrary expression positions in the emitted code.
  */
 function __responseOf(raw, text, request) {
-  var finalUrl = __str(raw.url).length > 0 ? __str(raw.url) : request.url;
+  var finalUrl = __str(raw.url).length > 0 ? __str(raw.url) : __str(request.url);
 
   /*
    * okhttp's response.request is the request that PRODUCED this response — the
@@ -6155,9 +6322,9 @@ function __responseOf(raw, text, request) {
    * already had, which is the one thing that expression is never asked for: it
    * is how this ecosystem resolves a redirect to its destination.
    */
-  var finalRequest = finalUrl === request.url
+  var finalRequest = finalUrl === __str(request.url)
     ? request
-    : Object.assign({}, request, { url: finalUrl });
+    : __kRequest(request.method, finalUrl, request.headers, request.body, request.__tags);
 
   /*
    * A body the host declined to read is not an empty body.
@@ -6186,7 +6353,8 @@ function __responseOf(raw, text, request) {
     body: {
       string: function () { return read(); },
       bytes: function () { return __host().text.encode(read()); },
-      contentLength: function () { return read().length; },
+      // In bytes, which is what okhttp counts and what 'bytes()' answers.
+      contentLength: function () { return __host().text.encode(read()).length; },
       /*
        * okhttp's ResponseBody.contentType(), which is the header verbatim.
        *
@@ -6221,7 +6389,30 @@ function __responseOf(raw, text, request) {
       return __parseDoc(html === undefined || html === null ? read() : String(html), finalUrl);
     },
     parseAs: function (descriptor) { return __k.decode(descriptor, read()); },
-    peekBody: function () { return response.body; },
+    /*
+     * okhttp's 'peekBody(byteCount)': at most that many BYTES of the body,
+     * without consuming it. The whole body was read already, so peeking costs
+     * nothing — but the limit is honoured, because a check written as
+     * 'peekBody(15).string() == "<!DOCTYPE html>"' is asking about the first
+     * fifteen bytes and nothing past them.
+     */
+    peekBody: function (byteCount) {
+      var limit = Number(byteCount);
+      var whole = read();
+      var text = whole;
+      if (Number.isFinite(limit) && limit >= 0 && limit < whole.length * 4) {
+        var bytes = __host().text.encode(whole);
+        if (limit < bytes.length) text = __host().text.decode(bytes.slice(0, limit));
+      }
+      return {
+        string: function () { return text; },
+        bytes: function () { return __host().text.encode(text); },
+        contentLength: function () { return __host().text.encode(text).length; },
+        contentType: function () { return response.body.contentType(); },
+        close: function () {},
+        closeQuietly: function () {}
+      };
+    },
     close: function () {},
     /* okhttp's 'Response.closeQuietly()' — the same nothing as 'close', since
        the host buffered the body before this object existed. */
@@ -6325,7 +6516,7 @@ async function __execute(request, follow) {
   // this runtime's business rather than the host's — see ABI.md, 'follow:
   // false — reading a redirect instead of taking it'.
   if (follow === false) options.follow = false;
-  var raw = await __host().http.send(request.url, options);
+  var raw = await __host().http.send(__str(request.url), options);
   return __responseOf(raw, await raw.text(), request);
 }
 
@@ -6412,10 +6603,33 @@ var __cookieJar = {
  * changed. The flag is therefore carried into the request, where ctx.http turns
  * it into the host's 'follow: false'.
  */
-function __clientBuilder(follow, inherited) {
+function __clientBuilder(follow, inherited, inheritedCookies) {
   var redirects = follow;
   var chain = (inherited || []).slice();
+  var cookies = (inheritedCookies || []).slice();
   var builder = {
+    /*
+     * keiyoushi's 'addCookie', which is how an age gate or a reading mode is
+     * switched on: 'addCookie("is_mature" to "true")'. Upstream installs a
+     * NETWORK interceptor that writes a Cookie header on every request to the
+     * source's host (or the domain given), merging with one already there —
+     * and also writes the cookie into Android's shared CookieManager.
+     *
+     * The header is what this does, and it is a request header the plugin
+     * sets on its own requests: nothing here reads a jar. The CookieManager
+     * write is not done and cannot be: it is the host's store, which ADR-0005
+     * keeps out of a plugin's reach in both directions, and what it bought
+     * upstream was the cookie on requests the plugin does not make — a
+     * WebView, the app's own image loader. Those are the host's here.
+     *
+     * The domain is resolved per request, as upstream resolves it, so a
+     * source whose base url is a preference follows the preference.
+     */
+    addCookie: function (a, b) {
+      if (b === undefined) cookies.push({ domain: null, cookies: a });
+      else cookies.push({ domain: a, cookies: b });
+      return builder;
+    },
     /* Kept in written order, which is the order okhttp runs them in: the first
        one added is the outermost, and it sees the request before the ones
        after it and the response after them. */
@@ -6457,8 +6671,8 @@ function __clientBuilder(follow, inherited) {
       /* The shared client only when nothing was changed: an extension that
          built one to install an interceptor must not get the one everything
          else uses. */
-      if (redirects !== false && chain.length === 0) return client;
-      return __clientWith(redirects !== false, chain);
+      if (redirects !== false && chain.length === 0 && cookies.length === 0) return client;
+      return __clientWith(redirects !== false, chain, cookies);
     }
   };
   return builder;
@@ -6483,12 +6697,16 @@ function __clientBuilder(follow, inherited) {
  *   sees it, so an interceptor that wraps the source of a body rather than its
  *   bytes has nothing to wrap.
  */
-async function __proceed(request, chain, index, follow) {
-  if (index >= chain.length) return await __execute(request, follow);
+async function __proceed(request, chain, index, follow, cookies) {
+  // A request a suspending member built — 'pageListRequest' that fetched a
+  // page to find an id first — arrives as a promise of one. Kotlin would
+  // have finished building it before the call; so does this.
+  if (__thenable(request)) request = await request;
+  if (index >= chain.length) return await __execute(__withCookies(request, cookies), follow);
   var interceptor = chain[index];
   var link = {
     request: function () { return request; },
-    proceed: function (next) { return __proceed(next, chain, index + 1, follow); },
+    proceed: function (next) { return __proceed(next, chain, index + 1, follow, cookies); },
     /* okhttp hands the chain the call and the connection. The call is the
        request this one is wrapping; there is no connection, and a source that
        asks for one is asking about a socket this build does not have. */
@@ -6515,23 +6733,79 @@ async function __proceed(request, chain, index, follow) {
   return answer;
 }
 
+/**
+ * The Cookie header 'addCookie' asks for, merged into a request the way
+ * upstream's CookieInterceptor merges it: the first rule whose domain matches
+ * the request's host (or a subdomain of it) wins; a cookie already on the
+ * request under the same name is replaced; and a request already carrying all
+ * of them is sent unchanged.
+ */
+function __withCookies(request, rules) {
+  if (rules === undefined || rules === null || rules.length === 0) return request;
+  var host = request.url.host;
+  var chosen = null;
+  for (var i = 0; i < rules.length && chosen === null; i += 1) {
+    var domain = rules[i].domain === null ? __sourceHost() : __str(rules[i].domain());
+    if (host === domain || host.endsWith('.' + domain)) chosen = __cookiePairs(rules[i].cookies);
+  }
+  if (chosen === null) return request;
+  var existing = __str(request.headers.get('Cookie'));
+  var written = existing.length === 0 ? [] : existing.split('; ');
+  var wanted = chosen.map(function (pair) { return pair[0] + '=' + pair[1]; });
+  if (wanted.every(function (one) { return written.indexOf(one) !== -1; })) return request;
+  var kept = written.filter(function (one) {
+    return !chosen.some(function (pair) { return one.indexOf(pair[0] + '=') === 0; });
+  });
+  return request.newBuilder().header('Cookie', kept.concat(wanted).join('; ')).build();
+}
+
+/** A Pair, a list of Pairs, or a function answering either — as name/value rows. */
+function __cookiePairs(value) {
+  var given = typeof value === 'function' ? value() : value;
+  if (given === null || given === undefined) return [];
+  var list = Array.isArray(given) && given.first !== undefined ? [given] : __arr(given);
+  return list.map(function (pair) {
+    return Array.isArray(pair) ? [__str(pair[0]), __str(pair[1])] : [__str(pair.first), __str(pair.second)];
+  });
+}
+
+/*
+ * The host of the source the bundle serves — upstream's 'source.baseUrl',
+ * read when a request is made rather than when the client is built, because a
+ * property initialiser runs before the entry has finished constructing it.
+ */
+function __sourceHost() {
+  var base = null;
+  try {
+    base = typeof __source === 'undefined' || __source === null ? null : __source.baseUrl;
+  } catch (error) {
+    base = null;
+  }
+  if ((base === null || base === undefined) && typeof __BASE_URL !== 'undefined') base = __BASE_URL;
+  if (base === null || base === undefined) {
+    throw new Error('This converted extension set a cookie for its own site, and has no base url to take the site from.');
+  }
+  return __httpUrlOf(__str(base)).host;
+}
+
 /** A client, and the redirect policy every call it makes carries. */
-function __clientWith(follow, interceptors) {
+function __clientWith(follow, interceptors, cookieRules) {
   var chain = interceptors || [];
+  var cookies = cookieRules || [];
   var made = {
     interceptors: chain,
     newCall: function (request) {
       return {
-        execute: function () { return __proceed(request, chain, 0, follow); },
-        await: function () { return __proceed(request, chain, 0, follow); },
+        execute: function () { return __proceed(request, chain, 0, follow, cookies); },
+        await: function () { return __proceed(request, chain, 0, follow, cookies); },
         /* The Rx-era doors onto the same two calls. 238 members in one
            catalogue are written as
            'client.newCall(r).asObservableSuccess().map { … }', so these are
            the entry point for most of this ecosystem's older half. */
-        asObservable: function () { return __observable(__proceed(request, chain, 0, follow)); },
+        asObservable: function () { return __observable(__proceed(request, chain, 0, follow, cookies)); },
         asObservableSuccess: function () { return __observable(this.awaitSuccess()); },
         awaitSuccess: async function () {
-          var response = await __proceed(request, chain, 0, follow);
+          var response = await __proceed(request, chain, 0, follow, cookies);
           if (!response.isSuccessful) {
             throw new Error('This source answered ' + response.code + ' for ' + request.url + '.');
           }
@@ -6544,7 +6818,7 @@ function __clientWith(follow, interceptors) {
         stop: function () {}
       };
     },
-    newBuilder: function () { return __clientBuilder(follow, chain); },
+    newBuilder: function () { return __clientBuilder(follow, chain, cookies); },
     cookieJar: __cookieJar
   };
   return made;
@@ -6572,7 +6846,7 @@ var network = {
  * a source signed stops verifying. Only parameters this builder adds are
  * encoded, because only those arrived as plain text.
  */
-function __httpUrlOf(value) {
+function __httpUrlOf(value, keepText) {
   var text = __str(value);
   var parts = /^([a-zA-Z][a-zA-Z0-9+.-]*:)?(\\/\\/[^/?#]*)?([^?#]*)(\\?[^#]*)?(#.*)?$/.exec(text);
   var scheme = parts[1] === undefined ? '' : parts[1];
@@ -6592,10 +6866,31 @@ function __httpUrlOf(value) {
     }
   }
 
-  return __httpUrlValue(scheme, authority, path, pairs, fragment);
+  return __httpUrlValue(scheme, authority, path, pairs, fragment, keepText === true ? text : null);
 }
 
-function __httpUrlValue(scheme, authority, path, pairs, fragment) {
+/*
+ * The parts of an authority: 'user:pass@host:port'. okhttp spells the default
+ * port for the scheme when none is written.
+ */
+function __authorityParts(scheme, authority) {
+  var bare = authority.replace(/^\\/\\//, '');
+  var at = bare.lastIndexOf('@');
+  var userinfo = at === -1 ? '' : bare.slice(0, at);
+  var hostport = at === -1 ? bare : bare.slice(at + 1);
+  var port = /:([0-9]+)$/.exec(hostport);
+  var colon = userinfo.indexOf(':');
+  var named = scheme.replace(/:$/, '').toLowerCase();
+  return {
+    user: colon === -1 ? userinfo : userinfo.slice(0, colon),
+    password: colon === -1 ? '' : userinfo.slice(colon + 1),
+    host: port === null ? hostport : hostport.slice(0, port.index),
+    port: port === null ? (named === 'https' ? 443 : (named === 'http' ? 80 : -1)) : Number(port[1]),
+    written: port !== null
+  };
+}
+
+function __httpUrlValue(scheme, authority, path, pairs, fragment, original) {
   function decode(part) {
     try {
       return decodeURIComponent(String(part).replace(/\\+/g, ' '));
@@ -6612,9 +6907,46 @@ function __httpUrlValue(scheme, authority, path, pairs, fragment) {
     // out with an empty 'cid' and the source answered 63 bytes.
     fragment: fragment.replace(/^#/, '') || null,
     encodedFragment: fragment.replace(/^#/, '') || null,
-    host: authority.replace(/^\\/\\//, '').replace(/^[^@]*@/, '').replace(/:[0-9]+$/, ''),
+    __kUrl: true,
+    host: __authorityParts(scheme, authority).host,
+    port: __authorityParts(scheme, authority).port,
+    username: decode(__authorityParts(scheme, authority).user),
+    password: decode(__authorityParts(scheme, authority).password),
+    encodedUsername: __authorityParts(scheme, authority).user,
+    encodedPassword: __authorityParts(scheme, authority).password,
+    isHttps: scheme.replace(/:$/, '').toLowerCase() === 'https',
     encodedPath: path,
+    // okhttp keeps an empty last segment ('/a/' is ['a', '']) — pathSize and
+    // removePathSegment count it — but this runtime has always answered the
+    // segments WITHOUT empties, and the catalogue reads '.last()' of them to
+    // mean the last real one. That reading is kept; pathSize follows it.
     pathSegments: path.split('/').filter(function (segment) { return segment.length > 0; }),
+    encodedPathSegments: path.split('/').filter(function (segment) { return segment.length > 0; }),
+    pathSize: path.split('/').filter(function (segment) { return segment.length > 0; }).length,
+    // android.net.Uri's readers, over the same parse: 'Uri.parse(u).path'.
+    path: decode(path.replace(/\\+/g, '%2B')),
+    lastPathSegment: (function () {
+      var segments = path.split('/').filter(function (segment) { return segment.length > 0; });
+      return segments.length === 0 ? null : decode(segments[segments.length - 1].replace(/\\+/g, '%2B'));
+    }()),
+    authority: authority.replace(/^\\/\\//, '') || null,
+    encodedQuery: pairs.length === 0 && original === null ? null : __joinQuery(pairs),
+    query: pairs.length === 0 && original === null ? null : pairs.map(function (pair) {
+      return pair[1] === null ? decode(pair[0]) : decode(pair[0]) + '=' + decode(pair[1]);
+    }).join('&'),
+    querySize: pairs.length,
+    queryParameterValues: function (name) {
+      var values = [];
+      for (var i = 0; i < pairs.length; i += 1) {
+        if (decode(pairs[i][0]) === String(name)) values.push(pairs[i][1] === null ? null : decode(pairs[i][1]));
+      }
+      return values;
+    },
+    queryParameterName: function (index) { return decode(pairs[Number(index)][0]); },
+    queryParameterValue: function (index) {
+      var value = pairs[Number(index)][1];
+      return value === null ? null : decode(value);
+    },
     queryParameter: function (name) {
       for (var i = 0; i < pairs.length; i += 1) {
         if (decode(pairs[i][0]) === String(name)) return pairs[i][1] === null ? null : decode(pairs[i][1]);
@@ -6626,22 +6958,172 @@ function __httpUrlValue(scheme, authority, path, pairs, fragment) {
       for (var i = 0; i < pairs.length; i += 1) names.push(decode(pairs[i][0]));
       return names;
     },
+    /* Exactly the text it was parsed from, when it was parsed from one: a
+       request's url prints as the url the extension wrote, byte for byte. */
     toString: function () {
-      var written = [];
-      for (var i = 0; i < pairs.length; i += 1) {
-        written.push(pairs[i][1] === null ? pairs[i][0] : pairs[i][0] + '=' + pairs[i][1]);
-      }
-      return scheme + authority + path + (written.length > 0 ? '?' + written.join('&') : '') + fragment;
+      if (original !== null && original !== undefined) return original;
+      var written = __joinQuery(pairs);
+      return scheme + authority + path + (written.length > 0 ? '?' + written : '') + fragment;
     }
   };
+  // If the query was '?' with nothing after it, the parse has no pairs but
+  // okhttp's encodedQuery is '' rather than null.
+  if (original !== null && original !== undefined && url.encodedQuery !== null && original.indexOf('?') === -1) {
+    url.encodedQuery = null;
+    url.query = null;
+  }
   url.newBuilder = function () { return __httpUrlBuilder(scheme, authority, path, pairs.slice(), fragment); };
+  // android.net.Uri's name for the same builder.
+  url.buildUpon = url.newBuilder;
+  url.getQueryParameters = url.queryParameterValues;
   return url;
+}
+
+function __joinQuery(pairs) {
+  var written = [];
+  for (var i = 0; i < pairs.length; i += 1) {
+    written.push(pairs[i][1] === null ? pairs[i][0] : pairs[i][0] + '=' + pairs[i][1]);
+  }
+  return written.join('&');
 }
 
 function __httpUrlBuilder(scheme, authority, path, pairs, fragment) {
   function encode(value) { return encodeURIComponent(__str(value)); }
+  /* A whole query written as text: '&' and '=' stay separators, and what a
+     query may not carry is escaped — '#', a space — while an escape already
+     in it is left as written. */
+  function canonical(value) {
+    return __str(value).replace(/[^A-Za-z0-9\\-._~!$&'()*+,;=:@/?%]/g, function (ch) {
+      return encodeURIComponent(ch);
+    }).replace(/%(?![0-9A-Fa-f]{2})/g, '%25');
+  }
+  function splitQuery(text) {
+    var out = [];
+    var written = __str(text).split('&');
+    for (var i = 0; i < written.length; i += 1) {
+      var at = written[i].indexOf('=');
+      if (at === -1) out.push([written[i], null]);
+      else out.push([written[i].slice(0, at), written[i].slice(at + 1)]);
+    }
+    return out;
+  }
+  function segments() { return path.split('/').filter(function (segment) { return segment.length > 0; }); }
+  function authorityOf(parts) {
+    var userinfo = parts.user.length === 0 ? '' : parts.user + (parts.password.length === 0 ? '' : ':' + parts.password) + '@';
+    var named = scheme.replace(/:$/, '').toLowerCase();
+    var standard = (named === 'https' && parts.port === 443) || (named === 'http' && parts.port === 80);
+    return '//' + userinfo + parts.host + (parts.port === -1 || standard ? '' : ':' + parts.port);
+  }
 
   var builder = {
+    /* okhttp's setters for the parts before the path. */
+    scheme: function (value) {
+      var next = __str(value).toLowerCase();
+      if (next !== 'http' && next !== 'https') throw new Error('unexpected scheme: ' + next);
+      scheme = next + ':';
+      return builder;
+    },
+    host: function (value) {
+      var parts = __authorityParts(scheme, authority);
+      parts.host = __str(value);
+      authority = authorityOf(parts);
+      return builder;
+    },
+    port: function (value) {
+      var parts = __authorityParts(scheme, authority);
+      parts.port = Number(value);
+      authority = authorityOf(parts);
+      return builder;
+    },
+    username: function (value) {
+      var parts = __authorityParts(scheme, authority);
+      parts.user = encode(value);
+      authority = authorityOf(parts);
+      return builder;
+    },
+    password: function (value) {
+      var parts = __authorityParts(scheme, authority);
+      parts.password = encode(value);
+      authority = authorityOf(parts);
+      return builder;
+    },
+    encodedUsername: function (value) {
+      var parts = __authorityParts(scheme, authority);
+      parts.user = __str(value);
+      authority = authorityOf(parts);
+      return builder;
+    },
+    encodedPassword: function (value) {
+      var parts = __authorityParts(scheme, authority);
+      parts.password = __str(value);
+      authority = authorityOf(parts);
+      return builder;
+    },
+    /* 'encodedPath("/a/b")' replaces the whole path; okhttp insists on the
+       leading slash, and so does this rather than guessing where it went. */
+    encodedPath: function (value) {
+      var next = __str(value);
+      if (next.charAt(0) !== '/') throw new Error('unexpected encodedPath: ' + next);
+      path = next;
+      return builder;
+    },
+    /* 'removePathSegment(i)': the i-th segment gone, and '/' left when it was
+       the only one — okhttp's. */
+    removePathSegment: function (index) {
+      var kept = segments();
+      var at = Number(index);
+      if (!(at >= 0 && at < kept.length)) throw new Error('This converted extension removed path segment ' + at + ' of ' + kept.length + '.');
+      kept.splice(at, 1);
+      path = '/' + kept.join('/');
+      return builder;
+    },
+    /* 'query(text)' and 'encodedQuery(text)' replace the whole query; null
+       removes it. The first escapes what a query cannot carry, the second
+       takes the text as already escaped. */
+    query: function (value) {
+      pairs = value === null || value === undefined ? [] : splitQuery(canonical(value));
+      return builder;
+    },
+    encodedQuery: function (value) {
+      pairs = value === null || value === undefined ? [] : splitQuery(value);
+      return builder;
+    },
+    setEncodedQueryParameter: function (name, value) {
+      builder.removeAllEncodedQueryParameters(name);
+      return builder.addEncodedQueryParameter(name, value);
+    },
+    removeAllEncodedQueryParameters: function (name) {
+      var wanted = __str(name);
+      pairs = pairs.filter(function (pair) { return pair[0] !== wanted; });
+      return builder;
+    },
+    encodedFragment: function (value) {
+      fragment = value === null || value === undefined ? '' : '#' + __str(value);
+      return builder;
+    },
+    /* android.net.Uri.Builder, over the same parts: 'Uri.parse(u).buildUpon()
+       .appendQueryParameter("s", q)'. Uri.encode and encodeURIComponent leave
+       the same characters alone. */
+    appendQueryParameter: function (name, value) {
+      pairs.push([encode(name), value === null || value === undefined ? 'null' : encode(value)]);
+      return builder;
+    },
+    appendPath: function (segment) {
+      path = path.replace(/\\/$/, '') + '/' + encode(segment);
+      return builder;
+    },
+    appendEncodedPath: function (segment) {
+      var written = __str(segment);
+      path = path.replace(/\\/$/, '') + '/' + written.replace(/^\\//, '');
+      return builder;
+    },
+    path: function (value) {
+      path = __str(value).split('/').map(encode).join('/');
+      return builder;
+    },
+    clearQuery: function () { pairs = []; return builder; },
+    authority: function (value) { authority = '//' + encode(value).replace(/%3A/gi, ':').replace(/%40/g, '@'); return builder; },
+    encodedAuthority: function (value) { authority = '//' + __str(value); return builder; },
     addQueryParameter: function (name, value) {
       pairs.push([encode(name), value === null || value === undefined ? null : encode(value)]);
       return builder;
@@ -6745,10 +7227,10 @@ __k.toMediaType = function (value) { return __str(value); };
 __k.toRequestBody = function (value, contentType) {
   var type = contentType === undefined || contentType === null ? null : __str(contentType);
   if (typeof value === 'string' || value === null || value === undefined) {
-    return { __kBody: true, contentType: type, text: __str(value) };
+    return __requestBody(type, __str(value));
   }
   if (typeof Uint8Array !== 'undefined' && value instanceof Uint8Array) {
-    return { __kBody: true, contentType: type, text: __host().text.decode(value) };
+    return __requestBody(type, __host().text.decode(value));
   }
   throw new Error(
     'This converted extension built a request body out of something Yorozo cannot send as text. ' +
@@ -6772,14 +7254,14 @@ __k.toRequestBody = function (value, contentType) {
 __k.toResponseBody = function (value, contentType) {
   var type = contentType === undefined || contentType === null ? null : __str(contentType);
   if (typeof value === 'string' || value === null || value === undefined) {
-    return { __kBody: true, contentType: type, text: __str(value) };
+    return __requestBody(type, __str(value));
   }
   if (typeof Uint8Array !== 'undefined' && value instanceof Uint8Array) {
     var text = __host().text.decode(value);
     var back = __host().text.encode(text);
     var same = back.length === value.length;
     for (var at = 0; same && at < value.length; at += 1) same = back[at] === value[at];
-    if (same) return { __kBody: true, contentType: type, text: text };
+    if (same) return __requestBody(type, text);
   }
   throw new Error(
     'This converted extension replaced a response with a body that is not text. Yorozo keeps a ' +
@@ -6809,7 +7291,7 @@ __k.toJsonRequestBody = function (value) {
   // A buildJsonObject / buildJsonArray result is safe to serialise: the
   // extension wrote its keys itself, so there is no @SerialName rename to lose.
   if (__isJson(value)) {
-    return { __kBody: true, contentType: 'application/json; charset=utf-8', text: JSON.stringify(value) };
+    return __requestBody('application/json; charset=utf-8', JSON.stringify(value));
   }
   if (typeof value !== 'string') {
     throw new Error(
@@ -6817,7 +7299,7 @@ __k.toJsonRequestBody = function (value) {
       '@Serializable field names only for decoding, so encoding one here could post the wrong keys.'
     );
   }
-  return { __kBody: true, contentType: 'application/json; charset=utf-8', text: value };
+  return __requestBody('application/json; charset=utf-8', value);
 };
 
 __k.bodyString = function (value) {

@@ -401,7 +401,8 @@ const __super = {
     );
   },
   getHomeUrl: function () { return __BASE_URL; },
-  getAnimeUrl: function (anime) { return __detailsRequest(anime).url; },
+  // A request's url is an HttpUrl; the member answers the String upstream's does.
+  getAnimeUrl: function (anime) { return String(__detailsRequest(anime).url); },
   getEpisodeUrl: function (episode) { return episode.url; },
   // Deprecated upstream and a no-op there too: everything it used to do is
   // expected to happen while the episode is being constructed.

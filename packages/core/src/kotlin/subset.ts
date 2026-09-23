@@ -1073,7 +1073,12 @@ export const BUILDER_LAMBDA_METHODS: ReadonlySet<string> = new Set([
  * is how most of them are written — refused for an `it` with no lambda around
  * it, naming a construct the source never wrote.
  */
-export const ARGUMENT_LAMBDA_METHODS: ReadonlySet<string> = new Set(['addInterceptor']);
+export const ARGUMENT_LAMBDA_METHODS: ReadonlySet<string> = new Set([
+	'addInterceptor',
+	// keiyoushi's `addCookie { listOf("k" to v) }`: the lambda is the cookies,
+	// asked for at each request so a preference can change them.
+	'addCookie'
+]);
 
 /**
  * Kotlin properties (no call parentheses) that must go through the runtime.
@@ -1343,6 +1348,22 @@ export const HOST_METHODS: ReadonlySet<string> = new Set([
 	'string',
 	'bytes',
 	'code',
+	// okhttp's request side: an interceptor's `request.newBuilder()
+	// .removeHeader("Referer")`, the label a request carries back on its
+	// response (`tag`), a Content-Length written by hand from `contentLength()`,
+	// and `peekBody(n)` — the first n bytes, without consuming the body.
+	'removeHeader',
+	'tag',
+	'contentLength',
+	'peekBody',
+	'cacheControl',
+	// okhttp's MultipartBody.Builder.
+	'setType',
+	'addFormDataPart',
+	'addPart',
+	// keiyoushi's `addCookie`, a Cookie header on the source's own requests —
+	// see the client builder in the runtime for what it does and does not do.
+	'addCookie',
 	// `response.newBuilder().code(200).message("OK")` — the reason phrase an
 	// interceptor writes when it turns a 404 into an empty page. The builder
 	// records it and the built response carries it as `message`.
@@ -1407,6 +1428,26 @@ export const HOST_METHODS: ReadonlySet<string> = new Set([
 	'addEncodedPathSegments',
 	'setPathSegment',
 	'setEncodedPathSegment',
+	// The rest of HttpUrl.Builder: the whole query at once (`query(null)` is how
+	// this catalogue strips one), one segment out, an encoded parameter set, and
+	// the authority's parts.
+	'query',
+	'encodedQuery',
+	'removePathSegment',
+	'addEncodedPathSegment',
+	'setEncodedQueryParameter',
+	'removeAllEncodedQueryParameters',
+	'username',
+	'password',
+	'port',
+	'queryParameterValues',
+	// android.net.Uri.Builder, which the runtime answers with the same builder:
+	// `Uri.parse(u).buildUpon().appendQueryParameter("s", q)`.
+	'buildUpon',
+	'appendQueryParameter',
+	'appendPath',
+	'appendEncodedPath',
+	'clearQuery',
 	'encodedPath',
 	'queryParameter',
 	'queryParameterNames',
@@ -1855,6 +1896,8 @@ export const GLOBAL_NAMES: ReadonlySet<string> = new Set([
 	'OffsetDateTime',
 	'ZonedDateTime',
 	'LocalDateTime',
+	// okhttp's MultipartBody, whose `FORM` is read off the type itself.
+	'MultipartBody',
 	// The rest of the java.time subset, and kotlin.time's Clock and Duration —
 	// see `RUNTIME_GLOBALS` for why each has to be a name.
 	'LocalDate',
