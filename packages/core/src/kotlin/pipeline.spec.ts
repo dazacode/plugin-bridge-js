@@ -931,6 +931,8 @@ describe('which refusals stop a build', () => {
 	it('does not block on a member the host draws itself', async () => {
 		// A converted bundle declares no settings, so nothing ever calls
 		// `setupPreferenceScreen` — the same line `themes/convert.ts` draws.
+		// The preference types themselves translate now; the Android toast
+		// beside them is what is refused.
 		const result = await convertKotlin(
 			[
 				{
@@ -940,6 +942,7 @@ describe('which refusals stop a build', () => {
 						'    override val baseUrl = "https://example.invalid"',
 						'    override fun setupPreferenceScreen(screen: PreferenceScreen) {',
 						'        screen.addPreference(ListPreference(screen.context))',
+						'        Toast.makeText(screen.context, "saved", Toast.LENGTH_SHORT).show()',
 						'    }',
 						'}'
 					)

@@ -7463,6 +7463,22 @@ class Emitter {
 		// Arity separates them cleanly. Every SharedPreferences call in this
 		// ecosystem passes a default (`getString(KEY, DEFAULT)!!`); every
 		// org.json read passes only the field.
+		// `body.source().asResponseBody(type)` — okio's spelling of "the same
+		// bytes under another content type", which is how an interceptor fixes a
+		// host that serves its pages as `application/octet-stream`. A response
+		// here is the text the host read, so the same body is its `string()`,
+		// handed to `toResponseBody` with the new type. Only this whole chain:
+		// `.source()` on its own is an okio stream (`readByteArray`,
+		// `cipherSource`) over bytes this runtime does not keep, and stays
+		// refused, as does the two-argument form, which also asserts a length.
+		if (name === 'asResponseBody' && args.length === 1 && lambda === null) {
+			const body = okioSourceOf(receiver);
+			if (body !== null) {
+				const type = this.plainArguments(name, args)[0];
+				return `${this.helper('toResponseBody')}(${this.expr(body)}.string(), ${type})`;
+			}
+		}
+
 		const jsonGetter = JSON_GETTERS.get(name);
 		if (jsonGetter !== undefined && args.length === 1 && lambda === null) {
 			return `${this.helper(jsonGetter)}(${[this.expr(receiver), ...this.plainArguments(name, args)].join(', ')})`;
@@ -10346,6 +10362,22 @@ function receiverArity(parameter: KNode): number | null {
 	const list = parts.findIndex((child) => child.type === 'function_type_parameters');
 	if (list <= 0 || parts[list - 1].type !== '.') return null;
 	return kids(parts[list]).length;
+}
+
+/**
+ * `x` in `x.source()` — a zero-argument, non-safe call of `source` — or null.
+ * See the `asResponseBody` case in `methodCall`.
+ */
+function okioSourceOf(node: KNode): KNode | null {
+	if (node.type !== 'call_expression') return null;
+	const [callee, suffix] = kids(node);
+	if (callee?.type !== 'navigation_expression' || suffix?.type !== 'call_suffix') return null;
+	if (suffix.allChildren.some((part) => part.type === 'annotated_lambda')) return null;
+	const args = kids(suffix).find((part) => part.type === 'value_arguments');
+	if (args !== undefined && kids(args).length > 0) return null;
+	const [inner, step] = kids(callee);
+	if (step?.type !== 'navigation_suffix' || step.text !== '.source') return null;
+	return inner ?? null;
 }
 
 /** See `ReceiverSlots`. Null for a function with no function-typed parameter. */

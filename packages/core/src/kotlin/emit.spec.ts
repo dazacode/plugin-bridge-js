@@ -5104,6 +5104,53 @@ describe('a parameter that cannot be invoked', () => {
 	});
 });
 
+describe("okio's source, which is only ever the same body under another type", () => {
+	it('rewraps `body.source().asResponseBody(type)` as the body text, and refuses the stream', () => {
+		// The Madara interceptors that fix a host serving pages as
+		// `application/octet-stream`. A response here is text, so the same
+		// bytes are its `string()`; the runtime half is proved in
+		// kotlin-runtime.spec.ts. Reading the source as a stream is not
+		// something a text body can answer, and stays refused.
+		const emission = translate(
+			inClass(
+				'    fun fix(response: Response): Response {',
+				'        val body = response.body.source().asResponseBody("image/jpeg".toMediaType())',
+				'        return response.newBuilder().body(body).build()',
+				'    }',
+				'    fun stream(response: Response) = response.body.source().readByteArray(12)',
+				'    fun sized(response: Response) = response.body.source().asResponseBody(null, -1)'
+			)
+		);
+		expect(emission.js).toContain(
+			"__k.toResponseBody(response.body.string(), __k.toMediaType('image/jpeg'))"
+		);
+		expect(emission.refusals.map((one) => one.member).sort()).toEqual(['sized', 'stream']);
+	});
+});
+
+describe('the androidx preference idiom', () => {
+	it('builds the preference and hands it to the screen, not to the source', () => {
+		// MangaThemesia's paid-chapter helper. `setDefaultValue` inside the
+		// block is the preference's; the runtime half is in kotlin-runtime.spec.
+		const emission = translate(
+			kt(
+				'class Helper {',
+				'    fun addTo(screen: PreferenceScreen) {',
+				'        SwitchPreferenceCompat(screen.context).apply {',
+				'            key = "hide_paid"',
+				'            setDefaultValue(true)',
+				'        }.also(screen::addPreference)',
+				'    }',
+				'}'
+			)
+		);
+		expect(emission.refusals).toEqual([]);
+		expect(emission.js).toContain('SwitchPreferenceCompat(screen.context)');
+		expect(emission.js).toContain('return this.setDefaultValue(true);');
+		expect(emission.js).toContain('(...__a) => screen.addPreference(...__a)');
+	});
+});
+
 describe('a safe assignment', () => {
 	it('writes when the receiver is there, and evaluates nothing when it is not', () => {
 		// `firstOrNull()?.date_upload = time` on an empty list does nothing in

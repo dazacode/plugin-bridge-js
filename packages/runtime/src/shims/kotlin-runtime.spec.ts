@@ -2564,9 +2564,9 @@ describe('preferences', () => {
 /**
  * The runtime again, with the androidx preference names exported.
  *
- * They are not in `RUNTIME_GLOBALS` — nothing the emitter *calls* is a
- * preference type; an extension constructs them by name — so the shared loader
- * cannot reach them and this one exports them directly.
+ * The constructable ones are in `RUNTIME_GLOBALS` now, since a helper that
+ * builds one is translated; this loader predates that, and also reaches the
+ * store and the setting-id map, which the shared one does not.
  */
 async function loadPreferences(settingIds: Record<string, string> = {}) {
 	const probe = [
@@ -2604,6 +2604,28 @@ describe('the androidx preference framework a converted extension builds', () =>
 		screen.addPreference(new runtime.types.MultiSelectListPreference(null));
 
 		expect(screen.getPreferenceCount()).toBe(4);
+	});
+
+	it('runs the idiom as the emitter writes it: apply, a bare setDefaultValue, addPreference', async () => {
+		// `SwitchPreferenceCompat(screen.context).apply { key = …;
+		// setDefaultValue(true) }.also(screen::addPreference)`, in the shape
+		// emit.spec.ts asserts. The bare `setDefaultValue` must land on the
+		// preference: on the source object it would ask the extension instead.
+		const runtime = await loadPreferences();
+		runtime.enter(null);
+		const { k, types } = runtime;
+		const screen = types.PreferenceScreen(null);
+		k.also(
+			k.apply(types.SwitchPreferenceCompat(screen.context), function (this: any) {
+				this.key = 'hide_paid';
+				return this.setDefaultValue(true);
+			}),
+			(...a: unknown[]) => screen.addPreference(...a)
+		);
+
+		expect(screen.getPreferenceCount()).toBe(1);
+		expect(screen.getPreference(0).key).toBe('hide_paid');
+		expect(screen.getPreference(0).defaultValue).toBe(true);
 	});
 
 	it('is callable without `new`, since a Kotlin constructor has no keyword', async () => {
@@ -4962,6 +4984,35 @@ describe('toCollection and the response an interceptor rebuilds', () => {
 		expect(response.message).toBe('OK');
 		// The body object, not '[object Object]'.
 		expect(response.body.string()).toBe('');
+		expect(response.body.contentType()).toBe('text/html');
+	});
+
+	it('relabels a body the way `body.source().asResponseBody(type)` is emitted', async () => {
+		// The emitter writes okio's rewrap as the body's text under the new
+		// type (see emit.spec.ts); this is that exact expression, run.
+		const { ctx } = context({
+			'https://example.invalid/page': {
+				status: 200,
+				body: '<p>page</p>',
+				headers: { 'content-type': 'application/octet-stream' }
+			}
+		});
+		runtime.enter(ctx);
+		const client = runtime.client
+			.newBuilder()
+			.addInterceptor(async function (chain: {
+				request(): unknown;
+				proceed(r: unknown): Promise<any>;
+			}) {
+				const response = await chain.proceed(chain.request());
+				const body = k.toResponseBody(response.body.string(), k.toMediaType('text/html'));
+				return response.newBuilder().body(body).build();
+			})
+			.build();
+		const response = await client
+			.newCall(runtime.globals.GET('https://example.invalid/page'))
+			.execute();
+		expect(response.body.string()).toBe('<p>page</p>');
 		expect(response.body.contentType()).toBe('text/html');
 	});
 

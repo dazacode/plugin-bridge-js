@@ -772,6 +772,23 @@ export const RUNTIME_GLOBALS = [
 	/* Aniyomi's spelling of the same library-refresh hint. */
 	'AnimeUpdateStrategy',
 	'SMangaUpdate',
+	/* androidx's preference types, as declarations (see `KOTLIN_PREFS`). A
+	   plugin never draws them — the manifest's settings are derived from
+	   `setupPreferenceScreen` before packaging — but a helper that builds one
+	   is ordinary code: MangaThemesia's `MangaThemesiaPaidChapterHelper`
+	   constructs a `SwitchPreferenceCompat` in a member the template's own
+	   screen calls, and every instance refused on that constructor while the
+	   runtime already defined the type. Running one records its default,
+	   which is the one thing it does here. */
+	'PreferenceCategory',
+	'SwitchPreferenceCompat',
+	'SwitchPreference',
+	'CheckBoxPreference',
+	'EditTextPreference',
+	'ListPreference',
+	'DropDownPreference',
+	'MultiSelectListPreference',
+	'SeekBarPreference',
 	'SimpleDateFormat',
 	/* The `java.time` formatter the same helpers are called on —
 	   `DateTimeFormatter.ofPattern("yyyy-MM-dd").tryParseDate(date)`. Shimmed

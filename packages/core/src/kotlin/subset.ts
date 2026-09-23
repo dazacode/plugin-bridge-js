@@ -1270,6 +1270,14 @@ export const HOST_PROPERTY_METHODS: ReadonlySet<string> = new Set([
  * is a deliberate cost rather than an oversight.
  */
 export const HOST_METHODS: ReadonlySet<string> = new Set([
+	// A PreferenceScreen's (`KOTLIN_PREFS`), which is the one call the
+	// preference idiom ends on: `SwitchPreferenceCompat(ctx).apply { … }
+	// .also(screen::addPreference)`. It records the child and its default.
+	// `setDefaultValue` is the call inside that block, bare, on the
+	// preference: without it here the block's implicit receiver lost to the
+	// source object and the default was asked of the extension instead.
+	'addPreference',
+	'setDefaultValue',
 	// kotlinx's JsonDecoder, as a KSerializer's `deserialize` is handed it by
 	// the typed decoder (`__jsonDecoder` in the runtime). The `encode*` half
 	// is what the same object's `serialize` writes; the runtime never calls
@@ -1997,6 +2005,16 @@ export const GLOBAL_NAMES: ReadonlySet<string> = new Set([
 	'UpdateStrategy',
 	'AnimeUpdateStrategy',
 	'SMangaUpdate',
+	// androidx's preference types — see `RUNTIME_GLOBALS`.
+	'PreferenceCategory',
+	'SwitchPreferenceCompat',
+	'SwitchPreference',
+	'CheckBoxPreference',
+	'EditTextPreference',
+	'ListPreference',
+	'DropDownPreference',
+	'MultiSelectListPreference',
+	'SeekBarPreference',
 	'SimpleDateFormat',
 	'DateTimeFormatter',
 	'Locale',
