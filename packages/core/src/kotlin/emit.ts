@@ -7032,6 +7032,10 @@ class Emitter {
 				return this.cast(node);
 			case 'prefix_expression': {
 				const operator = node.allChildren[0]?.type ?? '';
+				if (operator === 'annotation') {
+					const operand = kids(node).filter((k) => k.type !== 'annotation');
+					return this.expr(operand[operand.length - 1]);
+				}
 				if (operator !== '-' && operator !== '+' && operator !== '!') {
 					this.refuse(node, `a prefix \`${operator}\``);
 				}

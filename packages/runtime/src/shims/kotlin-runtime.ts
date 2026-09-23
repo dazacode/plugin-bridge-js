@@ -11028,6 +11028,28 @@ var Log = (function () {
  * 'instanceof' for anything carrying that member.
  */
 var Interceptor = {};
+var __imgGrant = function (n) { return new Proxy(function () {}, { get: function (t, k) { if (k === 'prototype') return {}; if (typeof k === 'symbol') return undefined; return __imgGrant(n + '.' + String(k)); }, construct: function () { throw new Error('image grant: new ' + n); }, apply: function () { throw new Error('image grant: ' + n + '()'); } }); };
+var Bitmap = __imgGrant('Bitmap');
+var Protocol = __imgGrant('Protocol');
+var Integer = typeof Integer !== 'undefined' ? Integer : __imgGrant('Integer');
+var ByteArrayOutputStream = typeof ByteArrayOutputStream !== 'undefined' ? ByteArrayOutputStream : __imgGrant('ByteArrayOutputStream');
+var SeedRandom = typeof SeedRandom !== 'undefined' ? SeedRandom : __imgGrant('SeedRandom');
+
+var Buffer = typeof Buffer !== 'undefined' ? Buffer : __imgGrant('Buffer');
+var BitmapFactory = __imgGrant('BitmapFactory');
+var Canvas = __imgGrant('Canvas');
+var Rect = __imgGrant('Rect');
+var RectF = __imgGrant('RectF');
+var Paint = __imgGrant('Paint');
+var TextPaint = __imgGrant('TextPaint');
+var StaticLayout = __imgGrant('StaticLayout');
+var Color = __imgGrant('Color');
+var Typeface = __imgGrant('Typeface');
+var Layout = __imgGrant('Layout');
+var LineBreaker = __imgGrant('LineBreaker');
+var ImageDecoder = __imgGrant('ImageDecoder');
+var Html = __imgGrant('Html');
+
 Object.defineProperty(Interceptor, Symbol.hasInstance, {
   value: function (value) { return __k.hasMembers(value, ['intercept']); }
 });
