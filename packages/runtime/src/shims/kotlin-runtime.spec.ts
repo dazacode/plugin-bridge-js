@@ -1026,6 +1026,28 @@ describe('one dead mirror must not lose the page', () => {
 /* ── properties, types, ranges ────────────────────────────────────────────── */
 
 describe('the parts of Kotlin that have no JavaScript spelling', () => {
+	it('runs the measured collection and text helpers without losing their return shapes', async () => {
+		expect(k.filterNotNull([null, 0, undefined, 2])).toEqual([0, 2]);
+		expect(k.maxOf([1, 3, 2], (n: number) => n * 2)).toBe(6);
+		expect(() => k.maxOf([], (n: number) => n)).toThrow(/empty/);
+		const values = [1, 2];
+		expect(k.replaceAll(values, (n: number) => n * 3)).toBeUndefined();
+		expect(values).toEqual([3, 6]);
+		expect(k.replaceAll('a1b22', '[0-9]+', '#')).toBe('a#b#');
+		const destination = k.mutableListOf('x');
+		expect(
+			await k.mapNotNullTo([1, 2, 3], destination, (n: number) => (n === 2 ? null : n * 10))
+		).toBe(destination);
+		expect(destination).toEqual(['x', 10, 30]);
+		const mapped = k.toMap([k.to('a', 1), k.to('b', 2), k.to('a', 3)]);
+		expect([...mapped]).toEqual([
+			['a', 3],
+			['b', 2]
+		]);
+		const into = k.mutableMapOf();
+		expect(k.toMap([k.to('z', 4)], into)).toBe(into);
+		expect(into.get('z')).toBe(4);
+	});
 	it('keeps equal sort keys stable while sorting a MutableList in place', () => {
 		const list = k.mutableListOf({ n: 1, id: 'a' }, { n: 2, id: 'b' }, { n: 1, id: 'c' });
 		expect(k.sortByDescending(list, (item: { n: number }) => item.n)).toBeUndefined();

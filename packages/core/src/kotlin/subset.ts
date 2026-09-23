@@ -1062,7 +1062,15 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 	['xor', 'bitwiseXor'],
 	// `length()` with the parentheses is org.json's, never Kotlin's
 	// `String.length` — that one is a property and reaches a different table.
-	['length', 'jsonLength']
+	['length', 'jsonLength'],
+	// Measured stdlib gaps. The nullable number reader already has the same
+	// double-precision result; the remaining helpers live in the runtime.
+	['toDoubleOrNull', 'toFloatOrNull'],
+	['filterNotNull', 'filterNotNull'],
+	['maxOf', 'maxOf'],
+	['replaceAll', 'replaceAll'],
+	['mapNotNullTo', 'mapNotNullTo'],
+	['toMap', 'toMap']
 ]);
 
 /**

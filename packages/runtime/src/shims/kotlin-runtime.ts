@@ -2206,6 +2206,18 @@ var __k = {
     return text.split(__str(target)).join(__str(replacement));
   },
 
+  /** MutableList.replaceAll changes the list; String.replaceAll takes a regex. */
+  replaceAll: function (value, transform, replacement) {
+    if (typeof value === 'string') return __k.replaceString(value, __k.regex(transform), replacement);
+    if (!Array.isArray(value) || typeof transform !== 'function') {
+      throw new Error('This converted extension called replaceAll on an unsupported value.');
+    }
+    return __then(__each(value.slice(), transform), function (values) {
+      for (var i = 0; i < values.length; i += 1) value[i] = values[i];
+      return undefined;
+    });
+  },
+
   /**
    * Kotlin splits on any of several literal delimiters, or on a Regex.
    *
@@ -2521,6 +2533,14 @@ var __k = {
     });
   },
 
+  /** Keep only non-null input values, in their original order. */
+  filterNotNull: function (list) {
+    var items = __arr(list);
+    var out = [];
+    for (var i = 0; i < items.length; i += 1) if (__present(items[i])) out.push(items[i]);
+    return out;
+  },
+
   /**
    * filter, which answers a String for a String.
    *
@@ -2682,6 +2702,17 @@ var __k = {
     });
   },
 
+  /** maxOf on a collection requires an element and a selector. */
+  maxOf: function (list, selector) {
+    var items = __arr(list);
+    if (items.length === 0) throw new Error('This converted extension took maxOf an empty collection.');
+    return __then(__each(items, selector), function (values) {
+      var best = values[0];
+      for (var i = 1; i < values.length; i += 1) if (__cmp(values[i], best) > 0) best = values[i];
+      return best;
+    });
+  },
+
   /** MutableList sorts change the receiver and answer Unit. */
   sortBy: function (list, selector) {
     return __then(__k.sortedBy(list, selector), function (sorted) { return __sortInPlace(list, sorted); });
@@ -2834,6 +2865,14 @@ var __k = {
         return destination;
       }
     );
+  },
+
+  /** Append non-null transformed values to the destination itself. */
+  mapNotNullTo: function (list, destination, transform) {
+    return __then(__k.mapNotNull(list, transform), function (values) {
+      for (var i = 0; i < values.length; i += 1) __k.add(destination, values[i]);
+      return destination;
+    });
   },
 
   /**
@@ -3804,6 +3843,33 @@ var __k = {
       Object.keys(value).forEach(function (key) { out.set(key, value[key]); });
     }
     return __mutableMap(out);
+  },
+
+  /** Turn pairs into a map, with later duplicates winning as in Kotlin. */
+  toMap: function (value, destination) {
+    if (destination === undefined && value !== null && value !== undefined &&
+        !(value instanceof Map) && !Array.isArray(value) && typeof value.toMap === 'function') {
+      return value.toMap();
+    }
+    var out = destination === undefined ? __mutableMap(new Map()) : destination;
+    if (!(out instanceof Map)) throw new Error('This converted extension passed a non-map destination to toMap.');
+    if (value instanceof Map) {
+      value.forEach(function (held, key) { out.set(key, held); });
+      return out;
+    }
+    var items = value !== null && value !== undefined && !Array.isArray(value) &&
+      typeof value === 'object' && typeof value[Symbol.iterator] !== 'function'
+      ? Object.entries(value) : __arr(value);
+    for (var i = 0; i < items.length; i += 1) {
+      var pair = items[i];
+      if (Array.isArray(pair)) out.set(pair[0], pair[1]);
+      else if (pair !== null && pair !== undefined && 'first' in pair && 'second' in pair) {
+        out.set(pair.first, pair.second);
+      } else if (pair !== null && pair !== undefined && 'key' in pair && 'value' in pair) {
+        out.set(pair.key, pair.value);
+      } else throw new Error('This converted extension passed a non-pair to toMap.');
+    }
+    return out;
   },
 
   setOf: function () { return __k.toSet(Array.prototype.slice.call(arguments)); },

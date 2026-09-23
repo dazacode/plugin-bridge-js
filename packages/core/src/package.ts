@@ -164,8 +164,13 @@ const ENTRYPOINT = 'source';
  * 53: mutable sorts, getOrPut, buildSet and Observable lambdas widen the
  *     supported control-flow subset; descending keyed sorts also preserve
  *     Kotlin's stable order. Reconvert to include newly emitted members.
+ *
+ * 54: measured collection and numeric helpers from the stdlib pass now emit
+ *     through checked runtime behavior: null filtering, maxOf, replaceAll,
+ *     mapNotNullTo, toMap, and nullable double parsing. Reconvert to include
+ *     extensions previously refused for those calls.
  */
-export const CONVERTER_VERSION = 53;
+export const CONVERTER_VERSION = 54;
 
 export interface BundleInput {
 	readonly id: string;

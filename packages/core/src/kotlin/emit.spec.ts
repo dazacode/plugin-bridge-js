@@ -4604,6 +4604,24 @@ describe('the class loader', () => {
 });
 
 describe('the shared playlist module’s signatures', () => {
+	it('routes the measured stdlib calls through their runtime helpers', () => {
+		const emitted = translate(
+			inClass(
+				'    fun number(text: String) = text.toDoubleOrNull()',
+				'    fun compact(xs: List<Int?>) = xs.filterNotNull()',
+				'    fun largest(xs: List<Int>) = xs.maxOf { it }',
+				'    fun rewritten(xs: MutableList<Int>) = xs.replaceAll { it + 1 }',
+				'    fun into(xs: List<Int>) = xs.mapNotNullTo(mutableListOf()) { it }',
+				'    fun pairs(xs: List<Pair<String, Int>>) = xs.toMap()'
+			)
+		);
+		expect(emitted.refusals).toEqual([]);
+		expect(emitted.js).toContain('__k.toFloatOrNull(text)');
+		for (const helper of ['filterNotNull', 'maxOf', 'replaceAll', 'mapNotNullTo', 'toMap']) {
+			expect(emitted.js).toContain(`__k.${helper}(`);
+		}
+	});
+
 	it('routes in-place sorts, map defaults, receiver builders and Observable callbacks', () => {
 		const emitted = translate(
 			inClass(

@@ -604,6 +604,11 @@ export const RUNTIME_HELPERS = [
 	   `CLASS_LOADER` in `subset.ts` for the two spellings that reach it, and
 	   `__RESOURCES` in the entry point for where the files come from. */
 	'classLoader',
+	'filterNotNull',
+	'maxOf',
+	'replaceAll',
+	'mapNotNullTo',
+	'toMap',
 	/* A class's simple name — see `SIMPLE_NAME` in `subset.ts` for the two
 	   chains that reach it and why a value only reaches it inside a log line. */
 	'simpleName',
