@@ -657,6 +657,11 @@ export function namedObstacle(text: string): string | null {
  * typo is `__k.mapNotNul is not a function` inside a sandbox.
  */
 export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
+	// Kotlin's Map transforms, each answering a Map — see the runtime.
+	['mapValues', 'mapValues'],
+	['mapKeys', 'mapKeys'],
+	['filterKeys', 'filterKeys'],
+	['filterValues', 'filterValues'],
 	// strings — every one of these differs from its JavaScript namesake
 	['substringAfter', 'substringAfter'],
 	['substringAfterLast', 'substringAfterLast'],
@@ -1204,7 +1209,14 @@ export const EXTENSION_PROPERTIES: ReadonlyMap<string, string> = new Map([
 	['float', 'jeFloat'],
 	['floatOrNull', 'jeFloatOrNull'],
 	['boolean', 'jeBoolean'],
-	['booleanOrNull', 'jeBooleanOrNull']
+	['booleanOrNull', 'jeBooleanOrNull'],
+	// A Kotlin Map's views. A JS Map spells these as *methods* and a
+	// JsonObject has none, so each was a property read that answered the
+	// method or undefined — `m.values.joinToString()` was empty, nothing
+	// refused. Deferring to a receiver that has the property, as above.
+	['keys', 'kKeys'],
+	['values', 'kValues'],
+	['entries', 'kEntries']
 ]);
 
 /**

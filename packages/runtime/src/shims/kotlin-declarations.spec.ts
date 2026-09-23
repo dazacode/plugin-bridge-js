@@ -93,6 +93,44 @@ function refusalNames(source: string): string[] {
 	return emission.refusals.flatMap((one) => one.obstacles.map((obstacle) => obstacle.kind));
 }
 
+describe('a Kotlin Map, as a JS Map and as a JsonObject', () => {
+	// A Map iterated as bare [k, v] arrays, so `it.key` was undefined, and its
+	// `keys`/`values`/`entries` were property reads of a JS Map's *methods*; a
+	// JsonObject iterated as one item, itself. All of it converted and answered
+	// empty lists and NaN with nothing refused.
+	const source = kt(
+		'class Demo {',
+		'    fun views(): String {',
+		'        val m = mapOf("a" to 1, "b" to 2)',
+		'        return m.keys.joinToString() + "|" + m.values.joinToString() + "|" + m.entries.joinToString { it.key + it.value }',
+		'    }',
+		'    fun entries(): String {',
+		'        val m = mapOf("a" to 1, "b" to 2)',
+		'        return m.map { it.key + it.value }.joinToString() + "|" + m.maxByOrNull { it.value }?.key + "|" + m.toList().joinToString { it.first }',
+		'    }',
+		'    fun transforms(): String {',
+		'        val m = mapOf("a" to 1, "b" to 2)',
+		'        return m.filter { it.value > 1 }.keys.joinToString() + "|" + m.mapValues { it.value * 10 }.values.joinToString() + "|" +',
+		'            m.mapKeys { it.key.uppercase() }.keys.joinToString() + "|" + m.filterKeys { it == "a" }.size + "|" + m.filterValues { it > 5 }.size',
+		'    }',
+		'    fun json(text: String): String {',
+		'        val o = Json.parseToJsonElement(text).jsonObject',
+		'        val seen = mutableListOf<String>()',
+		'        o.forEach { (k, _) -> seen.add(k) }',
+		'        return o.keys.joinToString() + "|" + ("src" in o) + ("q" in o) + "|" + seen.joinToString() + "|" + o.filter { it.key != "b" }.keys.joinToString()',
+		'    }',
+		'}'
+	);
+
+	it('answers views, entries and Map-valued transforms as Kotlin does', async () => {
+		const d = await instantiate('Demo', source);
+		expect(d.views()).toBe('a, b|1, 2|a1, b2');
+		expect(d.entries()).toBe('a1, b2|b|a, b');
+		expect(d.transforms()).toBe('b|10, 20|A, B|1|0');
+		expect(d.json('{"src":1,"b":{}}')).toBe('src, b|truefalse|src, b|src');
+	});
+});
+
 describe('a reference to a member the template declares', () => {
 	it('binds it to the inherited value, not to the argument', async () => {
 		// DooPlay's `protected open val episodeNumberRegex`, read by a subclass

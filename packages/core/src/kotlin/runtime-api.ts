@@ -197,6 +197,14 @@ export const RUNTIME_HELPERS = [
 	'jeFloatOrNull',
 	'jeBoolean',
 	'jeBooleanOrNull',
+	/* A Kotlin Map's views and transforms — see `__mapPart` in the runtime. */
+	'kKeys',
+	'kValues',
+	'kEntries',
+	'mapValues',
+	'mapKeys',
+	'filterKeys',
+	'filterValues',
 	/* Typed decoding: a '@Serializable' class, and a JsonTransformingSerializer. */
 	'serial',
 	'transforms',

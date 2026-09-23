@@ -199,10 +199,97 @@ function __arr(value) {
   // bogus '' element in a page of results is exactly the silent wrongness this
   // runtime exists to prevent.
   if (typeof value === 'string') return value.length === 0 ? [] : [value];
+  // A Kotlin Map iterates as its entries — see '__entry' — whether it is a JS
+  // Map or a JsonObject, which is the plain object JSON.parse made. Both used
+  // to be wrong: a Map gave bare [k, v] arrays, so 'it.key' was undefined, and
+  // a JsonObject was one item, itself, so 'forEach { (k, v) -> }' ran once
+  // with the object as its key.
+  if (value instanceof Map) return __mapEntries(value);
+  if (__mapLike(value)) return __mapEntries(value);
   if (typeof value.toArray === 'function') return value.toArray();
   if (typeof value[Symbol.iterator] === 'function') return Array.from(value);
   if (typeof value.length === 'number') return Array.prototype.slice.call(value);
   return [value];
+}
+
+/**
+ * A Kotlin Map.Entry: the '[key, value]' pair destructuring reads, which is
+ * how a Map iterated here all along, carrying the names Kotlin reads it by —
+ * 'key' and 'value', and 'first'/'second' so 'toList()' of a map is a list of
+ * Pairs, as it is in Kotlin. Non-enumerable, so JSON and equality see a pair.
+ */
+function __entry(key, value) {
+  var entry = [key, value];
+  Object.defineProperty(entry, 'key', { value: key, enumerable: false });
+  Object.defineProperty(entry, 'value', { value: value, enumerable: false });
+  Object.defineProperty(entry, 'first', { value: key, enumerable: false });
+  Object.defineProperty(entry, 'second', { value: value, enumerable: false });
+  return entry;
+}
+
+/**
+ * A plain object that can only be a Map in Kotlin: JSON's object (a
+ * JsonObject, or a map field the decoder answered), never a record the
+ * runtime or the extension built with behaviour on it. Kotlin cannot iterate
+ * a class instance or a DTO, so an object reaching a collection helper is one
+ * of these — this only makes sure it is data and not, say, a builder.
+ */
+function __mapLike(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  if (value instanceof Map || value instanceof Set) return false;
+  var proto = Object.getPrototypeOf(value);
+  if (proto !== Object.prototype && proto !== null) return false;
+  if (value.__kResult === true) return false;
+  for (var key in value) {
+    if (Object.prototype.hasOwnProperty.call(value, key) && typeof value[key] === 'function') return false;
+  }
+  return true;
+}
+
+function __mapEntries(value) {
+  var out = [];
+  if (value instanceof Map) {
+    value.forEach(function (held, key) { out.push(__entry(key, held)); });
+    return out;
+  }
+  for (var key in value) {
+    if (Object.prototype.hasOwnProperty.call(value, key)) out.push(__entry(key, value[key]));
+  }
+  return out;
+}
+
+/** A new Kotlin Map from entries — what filter and mapValues answer over a Map. */
+function __mapFrom(entries) {
+  var out = __mutableMap(new Map());
+  for (var i = 0; i < entries.length; i += 1) out.set(entries[i][0], entries[i][1]);
+  return out;
+}
+
+function __isMap(value) {
+  return value instanceof Map || __mapLike(value);
+}
+
+/**
+ * A Map's 'keys', 'values' or 'entries', read as a property.
+ *
+ * They were plain property reads: undefined on a JsonObject, and on a JS Map
+ * the *method* of that name, which every helper then iterated as one opaque
+ * item — 'm.values.joinToString()' was empty. A receiver that really has the
+ * property answers it unchanged: a DTO's own 'entries' field, a class getter,
+ * an enum's static 'entries'.
+ */
+function __mapPart(value, name) {
+  if (value instanceof Map) {
+    var entries = __mapEntries(value);
+    if (name === 'entries') return entries;
+    return entries.map(function (entry) { return name === 'keys' ? entry[0] : entry[1]; });
+  }
+  if (value !== null && value !== undefined && (typeof value === 'object' || typeof value === 'function') &&
+      name in value) {
+    return value[name];
+  }
+  if (__mapLike(value)) return __mapPart(new Map(__mapEntries(value)), name);
+  return value === null || value === undefined ? value : value[name];
 }
 
 /**
@@ -2422,6 +2509,8 @@ var __k = {
     }
     if (haystack instanceof Set) return haystack.has(needle);
     if (haystack instanceof Map) return haystack.has(needle);
+    // 'key in jsonObject' is containsKey, as it is on any Kotlin Map.
+    if (__mapLike(haystack)) return Object.prototype.hasOwnProperty.call(haystack, __str(needle));
     var items = __arr(haystack);
     for (var i = 0; i < items.length; i += 1) if (items[i] === needle) return true;
     return false;
@@ -2673,20 +2762,24 @@ var __k = {
   filter: function (list, predicate) {
     var items = __chars(list);
     var text = typeof list === 'string';
+    // Over a Map, Kotlin's filter answers a Map, and '.keys' is read off it.
+    var map = __isMap(list);
     return __then(__each(items, function (item) { return predicate(item); }), function (flags) {
       var out = [];
       for (var i = 0; i < items.length; i += 1) if (flags[i]) out.push(items[i]);
-      return text ? out.join('') : out;
+      return text ? out.join('') : (map ? __mapFrom(out) : out);
     });
   },
 
   filterNot: function (list, predicate) {
     var items = __chars(list);
     var text = typeof list === 'string';
+    // Over a Map, Kotlin's filterNot answers a Map, and '.keys' is read off it.
+    var map = __isMap(list);
     return __then(__each(items, function (item) { return predicate(item); }), function (flags) {
       var out = [];
       for (var i = 0; i < items.length; i += 1) if (!flags[i]) out.push(items[i]);
-      return text ? out.join('') : out;
+      return text ? out.join('') : (map ? __mapFrom(out) : out);
     });
   },
 
@@ -5389,6 +5482,45 @@ var __k = {
       }
     };
     return __then(block.call(accumulator, accumulator), function () { return __marked(out); });
+  },
+
+  /** A Map's keys, values and entries, read as properties — see '__mapPart'. */
+  kKeys: function (value) { return __mapPart(value, 'keys'); },
+  kValues: function (value) { return __mapPart(value, 'values'); },
+  kEntries: function (value) { return __mapPart(value, 'entries'); },
+
+  /**
+   * Kotlin's Map transforms, which answer a Map: the lambda of 'mapValues' and
+   * 'mapKeys' is handed the entry, of 'filterKeys' the key and of
+   * 'filterValues' the value.
+   */
+  mapValues: function (map, fn) {
+    var entries = __arr(map);
+    return __then(__each(entries, function (entry) { return fn(entry); }), function (values) {
+      var out = [];
+      for (var i = 0; i < entries.length; i += 1) out.push([entries[i][0], values[i]]);
+      return __mapFrom(out);
+    });
+  },
+  mapKeys: function (map, fn) {
+    var entries = __arr(map);
+    return __then(__each(entries, function (entry) { return fn(entry); }), function (keys) {
+      var out = [];
+      for (var i = 0; i < entries.length; i += 1) out.push([keys[i], entries[i][1]]);
+      return __mapFrom(out);
+    });
+  },
+  filterKeys: function (map, fn) {
+    var entries = __arr(map);
+    return __then(__each(entries, function (entry) { return fn(entry[0]); }), function (flags) {
+      return __mapFrom(entries.filter(function (entry, i) { return flags[i]; }));
+    });
+  },
+  filterValues: function (map, fn) {
+    var entries = __arr(map);
+    return __then(__each(entries, function (entry) { return fn(entry[1]); }), function (flags) {
+      return __mapFrom(entries.filter(function (entry, i) { return flags[i]; }));
+    });
   },
 
   /** JsonArray(list) and JsonPrimitive(x), which are the values themselves. */
