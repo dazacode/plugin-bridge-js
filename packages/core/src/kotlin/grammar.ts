@@ -117,7 +117,7 @@ async function build(loader: WasmLoader): Promise<KotlinParser> {
 		// Two such rewrites now, tried together and then the older one alone, so
 		// a file the newer one cannot help is read exactly as it was before it
 		// existed. See `tightPrefixOperands`.
-		const generic = genericCallOperands(source);
+		const generic = genericCallOperands(iterableDelegateBodies(source));
 		const candidates = [tightPrefixOperands(generic), generic].filter(
 			(one, at, all) => one !== source && all.indexOf(one) === at
 		);
@@ -452,6 +452,52 @@ function rawStringsEndingInBackslash(source: string): string {
 		}
 	}
 	if (edits.length === 0) return source;
+	let output = source;
+	for (const edit of edits.sort((left, right) => right.start - left.start)) {
+		output = output.slice(0, edit.start) + edit.text + output.slice(edit.end);
+	}
+	return output;
+}
+
+/**
+ * `data class Chapter(val pages: List<String>) : Iterable<String> by pages {
+ * … }`, which this grammar reads wrongly and without an error: the class body
+ * becomes a trailing lambda passed to `pages`, so the class has no members and
+ * its delegate is a call. The emitter refused it as the delegation it is (see
+ * `iterableDelegateOf`); a template writing its DTOs this way had two listings
+ * with nothing else refused.
+ *
+ * Rewritten into what the delegation *means*: the class declares `iterator()`
+ * over the property, which the emitter already translates, so
+ *
+ *     : Iterable<String> by pages {
+ *     : Iterable<String> { override fun iterator() = pages.iterator();
+ *
+ * on the same line, so every line a refusal names is still the line it was.
+ * Exact only where the delegate is a `val` of the primary constructor: Kotlin
+ * captures the delegate once, at construction, and a `val` cannot be rebound,
+ * so reading it at each call reads the same list. A delegate that is anything
+ * else — a plain parameter, an expression — is left as it was, and refused.
+ * Not gated on a parse error, for `genericCallOperands`' reason, and kept on
+ * the same terms: only if the result parses.
+ */
+function iterableDelegateBodies(source: string): string {
+	if (!/\bIterable\s*<[^>]*>\s+by\s+\w+\s*\{/.test(source)) return source;
+	const masked = maskLiteralsAndComments(source);
+	const header =
+		/\bclass\s+\w+\s*\(([^()]*(?:\([^()]*\)[^()]*)*)\)\s*:\s*(Iterable\s*<[^{}]*?>)\s+by\s+(\w+)\s*\{/g;
+	const edits: Edit[] = [];
+	let match: RegExpExecArray | null;
+	while ((match = header.exec(masked)) !== null) {
+		const [whole, params, type, name] = match;
+		if (!new RegExp(`\\bva[lr]\\s+${name}\\s*:`).test(params)) continue;
+		const at = match.index + whole.lastIndexOf(type);
+		edits.push({
+			start: at,
+			end: match.index + whole.length,
+			text: `${type} { override fun iterator() = ${name}.iterator();`
+		});
+	}
 	let output = source;
 	for (const edit of edits.sort((left, right) => right.start - left.start)) {
 		output = output.slice(0, edit.start) + edit.text + output.slice(edit.end);

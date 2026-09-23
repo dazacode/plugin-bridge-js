@@ -443,13 +443,15 @@ describe('a Kotlin Iterable, declared or delegated', () => {
 			refusalNames(kt('class P(items: List<Int>) : Iterable<Int> by items', 'class Demo'))
 		).toEqual(['an `Iterable` delegate reading a parameter that is not a property']);
 		// With a body, the grammar reads `by pages { … }` as a call passing the
-		// body as a lambda; refused as the delegation, not emitted as a call.
+		// body as a lambda. Over a constructor `val` that is rewritten into the
+		// `iterator()` it means (see below); over anything else it is still
+		// refused as the delegation, not emitted as a call.
 		expect(
 			refusalNames(
 				kt(
-					'data class Q(val pages: List<String>) : Iterable<String> by pages {',
+					'class Q(pages: List<String>) : Iterable<String> by pages {',
 					'    val n: Int',
-					'        get() = pages.size',
+					'        get() = 1',
 					'}'
 				)
 			)
@@ -1996,5 +1998,33 @@ describe('okhttp Credentials', () => {
 		expect(demo.plain()).toBe('Basic dXNlcjpwYXNz');
 		expect(demo.latin()).toBe(`Basic ${Buffer.from('é:x', 'latin1').toString('base64')}`);
 		expect(demo.utf8()).toBe(`Basic ${Buffer.from('é:x', 'utf8').toString('base64')}`);
+	});
+});
+
+describe('an Iterable delegation followed by a class body', () => {
+	it('iterates the delegate, and keeps the members the grammar hid in a lambda', async () => {
+		// `: Iterable<String> by pages { … }` reads, in this grammar, as a
+		// lambda passed to `pages`: no members, a call for a delegate. It is
+		// rewritten into the `iterator()` the delegation means.
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'data class Chapter(val dir: String, val name: String, val pages: List<String>) : Iterable<String> by pages {',
+				"    val number: Float get() = dir.substringAfterLast('c').toFloatOrNull() ?: -1f",
+				'    override fun toString() = name.ifEmpty { dir }',
+				'}',
+				'class Demo {',
+				'    fun make(): Chapter = Chapter("v1c7", "", listOf("a", "b"))',
+				'    fun loud(c: Chapter): String {',
+				'        val all = c.map { it + "!" }',
+				'        return all.joinToString() + " " + c.number + " " + c.toString()',
+				'    }',
+				'    fun counted(c: Chapter): Int { var n = 0; for (p in c) n += p.length; return n }',
+				'}'
+			)
+		);
+		const chapter = demo.make();
+		expect(demo.loud(chapter)).toBe('a!, b! 7 v1c7');
+		expect(demo.counted(chapter)).toBe(2);
 	});
 });
