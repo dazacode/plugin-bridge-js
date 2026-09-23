@@ -8092,6 +8092,21 @@ class Emitter {
 				: `${this.helper('launch')}(${scope}, ${started})`;
 		}
 
+		// okhttp's typed tag: `request.newBuilder().tag(PageTag::class.java,
+		// PageTag(page))` then `response.request.tag(PageTag::class.java)`. The
+		// class literal is only ever a *key* there — see `classKey` — so it is
+		// read as one in exactly that position, and `::class` stays refused
+		// everywhere else, where it would be asked a question.
+		if (name === 'tag' && lambda === null && (args.length === 1 || args.length === 2)) {
+			const key = this.classKey(args[0]);
+			if (key !== null) {
+				const rest = args.slice(1).map((arg) => this.expr(this.argumentValue(arg)));
+				const target = this.expr(receiver);
+				const call = (on: string) => `${on}.tag(${[key, ...rest].join(', ')})`;
+				return safe ? `${this.helper('sc')}(${target}, (__r) => ${call('__r')})` : call(target);
+			}
+		}
+
 		if (name === 'not' && args.length === 0 && lambda === null && !safe) {
 			// `Boolean.not()` is the operator written as a call, which this
 			// ecosystem reaches for when negating something already parenthesised:
@@ -10798,6 +10813,30 @@ class Emitter {
 	private receiverDeclares(name: string): boolean {
 		if (this.receiverType === null) return false;
 		return this.classMemberIndex.get(this.receiverType)?.has(name) === true;
+	}
+
+	/**
+	 * A class literal written as an okhttp tag key — `X::class.java`,
+	 * `X::class.javaObjectType` or `X::class` — as the key this runtime
+	 * stores the tag under, or null for anything else.
+	 *
+	 * okhttp keys a request's tags by class, and the one thing a key is asked
+	 * is whether it is the same key again. Every spelling of one class is the
+	 * same key (okhttp 5 turns each into the KClass), so the key is the class's
+	 * name as written, resolved through an alias, and never an object anything
+	 * could call. A qualified or generic class, or `T::class` for a type
+	 * parameter, is not read — those need a type checker to say which class.
+	 */
+	private classKey(arg: KNode): string | null {
+		if (arg.type !== 'value_argument' || arg.allChildren.some((child) => child.type === '=')) {
+			return null;
+		}
+		const text = this.argumentValue(arg).text.replace(/\s+/g, '');
+		const found = /^([A-Z]\w*)::class(?:\.(?:java|javaObjectType))?$/.exec(text);
+		if (found === null) return null;
+		const name = this.aliased(found[1]);
+		if (this.reifiedTypes?.has(name) === true) return null;
+		return JSON.stringify(`class:${name}`);
 	}
 
 	/**

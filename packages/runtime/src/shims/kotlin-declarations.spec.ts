@@ -914,6 +914,31 @@ describe('an encode of a @Serializable class, the way kotlinx writes it', () => 
 	});
 });
 
+describe('an okhttp tag keyed by a class literal', () => {
+	it('stores and reads the tag under the class, whichever spelling names it', async () => {
+		// `.tag(PageTag::class.java, PageTag(page))` on the request, read back
+		// off the response's request. `::class` stays refused anywhere else.
+		const d = await instantiate(
+			'Demo',
+			kt(
+				'class PageTag(val page: Int)',
+				'class Demo {',
+				'    fun tagged(): Request = GET("https://example.invalid/a").newBuilder().tag(PageTag::class.java, PageTag(3)).build()',
+				'    fun page(r: Request): Int = r.tag(PageTag::class)?.page ?: -1',
+				'    fun text(r: Request): String? = r.tag(String::class.java)',
+				'}'
+			)
+		);
+		const request = d.tagged();
+		expect(d.page(request)).toBe(3);
+		expect(d.page(request.newBuilder().build())).toBe(3);
+		expect(d.text(request)).toBeNull();
+		expect(refusalNames(kt('class Demo {', '    fun k(): Any = PageTag::class.java', '}'))).toEqual(
+			['`::class` reflection']
+		);
+	});
+});
+
 describe('a typealias declared in the file next door', () => {
 	it('constructs through it, and decodes as the whole type it names', async () => {
 		// Erased within its own file only: the extension's
