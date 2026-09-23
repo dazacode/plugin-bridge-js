@@ -507,7 +507,10 @@ function __call(name, args) {
  * that does not, which 'FOREIGN.md' §4.1.8 records as the reason the policy
  * exists at all.
  */
-async function __send(request) {
+async function __send(pending) {
+  // A request member may suspend — it reads a token first — and hands back a
+  // Promise of the request rather than the request.
+  const request = await pending;
   if (request === null || request === undefined) {
     throw new Error('This extension built no request.');
   }
@@ -596,7 +599,11 @@ async function __page(kind, coroutine, args) {
     return __normalisePage(await __source[override].apply(__source, args));
   }
   const response = await __send(__call(kind + 'Request', args));
-  return __normalisePage(__call(kind + 'Parse', [response]));
+  // Awaited: a parse member that makes a request of its own — Toptoon reads a
+  // JSON file named in the page it was handed — is emitted 'async', and the
+  // Promise it answers has no 'mangas'. Normalised unawaited, every result on
+  // the page was dropped and the page came back empty, reporting nothing.
+  return __normalisePage(await __call(kind + 'Parse', [response]));
 }
 `;
 
@@ -767,7 +774,9 @@ export default {
       if (image.length === 0 && String(row.url || '').length > 0 && __declares('imageUrlParse')) {
         try {
           const resolved = await __send(__call('imageUrlRequest', [row]));
-          image = String(__call('imageUrlParse', [__both(resolved)]) || '');
+          // Awaited for the same reason as '__page': unawaited, a suspending
+          // imageUrlParse made every page's image the text "[object Promise]".
+          image = String((await __call('imageUrlParse', [__both(resolved)])) || '');
         } catch (error) {
           image = '';
         }

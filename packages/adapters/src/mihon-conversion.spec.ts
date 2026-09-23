@@ -175,6 +175,40 @@ class Extension {
 		expect(page.hasMore).toBe(true);
 	});
 
+	it('awaits a parse member that suspends, rather than normalising its Promise', async () => {
+		// The request/parse pair had the bug the test above guards on the
+		// fetchX path. A parse that makes a request of its own — Toptoon reads
+		// the JSON file its search page names — is emitted `async`, and its
+		// Promise has no `mangas`: every result was dropped, nothing reported.
+		const module = await load(`
+class Extension {
+  constructor() { this.baseUrl = '${BASE_URL}'; }
+  popularMangaRequest(page) { return GET(this.baseUrl + '/popular'); }
+  async popularMangaParse(response) {
+    await Promise.resolve();
+    return MangasPage([{ url: '/manga/second-request', title: 'After a second request' }], true);
+  }
+}
+`);
+
+		const sending = {
+			...(context() as object),
+			http: {
+				policy: async () => undefined,
+				send: async (url: string) => ({
+					status: 200,
+					url,
+					headers: {},
+					text: async () => '',
+					json: async () => ({})
+				})
+			}
+		};
+		const page = await module.browse('popular', 1, sending);
+		expect(page.entries.map((entry) => entry.title)).toEqual(['After a second request']);
+		expect(page.hasMore).toBe(true);
+	});
+
 	it('runs the extension’s own suspend getX, which is the API upstream has now', async () => {
 		// The generation after `fetchX`, and by a distance the commonest: 332 of
 		// this repository's ~800 Kotlin sources declare `getPopularManga`, 331
