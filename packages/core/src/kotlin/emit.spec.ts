@@ -290,6 +290,10 @@ const helpers: Record<string, (...args: never[]) => unknown> = {
 		return value;
 	},
 	run: (value: Any, fn: (this: Any) => Any) => fn.call(value),
+	firstInstanceOrNull: (list: Any[], type: Any) =>
+		typeof type === 'function'
+			? (list.find((item) => item instanceof (type as new () => unknown)) ?? null)
+			: null,
 	takeIf: (value: Any, fn: (inner: Any) => boolean) => (fn(value) ? value : null),
 	takeUnless: (value: Any, fn: (inner: Any) => boolean) => (fn(value) ? null : value),
 	// A `Result`, with the members the runtime's own carries. It is not a
@@ -4560,5 +4564,131 @@ describe('the order module-scope declarations are emitted in', () => {
 		);
 
 		expect(found).toBe('https://example.invalid');
+	});
+});
+
+describe('a local that shadows a name already in scope', () => {
+	it('binds it apart, so its own initialiser still reads the outer one', () => {
+		// `suspend fun fetchMangaUpdate(manga, chapters, …)` declaring `val
+		// chapters = if (…) … else chapters` is ordinary Kotlin. As JavaScript a
+		// `const` naming a parameter is a SyntaxError, and in a nested block the
+		// `else chapters` read the new binding before it existed.
+		const demo = instantiate(
+			inClass(
+				'    fun pick(chapters: List<String>, fetch: Boolean): List<String> {',
+				'        val chapters = if (fetch) listOf("new") else chapters',
+				'        return chapters',
+				'    }',
+				'    fun nested(page: Int): Int {',
+				'        var total = page',
+				'        if (page > 0) {',
+				'            val page = page + 1',
+				'            total += page',
+				'        }',
+				'        return total',
+				'    }'
+			)
+		);
+
+		expect(demo.pick(['old'], false)).toEqual(['old']);
+		expect(demo.pick(['old'], true)).toEqual(['new']);
+		expect(demo.nested(2)).toBe(5);
+	});
+});
+
+describe('a safe assignment', () => {
+	it('writes when the receiver is there, and evaluates nothing when it is not', () => {
+		// `firstOrNull()?.date_upload = time` on an empty list does nothing in
+		// Kotlin — not even the right-hand side. It was emitted as a plain `.`
+		// write and threw on exactly the list Kotlin was written to tolerate.
+		const demo = instantiate(
+			kt(
+				'class Row { var name = "" }',
+				'class Demo : Source() {',
+				'    var calls = 0',
+				'    private fun next(): String {',
+				'        calls += 1',
+				'        return "set"',
+				'    }',
+				'    fun mark(rows: List<Row>): List<Row> = rows.apply { firstOrNull()?.name = next() }',
+				'}'
+			)
+		);
+		const Row = function (this: { name: string }) {
+			this.name = '';
+		};
+		expect(demo.mark([])).toEqual([]);
+		expect(demo.calls).toBe(0);
+		const row = new (Row as unknown as new () => { name: string })();
+		demo.mark([row]);
+		expect(row.name).toBe('set');
+		expect(demo.calls).toBe(1);
+	});
+
+	it('passes the type to firstInstanceOrNull, where the call is implicit', () => {
+		// `getFilterList().apply { firstInstanceOrNull<SortFilter>()?.state = 1 }`
+		// — without the type the helper answers null, and the sort the popular
+		// page asks for was silently never set.
+		const found = evaluate(
+			kt(
+				'open class Filter(var state: Int = 0)',
+				'class GenreFilter : Filter()',
+				'class SortFilter : Filter()',
+				'class Demo : Source() {',
+				'    fun popular(filters: List<Filter>) = filters.apply { firstInstanceOrNull<SortFilter>()?.state = 1 }',
+				'}'
+			),
+			'new Demo().popular([new GenreFilter(), new SortFilter()]).map((f) => f.state)'
+		);
+
+		expect(found).toEqual([0, 1]);
+	});
+});
+
+describe('file annotations, and a serializer on a type argument', () => {
+	it('skips an annotation addressed to the IDE, and refuses one that changes decoding', () => {
+		expect(
+			refusalNames(
+				kt(
+					'@file:Suppress("SpellCheckingInspection")',
+					'',
+					'package demo',
+					'',
+					'class Demo : Source() {',
+					'    fun one() = 1',
+					'}'
+				)
+			)
+		).toEqual([]);
+		expect(
+			refusalNames(
+				kt(
+					'@file:UseSerializers(BoxSerializer::class)',
+					'',
+					'package demo',
+					'',
+					'class Box(val a: Int)'
+				)
+			)
+		).toEqual(['`@file:UseSerializers(BoxSerializer::class)`']);
+	});
+
+	it('refuses a custom serializer named on a type argument rather than decoding raw', () => {
+		// `List<@Serializable(RankingMangaSerializer::class) Ranking>` reshapes
+		// each element before the class sees it; decoded structurally, a tuple
+		// array became a record with every field `undefined`.
+		expect(
+			refusalNames(
+				kt(
+					'@Serializable',
+					'class RankingResponse(',
+					'    val children: List<',
+					'        @Serializable(RankingMangaSerializer::class)',
+					'        Ranking,',
+					'        >,',
+					')'
+				)
+			)
+		).toEqual(['a custom serializer `RankingMangaSerializer` on a type argument']);
 	});
 });

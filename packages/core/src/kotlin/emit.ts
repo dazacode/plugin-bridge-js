@@ -400,6 +400,13 @@ const QUALIFIED_GLOBAL = /^(?:java|javax|kotlin|android)\.[\w.]*?\.?(\w+)$/;
 const INJEKT_GET = /^Injekt\.get<(\w+)>\(\)$/;
 
 /**
+ * File annotations that say something to the compiler or the IDE and nothing
+ * at run time: warning suppression, an opt-in to an experimental API, and the
+ * JVM's name for the file's facade class — which a module has no use for.
+ */
+const INERT_FILE_ANNOTATION = /^@file:(?:Suppress|OptIn|JvmName|JvmMultifileClass|SuppressLint)\b/;
+
+/**
  * The calls that make a member `async` whether or not it said `suspend`.
  *
  * `.execute()` blocks in Kotlin and cannot here; the crypto four are
@@ -542,10 +549,18 @@ const NO_BLOCK_PARAMETER: ReadonlySet<string> = new Set([
 /**
  * Helpers whose reified type argument is the point of the call.
  *
- * Each takes the type as its last parameter and answers "everything" without
- * one, so a dropped type is a wrong value rather than an error.
+ * Each takes the type as its last parameter, and without one answers
+ * something other than what was asked: `filterIsInstance` everything, and
+ * `firstInstance`/`firstInstanceOrNull` nothing — the filter a search reads
+ * its sort from came back null, so `firstInstanceOrNull<SortFilter>()?.state
+ * = 1` set nothing and `firstInstance<OrderFilter>().value` threw on a list
+ * that held one. A dropped type is a wrong value either way.
  */
-const TYPED_HELPERS: ReadonlySet<string> = new Set(['filterIsInstance']);
+const TYPED_HELPERS: ReadonlySet<string> = new Set([
+	'filterIsInstance',
+	'firstInstance',
+	'firstInstanceOrNull'
+]);
 
 const ANIME_FILTER_KINDS: ReadonlySet<string> = new Set([
 	'Header',
@@ -1888,6 +1903,18 @@ class Emitter {
 			// *file's* alias as a member, and the extension with it.
 			case 'type_alias':
 				return null;
+			// `@file:Suppress("SpellCheckingInspection")` is an instruction to the
+			// IDE and the compiler's warnings, and has no existence at run time —
+			// and it refused the whole file as a member named after itself, which
+			// took a filter list or a theme with it for a spell-checker hint.
+			// Only the annotations known to be inert are skipped. The one other
+			// that occurs, `@file:UseSerializers(X::class)`, changes how every
+			// matching type in the file *decodes*, and the decoder here has no
+			// custom serializers to switch to — so it stays refused, by name.
+			case 'file_annotation':
+				return INERT_FILE_ANNOTATION.test(node.text.replace(/\s+/g, ''))
+					? null
+					: this.declineMember(this.nameOf(node) ?? spoken(node), node, spoken(node));
 			case 'class_declaration':
 				return this.classDeclaration(node);
 			case 'object_declaration':
@@ -2005,6 +2032,33 @@ class Emitter {
 					'translate members against a guessed class declaration.';
 				return null;
 			}
+		}
+
+		// `List<@Serializable(RankingMangaSerializer::class) Ranking>` — a
+		// custom serializer named on a type argument of a constructor property.
+		// It decodes each element through the extension's own
+		// `transformDeserialize` before the class sees it, and the decoder here
+		// is a structural walk with no custom serializers: the annotation would
+		// be read past, and every element decoded as the raw JSON the serializer
+		// existed to reshape — a tuple array read as a record, every field
+		// `undefined`. Refused by name, and graphed, so it blocks exactly the
+		// members that reach the class and no others. Only reachable at all
+		// since `trailingCommas` in `grammar.ts` let the one file carrying it
+		// parse.
+		const serializer = typeArgumentSerializer(node);
+		if (serializer !== null) {
+			this.graph.push({
+				member: name,
+				owner: this.owner,
+				construction: false,
+				references: mentions(node),
+				calls: callEdges(node)
+			});
+			return this.declineMember(
+				name,
+				node,
+				`a custom serializer \`${serializer}\` on a type argument`
+			);
 		}
 
 		// A supertype this file supplies is emitted as a real `extends`; one it
@@ -4271,8 +4325,9 @@ class Emitter {
 			if (destructuring !== undefined) this.refuse(node, 'a destructuring with no value');
 			const bare = this.propertyName(node);
 			if (bare === null) this.refuse(node, 'an unnamed local');
-			this.declare(bare, true);
-			return `let ${this.safe(bare)};`;
+			const unset = this.localBinding(bare);
+			this.declareAs(bare, unset, true);
+			return `let ${unset};`;
 		}
 
 		if (destructuring !== undefined) {
@@ -4287,14 +4342,15 @@ class Emitter {
 
 		const name = this.propertyName(node);
 		if (name === null) this.refuse(node, 'an unnamed local');
+		const binding = this.localBinding(name);
 
 		const guarded = this.elvisJump(initialiser);
 		if (guarded !== null) {
 			const value = this.expr(guarded.value);
-			this.declare(name, mutable);
+			this.declareAs(name, binding, mutable);
 			return [
-				`${keyword} ${this.safe(name)} = ${value};`,
-				`if (${this.safe(name)} == null) ${this.stmt(guarded.jump, this.jumpValues.get(guarded.jump))}`
+				`${keyword} ${binding} = ${value};`,
+				`if (${binding} == null) ${this.stmt(guarded.jump, this.jumpValues.get(guarded.jump))}`
 			].join('\n');
 		}
 
@@ -4302,24 +4358,45 @@ class Emitter {
 			// `val x = try { … } catch { return … }`: the `return` belongs to the
 			// enclosing function, so the `try` becomes a statement that assigns and
 			// the `return` stays a real return.
-			this.declare(name, mutable);
-			return [`let ${this.safe(name)};`, this.tail(initialiser, { target: this.safe(name) })].join(
-				'\n'
-			);
+			// Declared after the value is written, because the value is emitted
+			// in the scope *before* the name exists: in Kotlin a local's own
+			// initialiser sees whatever it shadows.
+			const lines = this.tail(initialiser, { target: binding });
+			this.declareAs(name, binding, mutable);
+			return [`let ${binding};`, lines].join('\n');
 		}
 
 		if (this.needsInlining(initialiser)) {
 			// `val x = response.use { … return … }`: same argument as the `try`
 			// above, one construct along. The block is emitted into this function
 			// rather than into a callback, so the `return` is this function's.
-			const lines = this.deliver(initialiser, { target: this.safe(name) });
-			this.declare(name, mutable);
-			return [`let ${this.safe(name)};`, ...lines].join('\n');
+			const lines = this.deliver(initialiser, { target: binding });
+			this.declareAs(name, binding, mutable);
+			return [`let ${binding};`, ...lines].join('\n');
 		}
 
 		const value = this.expr(initialiser);
-		this.declare(name, mutable);
-		return `${keyword} ${this.safe(name)} = ${value};`;
+		this.declareAs(name, binding, mutable);
+		return `${keyword} ${binding} = ${value};`;
+	}
+
+	/**
+	 * The JavaScript name a new local is bound under.
+	 *
+	 * Its own name, unless something already in scope has it. Kotlin lets a
+	 * local shadow a parameter or an outer local — `suspend fun
+	 * fetchMangaUpdate(manga: SManga, chapters: …)` goes on to declare `val
+	 * manga = createManga()` and `val chapters = if (…) … else chapters` —
+	 * and JavaScript does not: a `const` naming a parameter in the function's
+	 * own body is a SyntaxError, so the whole bundle failed to build. Where it
+	 * did build, in a nested block, the `else chapters` read the new binding
+	 * in its dead zone instead of the parameter it meant. A fresh spelling —
+	 * `$` cannot occur in a Kotlin name — is what keeps both readings apart.
+	 */
+	private localBinding(name: string): string {
+		if (this.lookupLocal(name) === null) return this.safe(name);
+		this.temporaries += 1;
+		return `${this.safe(name)}$${this.temporaries}`;
 	}
 
 	private assignment(node: KNode): string {
@@ -4407,6 +4484,29 @@ class Emitter {
 
 		const indexed = this.isIndexedTarget(target);
 		if (indexed && operator !== '=') this.refuse(node, `an indexed \`${operator}\``);
+
+		// **A safe assignment.** `firstOrNull()?.date_upload = time` writes when
+		// the receiver is there and does nothing at all when it is null — the
+		// value is not even evaluated. It was emitted as a plain `.` write, which
+		// throws on the empty list Kotlin was written to tolerate. Read into a
+		// temporary once, and the write goes behind the null test.
+		const steps = target.type === 'directly_assignable_expression' ? kids(target) : [];
+		if (!indexed && steps.slice(1).some(isSafeStep)) {
+			if (steps[steps.length - 1]?.type !== 'navigation_suffix') {
+				this.refuse(node, 'a safe assignment this build cannot read');
+			}
+			// The last step is `.name` or `?.name`, and a name has no dot in it.
+			const whole = this.assignable(target);
+			const dot = whole.lastIndexOf('.');
+			const property = whole.slice(dot + 1);
+			const receiver = whole.slice(0, whole.charAt(dot - 1) === '?' ? dot - 1 : dot);
+			const temporary = this.temporary();
+			return [
+				`const ${temporary} = ${receiver};`,
+				`if (${temporary} != null) ${temporary}.${property} ${operator} ${this.expr(value)};`
+			].join('\n');
+		}
+
 		const write = (text: string): string =>
 			indexed
 				? `${this.helper('setIndex')}(${this.indexedTarget(target).join(', ')}, ${text});`
@@ -4550,7 +4650,10 @@ class Emitter {
 			}
 			const name = kids(suffix)[0]?.text ?? suffix.text.replace(/^[.?]+/, '');
 			if (name.length === 0) this.refuse(suffix, 'an assignment to an unnamed property');
-			target = `${target}.${name}`;
+			// `a?.b.c = x`: a safe step on the way to the target is a safe *read*,
+			// and JavaScript's own `?.` is exactly that for a property. The last
+			// step is the write, and its guard is `assignment`'s — see there.
+			target = `${target}${isSafeStep(suffix) ? '?.' : '.'}${name}`;
 		}
 		return target;
 	}
@@ -6113,6 +6216,12 @@ class Emitter {
 					this.callArguments(name, args, lambda, labelled, RECEIVER_SCOPE.has(name)),
 					1
 				);
+				// The type, as the written-receiver path passes it — see
+				// `TYPED_HELPERS`. `apply { firstInstanceOrNull<SortFilter>() }` is
+				// the implicit spelling of the same call.
+				if (TYPED_HELPERS.has(helper) && typeArgument !== null && args.length === 0) {
+					withLambda.push(this.typeReference(typeArgument));
+				}
 				const call = `${this.helper(helper)}(${[implicit, ...withLambda].join(', ')})`;
 				const suspends = AWAITING_HELPERS.has(helper) || this.asyncLambdas > before;
 				return suspends ? this.awaited(call) : call;
@@ -7597,6 +7706,11 @@ class Emitter {
 		});
 	}
 
+	/** A local bound under a JavaScript name other than its own. See `localBinding`. */
+	private declareAs(name: string, text: string, mutable: boolean): void {
+		this.scopes[this.scopes.length - 1]?.set(name, { text, mutable });
+	}
+
 	private lookup(name: string): string | null {
 		return this.lookupLocal(name)?.text ?? null;
 	}
@@ -7853,6 +7967,27 @@ function kids(node: KNode | null | undefined): readonly KNode[] {
 	// operand — is the last one.
 	const nulls = node.allChildren.filter((child) => child.type === 'null');
 	return nulls.length === 0 ? named : [...named, ...nulls];
+}
+
+/**
+ * The serializer a `@Serializable(X::class)` names on a type argument anywhere
+ * in this class's header, or null. See `classDeclaration`.
+ */
+function typeArgumentSerializer(node: KNode): string | null {
+	const header = kids(node).find((child) => child.type === 'primary_constructor');
+	if (header === undefined) return null;
+	for (const child of walk(header)) {
+		if (child.type !== 'type_projection') continue;
+		const modifiers = kids(child).find((part) => part.type === 'type_modifiers');
+		const found = modifiers?.text.match(/@Serializable\s*\(\s*(?:with\s*=\s*)?([\w.]+)::class/);
+		if (found !== undefined && found !== null) return found[1];
+	}
+	return null;
+}
+
+/** True for a `?.name` step, which reads through a null rather than failing on it. */
+function isSafeStep(node: KNode): boolean {
+	return node.type === 'navigation_suffix' && node.allChildren[0]?.type === '?.';
 }
 
 /**

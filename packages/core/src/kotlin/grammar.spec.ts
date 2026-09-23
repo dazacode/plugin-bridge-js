@@ -370,6 +370,139 @@ object Filters {
 		expect(tree.hasError).toBe(false);
 	});
 
+	it('reads a trailing comma before `>`, before `->` and before `]`', async () => {
+		// ktlint writes one wherever a list breaks across lines, and the grammar
+		// predates all three. The first is a theme's DTO header — every extension
+		// on the theme was refused for a comma — the second a `when` over filter
+		// types, the third a cipher's table lookup.
+		const parse = await loadKotlinGrammar(vendorWasm);
+		const tree = parse(`
+class RankingResponse(
+    val children: List<
+        Ranking,
+        >,
+)
+class Demo {
+    fun pick(filter: Any): Int = when (filter) {
+        is ActressFilter,
+        is MakerFilter,
+        -> 1
+        else -> 2
+    }
+    fun step(table: IntArray, i: Int): Int = table[
+        (i xor 7) and 0xFF,
+    ]
+}
+`);
+
+		expect(tree.hasError).toBe(false);
+	});
+
+	it('reads `..<` as the `until` it means', async () => {
+		const parse = await loadKotlinGrammar(vendorWasm);
+		const tree = parse(`
+class Demo {
+    fun same(b: ByteArray, cmp: ByteArray): Boolean {
+        for (i in 0..<b.size) {
+            if (b[i] != cmp[i]) return false
+        }
+        return true
+    }
+}
+`);
+
+		expect(tree.hasError).toBe(false);
+		expect(firstOfType(tree.root, 'infix_expression')?.text).toContain('until');
+	});
+
+	it('reads a callable reference on a nullable receiver type', async () => {
+		const parse = await loadKotlinGrammar(vendorWasm);
+		const tree = parse(`
+class Demo {
+    fun text(raw: String?) = raw.takeUnless(String?::isNullOrBlank) ?: "none"
+}
+`);
+
+		expect(tree.hasError).toBe(false);
+		expect(firstOfType(tree.root, 'callable_reference')).not.toBeNull();
+	});
+
+	it('reads an assignment through an index, or a safe step, behind a call', async () => {
+		// The assignable rule reaches over neither: `getTarget(c)[s] = v` took a
+		// whole cipher with it, and `firstOrNull()?.x = y` inside a block opened
+		// on the same line — `.apply { … }` — a theme's chapter list.
+		const parse = await loadKotlinGrammar(vendorWasm);
+		const tree = parse(`
+class Demo {
+    fun go(c: Int, s: Int, v: Int) {
+        val a = 1
+        getTarget(c and 12)[s] = v
+    }
+    fun list(rows: List<SChapter>) = rows
+        .apply { firstOrNull()?.date_upload = time }
+    fun pick() = find(getFilterList().apply { firstInstanceOrNull<SortFilter>()?.state = 1 })
+}
+`);
+
+		expect(tree.hasError).toBe(false);
+	});
+
+	it('ends a `when` entry before a parenthesised condition, or an `in` after a brace', async () => {
+		// `-> SManga.LICENSED` above `(a) && (b) -> …` read as a *call* of the
+		// constant; `-> genre = xs.joinToString { … }` above `in detailStatus`
+		// read the `in` as an infix operator on the lambda.
+		const parse = await loadKotlinGrammar(vendorWasm);
+		const tree = parse(`
+class Demo {
+    fun status(licensed: Boolean, t: String): Int = when {
+        licensed -> SManga.LICENSED
+
+        (t == "a") && (t != "b") -> SManga.ON_HIATUS
+        (t == "c") -> SManga.ONGOING
+        else -> 0
+    }
+    fun details(key: String, xs: List<String>) {
+        when (key) {
+            in genres -> genre = xs.joinToString {
+                it.trim()
+            }
+            in statuses -> status = 1
+        }
+    }
+}
+`);
+
+		expect(tree.hasError).toBe(false);
+		const whens: KNode[] = [];
+		const collect = (node: KNode): void => {
+			if (node.type === 'when_expression') whens.push(node);
+			node.allChildren.forEach(collect);
+		};
+		collect(tree.root);
+		expect(
+			whens.map((when) => when.allChildren.filter((c) => c.type === 'when_entry').length)
+		).toEqual([4, 2]);
+	});
+
+	it('does not end a `when` condition that continues after an infix name', async () => {
+		// `a or` above `(b) -> 1` is one condition, broken after the operator.
+		// A name ends the line above, so the `;` is only written when that line
+		// is an entry of its own — which this one, with no arrow, is not.
+		const parse = await loadKotlinGrammar(vendorWasm);
+		const tree = parse(`
+class Demo {
+    fun go(a: Boolean, b: Boolean): Int = when {
+        a or
+            (b) -> 1
+        else -> 0
+    }
+}
+`);
+
+		const when = firstOfType(tree.root, 'when_expression');
+		expect(when?.allChildren.filter((c) => c.type === 'when_entry').length).toBe(2);
+	});
+
 	it('reports an error for source that is genuinely broken', async () => {
 		const parse = await loadKotlinGrammar(vendorWasm);
 		// The check has to be able to fail. An error-tolerant parser that never
