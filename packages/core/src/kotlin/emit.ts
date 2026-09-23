@@ -2545,7 +2545,15 @@ class Emitter {
 						this.moduleGetters.add(name);
 						return `function ${this.safe(name)}() ${accessor}`;
 					}
-					return `const ${this.safe(name)} = ${this.propertyValue(node, name)};`;
+					// A file-scope `var` is state the file keeps between calls —
+					// `private var filtersState = FiltersState.NOT_FETCHED`, moved
+					// on by the search that fetched them. As a `const` the first
+					// write threw, and a write from inside a class never reached it
+					// at all (see `assignable`).
+					const mutable = kids(node).some(
+						(part) => part.type === 'binding_pattern_kind' && part.text === 'var'
+					);
+					return `${mutable ? 'let' : 'const'} ${this.safe(name)} = ${this.propertyValue(node, name)};`;
 				});
 			}
 			// Consumed by the property above it; see `accessorOf`. Reached on its
@@ -5606,11 +5614,19 @@ class Emitter {
 	 * for hands out filter objects whose state a search then ticks.
 	 *
 	 * Null when the property has no getter, which is the ordinary case.
+	 *
+	 * A lone `private set` is not an accessor at all: it narrows who may write
+	 * and has no body, so the property is the plain `var` it would be without
+	 * the line — the default setter, writing the one binding every reader
+	 * reads. Beside a getter it is still refused: the getter is a function
+	 * here, and there would be no binding for the write to reach.
 	 */
 	private moduleGetter(node: KNode, next: KNode | undefined, name: string): string | null {
 		const setter = accessorOf(node, next, 'setter');
-		if (setter !== undefined) this.refuse(setter, 'a custom property setter');
 		const getter = accessorOf(node, next, 'getter');
+		if (setter !== undefined && (!visibilityOnly(setter) || getter !== undefined)) {
+			this.refuse(setter, 'a custom property setter');
+		}
 		if (getter === undefined) return null;
 		const body = kids(getter).find((child) => child.type === 'function_body');
 		if (body === undefined) this.refuse(getter, `\`${name}\` with a getter and no body`);
@@ -6946,6 +6962,20 @@ class Emitter {
 				// A companion `var`, which is a module binding here: written as
 				// `this.counter` it set a field on the instance and left the
 				// companion's value where it was.
+				target = this.safe(inner.text);
+			} else if (
+				local === null &&
+				this.moduleValues.has(inner.text) &&
+				!this.moduleGetters.has(inner.text) &&
+				!this.extensionProperties.has(inner.text) &&
+				!this.isSourceMember(inner.text)
+			) {
+				// A file-scope `var`, this file's or the one next door's — a
+				// file-scope `val` cannot be assigned in Kotlin, so a write to a
+				// module value is a write to one. `genresList = parsed` from the
+				// source's search went to `this.genresList`, a field on the
+				// instance nobody read, and every later read of the file's own
+				// binding still saw the empty list it started as.
 				target = this.safe(inner.text);
 			} else {
 				target = `this.${inner.text}`;
@@ -13413,6 +13443,19 @@ function enumMethods(declared: ReadonlySet<string>): string[] {
 		"[Symbol.toPrimitive](hint) { return hint === 'number' ? this.ordinal : this.toString(); }"
 	);
 	return out;
+}
+
+/**
+ * `private set` — a setter that only narrows who may write, with no body.
+ *
+ * Visibility is the compiler's business and has no JavaScript counterpart;
+ * `var accessToken: String? = null / private set` is the commonest way to
+ * write state only its own declaration assigns.
+ */
+function visibilityOnly(setter: KNode): boolean {
+	return !kids(setter).some(
+		(child) => child.type === 'function_body' || child.type === 'parameter_with_optional_type'
+	);
 }
 
 /** What `enumTail` puts on every enum class, reachable bare inside one. */
