@@ -1912,3 +1912,46 @@ describe('a write through a preference-delegated extension property', () => {
 		expect(demo.bump()).toBe(33);
 	});
 });
+
+describe('java.math.BigDecimal', () => {
+	const source = kt(
+		'class Demo {',
+		'    fun stars(score: String?): String {',
+		'        if (score.isNullOrBlank()) return ""',
+		'        return try {',
+		'            val big = score.toBigDecimal()',
+		'            if (big.signum() <= 0) return ""',
+		'            val stars = big.divide(BigDecimal(2), 0, RoundingMode.HALF_UP).toInt().coerceIn(0, 5)',
+		'            "★".repeat(stars) + "☆".repeat(5 - stars) + " " + big.stripTrailingZeros().toPlainString()',
+		'        } catch (_: Exception) {',
+		'            ""',
+		'        }',
+		'    }',
+		'    fun half(t: String): String = t.toBigDecimal().div(BigDecimal(2)).toPlainString()',
+		'    fun exact(t: String): String = BigDecimal(t).divide(BigDecimal("8")).toString()',
+		'    fun scaled(t: String): String = t.toBigDecimal().setScale(1, RoundingMode.HALF_EVEN).toPlainString()',
+		'    fun bigger(a: String, b: String): Boolean = a.toBigDecimal().compareTo(b.toBigDecimal()) > 0',
+		'    fun raw(a: String, b: String) = a.toBigDecimal() / b.toBigDecimal()',
+		'}'
+	);
+
+	it('divides, rounds and prints the way Java does, scale included', async () => {
+		const demo = await instantiate('Demo', source);
+		expect(demo.stars('8.40')).toBe('★★★★☆ 8.4');
+		expect(demo.stars('9')).toBe('★★★★★ 9');
+		expect(demo.stars('0')).toBe('');
+		expect(demo.stars('n/a')).toBe('');
+		// Kotlin's `div` is HALF_EVEN at the dividend's scale: 7/2 is 4, not 3.5.
+		expect(demo.half('7')).toBe('4');
+		expect(demo.half('7.0')).toBe('3.5');
+		expect(demo.exact('1')).toBe('0.125');
+		expect(demo.scaled('2.25')).toBe('2.2');
+		expect(demo.bigger('2.50', '2.5')).toBe(false);
+		expect(demo.bigger('2.51', '2.5')).toBe(true);
+	});
+
+	it('refuses to be read as a double by an operator, rather than dividing like one', async () => {
+		const demo = await instantiate('Demo', source);
+		expect(() => demo.raw('7', '2')).toThrow(/arithmetic operator on a BigDecimal/);
+	});
+});

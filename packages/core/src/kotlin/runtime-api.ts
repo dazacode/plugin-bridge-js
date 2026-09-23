@@ -44,6 +44,8 @@ export const RUNTIME_HELPERS = [
 	'toFloatOrNull',
 	'toFloat',
 	'toDouble',
+	'toBigDecimal',
+	'toBigDecimalOrNull',
 	'toLongOrNull',
 	'toLong',
 	'countLeadingZeroBits',
@@ -1083,6 +1085,11 @@ export const RUNTIME_GLOBALS = [
 	'PrimitiveSerialDescriptor',
 	'PrimitiveKind',
 	'JsonNull',
+
+	/* java.math.BigDecimal over a BigInt, and the rounding modes it divides
+	   with. */
+	'BigDecimal',
+	'RoundingMode',
 
 	/* java.io.File, as far as `File.createTempFile` goes: see `JSOUP_STATICS`. */
 	'File'

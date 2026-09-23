@@ -482,6 +482,8 @@ function __present(value) {
 /** Kotlin's natural ordering, for the two types a scraper ever sorts by. */
 function __cmp(a, b) {
   if (typeof a === 'number' && typeof b === 'number') return a < b ? -1 : (a > b ? 1 : 0);
+  // By value, as Kotlin's compareTo on a BigDecimal: "2.0" and "2" are equal.
+  if (a instanceof __BigDecimal) return a.compareTo(b);
   // A java.time value orders by its own compareTo — by instant, or by date —
   // where the string fallback below would order '2024-10-01' after '2024-9-…'.
   if (a !== null && a !== undefined && a.__kTime === true && typeof a.compareTo === 'function') {
@@ -1679,6 +1681,213 @@ Collator.prototype.equals = function (left, right) {
 };
 
 /**
+ * java.math.BigDecimal, as an unscaled BigInt and a scale - the value is
+ * unscaled / 10^scale, exactly as Java keeps it, so scale-sensitive answers
+ * ('toPlainString' of "4.50" is "4.50") come out the same.
+ *
+ * Built from text by Java's own grammar, and from a number by Kotlin's rule
+ * ('Double.toBigDecimal()' is 'BigDecimal(this.toString())'). One difference is
+ * stated rather than hidden: a JavaScript number does not say whether it was an
+ * Int or a Double, and 2.0 prints as "2" here where Java prints "2.0", so a
+ * value built from an integer-valued double has scale 0 rather than 1. It is the
+ * same number, compares equal, and differs only in an unstripped
+ * toPlainString.
+ */
+function __BigDecimal(unscaled, scale) {
+  this.unscaled = unscaled;
+  this.scale = scale;
+}
+
+function __bigDecimalOf(value) {
+  if (value instanceof __BigDecimal) return value;
+  if (typeof value === 'bigint') return new __BigDecimal(value, 0);
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) {
+      throw new Error('This converted extension made a BigDecimal of ' + value + ', which has none.');
+    }
+    return __bigDecimalParse(String(value));
+  }
+  return __bigDecimalParse(__str(value));
+}
+
+function __bigDecimalParse(text) {
+  var match = /^([+-]?)([0-9]*)(?:\\.([0-9]*))?(?:[eE]([+-]?[0-9]+))?$/.exec(text);
+  if (match === null || (match[2] + (match[3] || '')).length === 0) {
+    throw new Error('This converted extension read "' + text + '" as a BigDecimal, and it is not one.');
+  }
+  var fraction = match[3] || '';
+  var digits = BigInt((match[2] + fraction) || '0');
+  var scale = fraction.length - (match[4] === undefined ? 0 : Number(match[4]));
+  return new __BigDecimal(match[1] === '-' ? -digits : digits, scale);
+}
+
+function __pow10(n) {
+  return BigInt(10) ** BigInt(n);
+}
+
+/** This value's unscaled digits re-expressed at a larger scale. */
+function __bigDecimalAt(value, scale) {
+  return value.unscaled * __pow10(scale - value.scale);
+}
+
+/**
+ * An integer quotient rounded the way java.math.RoundingMode says. 'remainder'
+ * carries the sign of the dividend, as BigInt division truncates.
+ */
+function __roundQuotient(quotient, remainder, divisor, mode) {
+  if (remainder === BigInt(0)) return quotient;
+  var negative = (remainder < BigInt(0)) !== (divisor < BigInt(0));
+  var away = negative ? quotient - BigInt(1) : quotient + BigInt(1);
+  var twice = (remainder < BigInt(0) ? -remainder : remainder) * BigInt(2);
+  var whole = divisor < BigInt(0) ? -divisor : divisor;
+  var half = twice === whole ? 0 : (twice > whole ? 1 : -1);
+  switch (__str(mode)) {
+    case 'UP': return away;
+    case 'DOWN': return quotient;
+    case 'CEILING': return negative ? quotient : away;
+    case 'FLOOR': return negative ? away : quotient;
+    case 'HALF_UP': return half >= 0 ? away : quotient;
+    case 'HALF_DOWN': return half > 0 ? away : quotient;
+    case 'HALF_EVEN':
+      if (half !== 0) return half > 0 ? away : quotient;
+      return quotient % BigInt(2) === BigInt(0) ? quotient : away;
+    case 'UNNECESSARY':
+      throw new Error('This converted extension divided with RoundingMode.UNNECESSARY, and rounding was necessary.');
+    default:
+      throw new Error('This converted extension rounded with a mode this runtime does not know: ' + __str(mode) + '.');
+  }
+}
+
+__BigDecimal.prototype.signum = function () {
+  return this.unscaled > BigInt(0) ? 1 : (this.unscaled < BigInt(0) ? -1 : 0);
+};
+__BigDecimal.prototype.setScale = function (scale, mode) {
+  var wanted = Number(scale);
+  if (wanted >= this.scale) return new __BigDecimal(__bigDecimalAt(this, wanted), wanted);
+  var divisor = __pow10(this.scale - wanted);
+  var quotient = this.unscaled / divisor;
+  var rounded = __roundQuotient(quotient, this.unscaled % divisor, divisor, mode === undefined ? 'UNNECESSARY' : mode);
+  return new __BigDecimal(rounded, wanted);
+};
+/**
+ * divide(other, scale, mode), divide(other, mode) at this value's scale, or
+ * divide(other) exactly - which throws, as Java's does, when the quotient
+ * does not terminate.
+ */
+__BigDecimal.prototype.divide = function (other, scaleOrMode, mode) {
+  var divisor = __bigDecimalOf(other);
+  if (divisor.unscaled === BigInt(0)) throw new Error('This converted extension divided a BigDecimal by zero.');
+  if (scaleOrMode === undefined) {
+    // Exact: try growing scales until the division comes out even. A quotient
+    // that terminates does so within the digits of the divisor's twos and fives.
+    // Java answers the smallest scale no less than the preferred one at which
+    // the quotient is exact, so the search starts there.
+    var preferred = this.scale - divisor.scale;
+    var limit = preferred + divisor.unscaled.toString().length * 4 + 32;
+    for (var scale = preferred; scale <= limit; scale += 1) {
+      var numerator = this.unscaled * __pow10(scale - preferred);
+      if (numerator % divisor.unscaled === BigInt(0)) {
+        return new __BigDecimal(numerator / divisor.unscaled, scale);
+      }
+    }
+    throw new Error('This converted extension divided two BigDecimals whose quotient does not terminate.');
+  }
+  var wanted = typeof scaleOrMode === 'number' ? scaleOrMode : this.scale;
+  var rounding = typeof scaleOrMode === 'number' ? mode : scaleOrMode;
+  var top = this.unscaled * __pow10(Math.max(wanted - this.scale + divisor.scale, 0));
+  var bottom = divisor.unscaled * __pow10(Math.max(this.scale - divisor.scale - wanted, 0));
+  return new __BigDecimal(__roundQuotient(top / bottom, top % bottom, bottom, rounding), wanted);
+};
+/** Kotlin's '/' operator on a BigDecimal: HALF_EVEN at this value's scale. */
+__BigDecimal.prototype.div = function (other) { return this.divide(other, 'HALF_EVEN'); };
+__BigDecimal.prototype.stripTrailingZeros = function () {
+  if (this.unscaled === BigInt(0)) return new __BigDecimal(BigInt(0), 0);
+  var out = this;
+  while (out.unscaled % BigInt(10) === BigInt(0)) {
+    out = new __BigDecimal(out.unscaled / BigInt(10), out.scale - 1);
+  }
+  return out;
+};
+__BigDecimal.prototype.add = function (other) {
+  var right = __bigDecimalOf(other);
+  var scale = Math.max(this.scale, right.scale);
+  return new __BigDecimal(__bigDecimalAt(this, scale) + __bigDecimalAt(right, scale), scale);
+};
+__BigDecimal.prototype.subtract = function (other) {
+  var right = __bigDecimalOf(other);
+  return this.add(new __BigDecimal(-right.unscaled, right.scale));
+};
+__BigDecimal.prototype.multiply = function (other) {
+  var right = __bigDecimalOf(other);
+  return new __BigDecimal(this.unscaled * right.unscaled, this.scale + right.scale);
+};
+__BigDecimal.prototype.compareTo = function (other) {
+  var right = __bigDecimalOf(other);
+  var scale = Math.max(this.scale, right.scale);
+  var left = __bigDecimalAt(this, scale);
+  var against = __bigDecimalAt(right, scale);
+  return left === against ? 0 : (left > against ? 1 : -1);
+};
+__BigDecimal.prototype.toPlainString = function () {
+  var negative = this.unscaled < BigInt(0);
+  var digits = (negative ? -this.unscaled : this.unscaled).toString();
+  if (this.scale <= 0) return (negative ? '-' : '') + digits + '0'.repeat(-this.scale);
+  while (digits.length <= this.scale) digits = '0' + digits;
+  var point = digits.length - this.scale;
+  return (negative ? '-' : '') + digits.slice(0, point) + '.' + digits.slice(point);
+};
+/** Kotlin's toInt()/toLong() on a BigDecimal truncate toward zero. */
+__BigDecimal.prototype.intValue = function () {
+  var truncated = this.scale <= 0 ? __bigDecimalAt(this, 0) : this.unscaled / __pow10(this.scale);
+  return Number(truncated);
+};
+__BigDecimal.prototype.doubleValue = function () { return Number(this.toPlainString()); };
+/**
+ * Java's toString, which is what string interpolation reads: plain notation
+ * while the scale is not negative and the exponent is no smaller than -6,
+ * scientific otherwise - so a stripped 10 prints "1E+1", as it does there.
+ */
+__BigDecimal.prototype.toString = function () {
+  var negative = this.unscaled < BigInt(0);
+  var digits = (negative ? -this.unscaled : this.unscaled).toString();
+  var adjusted = digits.length - 1 - this.scale;
+  if (this.scale >= 0 && adjusted >= -6) return this.toPlainString();
+  var mantissa = digits.length > 1 ? digits.charAt(0) + '.' + digits.slice(1) : digits;
+  return (negative ? '-' : '') + mantissa + 'E' + (adjusted >= 0 ? '+' : '') + adjusted;
+};
+/**
+ * No silent arithmetic. The emitter writes Kotlin's operators on values it
+ * cannot type as JavaScript's own, and a BigDecimal read as a double would
+ * divide as a double - '7 / 2' is 3.5 here and 4 in Kotlin, which rounds
+ * HALF_EVEN at the dividend's scale - and compare and add the same way with
+ * nothing refused. So only a string may be asked of one implicitly (an
+ * interpolation); an operator on it throws, naming why, and the named methods
+ * and the operator helpers below are the ways to do arithmetic on it.
+ */
+__BigDecimal.prototype[Symbol.toPrimitive] = function (hint) {
+  if (hint === 'string') return this.toString();
+  throw new Error(
+    'This converted extension used an arithmetic operator on a BigDecimal, which Yorozo does not ' +
+    'read as a double. Only its named methods are translated.'
+  );
+};
+
+/** 'BigDecimal(2)', 'BigDecimal("4.5")'. */
+function BigDecimal(value) {
+  return __bigDecimalOf(value);
+}
+BigDecimal.ZERO = new __BigDecimal(BigInt(0), 0);
+BigDecimal.ONE = new __BigDecimal(BigInt(1), 0);
+BigDecimal.TEN = new __BigDecimal(BigInt(10), 0);
+BigDecimal.valueOf = function (value) { return __bigDecimalOf(value); };
+
+/** java.math.RoundingMode's constants, spelled as they are read. */
+var RoundingMode = {
+  UP: 'UP', DOWN: 'DOWN', CEILING: 'CEILING', FLOOR: 'FLOOR',
+  HALF_UP: 'HALF_UP', HALF_DOWN: 'HALF_DOWN', HALF_EVEN: 'HALF_EVEN', UNNECESSARY: 'UNNECESSARY'
+};
+
+/**
  * kotlinx's descriptor vocabulary, as far as a hand-written KSerializer
  * declares it: 'override val descriptor = PrimitiveSerialDescriptor("X",
  * PrimitiveKind.STRING)'. Nothing in this runtime reads a descriptor — the
@@ -2505,6 +2714,7 @@ var __k = {
 
   toIntOrNull: function (value) {
     if (typeof value === 'number') return Number.isFinite(value) ? Math.trunc(value) : null;
+    if (value instanceof __BigDecimal) return value.intValue();
     var text = __str(value).trim();
     if (!/^[+-]?[0-9]+$/.test(text)) return null;
     var parsed = Number(text);
@@ -2535,6 +2745,7 @@ var __k = {
 
   toFloatOrNull: function (value) {
     if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+    if (value instanceof __BigDecimal) return value.doubleValue();
     var text = __str(value).trim();
     if (!/^[+-]?([0-9]+\\.?[0-9]*|\\.[0-9]+)([eE][+-]?[0-9]+)?$/.test(text)) return null;
     var parsed = Number(text);
@@ -2555,6 +2766,16 @@ var __k = {
    * parsed the way toFloat parses it, throwing where Kotlin would throw
    * NumberFormatException.
    */
+  /** 'text.toBigDecimal()' and 'n.toBigDecimal()'; see __BigDecimal. */
+  toBigDecimal: function (value) { return __bigDecimalOf(value); },
+  toBigDecimalOrNull: function (value) {
+    try {
+      return __bigDecimalOf(value);
+    } catch (error) {
+      return null;
+    }
+  },
+
   toDouble: function (value) {
     if (typeof value === 'number') return value;
     return __k.toFloat(value);
@@ -4039,6 +4260,7 @@ var __k = {
    * literal, which is the only place it can be told apart.
    */
   plus: function (left, right, unit) {
+    if (left instanceof __BigDecimal) return left.add(right);
     // A date moved by an amount: 'zoned.plus(3, ChronoUnit.DAYS)'.
     if (left !== null && left !== undefined && left.__kTime === true) return left.plus(right, unit);
     if (typeof left === 'number' || typeof left === 'string' || left === null || left === undefined) {
@@ -4623,9 +4845,18 @@ var __k = {
    * one in milliseconds through a null-safe chain, where the operator form has
    * nowhere to put the ?. at all.
    */
-  times: function (value, other) { return Number(value) * Number(other); },
-  divide: function (value, other) { return Number(value) / Number(other); },
-  subtract: function (value, other) { return Number(value) - Number(other); },
+  times: function (value, other) {
+    if (value instanceof __BigDecimal) return value.multiply(other);
+    return Number(value) * Number(other);
+  },
+  divide: function (value, other) {
+    if (value instanceof __BigDecimal) return value.div(other);
+    return Number(value) / Number(other);
+  },
+  subtract: function (value, other) {
+    if (value instanceof __BigDecimal) return value.subtract(other);
+    return Number(value) - Number(other);
+  },
 
   toHexString: function (value) {
     if (typeof value === 'number') {
@@ -5568,6 +5799,7 @@ var __k = {
    */
   minus: function (value, other, unit) {
     if (typeof value === 'number') return value - Number(other);
+    if (value instanceof __BigDecimal) return value.subtract(other);
     // And the same for a date: 'ZonedDateTime.now(zone).minus(n, unit)'.
     if (value !== null && value !== undefined && value.__kTime === true) return value.minus(other, unit);
     // Kotlin has no String minus, so a string on the left is a Char: 'c - 'A''

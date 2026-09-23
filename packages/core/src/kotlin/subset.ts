@@ -732,6 +732,10 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 	// It was a passthrough, and neither a JavaScript number nor a string has a
 	// `toDouble` — every call died with "is not a function", nothing refused.
 	['toDouble', 'toDouble'],
+	// java.math.BigDecimal, which the runtime keeps exactly (an unscaled BigInt
+	// and a scale): `score.toBigDecimal().divide(BigDecimal(2), 0, HALF_UP)`.
+	['toBigDecimal', 'toBigDecimal'],
+	['toBigDecimalOrNull', 'toBigDecimalOrNull'],
 	['toLongOrNull', 'toLongOrNull'],
 	['toLong', 'toLong'],
 	['countLeadingZeroBits', 'countLeadingZeroBits'],
@@ -1831,6 +1835,12 @@ export const HOST_METHODS: ReadonlySet<string> = new Set([
 	'lastIndexOf',
 	'substring',
 	'toBoolean',
+	// BigDecimal's own, on the runtime's value: see `toBigDecimal`.
+	'signum',
+	'divide',
+	'setScale',
+	'stripTrailingZeros',
+	'toPlainString',
 	'format',
 	'parseLong',
 	'time',
@@ -2357,6 +2367,8 @@ export const GLOBAL_NAMES: ReadonlySet<string> = new Set([
 
 	/* kotlinx.serialization's names a hand-written KSerializer declares, and
 	   JsonNull, which is JSON's null — see the typed decoder in the runtime. */
+	'BigDecimal',
+	'RoundingMode',
 	'PrimitiveSerialDescriptor',
 	'PrimitiveKind',
 	'JsonNull',
