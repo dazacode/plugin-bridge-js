@@ -7647,6 +7647,33 @@ class Emitter {
 			return `(__recv, ...__a) => __recv.${member.text}(...__a)`;
 		}
 
+		// `hls.let(UrlUtils::fixUrl)` — a member of a declared `object`, which is
+		// the *bound* form: the object is the receiver and every argument is the
+		// function's. The branch above excludes objects for exactly that reason,
+		// and nothing took them up, so the reference was refused while the
+		// object sat translated beside it. Arguments forwarded by the rule the
+		// bare `::name` form uses, and for its reason: a collection helper hands
+		// the lambda an index too, which a second overload — `fixUrl(url,
+		// baseUrl)` — would take as its base url.
+		if (
+			named &&
+			this.declaredObjects.has(owner.text) &&
+			this.classFunctionIndex.get(owner.text)?.has(member.text) === true &&
+			this.classFieldIndex.get(owner.text)?.has(member.text) !== true
+		) {
+			const target = `${this.read(owner.text, owner)}.${member.text}`;
+			const arity = this.requiredArities.get(`${owner.text}.${member.text}`) ?? null;
+			const names =
+				arity !== null && arity > 1
+					? Array.from({ length: arity }, (_, index) => `__a${index}`).join(', ')
+					: '__a';
+			if (this.declaredSuspends.has(member.text)) {
+				this.asyncLambdas += 1;
+				return `async (${names}) => (await ${target}(${names}))`;
+			}
+			return `(${names}) => ${target}(${names})`;
+		}
+
 		// The same unbound form over a *property*: `distinctBy(GenreRoute::slug)`
 		// and `sortedBy(Chapter::number)`. Kotlin's reference to a property is a
 		// function of one argument that reads it, which is the shape every

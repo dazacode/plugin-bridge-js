@@ -475,10 +475,11 @@ describe('a file that declares a name the runtime already defines', () => {
 		expect(dto.js).toContain('(__recv, ...__a) => __recv.toSAnime(...__a)');
 	});
 
-	it('still refuses `Obj::method`, where the object is already the receiver', async () => {
+	it('reads `Obj::method` as bound, where the object is already the receiver', async () => {
 		// For an `object`, Kotlin's `Obj::member` is the BOUND form. Reading it
 		// as unbound would consume the first argument as a receiver and drop it
-		// silently — which is worse than the refusal it replaces.
+		// silently — which is worse than the refusal it replaced. It is now the
+		// bound call, the argument passed on and the object as the receiver.
 		const object = await convertKotlin(
 			[
 				{
@@ -497,7 +498,9 @@ describe('a file that declares a name the runtime already defines', () => {
 			{ parser }
 		);
 
-		expect(object.complete).toBe(false);
+		expect(object.complete).toBe(true);
+		expect(object.js).toContain('(__a) => Obj.wrap(__a)');
+		expect(object.js).not.toContain('__recv.wrap');
 	});
 
 	it('does not borrow a same-named extension from an unrelated class', async () => {

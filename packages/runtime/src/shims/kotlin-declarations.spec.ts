@@ -1863,3 +1863,26 @@ describe('a bare call inside an object', () => {
 		expect(demo.packed()).toEqual(['eval(x)']);
 	});
 });
+
+describe('a reference to a member of a declared object', () => {
+	it('is bound to the object, forwarding one argument to an overloaded name', async () => {
+		// `hls.let(UrlUtils::fixUrl)`. The object is the receiver; with two
+		// overloads, `(url)` and `(url, baseUrl)`, the index a collection
+		// helper passes must not reach the second.
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'object Urls {',
+				'    fun fix(url: String): String = if (url.startsWith("//")) "https:$url" else url',
+				'    fun fix(url: String, base: String): String = base + url',
+				'}',
+				'class Demo {',
+				'    fun one(u: String): String = u.let(Urls::fix)',
+				'    fun many(us: List<String>): List<String> = us.map(Urls::fix)',
+				'}'
+			)
+		);
+		expect(demo.one('//a.example.invalid/x')).toBe('https://a.example.invalid/x');
+		expect(demo.many(['//b.example.invalid', 'c'])).toEqual(['https://b.example.invalid', 'c']);
+	});
+});
