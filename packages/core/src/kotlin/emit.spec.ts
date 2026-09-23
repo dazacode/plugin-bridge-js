@@ -4441,6 +4441,67 @@ describe('the class loader', () => {
 	});
 });
 
+describe('the shared playlist module’s signatures', () => {
+	// Each of these is a shape `PlaylistUtils` is written in, and each was
+	// emitted without a refusal and wrong: the request went out with the wrong
+	// headers or referer, which reads to a viewer as a hoster being down.
+
+	it('lets a parameter default read the parameters before it', () => {
+		const demo = instantiate(
+			inClass(
+				'    fun referer(url: String, ref: String = url.substringBefore("/v/")) = ref',
+				'    fun shown(): String = referer("https://h.example.invalid/v/1")'
+			)
+		);
+
+		expect(demo.shown()).toBe('https://h.example.invalid');
+	});
+
+	it('passes a bare `::member` every argument the member needs', () => {
+		// `masterHeadersGen: (Headers, String) -> Headers = ::generateMasterHeaders`
+		const demo = instantiate(
+			inClass(
+				'    fun join(a: String, b: String, c: String = "!"): String = a + b + c',
+				'    fun apply(f: (String, String) -> String = ::join): String = f("x", "y")',
+				'    fun one(): List<String> = listOf("q").map(::single)',
+				'    fun single(a: String, b: String = "-"): String = a + b'
+			)
+		);
+
+		expect(demo.apply()).toBe('xy!');
+		// Still one argument where the member needs one: the runtime's `map`
+		// passes an index too, and it must not land in `b`.
+		expect(demo.one()).toEqual(['q-']);
+	});
+
+	it('keeps a constructor default that is a bare name', () => {
+		const shown = evaluate(
+			kt(
+				'val FALLBACK = "none"',
+				'class Utils(private val client: String, val headers: String = FALLBACK)',
+				'data class Pair2(val a: String, val b: String = a)'
+			),
+			'[new Utils("c").headers, Pair2("z").b]'
+		);
+
+		expect(shown).toEqual(['none', 'z']);
+	});
+
+	it('calls an object’s own member over the runtime function of that name', () => {
+		const shown = evaluate(
+			kt(
+				'object Packer {',
+				'    fun unpack(vararg blocks: String): List<String> = blocks.toList()',
+				'    fun combine(block: String): String = unpack(block, block).joinToString("+")',
+				'}'
+			),
+			'Packer.combine("a")'
+		);
+
+		expect(shown).toBe('a+a');
+	});
+});
+
 describe('a class’s simple name', () => {
 	it('answers a final class with its own name, and an object with its', () => {
 		// `private val tag by lazy { javaClass.simpleName }` is the whole idiom.

@@ -6115,6 +6115,14 @@ var Headers = {
   }
 };
 
+/**
+ * keiyoushi.utils.commonEmptyHeaders, which the shared modules take as a
+ * constructor default: 'class PlaylistUtils(client, headers: Headers =
+ * commonEmptyHeaders)'. It is Headers.Builder().build() there, and a module
+ * built without headers sends none of its own — the host's still apply.
+ */
+var commonEmptyHeaders = Headers.Builder().build();
+
 var FormBody = {
   Builder: function () {
     var pairs = [];

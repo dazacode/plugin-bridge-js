@@ -1231,6 +1231,12 @@ class Emitter {
 	/** Signatures under the class that declares them, as `Owner.method`. */
 	private readonly qualifiedSignatures = new Map<string, readonly string[]>();
 	/**
+	 * The parameters without a default, under `Owner.method`; `null` for an
+	 * overloaded name. This file's classes only — a neighbour's are not needed,
+	 * because a bare `::name` can only name a member of the class it is in.
+	 */
+	private readonly requiredArities = new Map<string, number | null>();
+	/**
 	 * Types declared with `object`, whose `::member` is bound and not unbound.
 	 *
 	 * `Obj::method` in Kotlin already has its receiver — the object — so it is
@@ -1505,6 +1511,17 @@ class Emitter {
 					// calling whenever the receiver is a construction of one.
 					if (owner !== null) {
 						this.qualifiedSignatures.set(`${owner}.${name}`, this.parameterNames(child));
+						// And how many of those a caller must supply, for a bare
+						// `::name` handed on as a value; see `callableReference`.
+						// Two declarations under one key are an overload, and an
+						// overload has no one arity — kept as `null`.
+						const key = `${owner}.${name}`;
+						const required = requiredParameterCount(child);
+						const seen = this.requiredArities.get(key);
+						this.requiredArities.set(
+							key,
+							seen === undefined || seen === required ? required : null
+						);
 					}
 				}
 				continue;
@@ -3814,42 +3831,58 @@ class Emitter {
 				);
 			}
 			names.push(pending.name);
+			// In scope for the defaults after it. `fun extractFromHls(playlistUrl:
+			// String, referer: String = playlistUrl.toDefaultReferer())` is how
+			// PlaylistUtils — the module most extractors share — writes its
+			// signature, and a default reads the parameters *before* it. Without
+			// this the name resolved as a member and came out
+			// `this.toDefaultReferer(this.playlistUrl)`: a field nothing sets, so
+			// every stream went out with an empty Referer and nothing refused.
+			// JavaScript defaults see earlier parameters exactly as Kotlin's do.
+			this.declare(pending.name);
 			pending = null;
 		};
 
-		for (const child of list?.allChildren ?? []) {
-			if (COMMENT_KINDS.has(child.type)) continue;
-			if (child.type === '(' || child.type === ')') continue;
-			if (child.type === ',') {
-				flush(null);
-				continue;
-			}
-			if (expectingDefault) {
-				expectingDefault = false;
-				flush(child);
-				continue;
-			}
-			if (child.type === '=') {
-				expectingDefault = true;
-				continue;
-			}
-			if (child.type === ':') continue;
-			if (child.type.endsWith('type') || child.type === 'type_arguments') continue;
-			if (child.type === 'parameter_modifiers') {
-				// A modifier list is a sibling too, and it comes *before* the
-				// parameter it modifies.
-				spread = this.readParameterModifiers(child);
-				continue;
-			}
-			if (child.type !== 'parameter') this.refuse(child, spoken(child));
+		// Its own scope, so the names declared above end with the signature;
+		// the body declares them again inside `functionScope`.
+		this.pushScope();
+		try {
+			for (const child of list?.allChildren ?? []) {
+				if (COMMENT_KINDS.has(child.type)) continue;
+				if (child.type === '(' || child.type === ')') continue;
+				if (child.type === ',') {
+					flush(null);
+					continue;
+				}
+				if (expectingDefault) {
+					expectingDefault = false;
+					flush(child);
+					continue;
+				}
+				if (child.type === '=') {
+					expectingDefault = true;
+					continue;
+				}
+				if (child.type === ':') continue;
+				if (child.type.endsWith('type') || child.type === 'type_arguments') continue;
+				if (child.type === 'parameter_modifiers') {
+					// A modifier list is a sibling too, and it comes *before* the
+					// parameter it modifies.
+					spread = this.readParameterModifiers(child);
+					continue;
+				}
+				if (child.type !== 'parameter') this.refuse(child, spoken(child));
 
+				flush(null);
+				const name = this.nameOf(child);
+				if (name === null) this.refuse(child, 'an unnamed parameter');
+				pending = { name, spread, node: child };
+				spread = false;
+			}
 			flush(null);
-			const name = this.nameOf(child);
-			if (name === null) this.refuse(child, 'an unnamed parameter');
-			pending = { name, spread, node: child };
-			spread = false;
+		} finally {
+			this.popScope();
 		}
-		flush(null);
 
 		// Kotlin lets a `vararg` sit anywhere and names the parameters after it
 		// at the call site; JavaScript's rest parameter has to be last, and
@@ -3921,14 +3954,19 @@ class Emitter {
 			if (param.type !== 'class_parameter') continue;
 			const name = kids(param).find((child) => child.type === 'simple_identifier')?.text;
 			if (name === undefined) continue;
+			// The default is whatever follows the `=`, read by position. It was
+			// read by *kind* — the first child that was not a modifier, a type
+			// or an identifier — and so a default that IS an identifier vanished:
+			// `class PlaylistUtils(client, headers: Headers = commonEmptyHeaders)`
+			// came out `constructor(client, headers)`, and `PlaylistUtils(client)`
+			// — how most extractors build it — handed every request an undefined
+			// `headers`. `data class D(val a: String, val b: String = a)` the same.
+			const all = param.allChildren;
+			const equals = all.findIndex((child) => child.type === '=');
 			const fallback =
-				kids(param).find(
-					(child) =>
-						child.type !== 'modifiers' &&
-						child.type !== 'binding_pattern_kind' &&
-						child.type !== 'simple_identifier' &&
-						!child.type.endsWith('type')
-				) ?? null;
+				equals === -1
+					? null
+					: (all.slice(equals + 1).find((child) => !COMMENT_KINDS.has(child.type)) ?? null);
 			out.push({
 				name,
 				isProperty: kids(param).some((child) => child.type === 'binding_pattern_kind'),
@@ -5301,6 +5339,27 @@ class Emitter {
 					return `(...__a) => ${this.helper(extension)}(...__a)`;
 				}
 			}
+			// As many arguments as the function needs, and no more.
+			//
+			// One was the rule, and it is right for the commonest use —
+			// `.map(::fixUrl)` — where the runtime's collection helpers pass an
+			// index as well, and forwarding every argument would hand it to a
+			// parameter with a default. It is wrong for a reference that stands
+			// in for a wider function type: PlaylistUtils writes
+			// `masterHeadersGen: (Headers, String) -> Headers =
+			// ::generateMasterHeaders`, and with one argument forwarded every
+			// HLS request that took the default went out built from `referer =
+			// undefined`. Nothing refused it. The required count is exact for
+			// both: the function type supplies at least that many, and a
+			// parameter with a default is one Kotlin fills in itself.
+			const arity =
+				this.owner !== null && this.classMembers.has(member.text)
+					? (this.requiredArities.get(`${this.owner}.${member.text}`) ?? null)
+					: null;
+			if (arity !== null && arity > 1) {
+				const names = Array.from({ length: arity }, (_, index) => `__a${index}`).join(', ');
+				return `(${names}) => ${this.read(member.text, member)}(${names})`;
+			}
 			return `(__a) => ${this.read(member.text, member)}(__a)`;
 		}
 
@@ -6086,7 +6145,14 @@ class Emitter {
 			return 'Json';
 		}
 
-		const free = FREE_FUNCTIONS.get(name);
+		// A name the enclosing class or object declares for itself is that
+		// declaration, not the runtime's function of the same spelling — Kotlin
+		// resolves a member before anything imported. `JsUnpacker` declares its
+		// own `unpack(vararg)` and its `unpackAndCombine` calls it bare; read as
+		// the runtime's one-argument `unpack`, the result was a string that
+		// `joinToString(" ")` then spelled out a character at a time, and every
+		// extractor built on it answered garbage with nothing refused.
+		const free = this.declaresOwn(name) ? undefined : FREE_FUNCTIONS.get(name);
 		if (free !== undefined) {
 			const before = this.asyncLambdas;
 			const tail = this.provenance(
@@ -7628,6 +7694,16 @@ class Emitter {
 		return `${this.helper('simpleName')}(${this.selfReference()})`;
 	}
 
+	/**
+	 * Whether the class or object being emitted declares `name` itself, or a
+	 * local of that name is in scope. See the free-function check in `bareCall`.
+	 */
+	private declaresOwn(name: string): boolean {
+		if (this.lookup(name) !== null) return true;
+		if (this.owner !== null && this.objectMembers.get(name) === this.owner) return true;
+		return this.owner !== null && this.classMembers.has(name);
+	}
+
 	private selfReference(): string {
 		for (let index = this.frames.length - 1; index >= 0; index -= 1) {
 			const kind = this.frames[index].kind;
@@ -8823,6 +8899,25 @@ const ASSIGNABLE_HEADS: ReadonlySet<string> = new Set([
 	'this_expression',
 	'parenthesized_expression'
 ]);
+
+/**
+ * How many of a function's value parameters have no default.
+ *
+ * Read off the parameter list as the grammar gives it: a `parameter` followed
+ * by `=` has a default, and every other one must be supplied by the caller.
+ */
+function requiredParameterCount(node: KNode): number {
+	const list = kids(node).find((child) => child.type === 'function_value_parameters');
+	const children = list?.allChildren ?? [];
+	let count = 0;
+	for (const [index, child] of children.entries()) {
+		if (child.type !== 'parameter') continue;
+		let next = index + 1;
+		while (next < children.length && COMMENT_KINDS.has(children[next].type)) next += 1;
+		if (children[next]?.type !== '=') count += 1;
+	}
+	return count;
+}
 
 /**
  * The `reified` type parameters a function declares, in order.

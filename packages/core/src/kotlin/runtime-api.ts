@@ -692,6 +692,10 @@ export const RUNTIME_GLOBALS = [
 	/* okhttp's `CacheControl`, named as the third argument of `GET`. Carried
 	   rather than refused; see the value for why. */
 	'CacheControl',
+	/* keiyoushi.utils.commonEmptyHeaders — the default `headers` of the shared
+	   extractor modules' constructors. A lowercase name the emitter would
+	   otherwise read as a member of the source, which is undefined. */
+	'commonEmptyHeaders',
 	/* `TimeZone.getTimeZone("UTC")`, which 115 sources set on a date format,
 	   and `Regex.escape(literal)`, which is the companion rather than the
 	   constructor. Both are capitalised receivers the emitter passes through, so

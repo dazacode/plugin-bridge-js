@@ -1687,6 +1687,8 @@ export const GLOBAL_NAMES: ReadonlySet<string> = new Set([
 	// behaviour; it is here so that naming it resolves.
 	'Interceptor',
 	'CacheControl',
+	/* See `RUNTIME_GLOBALS`: the shared modules' default constructor headers. */
+	'commonEmptyHeaders',
 	/* `TimeZone.getTimeZone("UTC")`, which 115 sources set on a date format,
 	   and `Regex.escape(literal)`, which is the companion rather than the
 	   constructor. Both are capitalised receivers the emitter passes through, so
