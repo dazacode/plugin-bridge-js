@@ -4604,6 +4604,18 @@ describe('the class loader', () => {
 });
 
 describe('the shared playlist module’s signatures', () => {
+	it('treats Kotlin null comparisons as nullish JavaScript comparisons', () => {
+		const emitted = translate(
+			inClass(
+				'    fun missing(value: String?): Boolean = value == null',
+				'    fun present(value: String?): Boolean = value != null'
+			)
+		);
+		expect(emitted.refusals).toEqual([]);
+		expect(emitted.js).toContain('value == null');
+		expect(emitted.js).toContain('value != null');
+	});
+
 	it('routes the measured stdlib calls through their runtime helpers', () => {
 		const emitted = translate(
 			inClass(

@@ -6197,8 +6197,14 @@ class Emitter {
 				if (guarded !== null) return this.hoistedGuard(node, guarded);
 				return `(${this.expr(kids(node)[0])} ?? ${this.expr(kids(node)[1])})`;
 			}
-			case 'equality_expression':
-				return this.binary(node, (operator) => (operator.startsWith('==') ? '===' : '!=='));
+			case 'equality_expression': {
+				const operands = kids(node);
+				const nullable = operands.some((part) => part.type === 'null' || part.text === 'null');
+				return this.binary(node, (operator) => {
+					if (nullable) return operator.startsWith('==') ? '==' : '!=';
+					return operator.startsWith('==') ? '===' : '!==';
+				});
+			}
 			case 'comparison_expression': {
 				const generic = this.genericReference(node);
 				if (generic !== null) return generic;

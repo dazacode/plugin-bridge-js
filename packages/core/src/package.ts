@@ -173,8 +173,11 @@ const ENTRYPOINT = 'source';
  * 55: Next.js App Router, Pages Router, and React Flight extraction now run
  *     through the runtime for typed `extractNextJs` and `extractNextJsRsc`.
  *     Reconvert bundles that use those core helpers.
+ *
+ * 56: nullable Kotlin comparisons now preserve null/undefined equivalence in
+ *     JavaScript. This prevents pagination loops when optional links are absent.
  */
-export const CONVERTER_VERSION = 55;
+export const CONVERTER_VERSION = 56;
 
 export interface BundleInput {
 	readonly id: string;
