@@ -43,6 +43,7 @@ export const RUNTIME_HELPERS = [
 	'toInt',
 	'toFloatOrNull',
 	'toFloat',
+	'toDouble',
 	'toLongOrNull',
 	'toLong',
 	'countLeadingZeroBits',
@@ -793,6 +794,10 @@ export const RUNTIME_GLOBALS = [
 	'SEpisode',
 	'Video',
 	'Track',
+	/* ext-lib 16's skip markers on a Video. Built and carried; the ABI has no
+	   field for them, so nothing a viewer sees depends on them. */
+	'TimeStamp',
+	'ChapterType',
 	'AnimeFilter',
 	'Json',
 

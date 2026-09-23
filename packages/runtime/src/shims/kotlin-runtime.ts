@@ -2550,6 +2550,17 @@ var __k = {
   },
 
   /**
+   * Kotlin's toDouble: a number widened, which in JavaScript is the number
+   * itself - NaN and the infinities included, as Kotlin keeps them - and text
+   * parsed the way toFloat parses it, throwing where Kotlin would throw
+   * NumberFormatException.
+   */
+  toDouble: function (value) {
+    if (typeof value === 'number') return value;
+    return __k.toFloat(value);
+  },
+
+  /**
    * A Long, as far as a double can carry one.
    *
    * Every Long a scraper reads is a timestamp or an id, both well inside the
@@ -12654,6 +12665,35 @@ function Video(url, quality, videoUrl, headers, subtitleTracks, audioTracks) {
   this.subtitleTracks = __arr(subtitleTracks);
   this.audioTracks = __arr(audioTracks);
 }
+
+/**
+ * A marked stretch of a video - an opening, an ending, a recap - that a
+ * player can offer to skip.
+ *
+ * Upstream it is ext-lib 16's 'TimeStamp(start, end, name, type =
+ * ChapterType.Other)', in seconds, carried on a Video's 'timestamps'. The ABI
+ * has no field for skip markers, so the driver hands the video on without
+ * them: what an extension builds here changes nothing it plays. It is still
+ * a real value rather than a stand-in, because extensions filter and copy
+ * these ('if (e > s) add(TimeStamp(s, e, ...))', 'video.copy(timestamps =
+ * ...)') and the arithmetic on 'start' and 'end' has to be over numbers.
+ */
+function TimeStamp(start, end, name, type) {
+  if (!(this instanceof TimeStamp)) return new TimeStamp(start, end, name, type);
+  this.start = Number(start);
+  this.end = Number(end);
+  this.name = __str(name);
+  this.type = type === undefined || type === null ? ChapterType.Other : type;
+}
+
+/** The kinds a TimeStamp can be, spelled as upstream's enum constants. */
+var ChapterType = {
+  Opening: 'Opening',
+  Ending: 'Ending',
+  Recap: 'Recap',
+  MixedOp: 'MixedOp',
+  Other: 'Other'
+};
 
 function Track(url, lang) {
   if (!(this instanceof Track)) return new Track(url, lang);

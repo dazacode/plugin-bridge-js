@@ -728,6 +728,10 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 	['toInt', 'toInt'],
 	['toFloatOrNull', 'toFloatOrNull'],
 	['toFloat', 'toFloat'],
+	// `it.start.toDouble()` over a number, or `"1.5".toDouble()` over text.
+	// It was a passthrough, and neither a JavaScript number nor a string has a
+	// `toDouble` — every call died with "is not a function", nothing refused.
+	['toDouble', 'toDouble'],
 	['toLongOrNull', 'toLongOrNull'],
 	['toLong', 'toLong'],
 	['countLeadingZeroBits', 'countLeadingZeroBits'],
@@ -1826,7 +1830,6 @@ export const HOST_METHODS: ReadonlySet<string> = new Set([
 	'indexOf',
 	'lastIndexOf',
 	'substring',
-	'toDouble',
 	'toBoolean',
 	'format',
 	'parseLong',
@@ -2201,6 +2204,8 @@ export const GLOBAL_NAMES: ReadonlySet<string> = new Set([
 	'SEpisode',
 	'Video',
 	'Track',
+	'TimeStamp',
+	'ChapterType',
 	'AnimeFilter',
 	'Json',
 	'Hoster',
@@ -2641,6 +2646,9 @@ export const KNOWN_SIGNATURES: ReadonlyMap<string, readonly string[]> = new Map(
 	// reached only when a call names something that can only be its.
 	['Video', ['url', 'quality', 'videoUrl', 'headers', 'subtitleTracks', 'audioTracks']],
 	['Track', ['url', 'lang']],
+	// `TimeStamp(start, end, name = "Intro", type = ChapterType.Opening)`: the
+	// last two are named at every construction site in the catalogue.
+	['TimeStamp', ['start', 'end', 'name', 'type']],
 
 	// **`Page(index, url = "", imageUrl = null)`**, and the reason it is here
 	// rather than left to positional calls: `Page(index, imageUrl = it)` is how

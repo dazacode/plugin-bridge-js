@@ -1766,3 +1766,36 @@ describe('a helper class calling back into the source object it was handed', () 
 		]);
 	});
 });
+
+describe('skip markers on a video', () => {
+	it('builds TimeStamp values and carries them through a Video copy', async () => {
+		// ext-lib 16's `TimeStamp(start, end, name, type)`. The ABI has no field
+		// for them, so what matters is that building them is ordinary Kotlin:
+		// numbers compared, a default type, a `copy(timestamps = …)`.
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    fun marks(s: Int, e: Int): List<TimeStamp> = buildList {',
+				'        if (e > s) add(TimeStamp(s.toDouble(), e.toDouble(), name = "Intro", type = ChapterType.Opening))',
+				'        add(TimeStamp(90.0, 120.5, "Outro"))',
+				'    }',
+				'    fun video(s: Int, e: Int): Video =',
+				'        Video("https://example.invalid/a.m3u8", "720p", "https://example.invalid/a.m3u8")',
+				'            .copy(timestamps = marks(s, e))',
+				'    fun parsed(t: String): Double = t.toDouble() + 1.toDouble()',
+				'}'
+			)
+		);
+		const [intro, outro] = demo.marks(0, 85);
+		expect([intro.start, intro.end, intro.name, intro.type]).toEqual([0, 85, 'Intro', 'Opening']);
+		expect([outro.start, outro.end, outro.type]).toEqual([90, 120.5, 'Other']);
+		expect(demo.marks(5, 5)).toHaveLength(1);
+		const video = demo.video(0, 85);
+		expect(video.videoUrl).toBe('https://example.invalid/a.m3u8');
+		expect(video.timestamps.map((one: { name: string }) => one.name)).toEqual(['Intro', 'Outro']);
+		// `toDouble` was a passthrough onto a method no number or string has.
+		expect(demo.parsed(' 2.5')).toBe(3.5);
+		expect(() => demo.parsed('two')).toThrow(/as a number/);
+	});
+});
