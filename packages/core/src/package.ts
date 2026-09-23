@@ -186,8 +186,14 @@ const ENTRYPOINT = 'source';
  *     custom serializer this runtime cannot run). Every bundle made at 56 or
  *     earlier must be reconverted: some decode differently, and some that
  *     loaded are now honestly refused.
+ *
+ * 58: a plain `fun` that blocks is awaited from another file and through a
+ *     `::` reference, and `runCatching` over a suspending block is awaited
+ *     before its Result is read. At 57 the Voe extractor, among others,
+ *     answered no videos. A temporary file handed to the player is a `data:`
+ *     uri. Reconvert every bundle made at 57 or earlier.
  */
-export const CONVERTER_VERSION = 57;
+export const CONVERTER_VERSION = 58;
 
 export interface BundleInput {
 	readonly id: string;
