@@ -33,6 +33,7 @@ import {
 	RUNTIME_GLOBALS,
 	RUNTIME_HELPERS
 } from '@plugin-bridge/core/kotlin/runtime-api';
+import { RUNTIME_STATIC_REFERENCES } from '@plugin-bridge/core/kotlin/subset';
 import { JS_RUNTIME } from './js-runtime';
 import {
 	KOTLIN_RUNTIME_SECTIONS,
@@ -200,6 +201,15 @@ describe('what the emitter is promised', () => {
 
 	it('defines every global a scraper writes by name', () => {
 		const missing = RUNTIME_GLOBALS.filter((name) => runtime.globals[name] === undefined);
+		expect(missing).toEqual([]);
+	});
+
+	it('defines every function a `Global::member` reference may name', () => {
+		const missing = [...RUNTIME_STATIC_REFERENCES].flatMap(([owner, members]) =>
+			[...members]
+				.filter((member) => typeof runtime.globals[owner]?.[member] !== 'function')
+				.map((member) => `${owner}.${member}`)
+		);
 		expect(missing).toEqual([]);
 	});
 
@@ -3421,6 +3431,26 @@ describe('the java and android types an extension names', () => {
 		expect(new TextDecoder().decode(Base64.encode(k.toByteArray('a'), Base64.NO_WRAP))).toBe(
 			'YQ=='
 		);
+	});
+
+	it('decodes base64 before any host is entered, to the bytes the host gives', async () => {
+		// `private val KEY = Base64.decode("…", Base64.DEFAULT)` in a companion
+		// is evaluated when the module loads, before any plugin call has
+		// entered a host — and it died there. Base64 is arithmetic, so that
+		// moment is decoded in plain JavaScript; the bytes must be the host's.
+		const fresh = await load();
+		const Base64 = fresh.globals.Base64;
+		const samples = ['YX+1nM4KgfaYwNE3/MPcTg==', 'YWJj', 'YQ', 'YWI', 'w7j_fg', '', 'AAEC/f7/'];
+		const early = samples.map((one) =>
+			Array.from(Base64.decode(one, Base64.DEFAULT) as Uint8Array)
+		);
+		expect(() => Base64.decode('not*base64', Base64.DEFAULT)).toThrow(/not base64/);
+		fresh.enter(context().ctx);
+		const hosted = samples.map((one) =>
+			Array.from(Base64.decode(one, Base64.DEFAULT) as Uint8Array)
+		);
+		expect(early).toEqual(hosted);
+		expect(early[1]).toEqual([97, 98, 99]);
 	});
 
 	it('builds a Triple, a Date and a StringBuilder', () => {

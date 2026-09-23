@@ -82,13 +82,32 @@ export interface RawNode {
  * nodes and a translator visits a small fraction of them, so building the whole
  * façade eagerly would cost more than the parse did.
  */
+/**
+ * A name as the program means it, which for a quoted Kotlin name is without
+ * its backticks.
+ *
+ * `` val `data`: Wrapper `` declares a property called `data`; the backticks
+ * are how Kotlin lets a name be a word it otherwise reserves, and they are no
+ * part of the name. Passed through, every place a name is written out wrote
+ * them too — `` this.`data` = data `` — which JavaScript cannot parse, so the
+ * bundle failed to load with nothing refused. Only a quoted name that is a
+ * plain identifier inside is unquoted; one with a space or a hyphen in it
+ * has no JavaScript spelling, and keeps its backticks so it fails loudly.
+ */
+function identifierText(raw: RawNode): string {
+	const text = raw.text;
+	if (raw.type !== 'simple_identifier' || !text.startsWith('`')) return text;
+	const inner = /^`([A-Za-z_]\w*)`$/.exec(text);
+	return inner === null ? text : inner[1];
+}
+
 export function wrap(raw: RawNode): KNode {
 	let children: readonly KNode[] | null = null;
 	let allChildren: readonly KNode[] | null = null;
 
 	return {
 		type: raw.type,
-		text: raw.text,
+		text: identifierText(raw),
 		line: raw.startPosition.row + 1,
 		get hasError(): boolean {
 			return raw.hasError();

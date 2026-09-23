@@ -22,6 +22,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 
 import { emitKotlin, mergeDeclared, declaredIn } from '@plugin-bridge/core/kotlin/emit';
 import { loadKotlinGrammar, type KotlinParser } from '@plugin-bridge/core/kotlin/grammar';
+import { convertKotlin } from '@plugin-bridge/core/kotlin/pipeline';
 import { JS_RUNTIME } from './js-runtime';
 import { kotlinRuntime } from './kotlin-runtime';
 
@@ -734,5 +735,136 @@ describe('detached accessors and minimal declarations', () => {
 				)
 			)
 		).toEqual(['an anonymous `object : LinkedHashMap(…)` over a constructed base']);
+	});
+});
+
+describe('a nested type with a top-level namesake further down', () => {
+	// `Chapter.Branch` nested above a top-level `Branch`: the nested one took
+	// the bare name because it was written first, the top-level one was
+	// written under it too, and the module was "Branch has already been
+	// declared" at load. The top-level type keeps the name the rest of the
+	// module uses; the nested one is renamed apart, and the typed decoder is
+	// told the renamed class, or `branches` would decode as the namesake.
+	const source = kt(
+		'@Serializable',
+		'class Chapter(val branches: List<Branch>) {',
+		'    @Serializable',
+		'    class Branch(@SerialName("branch_id") val branchId: Int, val team: String) {',
+		'        fun label(): String = "$team#$branchId"',
+		'    }',
+		'    fun labels(): String = branches.joinToString { it.label() }',
+		'}',
+		'@Serializable',
+		'class Branch(val id: Int)',
+		'class Demo {',
+		'    private val json = Json { ignoreUnknownKeys = true }',
+		'    fun chapter(text: String): String = json.decodeFromString<Chapter>(text).labels()',
+		'    fun nested(text: String): String = json.decodeFromString<Chapter.Branch>(text).label()',
+		'    fun branches(text: String): Int = json.decodeFromString<List<Branch>>(text).sumOf { it.id }',
+		'}'
+	);
+
+	it('loads, and decodes each spelling as the class it names', async () => {
+		const d = await instantiate('Demo', source);
+		expect(d.chapter('{"branches":[{"branch_id":1,"team":"a"},{"branch_id":2,"team":"b"}]}')).toBe(
+			'a#1, b#2'
+		);
+		expect(d.nested('{"branch_id":3,"team":"c"}')).toBe('c#3');
+		expect(d.branches('[{"id":4},{"id":5}]')).toBe(9);
+	});
+});
+
+describe('a filter class that names its framework base’s arguments', () => {
+	// `Filter.Group<Option>(name = name, state = …)` in a filter file's base
+	// class. Refused, the base went — and every filter extending it with it,
+	// which died at load. Placed by upstream's own parameter lists.
+	it('builds the filter with each argument where upstream puts it', async () => {
+		const d = await instantiate(
+			'Demo',
+			kt(
+				'class Option(name: String, val value: String) : Filter.CheckBox(name)',
+				'abstract class MultiValue(name: String, values: List<Pair<String, String>>) : Filter.Group<Option>(',
+				'    state = values.map { Option(it.first, it.second) },',
+				'    name = name,',
+				')',
+				'class Status : MultiValue("Status", listOf("On" to "0", "Done" to "1"))',
+				'class Order : Filter.Sort(values = arrayOf("a", "b"), name = "Order", state = Selection(1, false))',
+				'class Demo {',
+				'    fun status(): String { val f = Status(); return f.name + ":" + f.state.joinToString { it.name + "=" + it.value } }',
+				'    fun order(): String { val f = Order(); return f.name + ":" + f.values.joinToString() + ":" + f.state!!.index }',
+				'}'
+			)
+		);
+		expect(d.status()).toBe('Status:On=0, Done=1');
+		expect(d.order()).toBe('Order:a, b:1');
+	});
+});
+
+describe('an extension named after the theme it imports and extends', () => {
+	// `abstract class UzayManga : UzayManga()` over
+	// `import …multisrc.uzaymanga.UzayManga`. Kotlin resolves the name to the
+	// import everywhere but the declaration itself; read the other way round,
+	// the class was emitted extending itself and the bundle died on import.
+	it('loads, extends the theme, and is the class the driver builds', async () => {
+		const result = await convertKotlin(
+			[
+				{
+					path: 'src/Theme.kt',
+					source: kt(
+						'package com.example.extension',
+						'',
+						'import com.example.multisrc.theme.Theme',
+						'',
+						'class Theme : Theme() {',
+						'    override val cdnUrl = "https://cdn.example.invalid"',
+						'}'
+					)
+				},
+				{
+					path: 'lib/Theme.kt',
+					source: kt(
+						'package com.example.multisrc.theme',
+						'',
+						'abstract class Theme {',
+						'    open val cdnUrl = "https://default.example.invalid"',
+						'    fun image(path: String): String = "$cdnUrl/$path"',
+						'}'
+					)
+				}
+			],
+			{ parser: parse }
+		);
+		expect(result.blocking).toEqual([]);
+		expect(result.className).toBe('Theme');
+		const module = [
+			JS_RUNTIME,
+			kotlinRuntime(),
+			result.js,
+			`export const __instantiate = function (ctx) { __enter(ctx); return new ${result.className}(); };`
+		].join('\n');
+		const url = `data:text/javascript;base64,${Buffer.from(module).toString('base64')}`;
+		const loaded = (await import(/* @vite-ignore */ url)) as { __instantiate(ctx: unknown): any };
+		expect(loaded.__instantiate(context()).image('a.jpg')).toBe(
+			'https://cdn.example.invalid/a.jpg'
+		);
+	});
+});
+
+describe('a reference to a function a runtime global answers', () => {
+	it('calls it, as the call form does', async () => {
+		// `publishedAt?.let(Instant::parseOrNull)` in a DTO's `toSChapter`,
+		// reached by `map(ChapterDto::toSChapter)`: refused and pruned, the
+		// chapter list died at "not a function".
+		const d = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    fun millis(at: String?): Long = at?.let(Instant::parseOrNull)?.toEpochMilliseconds() ?: 0L',
+				'}'
+			)
+		);
+		expect(d.millis('2021-05-17T09:30:15Z')).toBe(Date.UTC(2021, 4, 17, 9, 30, 15));
+		expect(d.millis('not a date')).toBe(0);
+		expect(d.millis(null)).toBe(0);
 	});
 });

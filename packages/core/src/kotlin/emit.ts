@@ -104,6 +104,7 @@ import {
 	FREE_FUNCTIONS,
 	GLOBAL_NAMES,
 	HOST_METHODS,
+	RUNTIME_STATIC_REFERENCES,
 	HOST_PROPERTY_METHODS,
 	KNOWN_SIGNATURES,
 	OUT_OF_SCOPE_KINDS,
@@ -858,9 +859,15 @@ export function emitKotlin(
 	 * class named by `build.gradle`'s `extClass` first. This carries that fact
 	 * the one step further it needed to travel.
 	 */
-	entryFile = false
+	entryFile = false,
+	/**
+	 * Names this file's own *declaration* is written under where its
+	 * references are renamed — a class named after the class it imports and
+	 * extends. See `keepsDeclaration` in `pipeline.ts`.
+	 */
+	declaredAs: ReadonlyMap<string, string> = new Map()
 ): Emission {
-	return new Emitter(neighbours, renames, entryFile).file(tree.root);
+	return new Emitter(neighbours, renames, entryFile, declaredAs).file(tree.root);
 }
 
 /**
@@ -1253,7 +1260,8 @@ class Emitter {
 	constructor(
 		neighbours: Declared,
 		private readonly renames: ReadonlyMap<string, string> = new Map(),
-		private readonly entryFile = false
+		private readonly entryFile = false,
+		private readonly declaredAs: ReadonlyMap<string, string> = new Map()
 	) {
 		for (const name of neighbours.types) {
 			this.declaredTypes.add(name);
@@ -1417,6 +1425,22 @@ class Emitter {
 	 * apart from the one that got there first. See `scopeNestedTypes`.
 	 */
 	private readonly emittedTypes = new Set<string>();
+	/** See `nestedRenames`. */
+	private readonly nestedRenameCache = new Map<KNode, ReadonlyMap<string, string>>();
+	/**
+	 * The types this file declares at its top level, by name.
+	 *
+	 * Reserved before anything is emitted, because a nested type is usually
+	 * written *above* its top-level namesake: `LibGroupDto.kt` nests
+	 * `Chapter.Branch` and declares a top-level `Branch` sixty lines further
+	 * down. `emittedTypes` only knows what has been written so far, so the
+	 * nested one took the bare name, the top-level one was written under it
+	 * too, and the module was "Branch has already been declared" at load —
+	 * converted, nothing refused, and two listings dead. The top-level type is
+	 * the one the rest of the file and the files next door name bare, so it is
+	 * the one that keeps the name; the nested one is renamed apart.
+	 */
+	private readonly topLevelTypes = new Set<string>();
 	/**
 	 * `typealias A = B`, as `A → B`.
 	 *
@@ -2113,6 +2137,11 @@ class Emitter {
 		this.registerImports(kids(root).find((child) => child.type === 'import_list'));
 
 		const top = kids(root);
+		for (const child of top) {
+			if (child.type !== 'class_declaration' && child.type !== 'object_declaration') continue;
+			const declared = this.nameOf(child);
+			if (declared !== null && declared !== undefined) this.topLevelTypes.add(declared);
+		}
 		for (const [index, child] of top.entries()) {
 			if (child.type === 'package_header' || child.type === 'import_list') continue;
 			const piece = this.declaration(child, top[index + 1]);
@@ -2361,6 +2390,26 @@ class Emitter {
 		// it with `undefined` — the plugin that looks like it works.
 		const invoked = this.baseInvocation(node);
 		const base = invoked === null ? null : this.resolvedBase(invoked.type);
+		// A class named after the class it imports and extends: every other
+		// spelling of the name in this file means the import, so only the
+		// header is written under the declared name. What else would name the
+		// class itself — a companion's statics, an enum's entries — reads it
+		// through the renamed spelling, so those shapes are refused rather than
+		// written against the wrong class.
+		const ownSpelling = rename === undefined ? this.declaredAs.get(name) : undefined;
+		if (
+			ownSpelling !== undefined &&
+			(isEnum ||
+				kids(kids(node).find((child) => child.type === 'class_body')).some(
+					(child) => child.type === 'companion_object'
+				))
+		) {
+			return this.declineMember(
+				name,
+				node,
+				'a class with a companion, named after the class it imports'
+			);
+		}
 
 		// A class that *constructs* an unreachable base is the extension. One
 		// that merely lists an interface — `class SomethingFactory :
@@ -2688,7 +2737,7 @@ class Emitter {
 			]).join('\n\n');
 		}
 		const cls =
-			`class ${this.safe(name)} ${heritage}${block([...ctor, ...memberLines])}` +
+			`class ${ownSpelling ?? this.safe(name)} ${heritage}${block([...ctor, ...memberLines])}` +
 			(statics.length > 0 ? `\n${statics}` : '');
 		// A `@Serializable` class is a *shape* as well as a class: the decoder
 		// answers plain JSON, so a field the source renamed and a property it
@@ -2770,21 +2819,9 @@ class Emitter {
 		members: readonly KNode[],
 		owner: string
 	): { renames: ReadonlyMap<string, string>; restore: () => void } {
-		const renames = new Map<string, string>();
+		const renames = this.nestedRenames(members, owner);
 		const saved = new Map<string, string | undefined>();
-
-		for (const child of members) {
-			if (child.type !== 'class_declaration' && child.type !== 'object_declaration') continue;
-			const declared = this.nameOf(child);
-			if (declared === null || declared === undefined) continue;
-			if (!this.emittedTypes.has(declared)) {
-				this.emittedTypes.add(declared);
-				continue;
-			}
-			let candidate = `${owner}_${declared}`;
-			while (this.emittedTypes.has(candidate)) candidate = `${candidate}_`;
-			this.emittedTypes.add(candidate);
-			renames.set(declared, candidate);
+		for (const [declared, candidate] of renames) {
 			saved.set(declared, this.localTypes.get(declared));
 			this.localTypes.set(declared, candidate);
 		}
@@ -2798,6 +2835,57 @@ class Emitter {
 				}
 			}
 		};
+	}
+
+	/**
+	 * Which of a class body's nested types are renamed apart, decided once.
+	 *
+	 * Split out of `scopeNestedTypes` because the class's `@Serializable`
+	 * registration is written *before* its body is scoped, and it names the
+	 * nested types too: `Chapter(val branches: List<Branch>)` over a nested
+	 * `Chapter.Branch` renamed to `Chapter_Branch` registered its field as
+	 * `List<Branch>` — the top-level namesake — and a decode built every
+	 * branch as the wrong class, missing the fields its own methods read.
+	 * Cached by the body's first member, so both callers see one answer and
+	 * the names are reserved once.
+	 */
+	private nestedRenames(members: readonly KNode[], owner: string): ReadonlyMap<string, string> {
+		const first = members[0];
+		if (first === undefined) return new Map();
+		const cached = this.nestedRenameCache.get(first);
+		if (cached !== undefined) return cached;
+		const renames = new Map<string, string>();
+		for (const child of members) {
+			if (child.type !== 'class_declaration' && child.type !== 'object_declaration') continue;
+			const declared = this.nameOf(child);
+			if (declared === null || declared === undefined) continue;
+			if (!this.emittedTypes.has(declared) && !this.topLevelTypes.has(declared)) {
+				this.emittedTypes.add(declared);
+				continue;
+			}
+			let candidate = `${owner}_${declared}`;
+			while (this.emittedTypes.has(candidate) || this.topLevelTypes.has(candidate)) {
+				candidate = `${candidate}_`;
+			}
+			this.emittedTypes.add(candidate);
+			renames.set(declared, candidate);
+			// `Chapter.Branch` spelled out names this one, not the namesake.
+			this.qualifiedTypes.set(`${owner}.${declared}`, candidate);
+		}
+		this.nestedRenameCache.set(first, renames);
+		return renames;
+	}
+
+	/**
+	 * A type as written, with every nested type renamed apart spelled the way
+	 * it was emitted — for the text handed to the typed decoder, which looks
+	 * a class up by its registered name rather than through `safe`.
+	 */
+	private scopedTypeText(text: string, own: ReadonlyMap<string, string> = new Map()): string {
+		return text.replace(/\b[A-Z]\w*(?:\.[A-Z]\w*)*/g, (written) => {
+			if (written.includes('.')) return this.qualifiedTypes.get(written) ?? written;
+			return own.get(written) ?? this.localTypes.get(written) ?? written;
+		});
 	}
 
 	/**
@@ -4234,6 +4322,14 @@ class Emitter {
 			return out;
 		};
 		let contextual = false;
+		// This class's own nested types, as they will be emitted — see
+		// `nestedRenames` for what reading them bare decoded.
+		const own = this.nestedRenames(
+			kids(
+				kids(node).find((child) => child.type === 'class_body' || child.type === 'enum_class_body')
+			),
+			name
+		);
 		const typeOf = (holder: KNode | undefined): string => {
 			const written = kids(holder).find(
 				(part) => part.type.endsWith('type') && part.type !== 'binding_pattern_kind'
@@ -4243,7 +4339,7 @@ class Emitter {
 			for (const marker of written.text.matchAll(new RegExp(SERIALIZER_ANNOTATION, 'g'))) {
 				serializers.add(marker[1]);
 			}
-			return serialType(written.text);
+			return this.scopedTypeText(serialType(written.text), own);
 		};
 
 		const fields: unknown[] = [];
@@ -4297,7 +4393,7 @@ class Emitter {
 		const params = kids(kids(node).find((child) => child.type === 'type_parameters'))
 			.filter((child) => child.type === 'type_parameter')
 			.map((child) => kids(child).find((part) => part.type === 'type_identifier')?.text ?? '?');
-		const own = named(annotations.text);
+		const ownSerializer = named(annotations.text);
 
 		const custom: string[] = [];
 		for (const serializer of serializers) {
@@ -4312,7 +4408,7 @@ class Emitter {
 			custom.push(`${JSON.stringify(serializer)}: () => ${this.safe(bare)}`);
 		}
 
-		const meta = { params, fields, body, with: own };
+		const meta = { params, fields, body, with: ownSerializer };
 		const make = `(__a) => ${isData ? '' : 'new '}${this.safe(name)}(...__a)`;
 		const map = custom.length === 0 ? 'null' : `{ ${custom.join(', ')} }`;
 		return {
@@ -4677,7 +4773,7 @@ class Emitter {
 		const bare = type.replace(/\?$/, '');
 		const bound = this.reifiedTypes?.get(bare);
 		if (bound !== undefined) return `${this.helper('typeText')}(${bound})`;
-		return JSON.stringify(type);
+		return JSON.stringify(this.scopedTypeText(type));
 	}
 
 	/** The type annotation on a property declaration, if it carries one. */
@@ -5532,15 +5628,35 @@ class Emitter {
 			// Kotlin destructuring is `component1()`, `component2()` — positional
 			// over a Pair, a data class, a list or a regex match. The runtime is
 			// asked for the components rather than the emitter guessing a shape.
+			// Each component is bound the way a single local is — see
+			// `localBinding` — because `val (manga, chapters) = …` inside
+			// `fetchMangaUpdate(manga, chapters, …)` redeclares two parameters,
+			// which is a SyntaxError in the function's own body.
 			const value = this.expr(initialiser);
 			const names = kids(destructuring).map(boundName);
-			for (const name of names) this.declare(name, mutable);
-			return `${keyword} [${names.map((part) => this.safe(part)).join(', ')}] = ${this.helper('destructured')}(${value});`;
+			const bindings = names.map((name) => (name === '_' ? '' : this.localBinding(name)));
+			names.forEach((name, index) => {
+				if (name !== '_') this.declareAs(name, bindings[index], mutable);
+			});
+			return `${keyword} [${bindings.join(', ')}] = ${this.helper('destructured')}(${value});`;
 		}
 
 		const name = this.propertyName(node);
 		if (name === null) this.refuse(node, 'an unnamed local');
 		const binding = this.localBinding(name);
+		// The two paths below write the value into the binding from *inside*
+		// the initialiser, and an initialiser may declare its own local of the
+		// same name — `val url = if (q) { val url = …; url } else …`. The inner
+		// one is bound first (the outer does not exist yet), so the branch's
+		// write came out as `url = url` against the inner `const`, which is
+		// "assignment to constant" at import. The outer takes a fresh spelling
+		// whenever the initialiser rebinds its name.
+		const target =
+			[...walk(initialiser)].some(
+				(child) => child.type === 'variable_declaration' && boundName(child) === name
+			) && binding === this.safe(name)
+				? `${binding}$${(this.temporaries += 1)}`
+				: binding;
 
 		const guarded = this.elvisJump(initialiser);
 		if (guarded !== null) {
@@ -5559,18 +5675,18 @@ class Emitter {
 			// Declared after the value is written, because the value is emitted
 			// in the scope *before* the name exists: in Kotlin a local's own
 			// initialiser sees whatever it shadows.
-			const lines = this.tail(initialiser, { target: binding });
-			this.declareAs(name, binding, mutable);
-			return [`let ${binding};`, lines].join('\n');
+			const lines = this.tail(initialiser, { target });
+			this.declareAs(name, target, mutable);
+			return [`let ${target};`, lines].join('\n');
 		}
 
 		if (this.needsInlining(initialiser)) {
 			// `val x = response.use { … return … }`: same argument as the `try`
 			// above, one construct along. The block is emitted into this function
 			// rather than into a callback, so the `return` is this function's.
-			const lines = this.deliver(initialiser, { target: binding });
-			this.declareAs(name, binding, mutable);
-			return [`let ${binding};`, ...lines].join('\n');
+			const lines = this.deliver(initialiser, { target });
+			this.declareAs(name, target, mutable);
+			return [`let ${target};`, ...lines].join('\n');
 		}
 
 		const value = this.expr(initialiser);
@@ -5683,7 +5799,12 @@ class Emitter {
 				inner !== undefined && inner.type === 'simple_identifier'
 					? this.lookupLocal(inner.text)
 					: null;
-			if (local !== null && !local.mutable) {
+			// `mutableListOf(…).apply { this += more }`: `this` can no more be
+			// rebound than a `val` can, so it is `plusAssign` for the same
+			// reason. Read as a rebinding it was `this = __k.plus(this, …)`,
+			// which is not JavaScript at all — the bundle failed to parse.
+			const receiverSelf = inner !== undefined && inner.type === 'this_expression';
+			if (receiverSelf || (local !== null && !local.mutable)) {
 				const receiver = this.assignable(target);
 				// `all += page.entries ?: throw Exception("…")` — the elvis guard
 				// below, on the one path that returned before reaching it. The
@@ -5965,7 +6086,7 @@ class Emitter {
 			if (binding.type === 'multi_variable_declaration') {
 				const names = kids(binding).map(boundName);
 				for (const name of names) this.declare(name);
-				head = `const [${names.map((part) => this.safe(part)).join(', ')}]`;
+				head = `const ${this.pattern(names)}`;
 			} else {
 				const name = boundName(binding);
 				this.declare(name);
@@ -6825,7 +6946,11 @@ class Emitter {
 			if (helper !== undefined) {
 				return `(...__a) => ${this.helper(helper)}(${[receiver, '...__a'].join(', ')})`;
 			}
-			if (!this.declaredMethods.has(member.text) && !HOST_METHODS.has(member.text)) {
+			if (
+				!this.declaredMethods.has(member.text) &&
+				!HOST_METHODS.has(member.text) &&
+				RUNTIME_STATIC_REFERENCES.get(owner.text)?.has(member.text) !== true
+			) {
 				this.refuse(node, `\`::${member.text}\` on \`${owner.text}\``);
 			}
 			return `(...__a) => ${receiver}.${member.text}(...__a)`;
@@ -8892,7 +9017,7 @@ class Emitter {
 				const holder = `__p${names.length + 1}`;
 				names.push(holder);
 				unpack.push(
-					`const [${parts.map((part) => this.safe(part)).join(', ')}] = ${this.helper('destructured')}(${this.safe(holder)});`
+					`const ${this.pattern(parts)} = ${this.helper('destructured')}(${this.safe(holder)});`
 				);
 				this.destructuredParts.push(...parts);
 			}
@@ -9332,7 +9457,7 @@ class Emitter {
 			names.push(holder);
 			bound.push(holder, ...parts);
 			unpack.push(
-				`const [${parts.map((part) => this.safe(part)).join(', ')}] = ${this.helper('destructured')}(${this.safe(holder)});`
+				`const ${this.pattern(parts)} = ${this.helper('destructured')}(${this.safe(holder)});`
 			);
 		}
 		return { names, unpack, bound };
@@ -9507,6 +9632,19 @@ class Emitter {
 	}
 
 	/* ── names and scopes ────────────────────────────────────────────────── */
+
+	/**
+	 * A destructuring's binding list, with each `_` left as a hole.
+	 *
+	 * Kotlin's `_` is "no component here" and may be written any number of
+	 * times — `val (id, _, _) = url.split("/", limit = 3)`. Passed through as a
+	 * name it is two `const` bindings of `_`, which is "\"_\" has already been
+	 * declared" when the bundle is imported, taking every member with it. An
+	 * elided element is exactly what Kotlin meant: the component is not read.
+	 */
+	private pattern(parts: readonly string[]): string {
+		return `[${parts.map((part) => (part === '_' ? '' : this.safe(part))).join(', ')}]`;
+	}
 
 	/**
 	 * The JavaScript name a Kotlin one is written out as.
@@ -10449,7 +10587,26 @@ const TYPE_ARGUMENTS = '(?:<[^<>()]*(?:<[^<>()]*>[^<>()]*)*>\\s*)?';
 
 function callEdges(node: KNode): CallEdge[] {
 	const found = new Map<string, boolean>();
+	const inert = new Set<KNode>();
 	for (const child of walk(node)) {
+		// `.addInterceptor(::checkForToken)` calls `checkForToken` as surely as
+		// `checkForToken(chain)` does — later, from the client, on every request.
+		// It is not a `call_expression`, so it drew no edge, and the member
+		// behind it was pruned as unreachable along with everything *it*
+		// called. LibGroup's refused `refreshToken` (a WebView login) went
+		// that way: the bundle reported complete, loaded, and threw
+		// `this.refreshToken is not a function` on the first request.
+		// Not `::filterElements.isInitialized`, which asks whether a `lateinit`
+		// has been written and calls nothing.
+		if (child.type === 'navigation_expression' && /\.\s*isInitialized$/.test(child.text)) {
+			const reference = kids(child)[0];
+			if (reference?.type === 'callable_reference') inert.add(reference);
+		}
+		if (child.type === 'callable_reference' && !inert.has(child)) {
+			const target = kids(child).findLast((part) => part.type === 'simple_identifier');
+			if (target !== undefined) found.set(target.text, found.get(target.text) ?? false);
+			continue;
+		}
 		if (child.type !== 'call_expression') continue;
 		const text = child.text;
 		const dotted = new RegExp(`\\.\\s*([A-Za-z_]\\w*)\\s*${TYPE_ARGUMENTS}\\(`, 'g');

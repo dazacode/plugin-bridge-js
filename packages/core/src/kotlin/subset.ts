@@ -1247,6 +1247,21 @@ export const HOST_PROPERTY_METHODS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Functions a runtime global answers by name, for a `Global::member`
+ * reference to them — `publishedAt?.let(Instant::parseOrNull)`.
+ *
+ * The call form `Instant.parseOrNull(it)` has always passed through; the
+ * reference form was refused, because nothing said the global has that
+ * member. Refused inside a DTO's `toSChapter`, which a `map(Dto::toSChapter)`
+ * reached, it was a chapter list that died at "not a function". Kept to what
+ * the runtime defines — `kotlin-runtime.spec.ts` checks each is a function on
+ * its global — so a reference here cannot name something that is missing.
+ */
+export const RUNTIME_STATIC_REFERENCES: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+	['Instant', new Set(['parse', 'parseOrNull', 'tryParse', 'fromEpochMilliseconds'])]
+]);
+
+/**
  * Methods and properties emitted unchanged, because the runtime defines them.
  *
  * jsoup (`shims/dom.ts`), the HTTP client, the URL builder and the three model
@@ -2475,7 +2490,28 @@ export const KNOWN_SIGNATURES: ReadonlyMap<string, readonly string[]> = new Map(
 		'extractFromDash',
 		['mpdUrl', 'videoNameGen', 'mpdHeaders', 'videoHeaders', 'referer', 'subtitleList', 'audioList']
 	],
-	['graphQLPost', ['url', 'query', 'variables', 'headers']]
+	['graphQLPost', ['url', 'query', 'variables', 'headers']],
+	// The framework's filter constructors, which a filter file extends with
+	// its arguments named — `Filter.Group<Option>(name = name, state = …)`.
+	// Refused, the whole base class went, and every class extending it with
+	// it. The lists are upstream's own (`Filter.kt` in both ecosystems, the
+	// video fork renamed and unchanged) and the runtime's constructors take
+	// them in the same order; `Separator(name = "")` names a parameter the
+	// runtime ignores, which is what upstream's default does too.
+	...(['Filter', 'AnimeFilter'] as const).flatMap((family) =>
+		(
+			[
+				['Header', ['name']],
+				['Separator', ['name']],
+				['Select', ['name', 'values', 'state']],
+				['Text', ['name', 'state']],
+				['CheckBox', ['name', 'state']],
+				['TriState', ['name', 'state']],
+				['Group', ['name', 'state']],
+				['Sort', ['name', 'values', 'state']]
+			] as const
+		).map(([type, params]): [string, readonly string[]] => [`${family}.${type}`, params])
+	)
 	// `videosFromUrl` and `videoFromUrl` were here, and both were wrong.
 	//
 	// Every one of the 37 extractor declarations in this ecosystem puts `url`

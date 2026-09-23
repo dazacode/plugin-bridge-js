@@ -270,7 +270,7 @@ export async function convertKotlin(
 		}
 	}
 	const neighbours = mergeDeclared(surveyed);
-	const renames = localRenames(files, declaredByFile);
+	const { renames, declaredAs } = localRenames(files, declaredByFile);
 
 	for (const file of files) {
 		await breathe();
@@ -281,7 +281,8 @@ export async function convertKotlin(
 				tree ?? parse(file.source),
 				neighbours,
 				renames.get(file.path),
-				file === entry
+				file === entry,
+				declaredAs.get(file.path)
 			);
 		} catch (error) {
 			// A throw here is the parser itself failing, not a refusal — the
@@ -427,10 +428,27 @@ export async function convertKotlin(
 	// Narrowed to construction on purpose: a method body that names a refused
 	// member and is never called is inert, and refusing for it would throw away
 	// extensions over code nothing runs.
+	// A refused class that a class which *was* emitted extends. `class
+	// StatusList extends MultiValueFilter` runs when the module is evaluated,
+	// before any member is called, so the base has to exist at load whatever
+	// reachability says — and neither clause above could see it: a class
+	// header is not a member and draws no edge, and a base named `…Filter`
+	// was exempted as host-drawn. `MultiValueFilter` refused over a named
+	// argument, was pruned, and three listings converted, reported nothing
+	// refused, and died on import with "MultiValueFilter is not defined".
+	const refusedNames = new Set(refusals.map((one) => one.member));
+	const extendedBySurvivor = new Set<string>();
+	for (const [owner, base] of neighbours.classBases) {
+		if (!refusedNames.has(owner)) extendedBySurvivor.add(base);
+	}
+
 	const blocking = refusals.filter(
 		(one) =>
-			(!isHostDrawn(one.member) || calledByTranslated.has(one.member)) &&
-			(!graphed.has(one.member) || reachable.has(one.member) || namedAtConstruction.has(one.member))
+			extendedBySurvivor.has(one.member) ||
+			((!isHostDrawn(one.member) || calledByTranslated.has(one.member)) &&
+				(!graphed.has(one.member) ||
+					reachable.has(one.member) ||
+					namedAtConstruction.has(one.member)))
 	);
 	const message = refusals.length === 0 ? null : describeRefusals(refusals);
 
@@ -480,8 +498,12 @@ export async function convertKotlin(
 function localRenames(
 	files: readonly KotlinFile[],
 	declared: ReadonlyMap<string, Declared>
-): Map<string, ReadonlyMap<string, string>> {
+): {
+	renames: Map<string, ReadonlyMap<string, string>>;
+	declaredAs: Map<string, ReadonlyMap<string, string>>;
+} {
 	const applied = new Map<string, ReadonlyMap<string, string>>();
+	const declaredAs = new Map<string, ReadonlyMap<string, string>>();
 
 	/**
 	 * Which files declare each name, for every name any file declares.
@@ -516,6 +538,39 @@ function localRenames(
 	 * every file that merely *refers* to it already uses — which is the safety
 	 * net below.
 	 */
+	/** The package each file declares, read once. */
+	const packages = new Map<string, string>();
+	for (const file of files) packages.set(file.path, packageOf(file.source));
+	const importsByFile = new Map<string, string[]>();
+	for (const file of files) importsByFile.set(file.path, importsOf(file.source));
+	/** The other declaring files `path` imports `name` from, by package. */
+	const importedFrom = (path: string, name: string, where: Iterable<string>): string[] =>
+		[...where].filter(
+			(other) =>
+				other !== path &&
+				packages.get(other) !== packages.get(path) &&
+				(importsByFile.get(path) ?? []).includes(`${packages.get(other)}.${name}`)
+		);
+
+	/**
+	 * A file that declares a name *and* imports that name from another file.
+	 *
+	 * `abstract class UzayManga : UzayManga()` — an extension named after the
+	 * theme it extends, with `import …multisrc.uzaymanga.UzayManga` above it.
+	 * Kotlin resolves every `UzayManga` in that file to the import, which
+	 * outranks the package the declaration sits in; the declaration itself is
+	 * the only spelling that means the file's own class. "This file's own
+	 * declaration always wins" read it the other way round, so the extension
+	 * was emitted as `class UzayManga_ extends UzayManga_` and the bundle died
+	 * on import ("Cannot access before initialization") with nothing refused.
+	 *
+	 * So the theme is the one that moves, the importing file's references
+	 * follow it to the new spelling like any other importer's, and only the
+	 * importing file's *declaration* keeps the name — which is also the name
+	 * the driver builds the extension by.
+	 */
+	const keepsDeclaration = new Map<string, string>();
+
 	const contested = new Map<string, readonly string[]>();
 	for (const [name, where] of owners) {
 		// Widened: `RUNTIME_GLOBALS` is a literal tuple, and this asks about an
@@ -525,9 +580,20 @@ function localRenames(
 		// Sorted so a conversion is deterministic: the same input has to emit the
 		// same module, or a bundle digest means nothing (`package.ts`).
 		const sorted = [...where].sort();
+		const importers = shadowsRuntime
+			? []
+			: sorted.filter((path) => importedFrom(path, name, sorted).length === 1);
+		if (importers.length === 1) {
+			keepsDeclaration.set(name, importers[0]);
+			contested.set(
+				name,
+				sorted.filter((path) => path !== importers[0])
+			);
+			continue;
+		}
 		contested.set(name, shadowsRuntime ? sorted : sorted.slice(1));
 	}
-	if (contested.size === 0) return applied;
+	if (contested.size === 0) return { renames: applied, declaredAs };
 
 	// What each renamed declaration is written out as. `Video_` unless something
 	// already declares that, which would trade one collision for another.
@@ -549,14 +615,11 @@ function localRenames(
 		written.set(name, perFile);
 	}
 
-	/** The package each file declares, read once. */
-	const packages = new Map<string, string>();
-	for (const file of files) packages.set(file.path, packageOf(file.source));
-
 	for (const file of files) {
 		const pkg = packages.get(file.path) ?? '';
-		const imported = importsOf(file.source);
+		const imported = importsByFile.get(file.path) ?? [];
 		const mine = new Map<string, string>();
+		const ownSpelling = new Map<string, string>();
 
 		for (const [name, perFile] of written) {
 			// This file's own declaration always wins — that is what `private`
@@ -564,6 +627,17 @@ function localRenames(
 			const own = perFile.get(file.path);
 			if (own !== undefined) {
 				mine.set(name, own);
+				continue;
+			}
+			if (keepsDeclaration.get(name) === file.path) {
+				// See `keepsDeclaration`: references mean the import, the
+				// declaration keeps its own name.
+				const from = importedFrom(file.path, name, owners.get(name) ?? [])[0];
+				const renamed = from === undefined ? undefined : perFile.get(from);
+				if (renamed !== undefined) {
+					mine.set(name, renamed);
+					ownSpelling.set(name, name);
+				}
 				continue;
 			}
 			if (owners.get(name)?.has(file.path) === true) continue;
@@ -590,8 +664,9 @@ function localRenames(
 		}
 
 		if (mine.size > 0) applied.set(file.path, mine);
+		if (ownSpelling.size > 0) declaredAs.set(file.path, ownSpelling);
 	}
-	return applied;
+	return { renames: applied, declaredAs };
 }
 
 /** The package a file declares, or `''` for one that declares none. */
