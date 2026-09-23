@@ -2313,6 +2313,37 @@ class Emitter {
 		if (kinds.has('interface')) return this.interfaceDeclaration(node, name);
 		// An enum is a class with a fixed set of instances — see `enumTail`.
 		const isEnum = kinds.has('enum_class_body');
+
+		// `@Serializable(with = X::class)`, wherever in the class it is written.
+		// kotlinx hands that value to the extension's own serializer — a
+		// `JsonTransformingSerializer` that reshapes the raw JSON first, or a
+		// `KSerializer` whose `deserialize` reads it however it likes — and the
+		// decoder here is a structural walk that has no way to call one. Read
+		// past, the annotation decoded the JSON the serializer existed to
+		// reshape: a tuple array read as a record with every field `undefined`,
+		// a bare string where the class reads `.src` off an object, a number
+		// where it reads a string, `element[0]` never taken. All of it
+		// converted, loaded, and answered wrong with nothing refused.
+		//
+		// Refused by name, and graphed, so it blocks exactly the members that
+		// reach the class and no others. Checked before the `data` branch:
+		// the type-argument form used to be checked after it, so a `data class`
+		// carrying one went through.
+		const serializer = customSerializer(node);
+		if (serializer !== null) {
+			this.graph.push({
+				member: name,
+				owner: this.owner,
+				construction: false,
+				references: mentions(node),
+				calls: callEdges(node)
+			});
+			return this.declineMember(
+				name,
+				node,
+				`a custom serializer \`${serializer.name}\` ${serializer.placement}`
+			);
+		}
 		if (modifiers.has('data')) return this.dataDeclaration(node, name);
 
 		// The header — everything but the body — must parse cleanly. A recovered
@@ -2326,33 +2357,6 @@ class Emitter {
 					'translate members against a guessed class declaration.';
 				return null;
 			}
-		}
-
-		// `List<@Serializable(RankingMangaSerializer::class) Ranking>` — a
-		// custom serializer named on a type argument of a constructor property.
-		// It decodes each element through the extension's own
-		// `transformDeserialize` before the class sees it, and the decoder here
-		// is a structural walk with no custom serializers: the annotation would
-		// be read past, and every element decoded as the raw JSON the serializer
-		// existed to reshape — a tuple array read as a record, every field
-		// `undefined`. Refused by name, and graphed, so it blocks exactly the
-		// members that reach the class and no others. Only reachable at all
-		// since `trailingCommas` in `grammar.ts` let the one file carrying it
-		// parse.
-		const serializer = typeArgumentSerializer(node);
-		if (serializer !== null) {
-			this.graph.push({
-				member: name,
-				owner: this.owner,
-				construction: false,
-				references: mentions(node),
-				calls: callEdges(node)
-			});
-			return this.declineMember(
-				name,
-				node,
-				`a custom serializer \`${serializer}\` on a type argument`
-			);
 		}
 
 		// A supertype this file supplies is emitted as a real `extends`; one it
@@ -10118,17 +10122,40 @@ function receiverSlots(node: KNode): ReceiverSlots | null {
 }
 
 /**
- * The serializer a `@Serializable(X::class)` names on a type argument anywhere
- * in this class's header, or null. See `classDeclaration`.
+ * The first custom serializer a `@Serializable(X::class)` names anywhere in this
+ * class's own declaration, and where, or null. See `classDeclaration`.
+ *
+ * Four placements, all measured in the catalogue: on the class itself, on a
+ * constructor property (the common one), on a property in the body, and on a
+ * type argument — `List<@Serializable(RankingMangaSerializer::class) Ranking>`,
+ * which reshapes each element rather than the list. A nested class is its own
+ * declaration and answers for itself, so the walk stops at one.
  */
-function typeArgumentSerializer(node: KNode): string | null {
+function customSerializer(node: KNode): { name: string; placement: string } | null {
+	const named = (text: string | undefined) =>
+		text?.match(/@Serializable\s*\(\s*(?:with\s*=\s*)?([\w.]+)::class/)?.[1] ?? null;
+
+	const own = named(kids(node).find((child) => child.type === 'modifiers')?.text);
+	if (own !== null) return { name: own, placement: 'on the class' };
+
 	const header = kids(node).find((child) => child.type === 'primary_constructor');
-	if (header === undefined) return null;
-	for (const child of walk(header)) {
-		if (child.type !== 'type_projection') continue;
-		const modifiers = kids(child).find((part) => part.type === 'type_modifiers');
-		const found = modifiers?.text.match(/@Serializable\s*\(\s*(?:with\s*=\s*)?([\w.]+)::class/);
-		if (found !== undefined && found !== null) return found[1];
+	for (const parameter of kids(header)) {
+		if (parameter.type !== 'class_parameter') continue;
+		const found = named(kids(parameter).find((part) => part.type === 'modifiers')?.text);
+		if (found !== null) return { name: found, placement: 'on a property' };
+	}
+	const body = kids(node).find((child) => child.type === 'class_body');
+	for (const member of kids(body)) {
+		if (member.type !== 'property_declaration') continue;
+		const found = named(kids(member).find((part) => part.type === 'modifiers')?.text);
+		if (found !== null) return { name: found, placement: 'on a property' };
+	}
+	if (header !== undefined) {
+		for (const child of walk(header)) {
+			if (child.type !== 'type_projection') continue;
+			const found = named(kids(child).find((part) => part.type === 'type_modifiers')?.text);
+			if (found !== null) return { name: found, placement: 'on a type argument' };
+		}
 	}
 	return null;
 }

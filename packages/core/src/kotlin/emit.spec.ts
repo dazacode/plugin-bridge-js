@@ -5177,6 +5177,57 @@ describe('file annotations, and a serializer on a type argument', () => {
 			)
 		).toEqual(['a custom serializer `RankingMangaSerializer` on a type argument']);
 	});
+
+	it('refuses a custom serializer on a property, in a data class too', () => {
+		// greenshit's `@Serializable(PageListSerializer::class) val pages`
+		// turns a bare string into `{ src }`; read past, the reader got strings
+		// and every page's `.src` was `undefined`. It is a `data class` in half
+		// the catalogue, and the type-argument check used to sit after the
+		// `data` branch, so neither placement was ever refused there.
+		expect(
+			refusalNames(
+				kt(
+					'@Serializable',
+					'data class Chapter(',
+					'    @SerialName("cap_paginas") @Serializable(PageListSerializer::class) val pages: List<Page> = emptyList(),',
+					')'
+				)
+			)
+		).toEqual(['a custom serializer `PageListSerializer` on a property']);
+		expect(
+			refusalNames(
+				kt(
+					'@Serializable',
+					'data class Ranking(',
+					'    val children: List<@Serializable(RankingMangaSerializer::class) Ranking>,',
+					')'
+				)
+			)
+		).toEqual(['a custom serializer `RankingMangaSerializer` on a type argument']);
+	});
+
+	it('refuses a custom serializer on the class and on a body property', () => {
+		expect(
+			refusalNames(kt('@Serializable(with = MalSerializer::class)', 'class MalData(val id: Int)'))
+		).toEqual(['a custom serializer `MalSerializer` on the class']);
+		expect(
+			refusalNames(
+				kt(
+					'@Serializable',
+					'class Dto(val id: Int) {',
+					'    @Serializable(with = StringOrNumberSerializer::class)',
+					'    val title: String = ""',
+					'}'
+				)
+			)
+		).toEqual(['a custom serializer `StringOrNumberSerializer` on a property']);
+	});
+
+	it('still translates a plain @Serializable class', () => {
+		expect(
+			refusalNames(kt('@Serializable', 'data class Plain(@SerialName("x") val a: Int)'))
+		).toEqual([]);
+	});
 });
 
 describe('use-site variance, which is a fact about types', () => {
