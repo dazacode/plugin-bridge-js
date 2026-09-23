@@ -7125,7 +7125,17 @@ class Emitter {
 				return this.cast(node);
 			case 'prefix_expression': {
 				const operator = node.allChildren[0]?.type ?? '';
-				if (operator !== '-' && operator !== '+' && operator !== '!') {
+				// `if (++iterations > MAX) break` — increment, then read. The grammar
+				// hangs the operator over the whole comparison, as it does `-` and
+				// `!`, so it goes through `prefixOver` to reach its operand; see
+				// there for what it may apply to.
+				if (
+					operator !== '-' &&
+					operator !== '+' &&
+					operator !== '!' &&
+					operator !== '++' &&
+					operator !== '--'
+				) {
 					this.refuse(node, `a prefix \`${operator}\``);
 				}
 				return this.prefixOver(operator, kids(node)[0]);
@@ -7252,8 +7262,23 @@ class Emitter {
 				const to = parts[parts.length - 1];
 				return `${this.helper('range')}(${this.prefixOver(operator, from)}, ${this.expr(to)})`;
 			}
-			default:
-				return `${operator}${this.expr(node)}`;
+			default: {
+				const operand = this.expr(node);
+				// `++`/`--` need a place, which JavaScript's operator shares with
+				// Kotlin's provided the operand is still one after translation: a
+				// local or a plain property path. A property the emitter reads
+				// through a getter call is not, and `++this.count()` is a
+				// SyntaxError that takes the whole bundle down at load.
+				if (
+					(operator === '++' || operator === '--') &&
+					!/^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*$/.test(operand)
+				) {
+					this.refuse(node, `a prefix \`${operator}\` on something that is not a variable`);
+				}
+				return operator === '++' || operator === '--'
+					? `(${operator}${operand})`
+					: `${operator}${operand}`;
+			}
 		}
 	}
 

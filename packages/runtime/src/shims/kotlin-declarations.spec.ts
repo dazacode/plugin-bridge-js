@@ -1800,6 +1800,29 @@ describe('skip markers on a video', () => {
 	});
 });
 
+describe('a prefix increment', () => {
+	it('increments before reading, over a local and over a property', async () => {
+		// The grammar hangs `++` over the whole `++i > 3`, as it does `-` and
+		// `!`; applied to the comparison it would not be JavaScript at all.
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    private var n = 0',
+				'    fun loop(): Int {',
+				'        var i = 0',
+				'        while (true) { if (++i > 3) break }',
+				'        return i',
+				'    }',
+				'    fun both(): Int { --n; return ++n + n }',
+				'}'
+			)
+		);
+		expect(demo.loop()).toBe(4);
+		expect(demo.both()).toBe(0);
+	});
+});
+
 describe('a bare call inside an object', () => {
 	it('refuses a name the object does not declare, rather than calling it on `this`', () => {
 		// A Kotlin `object` has no outer instance, so the "a base class supplies
