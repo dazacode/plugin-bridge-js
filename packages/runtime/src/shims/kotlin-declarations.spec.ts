@@ -374,6 +374,31 @@ describe('a fourth pass: collection members, a when-subject binding, qualified c
 	});
 });
 
+describe('aggregates, capitalize, java.util.Random and code points', () => {
+	const source = kt(
+		'class Demo {',
+		'    fun agg(): String = listOf("b", "a", "c").min() + listOf(3, 9, 1).max() + listOf(1, 2).average() + "|" + Math.min(4, 2)',
+		'    fun empty(): String = emptyList<String>().min()',
+		'    fun cap(): String = "hello".capitalize() + "|" + "Hi".capitalize() + "|" + "élan".capitalize()',
+		'    fun roll(): Int { val random = Random(); return random.nextInt(5) }',
+		'    fun seeded(): Int = Random(42L).nextInt(5)',
+		'    fun point(): Int = "a😀".codePointAt(1)',
+		'}'
+	);
+
+	it('answers each as Kotlin and the JVM do, empty and seeded cases loudly', async () => {
+		const demo = await instantiate('Demo', source);
+		expect(demo.agg()).toBe('a91.5|2');
+		expect(() => demo.empty()).toThrow(/minimum of an empty collection/);
+		expect(demo.cap()).toBe('Hello|Hi|Élan');
+		const rolled = demo.roll();
+		expect(rolled >= 0 && rolled < 5).toBe(true);
+		// A seed asks for one reproducible sequence, which this cannot give.
+		expect(() => demo.seeded()).toThrow(/seeded a Random/);
+		expect(demo.point()).toBe(0x1f600);
+	});
+});
+
 describe('a Kotlin Iterable, declared or delegated', () => {
 	// `Iterable<T> by list` was refused; `override fun iterator()` translated
 	// into a class JavaScript could not iterate, and `x.map { }` over it ran

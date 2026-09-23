@@ -2715,6 +2715,56 @@ var __k = {
     return __byteString(__bytesOf(bytes).slice());
   },
 
+  /**
+   * Iterable.min()/max() — Kotlin 1.7's, which THROW on an empty collection
+   * (minOrNull is the forgiving one). A receiver with its own min/max answers
+   * for itself: 'Math.min(a, b)' reaches this table by name too.
+   */
+  collectionMin: function (list) {
+    if (list !== null && list !== undefined && !Array.isArray(list) && typeof list.min === 'function') {
+      return list.min.apply(list, Array.prototype.slice.call(arguments, 1));
+    }
+    var best = __k.minOrNull(list);
+    if (best === null && __arr(list).length === 0) {
+      throw new Error('This converted extension asked for the minimum of an empty collection.');
+    }
+    return best;
+  },
+  collectionMax: function (list) {
+    if (list !== null && list !== undefined && !Array.isArray(list) && typeof list.max === 'function') {
+      return list.max.apply(list, Array.prototype.slice.call(arguments, 1));
+    }
+    var best = __k.maxOrNull(list);
+    if (best === null && __arr(list).length === 0) {
+      throw new Error('This converted extension asked for the maximum of an empty collection.');
+    }
+    return best;
+  },
+
+  /** average() of numbers: NaN for an empty collection, as Kotlin's. */
+  average: function (list) {
+    var items = __arr(list);
+    if (items.length === 0) return NaN;
+    var total = 0;
+    for (var i = 0; i < items.length; i += 1) total += Number(items[i]);
+    return total / items.length;
+  },
+
+  /**
+   * String.capitalize(), deprecated in Kotlin and still written: the first
+   * character upper-cased when it is lower case, the rest untouched. The
+   * locale argument is accepted and not applied — the language core has no
+   * locale casing without 'Intl' (ABI.md section 6) — which differs from
+   * Kotlin only for a locale with its own rule for that letter, Turkish 'i'.
+   */
+  capitalize: function (value) {
+    var text = __str(value);
+    if (text.length === 0) return text;
+    var first = String.fromCodePoint(text.codePointAt(0));
+    if (first.toLowerCase() !== first || first.toUpperCase() === first) return text;
+    return first.toUpperCase() + text.slice(first.length);
+  },
+
   /** padEnd(length, padChar = ' '), padStart's mirror. */
   padEnd: function (value, length, pad) {
     var text = __str(value);
@@ -10469,7 +10519,21 @@ function __requireUtf8(charset, which) {
   );
 }
 
-var Random = {
+/**
+ * kotlin.random.Random's default instance, which is also what java.util's
+ * 'Random()' constructs here: 'val random = Random(); random.nextInt(n)'.
+ * Callable for that reason. A SEEDED 'Random(seed)' is refused: a seed asks
+ * for one reproducible sequence — a descrambler reorders tiles by it — and
+ * this generator cannot give it, so answering any sequence would be a wrong
+ * image rather than an error.
+ */
+function Random(seed) {
+  if (seed !== undefined && seed !== null) {
+    throw new Error('This converted extension seeded a Random, and this build cannot reproduce a seeded sequence.');
+  }
+  return Random;
+}
+Object.assign(Random, {
   nextBytes: function (array) {
     var bytes = __arr(array);
     for (var i = 0; i < bytes.length; i += 1) {
@@ -10486,7 +10550,7 @@ var Random = {
   nextLong: function (from, until) { return Random.nextInt(from, until); },
   nextDouble: function () { return Math.random(); },
   nextBoolean: function () { return Math.random() < 0.5; }
-};
+});
 
 /**
  * java.security.MessageDigest, over MD5, SHA-1 and SHA-256.

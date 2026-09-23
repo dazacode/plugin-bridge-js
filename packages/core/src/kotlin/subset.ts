@@ -1061,6 +1061,10 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 	// StringBuilder has one of its own — see the helper for both.
 	['removeAt', 'removeAt'],
 	['padEnd', 'padEnd'],
+	['min', 'collectionMin'],
+	['max', 'collectionMax'],
+	['average', 'average'],
+	['capitalize', 'capitalize'],
 	['runningFold', 'runningFold'],
 	['mapIndexedTo', 'mapIndexedTo'],
 	['containsAll', 'containsAll'],
@@ -1310,6 +1314,11 @@ export const HOST_METHODS: ReadonlySet<string> = new Set([
 	'noStore',
 	// java.util.Locale's language name — see `getDisplayLanguage`.
 	'getDisplayLanguage',
+	// java.util.Random's reader, on the runtime's `Random` (which `Random()`
+	// answers), and java.lang.String's code point reader, which is
+	// JavaScript's under the same name and the same UTF-16 index.
+	'nextInt',
+	'codePointAt',
 	'appendPattern',
 	'parseDefaulting',
 	'toFormatter',

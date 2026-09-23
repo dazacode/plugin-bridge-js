@@ -202,6 +202,10 @@ export const RUNTIME_HELPERS = [
 	'exception',
 	/* MutableList.removeAt/reverse and Map.getValue — see each in the runtime. */
 	'padEnd',
+	'collectionMin',
+	'collectionMax',
+	'average',
+	'capitalize',
 	'runningFold',
 	'mapIndexedTo',
 	'containsAll',
