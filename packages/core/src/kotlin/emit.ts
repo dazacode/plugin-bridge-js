@@ -7446,6 +7446,17 @@ class Emitter {
 				return this.cast(node);
 			case 'prefix_expression': {
 				const operator = node.allChildren[0]?.type ?? '';
+				// `@Suppress("DEPRECATION") x.length` — an annotation on an
+				// expression, which the grammar reads as a prefix operator. It
+				// tells the compiler something and changes nothing at run time,
+				// so the value is the operand's. The operand is the last child:
+				// several annotations stack in front of it.
+				if (operator === 'annotation') {
+					const operand = kids(node).filter((child) => child.type !== 'annotation');
+					const last = operand[operand.length - 1];
+					if (last === undefined) this.refuse(node, 'an annotation on nothing');
+					return this.expr(last);
+				}
 				// `if (++iterations > MAX) break` — increment, then read. The grammar
 				// hangs the operator over the whole comparison, as it does `-` and
 				// `!`, so it goes through `prefixOver` to reach its operand; see
