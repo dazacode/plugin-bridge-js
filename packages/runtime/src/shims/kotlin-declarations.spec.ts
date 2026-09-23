@@ -265,3 +265,54 @@ describe('extension functions overloaded on their receiver', () => {
 		expect(demo.onElement('<p></p>')).toBe('element p');
 	});
 });
+
+describe('a member imported by name from a shared object', () => {
+	const shared = kt(
+		'package example.shared',
+		'object SharedFilters {',
+		'    open class Choice(val value: String)',
+		'    fun pairs(index: Int): String = "pairs-" + index',
+		'    val PREFIX = "p:"',
+		'    inline fun <reified R> List<Any>.firstOf(): R = first { it is R } as R',
+		'    fun List<Any>.asQueryPart(): String = (first() as Choice).value',
+		'}'
+	);
+	const importing = kt(
+		'package example.extension',
+		'import example.shared.SharedFilters.Choice',
+		'import example.shared.SharedFilters.asQueryPart',
+		'import example.shared.SharedFilters.firstOf',
+		'import example.shared.SharedFilters.pairs',
+		'import example.shared.SharedFilters.PREFIX',
+		'class Picked(value: String) : Choice(value)',
+		'object LocalFilters {',
+		'    fun sorted(index: Int): String = PREFIX + pairs(index)',
+		'    fun chosen(items: List<Any>): String = items.firstOf<Picked>().value',
+		'    fun query(items: List<Any>): String = items.asQueryPart()',
+		'}',
+		'class Demo {',
+		'    fun sorted(): String = LocalFilters.sorted(2)',
+		'    fun chosen(): String = LocalFilters.chosen(listOf("x", Picked("y")))',
+		'    fun query(): String = LocalFilters.query(listOf(Picked("a b")))',
+		'}'
+	);
+
+	it('calls the object that declares it, not the one calling it', async () => {
+		// Emitted as `this.pairs(…)` on the importing object, which has no such
+		// member: a TypeError at the first search, with nothing refused.
+		const demo = await instantiate('Demo', shared, importing);
+		expect(demo.sorted()).toBe('p:pairs-2');
+	});
+
+	it('passes an imported reified extension the type the call site named', async () => {
+		const demo = await instantiate('Demo', shared, importing);
+		expect(demo.chosen()).toBe('y');
+	});
+
+	it('runs an imported extension rather than a runtime helper of the same name', async () => {
+		// The runtime's `asQueryPart` URL-encodes a string; handed the filter
+		// list instead of the declared extension, it answered an encoded list.
+		const demo = await instantiate('Demo', shared, importing);
+		expect(demo.query()).toBe('a b');
+	});
+});

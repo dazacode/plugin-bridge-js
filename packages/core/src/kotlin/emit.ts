@@ -921,6 +921,15 @@ export interface Declared {
 	/** Of `types`, the ones declared `object` — see `declaredObjects`. */
 	readonly objects: ReadonlySet<string>;
 	/**
+	 * Members with `reified` type parameters, as `Owner.name` → their names.
+	 *
+	 * `inline fun <reified R> AnimeFilterList.parseCheckbox(…)` declared in a
+	 * shared `object` and imported by the extension next door takes its type
+	 * as a carried argument (see `reifiedFunctions`); a call site in another
+	 * file has to know to pass it, or `it is R` asks about a type called "R".
+	 */
+	readonly reified: ReadonlyMap<string, readonly string[]>;
+	/**
 	 * Every signature a class member function is declared with, by name.
 	 *
 	 * Kotlin resolves a call among same-named functions by the arguments'
@@ -1001,6 +1010,7 @@ const EMPTY_DECLARED: Declared = {
 	moduleExtensions: new Set(),
 	qualifiedSignatures: new Map(),
 	objects: new Set(),
+	reified: new Map(),
 	overloads: new Map(),
 	classFunctions: new Map()
 };
@@ -1025,6 +1035,7 @@ export function mergeDeclared(parts: readonly Declared[]): Declared {
 	const moduleExtensions = new Set<string>();
 	const qualifiedSignatures = new Map<string, readonly string[]>();
 	const objects = new Set<string>();
+	const reified = new Map<string, readonly string[]>();
 	const classMembers = new Map<string, Set<string>>();
 	const classFields = new Map<string, Set<string>>();
 	const classBases = new Map<string, string>();
@@ -1069,6 +1080,7 @@ export function mergeDeclared(parts: readonly Declared[]): Declared {
 			if (!classBases.has(owner)) classBases.set(owner, base);
 		}
 		for (const name of part.objects) objects.add(name);
+		for (const [name, params] of part.reified) reified.set(name, params);
 		for (const [name, shape] of part.qualifiedSignatures) qualifiedSignatures.set(name, shape);
 		for (const name of part.extensions) extensions.add(name);
 		for (const name of part.moduleExtensions) moduleExtensions.add(name);
@@ -1107,6 +1119,7 @@ export function mergeDeclared(parts: readonly Declared[]): Declared {
 		moduleExtensions,
 		qualifiedSignatures,
 		objects,
+		reified,
 		overloads: new Map([...overloads].map(([name, shapes]) => [name, [...shapes.values()]])),
 		classFunctions
 	};
@@ -1149,6 +1162,7 @@ class Emitter {
 			this.qualifiedSignatures.set(name, shape);
 		}
 		for (const name of neighbours.objects) this.declaredObjects.add(name);
+		for (const [name, params] of neighbours.reified) this.reifiedMembers.set(name, params);
 		for (const [owner, members] of neighbours.classMembers) {
 			const into = this.classMemberIndex.get(owner) ?? new Set<string>();
 			for (const member of members) into.add(member);
@@ -1377,6 +1391,27 @@ class Emitter {
 	private readonly reifiedFunctions = new Map<string, readonly string[]>();
 	/** The reified parameters in scope, bound to the arguments carrying them. */
 	private reifiedTypes: ReadonlyMap<string, string> | null = null;
+	/** See `Declared.reified`. */
+	private readonly reifiedMembers = new Map<string, readonly string[]>();
+	/**
+	 * Members of a declared `object` this file imports by name, and the
+	 * object each is reached through.
+	 *
+	 * `import …AnimeStreamFilters.getPairListByIndex` then a bare
+	 * `getPairListByIndex(0)` inside another object is a call on
+	 * `AnimeStreamFilters`. With nothing recording the import it fell through
+	 * to "a bare lowercase call is a member of the source" and came out as
+	 * `this.getPairListByIndex(…)` — on the *calling* object, which has no
+	 * such member: a TypeError at the first search, with nothing refused. An
+	 * imported extension (`filters.parseCheckbox<GenresFilter>(…)`) was
+	 * refused instead, as a method nothing in reach declares.
+	 *
+	 * Only a member of an `object` this unit declares is recorded: that is
+	 * the one case where the import names a value this module holds. Kotlin
+	 * lets a member of the scope being emitted shadow an import, and so do
+	 * the call sites that read this — see `importedOwner`.
+	 */
+	private readonly importedMembers = new Map<string, string>();
 	/**
 	 * What a reified function's type parameter is *read off*, when a call site
 	 * names no type argument: its declared return type, or its receiver.
@@ -1465,6 +1500,7 @@ class Emitter {
 			moduleExtensions: this.declaredModuleExtensions,
 			qualifiedSignatures: this.qualifiedSignatures,
 			objects: this.declaredObjects,
+			reified: this.reifiedMembers,
 			classMembers: this.classMemberIndex,
 			classFields: this.classFieldIndex,
 			classBases: this.classBaseIndex,
@@ -1835,6 +1871,7 @@ class Emitter {
 		this.registerTypes(kids(root), true);
 		this.registerSignatures(kids(root));
 		this.registerExpectedTypes(root);
+		this.registerImports(kids(root).find((child) => child.type === 'import_list'));
 
 		const top = kids(root);
 		for (const [index, child] of top.entries()) {
@@ -3327,12 +3364,16 @@ class Emitter {
 			for (const member of kids(body)) {
 				if (member.type === 'function_declaration') {
 					const method = this.nameOf(member);
+					const owner = this.nameOf(child);
+					const reified = reifiedParams(member);
+					if (method !== null && owner !== null && reified.length > 0) {
+						this.reifiedMembers.set(`${owner}.${method}`, reified);
+					}
 					// An extension function is called with its receiver moved
 					// into first position, so it is not a passthrough method —
 					// but it still has to cross a file boundary, under the name
 					// of the class that declares it.
 					if (method !== null && receiverOf(member) !== null) {
-						const owner = this.nameOf(child);
 						if (owner !== null) this.declaredExtensions.add(`${owner}.${method}`);
 					} else if (method !== null && !isEntry) {
 						this.declaredMethods.add(method);
@@ -3554,6 +3595,36 @@ class Emitter {
 			this.extensionFunctions.set(name, shape);
 			if (owner !== null) this.extensionOwners.set(name, owner);
 		}
+	}
+
+	/** See `importedMembers`. */
+	private registerImports(list: KNode | undefined): void {
+		for (const header of kids(list)) {
+			if (header.type !== 'import_header') continue;
+			// `import a.B.c as d` renames, and `import a.B.*` names nothing.
+			if (kids(header).some((child) => child.type !== 'identifier')) continue;
+			if (header.allChildren.some((child) => child.type === '*' || child.type === '.*')) continue;
+			const path = (kids(header)[0]?.text ?? '').replace(/\s+/g, '').split('.');
+			if (path.length < 2) continue;
+			const member = path[path.length - 1];
+			const owner = path[path.length - 2];
+			// A nested type imported this way is a type, and already resolves.
+			if (!this.declaredObjects.has(owner) || this.declaredTypes.has(member)) continue;
+			this.importedMembers.set(member, owner);
+			const reified = this.reifiedMembers.get(`${owner}.${member}`);
+			if (reified !== undefined && !this.reifiedFunctions.has(member)) {
+				this.reifiedFunctions.set(member, reified);
+			}
+		}
+	}
+
+	/** The object an imported `name` is reached through, unless something closer declares it. */
+	private importedOwner(name: string): string | null {
+		const owner = this.importedMembers.get(name);
+		if (owner === undefined || owner === this.owner) return null;
+		if (this.isSourceMember(name) || this.objectMembers.has(name)) return null;
+		if (this.extensionFunctions.has(name) || this.lookup(name) !== null) return null;
+		return owner;
 	}
 
 	/* ── expected types ─────────────────────────────────────────────────── */
@@ -5962,7 +6033,27 @@ class Emitter {
 		// `private fun Array<String>.any(url: String)` and call the stdlib
 		// `this.any { … }` from inside it: same name, and only the lambda says
 		// which. A declaration cannot shadow a helper at a call site carrying one.
-		const shadowed = lambda === null && this.extensionFunctions.has(name);
+		//
+		// An extension imported by name from a shared `object` shadows it the
+		// same way — the one that caused it: `filters.asQueryPart<TypeFilter>()`
+		// imported from a multisrc template's filters object came out as the
+		// URL-encoder applied to the whole filter list, type argument dropped.
+		const importedExtension = this.importedOwner(name);
+		//
+		// And a member of a declared `object`, called through the object's
+		// name: `LocalFilters.sorted(2)` is that object's `sorted`, which
+		// Kotlin resolves before any extension — the runtime's collection
+		// `sorted` would have been handed the object as a list.
+		const objectMember =
+			receiver.type === 'simple_identifier' &&
+			this.declaredObjects.has(receiver.text) &&
+			this.classMemberIndex.get(receiver.text)?.has(name) === true;
+		const shadowed =
+			objectMember ||
+			(lambda === null &&
+				(this.extensionFunctions.has(name) ||
+					(importedExtension !== null &&
+						this.neighbourExtensions.has(`${importedExtension}.${name}`))));
 		// The two rate-limit helpers take their period as a *unit plus a number*,
 		// and the emitter is the only half of this converter that can still see
 		// which unit was written. Handled before the generic path because that
@@ -6062,6 +6153,11 @@ class Emitter {
 		// implements and a declaration on the class both still win: what is
 		// filled here is only the gap where nothing else answered at all.
 		if (extension === undefined && this.neighbourModuleExtensions.has(name)) extension = 'module';
+		// Imported by name from a shared `object` — see `importedMembers`.
+		const importedFrom = extension === undefined ? this.importedOwner(name) : null;
+		if (importedFrom !== null && this.neighbourExtensions.has(`${importedFrom}.${name}`)) {
+			extension = 'module';
+		}
 		if (extension !== undefined) {
 			// `element.getInfo("x")` calls `getInfo(element, "x")`: the receiver
 			// is the first argument, which is where the declaration put it. A
@@ -6078,7 +6174,7 @@ class Emitter {
 			// converted extension died with `this.fixLink is not a function` on
 			// its first search. The source is `__self` there, captured by the
 			// enclosing member — which is what this asks for.
-			const owner = this.extensionOwners.get(name);
+			const owner = this.extensionOwners.get(name) ?? importedFrom ?? undefined;
 			const callee =
 				extension === 'method'
 					? `${this.selfReference()}.${name}`
@@ -6324,6 +6420,20 @@ class Emitter {
 			// A file-scope `suspend fun` is an `async function` here, and its
 			// call site says nothing about that in either language.
 			return this.moduleSuspends.has(declared) ? this.awaited(made) : made;
+		}
+
+		// Imported by name from a shared `object`: a call on that object, not on
+		// whatever `this` is here. See `importedMembers`.
+		const importedFrom = this.importedOwner(name);
+		if (
+			importedFrom !== null &&
+			!this.neighbourExtensions.has(`${importedFrom}.${name}`) &&
+			this.classMemberIndex.get(importedFrom)?.has(name) === true
+		) {
+			const tail = this.callArguments(name, args, lambda, labelled, false);
+			const types = this.reifiedArguments(callee, name, typeArgument, expected);
+			const call = `${this.safe(importedFrom)}.${fieldName(name)}(${[...types, ...tail].join(', ')})`;
+			return this.declaredSuspends.has(name) ? this.awaited(call) : call;
 		}
 
 		// A capitalised bare call is a constructor of a class this build has not
@@ -7717,6 +7827,11 @@ class Emitter {
 			} else {
 				return `${this.safe(holder)}.${fieldName(name)}`;
 			}
+		}
+		// A property imported by name from a shared `object`.
+		const importedFrom = this.importedOwner(name);
+		if (importedFrom !== null && this.classFieldIndex.get(importedFrom)?.has(name) === true) {
+			return `${this.safe(importedFrom)}.${fieldName(name)}`;
 		}
 		if (name === 'field') this.refuse(node, 'a `field` backing reference');
 		if (name === 'it') this.refuse(node, 'an `it` with no lambda around it');
