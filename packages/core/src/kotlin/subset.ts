@@ -324,6 +324,24 @@ export const OUT_OF_SCOPE_KINDS: ReadonlyMap<string, string> = new Map([
  * resolved symbols is crude and deliberately over-eager: a false refusal costs
  * one extension, a false acceptance costs a plugin that looks like it works.
  */
+
+/* ── MEASUREMENT HACK (cx-bounds-throwaway): env-gated boundary grants ─────── */
+const __GRANT_GROUPS: Record<string, RegExp> = {
+	ddos: /WebView cookie store|CookieManager|getCookie|`Cookie`|`Cookie\.|`Cookie\(/,
+	js: /embedded JavaScript engine|QuickJs|Duktape|Rhino|Deobfuscator|deobfuscateScript|unpackAndCombine|JsUnpacker|synchrony|`\.evaluate\(\)`|evaluateJavascript/,
+	icpt: /interceptor|Interceptor|`\.proceed\(\)`|`\.intercept\(\)`|`\.request\(\)`/,
+	webview: /WebView|webView|runWebView|addJavascriptInterface|WebSettings|WebViewClient|evaluateJavascript/
+};
+const __GRANTED: RegExp[] = (
+	((globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.GRANT ?? '')
+		.split(',')
+		.filter((g) => g in __GRANT_GROUPS)
+		.map((g) => __GRANT_GROUPS[g])
+);
+export function granted(kind: string): boolean {
+	return __GRANTED.some((re) => re.test(kind));
+}
+
 const NAMED_OBSTACLES: readonly {
 	readonly pattern: RegExp;
 	readonly name: string;
@@ -418,7 +436,7 @@ const NAMED_OBSTACLES: readonly {
 	// and died inside the sandbox as `CookieManager is not defined` — a runtime
 	// mystery in place of a refusal with a name on it.
 	{ pattern: /\bCookieManager\b/, name: 'the WebView cookie store' }
-];
+].filter((entry) => !granted(entry.name));
 
 /* ── algorithms ───────────────────────────────────────────────────────────── */
 
@@ -2817,7 +2835,7 @@ function joinList(parts: readonly string[]): string {
 export function scanObstacles(node: KNode, memberName: string): Untranslatable[] {
 	const found: Untranslatable[] = [];
 	scanInto(node, memberName, found);
-	return found;
+	return found.filter((one) => !granted(one.kind));
 }
 
 /** Kinds the grammar makes named children and nothing should read as code. */

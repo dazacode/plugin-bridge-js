@@ -122,6 +122,7 @@ import {
 	VIDEO_V16_ONLY,
 	VIDEO_V16_PARAMETERS,
 	scanObstacles,
+	granted,
 	thrownHelper,
 	type Refusal,
 	type Untranslatable
@@ -3531,6 +3532,7 @@ class Emitter {
 	}
 
 	private declineMember(name: string, node: KNode, kind: string): null {
+		if (granted(kind)) return null;
 		// Named the way its author would recognise it wherever there is a name;
 		// a bare grammar kind in a message helps nobody read their own source.
 		const spoken = OUT_OF_SCOPE_KINDS.get(kind) ?? kind;
@@ -10004,6 +10006,7 @@ class Emitter {
 	}
 
 	private refuse(node: KNode, kind: string): never {
+		if (granted(kind)) return undefined as never;
 		this.pending.push({ kind, line: node.line, memberName: this.memberName });
 		throw new Refused(kind);
 	}
