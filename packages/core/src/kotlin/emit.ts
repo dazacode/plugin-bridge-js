@@ -121,6 +121,7 @@ import {
 	VARARG_OPTIONS,
 	VIDEO_V16_ONLY,
 	VIDEO_V16_PARAMETERS,
+	iterableDelegateOf,
 	scanObstacles,
 	thrownHelper,
 	type Refusal,
@@ -2641,6 +2642,9 @@ class Emitter {
 			}
 		}
 
+		// Iterable, made iterable here too. See `iterationMembers`.
+		memberLines.push(...this.iterationMembers(node, members, constructorParams, false));
+
 		// The plain name of an overloaded method, for everything that calls it
 		// by that name — this file's own `this.x(…)`, the files next door, and
 		// the driver. It resolves against the *instance*, so an override a
@@ -3071,6 +3075,10 @@ class Emitter {
 					if (emitted.isAsync) this.refuse(getter, 'a suspending getter');
 					fields.push(`get ${member}() ${emitted.text}`);
 				}
+
+				// Iterable, made iterable here too — see `iterationMembers`. The
+				// parameters are this factory's own, in scope as locals.
+				fields.push(...this.iterationMembers(node, bodyMembers, params, true));
 
 				// Handed to `dataRecord` with its own factory and field order, so
 				// `copy(count = 3)` can rebuild it: a computed property here
@@ -7387,6 +7395,23 @@ class Emitter {
 				const withBlock = this.callArguments(name, args, lambda, labelled, false);
 				return `${this.helper('decodeWith')}(${[this.expr(receiver), this.decodeType(shape), ...withBlock].join(', ')})`;
 			}
+			// `response.parseAs<Manga>(transform = ::transformJsonResponse)` —
+			// core's overload that runs the text through a function before the
+			// parse, named rather than trailing. The same `decodeWith` the block
+			// form takes; `json =` names a parser the runtime is already, and
+			// anything else keeps the refusal.
+			if (name === 'parseAs' && args.length > 0) {
+				const named = args.map((arg) => this.argumentName(arg));
+				const transform = args.find((arg) => this.argumentName(arg) === 'transform');
+				if (
+					transform !== undefined &&
+					named.every((one) => one === 'transform' || one === 'json')
+				) {
+					const fn = this.expr(this.argumentValue(transform));
+					return `${this.helper('decodeWith')}(${[this.expr(receiver), this.decodeType(shape), fn].join(', ')})`;
+				}
+			}
+
 			// `json.decodeFromStream(body.byteStream())` reads the whole body as
 			// the document, which is what the body's text already is here. Only
 			// that argument, read straight off a body: `.byteStream()` anywhere
@@ -10228,6 +10253,71 @@ class Emitter {
 		// a type of its own by that name is caught above, as it must be.
 		if (ANIME_FILTER_KINDS.has(declared)) return `AnimeFilter.${declared}`;
 		return null;
+	}
+
+	/**
+	 * What makes a Kotlin `Iterable` iterable here.
+	 *
+	 * Two spellings reach this. `class Volume(val chapters: List<Chapter>) :
+	 * Iterable<Chapter> by chapters` delegates the interface, which was refused
+	 * as an `explicit_delegation`; and `override fun iterator() = (a +
+	 * b).iterator()` declares it, which translated — into a class JavaScript
+	 * cannot iterate. `for (x in volume)` then threw "is not iterable", and
+	 * worse, `volume.map { … }` went through `__arr`, which read a value with
+	 * no protocol as a list of one: the map ran once, over the Volume itself,
+	 * and answered a plausible list of the wrong thing with nothing refused.
+	 *
+	 * So a delegate becomes `iterator()` over it — read each time from the
+	 * `val`s it names, which is the same list Kotlin captured at construction
+	 * because a `val` cannot be reassigned (a plain constructor parameter is
+	 * gone after construction, so a delegate naming one is refused) — and a
+	 * class with either gets `[Symbol.iterator]` draining its Kotlin iterator,
+	 * which is what `for…of`, `Array.from` and so `__arr` all ask for.
+	 */
+	private iterationMembers(
+		node: KNode,
+		members: readonly KNode[],
+		params: readonly { name: string; isProperty?: boolean }[],
+		record: boolean
+	): string[] {
+		let delegate: KNode | null = null;
+		for (const specifier of kids(node)) {
+			if (specifier.type !== 'delegation_specifier') continue;
+			const explicit = kids(specifier).find((child) => child.type === 'explicit_delegation');
+			if (explicit === undefined) continue;
+			delegate = iterableDelegateOf(explicit);
+			if (delegate === null) this.refuse(explicit, 'explicit_delegation');
+		}
+		const declares = members.some(
+			(child) =>
+				child.type === 'function_declaration' &&
+				this.nameOf(child) === 'iterator' &&
+				!this.hasModifier(child, 'abstract') &&
+				kids(kids(child).find((part) => part.type === 'function_value_parameters')).length === 0
+		);
+		if (delegate === null && !declares) return [];
+		const out: string[] = [];
+		if (delegate !== null) {
+			if (declares) this.refuse(delegate, 'an `Iterable` delegate beside its own `iterator()`');
+			if (!record) {
+				for (const used of walk(delegate)) {
+					if (used.type !== 'simple_identifier') continue;
+					const param = params.find((one) => one.name === used.text);
+					if (param !== undefined && param.isProperty !== true) {
+						this.refuse(used, 'an `Iterable` delegate reading a parameter that is not a property');
+					}
+				}
+			}
+			const body = this.functionScope('function', null, [], () =>
+				block([`return ${this.helper('iterator')}(${this.expr(delegate as KNode)});`])
+			);
+			if (body.isAsync) this.refuse(delegate, 'an `Iterable` delegate that suspends');
+			out.push(`iterator() ${body.text}`);
+		}
+		out.push(
+			'*[Symbol.iterator]() { const __it = this.iterator(); while (__it.hasNext()) yield __it.next(); }'
+		);
+		return out;
 	}
 
 	/** A base constructor's arguments, read with the subclass's own parameters in scope. */

@@ -201,6 +201,16 @@ export const RUNTIME_HELPERS = [
 	/* An exception built as a value, not thrown — see `exception`. */
 	'exception',
 	/* MutableList.removeAt/reverse and Map.getValue — see each in the runtime. */
+	'padEnd',
+	'findAnyOf',
+	'okioDecodeBase64',
+	'hashMap',
+	'hashSet',
+	'component1',
+	'component2',
+	'component3',
+	'component4',
+	'component5',
 	'removeAt',
 	'reverseInPlace',
 	'mapGetValue',
@@ -779,6 +789,9 @@ export const RUNTIME_GLOBALS = [
 	/* Aniyomi's spelling of the same library-refresh hint. */
 	'AnimeUpdateStrategy',
 	'SMangaUpdate',
+	/* okhttp's HttpUrl, for `HttpUrl.Builder()` — a url built from nothing.
+	   Everything else on it is an instance member the runtime already has. */
+	'HttpUrl',
 	/* androidx's preference types, as declarations (see `KOTLIN_PREFS`). A
 	   plugin never draws them — the manifest's settings are derived from
 	   `setupPreferenceScreen` before packaging — but a helper that builds one

@@ -1060,6 +1060,16 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 	// JavaScript's: Kotlin's answers Unit and `reversed()` is the copy, and a
 	// StringBuilder has one of its own — see the helper for both.
 	['removeAt', 'removeAt'],
+	['padEnd', 'padEnd'],
+	['findAnyOf', 'findAnyOf'],
+	// okio's, answering a ByteString or null; an extension's own
+	// `String.decodeBase64()` shadows it, as any declaration does.
+	['decodeBase64', 'okioDecodeBase64'],
+	['component1', 'component1'],
+	['component2', 'component2'],
+	['component3', 'component3'],
+	['component4', 'component4'],
+	['component5', 'component5'],
 	['reverse', 'reverseInPlace'],
 	['getValue', 'mapGetValue'],
 	['getStringOrNull', 'jeGetStringOrNull'],
@@ -1288,6 +1298,9 @@ export const HOST_METHODS: ReadonlySet<string> = new Set([
 	// source object and the default was asked of the extension instead.
 	'addPreference',
 	'setDefaultValue',
+	// okio's ByteString readers, on what `decodeBase64()` answers (see
+	// `__byteString` in the runtime).
+	'utf8',
 	// kotlinx's JsonDecoder, as a KSerializer's `deserialize` is handed it by
 	// the typed decoder (`__jsonDecoder` in the runtime). The `encode*` half
 	// is what the same object's `serialize` writes; the runtime never calls
@@ -1918,6 +1931,15 @@ export const FREE_FUNCTIONS: ReadonlyMap<string, string> = new Map([
 
 	['ArrayList', 'arrayList'],
 	['LinkedList', 'arrayList'],
+	// java.util's maps and sets by constructor — empty, sized, or copying.
+	// `IntRange(0, 9)` is `0..9` by constructor, and a range here is the list
+	// of its values — see `range` in the runtime.
+	['IntRange', 'range'],
+	['LongRange', 'range'],
+	['HashMap', 'hashMap'],
+	['LinkedHashMap', 'hashMap'],
+	['HashSet', 'hashSet'],
+	['LinkedHashSet', 'hashSet'],
 	// `List(n) { at -> … }` BUILDS: it is an episode list as often as not, and
 	// an empty array of that length answers undefined for every entry.
 	['List', 'listOfSize'],
@@ -2015,6 +2037,7 @@ export const GLOBAL_NAMES: ReadonlySet<string> = new Set([
 	'UpdateStrategy',
 	'AnimeUpdateStrategy',
 	'SMangaUpdate',
+	'HttpUrl',
 	// androidx's preference types — see `RUNTIME_GLOBALS`.
 	'PreferenceCategory',
 	'SwitchPreferenceCompat',
@@ -2505,6 +2528,7 @@ export const KNOWN_SIGNATURES: ReadonlyMap<string, readonly string[]> = new Map(
 	// ecosystem compares a header name, and it is the same trailing-boolean
 	// shape as the four above.
 	['equals', ['other', 'ignoreCase']],
+	['findAnyOf', ['strings', 'startIndex', 'ignoreCase']],
 
 	// `AnimesPage(animes = …, hasNextPage = …)`, which a list parse returns by
 	// hand. Both halves are required, so nothing is filled with `undefined`.
@@ -3085,6 +3109,18 @@ function scanInto(node: KNode, memberName: string, found: Untranslatable[]): voi
 		}
 	}
 
+	// `class Volume(val chapters: List<Chapter>) : Iterable<Chapter> by
+	// chapters` — the one interface delegation the emitter implements (see
+	// `iterableDelegate` there). The node kind stays refused for any other
+	// interface; for this one only the delegate expression is scanned.
+	if (node.type === 'explicit_delegation') {
+		const delegate = iterableDelegateOf(node);
+		if (delegate !== null) {
+			scanInto(delegate, memberName, found);
+			return;
+		}
+	}
+
 	// The third of the same shape, and the emitter's other half: see
 	// `CLASS_LOADER`. Returning rather than descending is what keeps the
 	// `javaClass` leaf below from being refused, and keeps the exemption exactly
@@ -3141,6 +3177,34 @@ function scanInto(node: KNode, memberName: string, found: Untranslatable[]): voi
 		if (swallowed !== null && (child.type === 'ERROR' || child.type === 'else')) continue;
 		scanInto(child, memberName, found);
 	}
+}
+
+/**
+ * The expression after `by` in `Iterable<T> by expr`, or null for any other
+ * delegation. Shared by the scanner and the emitter so the two agree on
+ * exactly which delegations translate.
+ */
+export function iterableDelegateOf(node: KNode): KNode | null {
+	if (node.type !== 'explicit_delegation') return null;
+	// Named children only: the type, then the delegate. The `by` between them
+	// is an anonymous token, asked of `allChildren`.
+	const parts = node.children.filter((child) => !COMMENT_KINDS.has(child.type));
+	if (parts.length !== 2 || !node.allChildren.some((child) => child.type === 'by')) return null;
+	const [type, delegate] = parts;
+	const name = type.children.find((child) => child.type === 'type_identifier')?.text;
+	if (type.type !== 'user_type' || name !== 'Iterable') return null;
+	// `: Iterable<Chapter> by pages { … }` — the grammar reads the class body
+	// as a trailing lambda passed to `pages`, so the members are inside the
+	// delegate. Refused as the delegation it is rather than emitted as a call.
+	if (
+		delegate.type === 'call_expression' &&
+		delegate.allChildren.some((child) =>
+			child.allChildren.some((part) => part.type === 'annotated_lambda')
+		)
+	) {
+		return null;
+	}
+	return delegate;
 }
 
 /** Node kinds under this one with no handler. For the survey and the specs. */

@@ -617,6 +617,41 @@ function __trimEnds(value, given, fromStart, fromEnd) {
 
 /** A Kotlin Char, which this runtime spells as a one-character string. */
 /** A Kotlin Pair, which is a two-element array carrying first and second. */
+/**
+ * okio's ByteString, as the bytes with its readers on them: 'utf8()',
+ * 'toByteArray()', 'hex()', 'base64()' and 'size'. Non-enumerable, so the
+ * value is still the Uint8Array every byte helper here already reads.
+ */
+function __byteString(bytes) {
+  var readers = {
+    utf8: function () { return __host().text.decode(bytes); },
+    toByteArray: function () { return bytes.slice(); },
+    hex: function () {
+      var out = '';
+      for (var i = 0; i < bytes.length; i += 1) out += (bytes[i] < 16 ? '0' : '') + bytes[i].toString(16);
+      return out;
+    },
+    base64: function () { return __host().bytes.toBase64(bytes); }
+  };
+  for (var name in readers) {
+    Object.defineProperty(bytes, name, { value: readers[name], enumerable: false });
+  }
+  Object.defineProperty(bytes, 'size', { get: function () { return bytes.length; }, enumerable: false });
+  return bytes;
+}
+
+function __component(value, n) {
+  if (value !== null && value !== undefined && typeof value['component' + n] === 'function' &&
+      !Array.isArray(value)) {
+    return value['component' + n]();
+  }
+  var parts = __k.destructured(value);
+  if (n > parts.length) {
+    throw new Error('This converted extension asked for component' + n + ' of a value with ' + parts.length + '.');
+  }
+  return parts[n - 1];
+}
+
 function __isPair(value) {
   return Array.isArray(value) && value.length === 2 &&
     Object.prototype.hasOwnProperty.call(value, 'first');
@@ -2518,6 +2553,53 @@ var __k = {
     var filler = pad === undefined ? ' ' : __str(pad);
     if (filler.length === 0) return text;
     while (text.length < Number(length)) text = filler.charAt(0) + text;
+    return text;
+  },
+
+  /**
+   * okio's String.decodeBase64(): a ByteString, or NULL for text that is not
+   * base64 — the '?.utf8() ?: throw' after it is how an extension says the
+   * page changed. Both alphabets, whitespace and trailing '=' skipped, as
+   * okio does; any other character, or a length no encoding produces, is null
+   * rather than a best effort.
+   */
+  okioDecodeBase64: function (value) {
+    if (value === null || value === undefined) return null;
+    var text = __str(value).replace(/[ \\t\\r\\n]/g, '').replace(/=+$/, '');
+    if (!/^[A-Za-z0-9+\\/_-]*$/.test(text) || text.length % 4 === 1) return null;
+    var normalised = text.replace(/-/g, '+').replace(/_/g, '/');
+    while (normalised.length % 4 !== 0) normalised += '=';
+    return __byteString(__host().bytes.fromBase64(normalised));
+  },
+
+  /**
+   * CharSequence.findAnyOf(strings, startIndex = 0, ignoreCase = false): the
+   * first index at which any of the strings occurs, paired with the one that
+   * does, or null. Kotlin's own order: indices ascending, and at one index
+   * the first string in the collection's order that matches there — not the
+   * longest.
+   */
+  findAnyOf: function (value, strings, startIndex, ignoreCase) {
+    var text = __str(value);
+    var wanted = __arr(strings).map(__str);
+    var fold = ignoreCase === true;
+    var hay = fold ? text.toLowerCase() : text;
+    var start = Math.max(0, Number(startIndex) || 0);
+    for (var at = start; at <= text.length; at += 1) {
+      for (var i = 0; i < wanted.length; i += 1) {
+        var needle = fold ? wanted[i].toLowerCase() : wanted[i];
+        if (hay.startsWith(needle, at)) return __k.to(at, wanted[i]);
+      }
+    }
+    return null;
+  },
+
+  /** padEnd(length, padChar = ' '), padStart's mirror. */
+  padEnd: function (value, length, pad) {
+    var text = __str(value);
+    var filler = pad === undefined ? ' ' : __str(pad);
+    if (filler.length === 0) return text;
+    while (text.length < Number(length)) text = text + filler.charAt(0);
     return text;
   },
 
@@ -4546,6 +4628,17 @@ var __k = {
    * list. The emitter writes the same helper for all of them because it cannot
    * tell which it has, so the shape decides here.
    */
+  /**
+   * componentN() written out — 'match.destructured.component1()' — which is
+   * the Nth of what destructuring the same value would bind (see
+   * 'destructured' below), or the value's own componentN where it has one.
+   */
+  component1: function (value) { return __component(value, 1); },
+  component2: function (value) { return __component(value, 2); },
+  component3: function (value) { return __component(value, 3); },
+  component4: function (value) { return __component(value, 4); },
+  component5: function (value) { return __component(value, 5); },
+
   destructured: function (value) {
     if (!__present(value)) return [];
     if (Array.isArray(value.groupValues)) return value.groupValues.slice(1);
@@ -6446,6 +6539,24 @@ var __k = {
   initialized: function (value) { return value !== undefined && value !== null; },
 
   /** ArrayList(), ArrayList(n) and ArrayList(collection) — a mutable list. */
+  /**
+   * HashMap() / LinkedHashMap(), and the copying constructor that takes a
+   * map. A capacity (a number) builds an empty one. A JS Map keeps insertion
+   * order, which is LinkedHashMap's promise and a HashMap's permitted order.
+   */
+  hashMap: function (value) {
+    if (value === null || value === undefined || typeof value === 'number') {
+      return __mutableMap(new Map());
+    }
+    return __k.toMutableMap(value);
+  },
+
+  /** HashSet() / LinkedHashSet(), and the copying constructor over a collection. */
+  hashSet: function (value) {
+    if (value === null || value === undefined || typeof value === 'number') return __k.toSet([]);
+    return __k.toSet(__arr(value));
+  },
+
   arrayList: function (value) {
     if (value === null || value === undefined || typeof value === 'number') return __mutableList([]);
     return __mutableList(__arr(value).slice());
@@ -8399,6 +8510,27 @@ function __httpUrlBuilder(scheme, authority, path, pairs, fragment) {
   };
   return builder;
 }
+
+/**
+ * okhttp's HttpUrl, by name — for 'HttpUrl.Builder()', a url built from
+ * nothing: '.scheme("https").host("…").addPathSegments(…)…build()'. The
+ * builder is the one 'newBuilder()' answers, started empty, and 'build()'
+ * throws as okhttp's does when the scheme or the host was never set, rather
+ * than answering a url with neither.
+ */
+var HttpUrl = {
+  Builder: function () {
+    var builder = __httpUrlBuilder('', '', '/', [], '');
+    var complete = builder.build;
+    builder.build = function () {
+      var built = complete();
+      if (built.scheme.length === 0) throw new Error('This converted extension built a url with no scheme.');
+      if (built.host.length === 0) throw new Error('This converted extension built a url with no host.');
+      return built;
+    };
+    return builder;
+  }
+};
 
 /**
  * 'response.body.string()', which this ecosystem writes as one call.
