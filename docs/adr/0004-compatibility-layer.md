@@ -1,7 +1,7 @@
 # ADR 0004 — The compatibility layer is the product: one runtime, many shells, and a second front-end for Kotlin
 
 Status: **proposed** · 2026-09-10 · extends ADR-0002 · depends on ADR-0003 ·
-revises `contract/plugin-api/FOREIGN.md` §4.1 and §4.1.2
+revises `contract/FOREIGN.md` §4.1 and §4.1.2
 
 Research answer to: "the plugin runtime is portable because it is JavaScript, so
 port it once and wrap it per platform — and the reusable part is not the app, it
@@ -374,7 +374,7 @@ The number to beat is **4 of 254**. Every phase below states what it should move
 Each phase has a kill switch, and none of them blocks ADR-0003's phases 3–5 —
 where they interleave, that is said.
 
-1. **The port, named and enforced.** Write `contract/plugin-api/HOST.md` from §4.
+1. **The port, named and enforced.** Write `contract/HOST.md` from §4.
    Replace the nine outward imports with a local `errors.ts` and an injected
    logger; take `sandbox`, `blobs`, `kv` and `worker` as constructor arguments.
    Add `tool/check-runtime-boundary.ts` to the web `check` script, failing on any

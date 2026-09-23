@@ -3,16 +3,17 @@
 **A compatibility and translation toolkit for adapting foreign plugin ecosystems
 into a portable JavaScript runtime for web and cross-platform clients.**
 
-Six plugin ecosystems exist for the same job and none of them run in a browser.
-This turns their extensions into one portable JavaScript plugin, running in a
-sealed sandbox behind a declared host port — so the same converted plugin runs
-in a browser tab, a desktop shell, a phone, or a terminal.
+Many plugin ecosystems exist for the same job and none of them run in a
+browser. This turns their extensions into one portable JavaScript plugin,
+running in a sealed sandbox behind a declared host port — so the same converted
+plugin runs in a browser tab, a desktop shell, a phone, or a terminal.
 
-**In practice this is mostly about [Aniyomi](https://github.com/aniyomiorg/aniyomi)
-extensions.** Aniyomi's are written in Kotlin against an Android base class, and
-they are the only ones translated from _source_ rather than from a published
-artifact — which is why the Kotlin front-end is the largest thing here. The
-other five adapters convert an artifact and are correspondingly thin.
+**The largest part is a Kotlin translator.** Extensions for
+[Aniyomi](https://github.com/aniyomiorg/aniyomi) (anime) and
+[Mihon](https://github.com/mihonapp/mihon) (manga) are written in Kotlin
+against an Android base class, and they are translated from _source_ — which is
+why the Kotlin front-end is the biggest thing here. The other adapters convert a
+published artifact, or need no conversion at all, and are correspondingly thin.
 
 It is a **translator**, not an emulator. Nothing here pretends to be Android.
 
@@ -85,136 +86,93 @@ argument, every time. See [`docs/security.md`](docs/security.md) for why.
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `packages/core`      | The Kotlin front-end — grammar, subset, emitter, pipeline — and the format-agnostic conversion machinery                                                                              |
 | `packages/runtime`   | The shims a converted bundle is built from: the Kotlin standard library, a jsoup-shaped DOM, the ecosystem drivers                                                                    |
-| `packages/adapters`  | One adapter per ecosystem: `aniyomi`, `mangayomi`, `cloudstream`, `sora`, `hayase`, `lnreader`                                                                                        |
+| `packages/adapters`  | One adapter per ecosystem: `aniyomi`, `mihon`, `sora`, `stremio`, `nuvio`, `hayase`, `mangayomi`, `lnreader`, `cloudstream`                                                           |
 | `packages/host`      | The port every host implements: the sandbox contract, the network relay, the cookie jar and request policy, the scoreboard — portable, and it names nothing a browser does not have   |
 | `packages/host-node` | One implementation of that port, for Node: the child-process isolate and the sealing that makes it no more capable than a Worker, and the certificate-chain repair the relay asks for |
 | `packages/cli`       | `plugin-bridge`                                                                                                                                                                       |
 
 ## Status
 
-**Two ecosystems, one core.** The engine has now been driven end to end against
-two unrelated plugin ecosystems — one written in Kotlin for Android, one in
-JavaScript for iOS and macOS — reaching the same ABI through the same host.
+**v0.5.0 runs 1,050 of 1,652 Kotlin extensions from two whole published
+repositories — up from 902 — and 691 of them now drive their code through
+browse, list and read, up from 474.** Every one of those gains came from fixing
+a _semantic_ once, not from patching a source.
 
-|                                  | Kotlin ecosystem | JavaScript ecosystem       |
-| -------------------------------- | ---------------- | -------------------------- |
-| Listings measured                | 254              | 69                         |
-| Convert and load                 | 69               | **57 of 57 anime modules** |
-| Return a stream URL              | 6                | 39                         |
-| **Verified playable end to end** | **3**            | **18**                     |
+|                                | before v0.5.0 | **v0.5.0**      | change   |
+| ------------------------------ | ------------- | --------------- | -------- |
+| Mihon manga, loaded (of 1,396) | 828           | **949 (68%)**   | **+121** |
+| Mihon manga, all three stages  | 412           | **609 (44%)**   | **+197** |
+| Aniyomi anime, loaded (of 256) | 74            | **101 (39%)**   | **+27**  |
+| Aniyomi anime, all three       | 62            | **82 (32%)**    | **+20**  |
+| **Combined, loaded**           | 902           | **1,050 (64%)** | **+148** |
+| **Combined, all three stages** | 474           | **691 (42%)**   | **+217** |
 
-That Kotlin column is an early, fully verified corpus. Over the two large Kotlin
-catalogues as a whole, v0.5.0 **loads** 949 of 1,396 manga listings and 101 of
-256 anime listings — load, and reaching requests under a probe, not playback.
-[`docs/compatibility.md`](docs/compatibility.md) has those figures with what
-they do and do not show.
+And one the broad probe cannot see: in the most widely shared site template in
+the manga repository, **0 of 176** loaded listings could list _and open_ a
+chapter before v0.5.0, and **164** can now — measured by handing each list
+call's real output to the next call.
 
-**A returned URL is not playback.** Both ecosystems report the claim and the
-verified result as separate rows, and each URL is checked in the same call that
-produced it — a signed stream URL expires and is often bound to the resolving
-IP, so a saved one checked later measures how long a token lived.
+**Read these for what they are.** _Loaded_ is convert-and-import. _All three
+stages_ is execution reaching a request at each step, against a probe that
+answers every request with an empty page — it is not proof that a real page
+parses or that anything plays. Verified playback is measured separately, on
+smaller corpora (2026-09-11):
 
-The second was measured with `packages/core` and `packages/host` **frozen**:
-every change it needed was in its own adapter, and it never touches the Kotlin
-front-end. [`docs/compatibility-sora.md`](docs/compatibility-sora.md) is that
-pass in full — including the two harness bugs that produced publishable-looking
-numbers before anyone checked them.
+|                                  | Kotlin (one 254-listing corpus) | JavaScript (Sora)          |
+| -------------------------------- | ------------------------------- | -------------------------- |
+| Convert and load                 | 69                              | **57 of 57 anime modules** |
+| Return a stream URL              | 6                               | 39                         |
+| **Verified playable end to end** | **3**                           | **16–18**                  |
 
-### The first ecosystem, in detail
+Playback over the v0.5.0 catalogues has not been measured yet, and it is the
+next number worth having. [`docs/measurements.md`](docs/measurements.md) has
+every figure, dated, with what each does and does not show.
 
-Honest numbers, from one 254-listing repository. **Every row names the stage it
-measures**, because two of them used to be quoted interchangeably and they are
-not the same question:
+### From an experiment to an approach
 
-|                                                     |        |
-| --------------------------------------------------- | ------ |
-| Listings measured                                   | 254    |
-| Convert (the translator produces a valid module)    | **69** |
-| Load and run (the module imports and answers)       | **69** |
-| Reach content (`search` or `browse` returns rows)   | 23     |
-| List episodes                                       | 14     |
-| Return a stream URL                                 | 6      |
-| **Verified playable** (that URL answers with media) | **3**  |
+On 2026-09-10 the translator was declared finished: 60 installable listings of
+one 254-listing corpus, and "diminishing returns" on the rest. That was true of
+that corpus, measured that way.
 
-The last two rows are separate on purpose. A resolved URL is a **claim**; three
-of those six are refused by the CDN the moment they are fetched. A signed stream
-URL also expires and is often bound to the resolving IP, so it is checked in the
-same call that produced it — checking a saved URL later measures how long a
-token lived, not whether the extension works.
+Measuring whole repositories changed that. Over 1,652 real listings, the same
+class of fix kept paying across hundreds of extensions at once: decode a
+`@Serializable` type the way kotlinx does, iterate a `Map` as a `Map`, await
+what blocks wherever it is called from, carry a chapter's state from listing to
+opening. None of those names a site. Together they moved two ecosystems at the
+same time, and nothing that previously loaded was lost.
 
-The gap is mostly **not** this software: 33 of the 60 never answer at all — 20
-behind an anti-bot challenge, 6 whose host does not resolve, 6 whose endpoint is
-gone, 1 serving no https. Of the rest, roughly half have simply changed their
-markup since the extension was written.
+That is the claim this release is evidence for: **running another ecosystem's
+plugins in a portable runtime is an engineering approach with a known method,
+not an open question.** The method is the part meant to travel:
 
-`docs/adr/0005-network-boundaries.md` decides what this will and will not
-acquire to close that gap, with the count each capability is worth.
+- **Refuse rather than approximate.** A construct that cannot be translated
+  exactly is named, with its file and line, and the member is not emitted. The
+  conservative refusal is what makes every number above trustworthy.
+- **Measure whole catalogues, then chains.** Loaded is not working; a
+  per-call probe cannot see state passed between calls. Each better instrument
+  found real faults the previous one reported as success.
+- **Fix classes, never sources.** A fix is ranked by how many listings it
+  completes on its own, and is only accepted if it is correct for all of them.
+- **Keep boundaries as decisions.** WebView, embedded script engines and the
+  other native capabilities stay refused on purpose
+  ([`docs/adr/0005-network-boundaries.md`](docs/adr/0005-network-boundaries.md));
+  they are not counted as work.
 
-### The compatibility pass is closed
-
-Those numbers are a stopping point rather than a snapshot. **The translator
-work has reached diminishing returns**: every offline-convertible bundle loads
-cleanly, and the blockers that remain no longer unlock listings — they are
-dominated by native capabilities and by sources that have changed or gone.
-
-Two measurements closed it, and both are the same shape:
-
-- **The local HTTP server cluster** — at least 14 listings stand up a loopback
-  server so per-request headers survive to every HLS segment. Not a gap: the
-  plugin ABI already replaces it declaratively.
-  `docs/adr/0006-local-http-server.md`.
-- **Non-local returns from lambdas** — 14 listings, and **0 of the 14** would
-  become installable from supporting them. Every one is already blocked by a
-  native capability. Broad support there is engineering effort with no
-  catalogue payoff.
-
-That second one is why blockers are ranked by **listings they would unblock
-alone**, never by how often they appear. Raw frequency is dominated by shared
-vendored libraries and by extensions that were never going to convert.
-
-What is left divides into three, none of which is translator work: native
-boundary decisions, external and source-side failures, and correctness or
-diagnostic cleanup that will not move installability. The last release under
-the loop was **v42** — one false refusal removed, no verdict moved, no
-regression.
-
-### Phase 2 asks a different question
-
-`native` is a decision, not a law, so the next question is **what the portable
-runtime should become** so a foreign plugin no longer needs its original
-platform. Each boundary was re-examined for the behaviour an extension actually
-needs, and then _actually granted_ — its refusal temporarily lifted and the
-whole catalogue re-converted — because counting listings that mention a
-capability is an upper bound that granting it immediately disproves.
-
-The result, in one line: **granting every native capability, a WebView and an
-embedded JavaScript engine included, moves offline conversion from 65 to 79.**
-The boundary is not where the catalogue is lost. The safe, portable subset —
-WebCrypto, a constrained cookie jar, a declarative request policy — gets 10 of
-those 14, and the two capabilities with a real security cost are worth 4
-between them.
-
-[`docs/phase-2-capability-map.md`](docs/phase-2-capability-map.md) is the map,
-with the measurement, the ranking and what it does not claim.
-
-**The three it recommended are now built** — `ctx.crypto` over WebCrypto, the
-constrained per-plugin cookie jar, and a declarative request policy — and
-re-measuring against the real implementations is the most useful line in that
-document: **+4 conversions where the grants predicted +10.** A grant only
-suppresses a refusal, so it measures what the catalogue would do _if we ignored
-our own rules_. The cookie jar's predicted +3 required letting a plugin read its
-own jar, which the design forbids; the request policy's +1 required accepting an
-arbitrary interceptor lambda, which it refuses by rule.
-
-The policy earned its place anyway, for a reason no count predicted:
-`__k.rateLimit` was `function (value) { return value; }`, under a comment saying
-pacing was host-owned that the host never received. Every extension throttling
-itself to protect a source had been converted into one that does not.
+What carries to other ecosystems, and what does not, is stated plainly. The
+host contract, the sandbox, the drivers' shape and the measurement method are
+shared — Sora reached the same ABI with core and host frozen. The Kotlin
+semantics themselves help only the Kotlin family; a JavaScript or Dart
+ecosystem needs its own adapter, and each one teaches some layer something new
+([`docs/compatibility.md`](docs/compatibility.md) has the worked example). Whether
+the next ecosystem moves the same way is the open question, and it has not
+been measured yet.
 
 ## Documentation
 
 - [`docs/architecture.md`](docs/architecture.md) — how a translation happens
-- [`docs/compatibility.md`](docs/compatibility.md) — what is supported, refused, and why
+- [`docs/measurements.md`](docs/measurements.md) — every number, dated, and what each one shows
+- [`docs/compatibility.md`](docs/compatibility.md) — what is supported, refused, and how it is measured
+- [`docs/compatibility-aniyomi.md`](docs/compatibility-aniyomi.md) — the Kotlin family, API by API
 - [`docs/compatibility-sora.md`](docs/compatibility-sora.md) — the second ecosystem, and what it proved
 - [`docs/phase-2-capability-map.md`](docs/phase-2-capability-map.md) — what the runtime should become, measured
 - [`docs/security.md`](docs/security.md) — the sandbox, the network relay, and rule 9
@@ -278,29 +236,22 @@ not the purpose.
 
 ## Roadmap
 
-Recently closed: the client now consumes these packages instead of carrying its
-own copy; `host` is split into the portable port and its Node implementation;
-and adapter discovery is inverted — `@plugin-bridge/adapters` owns the list of
-ecosystems and `core` no longer imports a single one of them, so adding an
-ecosystem is no longer a change to the package that is meant to know nothing
-about any particular one.
-
-- **De-couple the contract specs.** `contract/` is normative and now lives here,
-  but the four documents still read as Yorozo's. A contributor arriving cold
-  should not have to know Yorozo to read them.
-- **Decide the network boundaries.** Cookies, site-side JavaScript and anti-bot
-  handling are the three capabilities that would move the numbers above.
-  `docs/adr/0005-network-boundaries.md` states what each is worth and
-  recommends only one of them. With the compatibility loop closed these are the
-  only remaining work that could move the count, which is why they are a
-  decision for a person rather than the next thing to build.
-- **A third ecosystem, to find what two did not.** Two are now measured, and
-  the claim that the Kotlin front-end is one front-end rather than the engine
-  has survived its first real test — a JavaScript ecosystem reached the same ABI
-  with core frozen (`docs/compatibility-sora.md`). Two is enough to disprove
-  "it only does Aniyomi" and not enough to call the abstraction settled. The
-  remaining adapters are `browse-only` for reasons of their own, so a third
-  would mean a new one.
+- **Measure playback over the whole catalogues.** v0.5.0 says how much of two
+  repositories this can run. How much of it plays, verified in the same call
+  that resolved it, is the number that decides what a viewer gets.
+- **Authoring, not only translating.** A plugin written for this runtime
+  directly needs no translator at all. The SDK and CLI for that live in
+  [dazacode/kuro-plugins](https://github.com/dazacode/kuro-plugins), and making
+  that path excellent for outside developers is the next focus.
+- **A next ecosystem, measured the same way.** Two language families now reach
+  the same ABI. Another one is the test of whether the method generalises as
+  well as the contract did.
+- **De-couple the contract specs.** `contract/` is normative and lives here,
+  but parts still read as Yorozo's. A contributor arriving cold should not have
+  to know Yorozo to read them.
+- **The remaining refusals, by value.** A few widenable gaps are left in the
+  measured catalogues. They are ranked by listings each completes alone, and
+  none is worth bending the refusal rule for.
 
 ## Licence
 

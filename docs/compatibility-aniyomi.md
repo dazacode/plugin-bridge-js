@@ -14,7 +14,7 @@ available statement of the question — including in the places where its own
 answer is a stub, because a stub is miwayomi telling us that behaviour was not
 worth having.
 
-Read `contract/plugin-api/FOREIGN.md` §4.1 first; it is normative and this is
+Read `contract/FOREIGN.md` §4.1 first; it is normative and this is
 not. Where the two disagree, FOREIGN.md is right and this file is stale.
 
 Three rows below — the cookie jar, `WebView`, and the Cloudflare interstitial —
@@ -568,8 +568,7 @@ Two properties of the existing instrument worth not losing:
   everything it runs lives in a base class we could not read.
 - **A refusal is conjunctive.** An extension blocked by three constructs is
   unblocked by none of them individually, which is why the ranking counts
-  listings and why `CLAUDE_HANDOFF.md` rule 5 says to address them by whole-
-  extension gains.
+  listings and why they are addressed by whole-extension gains.
 
 ## 7. Where the pass stopped, and the two measurements that stopped it
 
@@ -577,6 +576,13 @@ Two properties of the existing instrument worth not losing:
 and run; every offline-convertible bundle loads cleanly; 5 of the 27 that are
 live and reachable complete the whole chain. The remaining blockers no longer
 unlock listings.
+
+> **Later (v0.5.0, 2026-09-22):** closed _for this phase_ turned out to be the
+> operative words. Measured over whole repositories rather than this corpus,
+> class-level fixes — typed decoding, Map semantics, awaiting what blocks, state
+> carried between calls — took the Kotlin family from 902 to 1,050 of 1,652
+> listings loading. The two measurements below still stand as stated.
+> [`measurements.md`](measurements.md) has the figures.
 
 Two measurements made that a conclusion rather than a mood, and both work the
 same way — count what a fix would unblock _alone_, then check what else the
@@ -669,7 +675,7 @@ turned out to be the instrument; the frozen verdict survived.
 ## 8. Licensing
 
 miwayomi is Apache-2.0. Its `source-api/` and `core-common/` are adapted from
-Aniyomi (Apache-2.0, `NOTICE-ANIYOMI.md`); its `android-compat/`, server and UI
+Aniyomi (Apache-2.0, `NOTICE`); its `android-compat/`, server and UI
 are its own work. Apache-2.0 permits reuse, including verbatim, with attribution
 and a statement of changes.
 

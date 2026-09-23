@@ -1,8 +1,9 @@
 # Compatibility — what is supported, what is refused, and why
 
-This is the shape of the answer. `docs/compatibility-aniyomi.md` is the detailed
-per-API map for the first ecosystem, and `contract/FOREIGN.md` is normative
-where the two disagree.
+This is the shape of the answer, and the method behind every number.
+[`measurements.md`](measurements.md) is where the numbers themselves live, dated.
+`docs/compatibility-aniyomi.md` is the detailed per-API map for the Kotlin
+family, and `contract/FOREIGN.md` is normative where the two disagree.
 
 ## Three ways a construct can be handled
 
@@ -258,51 +259,20 @@ an adapter is worth writing. An ecosystem measured at 12% playable was 0%
 relevant, and the gap between those two numbers was the whole decision — see
 the Miru row below.
 
-## Two ecosystems have been measured this way
+## Ecosystems measured this way
 
 The columns above were designed against a Kotlin ecosystem and then used
 unchanged on a JavaScript one, which is the only real test of whether they
-describe _translation_ or describe one translator.
+describe _translation_ or describe one translator. The figures for both, and
+for the v0.5.0 whole-catalogue pass over the Kotlin family, are in
+[`measurements.md`](measurements.md).
 
-|                   | Kotlin ecosystem | JavaScript ecosystem   |
-| ----------------- | ---------------- | ---------------------- |
-| convert and load  | 60 of 254        | 57 of 57 anime modules |
-| verified playable | 6                | 16                     |
-
-The Kotlin column is an early measurement of one 254-listing corpus, kept
-because the playable figure is the one that was proven end to end. The
-current state of the two large Kotlin catalogues is below.
-
-### The Kotlin catalogues at v0.5.0 (2026-09-22)
-
-Measured over each whole published index, not a sample:
-
-|           | listings | loaded      | all three stages |
-| --------- | -------- | ----------- | ---------------- |
-| keiyoushi | 1,396    | 949 (68%)   | 609 (44%)        |
-| yuzono    | 256      | 101 (39%)   | 82 (32%)         |
-| combined  | 1,652    | 1,050 (64%) | 691 (42%)        |
-
-Read these for what they are. **Loaded** is convert-and-import. **All three
-stages** is execution reaching a request at browse, list and read against a
-probe that answers every request with an empty page; it does not show that a
-real page parses, that media plays, or that the site is alive. Both are partial
-evidence on the first of the three numbers above and say nothing about the
-second. Replay runs against
-scripted responses are the stronger evidence of parsing, and they cover a
-subset. keiyoushi's stage run counts 950 rows for 949 distinct listings, so
-609 may be off by one.
-
-A capability that passes state from one call to the next cannot be seen by
-that probe at all, because it invents the id it opens. Madara's chapters were
-measured instead by listing against a scripted page and opening the id
-returned: **0 of 176 loaded Madara listings opened a chapter before v0.5.0,
-164 after.**
-
-With the listings refused on a deliberate native boundary set aside, 949 of
-1,281 (74%) and 101 of 142 (71%) load. That is the _load rate among listings
-not behind a deliberate native boundary_, and never a compatibility rate:
-setting the boundaries aside changes the population.
+One lesson from that pass belongs here, because it applies to any future
+measurement: **a capability that passes state from one call to the next is
+invisible to a per-call probe.** A probe that opens an id it invented cannot
+tell whether the id a source really returned would open. Measure those as a
+chain — the list call's real output handed to the next call — or say that the
+number does not cover them.
 
 ### A third, measured as a no (2026-09-19)
 

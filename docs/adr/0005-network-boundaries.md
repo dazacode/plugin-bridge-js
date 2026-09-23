@@ -1,7 +1,7 @@
 # ADR 0005 — Three network capabilities the compatibility layer does not have, and which of them it should
 
 Status: **proposed** · 2026-09-10 · extends ADR-0004 · depends on ADR-0003 ·
-reads against `contract/plugin-api/FOREIGN.md` §4.1 and `docs/ANIYOMI-COMPATIBILITY-MAP.md`
+reads against `contract/FOREIGN.md` §4.1 and `docs/compatibility-aniyomi.md`
 
 Research answer to: "the translator converts; the sources still mostly do not
 play. What is left, and how much of it is a decision rather than a bug?"
@@ -147,7 +147,7 @@ being the thing ADR-0003 and ADR-0004 describe:
   the only way out is `ctx.http`. A page's script expects a DOM, a window, a
   cookie store and an origin; supplying those convincingly is supplying the
   escape.
-- **It is a second runtime.** `ANIYOMI-COMPATIBILITY-MAP.md` §4 already records
+- **It is a second runtime.** `compatibility-aniyomi.md` §4 already records
   that the reference implementation's own WebView is a **stub** — it fires
   `onPageFinished` after a sleep and answers `evaluateJavascript` with `null`.
   The project that runs real bytecode on a JVM did not build this either.

@@ -21,8 +21,8 @@ and install downstream is written once, against one shape.
    `fixtures/indexes.json` — with `example.invalid` hosts, see
    `docs/security.md` — and a spec asserting the listings it produces. Do not
    fetch anything yet.
-2. **`convert` for the artifact case.** Four of the six existing adapters
-   convert a published artifact rather than source. If yours does, most of the
+2. **`convert` for the artifact case.** Most existing adapters convert a
+   published artifact rather than source. If yours does, most of the
    work is reading the archive and writing a manifest.
 3. **A driver, if the ecosystem has a base class.** `packages/runtime/src/shims`
    holds one per ecosystem: the object that knows the ABI the extension was

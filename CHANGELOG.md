@@ -14,12 +14,12 @@ minor bump.
 
 ## v0.5.0 — a converted extension decodes, awaits and remembers what upstream does
 
-A pass over two whole published catalogues — keiyoushi (Mihon, 1,396 manga
-listings) and yuzono (Aniyomi, 256 anime listings) — fixing what they refused
-or got silently wrong, one class at a time and never one source at a time.
-Most of what changed is a guarantee rather than a feature: a value that used to
-come back quietly wrong now comes back right, or the conversion refuses and
-names why.
+A pass over two whole published catalogues — a Mihon-family repository of 1,396
+manga listings and an Aniyomi-family repository of 256 anime listings — fixing
+what they refused or got silently wrong, one class at a time and never one
+source at a time. Most of what changed is a guarantee rather than a feature: a
+value that used to come back quietly wrong now comes back right, or the
+conversion refuses and names why.
 
 This release also contains the four sections below it that were marked
 _Unreleased_. `CONVERTER_VERSION` moves from 49 to 59, so every bundle a host
@@ -46,8 +46,8 @@ converted earlier is reconverted.
   across files, nor through a `::` reference, nor under
   `runCatching { … }.getOrDefault(…)` — each handed the caller a Promise where
   it expected a value. The Mihon driver likewise now awaits a parse member that
-  suspends. The Voe extractor, among others, answered no videos at all while
-  its listings counted as loaded.
+  suspends. A widely shared video-host extractor, among others, answered no
+  videos at all while its listings counted as loaded.
 - **A repaired subtitle reaches the player.** `File.createTempFile` gives an
   in-memory file and `Uri.fromFile` turns it into a `data:` URI typed by its
   suffix (`.vtt` is `text/vtt`), so an extension that rewrites its captions
@@ -97,21 +97,22 @@ end: they do not show that real pages parse or that media plays, and a site
 may be dead. Replay runs against scripted responses are the stronger evidence
 of parsing, and they cover a subset of sources, not the catalogues.
 
-|                        | start        | v0.5.0          |
-| ---------------------- | ------------ | --------------- |
-| keiyoushi loaded       | 828 of 1,396 | **949 (68%)**   |
-| keiyoushi three stages | 412          | **609 (44%)**   |
-| yuzono loaded          | 74 of 256    | **101 (39%)**   |
-| yuzono three stages    | 62           | **82 (32%)**    |
-| combined loaded        | 902 of 1,652 | **1,050 (64%)** |
-| combined three stages  | 474          | **691 (42%)**   |
+|                       | start        | v0.5.0          |
+| --------------------- | ------------ | --------------- |
+| manga loaded          | 828 of 1,396 | **949 (68%)**   |
+| manga three stages    | 412          | **609 (44%)**   |
+| anime loaded          | 74 of 256    | **101 (39%)**   |
+| anime three stages    | 62           | **82 (32%)**    |
+| combined loaded       | 902 of 1,652 | **1,050 (64%)** |
+| combined three stages | 474          | **691 (42%)**   |
 
 "Start" is engine `9048d76` for the loaded counts; the stage counts were first
-taken a few commits later, when loading stood at 829 and 74. keiyoushi's stage
-run counts 950 rows where 949 are distinct listings, so 609 may be off by one
-at the listing level; the percentage is unaffected.
+taken a few commits later, when loading stood at 829 and 74. Re-measured on the
+released commit, counting distinct listings: identical. (An earlier version of
+this entry warned that 609 might be off by one; the distinct count settled it.)
 
-Madara's chapters were measured separately, because the probe opens a chapter
+Chapters in Madara, the most widely shared site template in the manga
+repository, were measured separately, because the probe opens a chapter
 id it invents and so cannot see a handoff from listing to opening. Listing
 chapters against a scripted Madara page and then opening the id returned:
 **0 of 176 loaded Madara listings opened a chapter before, 164 after.** The
@@ -122,6 +123,8 @@ With the listings refused on a deliberate native boundary set aside (115 and
 _load rate among listings not behind a deliberate native boundary_. They are
 not compatibility rates, because setting the boundaries aside changes the
 population.
+
+Every figure, dated, is in `docs/measurements.md`.
 
 ### Version history, reconciled
 

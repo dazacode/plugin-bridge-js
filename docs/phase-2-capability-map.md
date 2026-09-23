@@ -7,6 +7,12 @@ Phase 1 asked _"how much of this ecosystem can we translate with the runtime we
 already have?"_ and answered it: 60 installable, and the translator work has
 reached diminishing returns.
 
+> **Later (v0.5.0, 2026-09-22):** that conclusion held for the corpus it was
+> measured on, and was overturned by measuring whole catalogues — class-level
+> translator fixes moved 1,050 of 1,652 listings to loading, from 902. This
+> document's own finding, that native capabilities are not where the catalogue
+> is lost, still stands. See [`measurements.md`](measurements.md).
+
 Phase 2 asks the better question — **"what should the portable runtime become,
 so that a foreign plugin no longer needs its original platform?"** — by refusing
 to treat `native` as permanent. Every capability below was re-examined for the

@@ -21,8 +21,11 @@ foreign index into **our** `RepositoryIndex`, and it converts one listing into a
 plugin archive. Returning our own types is the whole trick — everything
 downstream is written once, against one shape.
 
-Six exist: `aniyomi`, `mangayomi`, `cloudstream`, `sora`, `hayase`, `lnreader`.
-Five convert a published artifact; one translates from source.
+Nine exist: `aniyomi`, `mihon`, `sora`, `stremio`, `nuvio`, `hayase`,
+`mangayomi`, `lnreader`, `cloudstream`. Two — the Kotlin family, Aniyomi and
+Mihon — translate from source through the same front-end; the rest convert a
+published artifact or need no conversion, and some are `browse-only` for
+reasons each adapter states.
 
 ### 2. Front-end — reading the source
 

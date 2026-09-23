@@ -1,7 +1,7 @@
 # ADR 0006 — The local HTTP server idiom, and why the plugin ABI already answered it
 
 Status: **accepted** · 2026-09-10 · extends ADR-0004 · settles a row left open by ADR-0005 ·
-reads against `contract/plugin-api/ABI.md` §4 and `docs/compatibility-aniyomi.md`
+reads against `contract/ABI.md` §4 and `docs/compatibility-aniyomi.md`
 
 Research answer to: "several extensions refuse to convert because they stand up
 an HTTP server on localhost. Is that a translator gap, a missing capability, or
