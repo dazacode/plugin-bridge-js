@@ -54,6 +54,10 @@ export const RUNTIME_HELPERS = [
 	'bitwiseOr',
 	'bitwiseXor',
 	'toByte',
+	'toUByte',
+	'toBoolean',
+	'toBooleanStrict',
+	'toBooleanStrictOrNull',
 
 	/* Strings. The `substring*` family's two-argument forms return the *whole*
 	   string when the delimiter is absent, which no JavaScript builtin does. */
@@ -505,6 +509,7 @@ export const RUNTIME_HELPERS = [
 	'sortedDescending',
 	'compareBy',
 	'compareByDescending',
+	'comparatorOf',
 	'thenBy',
 	'thenByDescending',
 	'asSequence',
@@ -577,6 +582,14 @@ export const RUNTIME_HELPERS = [
 	'toRequestBody',
 	'toJsonBody',
 	'toJsonRequestBody',
+	/* keiyoushi core's GraphQL helpers (`utils/GraphQL.kt`): the builders, the
+	   builder extension and the envelope reader. */
+	'graphQLPost',
+	'graphQLBody',
+	'graphQLGet',
+	'appendGraphQLParams',
+	'persistedQueryExtension',
+	'parseGraphQLAs',
 	/* The response-side twin, which an interceptor hands to
 	   `response.newBuilder().body(…)` when it replaces what came back. */
 	'toResponseBody',

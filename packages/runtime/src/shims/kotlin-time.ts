@@ -1424,8 +1424,8 @@ function __numericLetter(letter, run) {
  * differently for a field that was read and one that defaulted: a LocalDate
  * from a pattern with no year is an exception there, not the year 1970.
  */
-function __readDate(parts, text) {
-  var found = new RegExp(parts.source).exec(__str(text));
+function __readDate(parts, text, caseInsensitive) {
+  var found = new RegExp(parts.source, caseInsensitive === true ? 'i' : '').exec(__str(text));
   if (found === null) return null;
   var read = {
     year: 1970, month: 1, day: 1, hour: 0, minute: 0, second: 0, nano: 0,
@@ -1517,16 +1517,25 @@ __DateTimeFormatter.prototype.getLocale = function () { return this.locale; };
 __DateTimeFormatter.prototype.withZone = function (zone) {
   return __withDefaults(
     new __DateTimeFormatter(this.pattern, this.locale, zone === null ? null : __zoneArg(zone), this.__iso),
-    this.__defaults
+    this.__defaults,
+    this.__ci
   );
 };
 __DateTimeFormatter.prototype.withLocale = function (locale) {
-  return __withDefaults(new __DateTimeFormatter(this.pattern, locale, this.zone, this.__iso), this.__defaults);
+  return __withDefaults(
+    new __DateTimeFormatter(this.pattern, locale, this.zone, this.__iso),
+    this.__defaults,
+    this.__ci
+  );
 };
 
-/** A formatter's 'parseDefaulting' fields, carried to a copy of it. */
-function __withDefaults(formatter, defaults) {
+/**
+ * A formatter's 'parseDefaulting' fields, carried to a copy of it — and its
+ * 'parseCaseInsensitive()', which a copy keeps the same way.
+ */
+function __withDefaults(formatter, defaults, caseInsensitive) {
   if (defaults !== undefined && defaults.length > 0) formatter.__defaults = defaults.slice();
+  if (caseInsensitive === true) formatter.__ci = true;
   return formatter;
 }
 __DateTimeFormatter.prototype.toString = function () { return this.pattern; };
@@ -1549,7 +1558,7 @@ __DateTimeFormatter.prototype.__read = function (text) {
       has: { year: true, month: true, day: true, hour: iso.hour !== null, minute: iso.hour !== null, second: iso.hour !== null }
     };
   }
-  var read = __readDate(this.__parts, text);
+  var read = __readDate(this.__parts, text, this.__ci === true);
   if (read === null) throw __parseError(text, 'it does not match "' + this.pattern + '"');
   // 'parseDefaulting(field, value)' from a DateTimeFormatterBuilder: a field
   // the pattern did not give is taken as that value, and one it did give is
@@ -1683,7 +1692,32 @@ function DateTimeFormatterBuilder() {
   if (!(this instanceof DateTimeFormatterBuilder)) return new DateTimeFormatterBuilder();
   this.__pattern = '';
   this.__defaults = [];
+  this.__ci = false;
 }
+/**
+ * 'parseCaseInsensitive()': the text's letters are matched ignoring case, so
+ * a quoted literal or a month name in capitals still reads. java.time applies
+ * it to what is appended *after* the call, which is where this catalogue
+ * writes it — first, before the pattern. Written after a pattern it would
+ * leave that pattern case-sensitive and this runtime has one flag for the
+ * whole formatter, so that order is refused where it is asked rather than
+ * read more leniently than java.time would.
+ */
+DateTimeFormatterBuilder.prototype.parseCaseInsensitive = function () {
+  if (this.__pattern.length > 0) {
+    throw __timeError('This converted extension switched a date formatter to case-insensitive after a pattern, which this runtime does not parse in part.');
+  }
+  this.__ci = true;
+  return this;
+};
+/** Its opposite, and the default: the same one flag, under the same rule. */
+DateTimeFormatterBuilder.prototype.parseCaseSensitive = function () {
+  if (this.__pattern.length > 0 && this.__ci) {
+    throw __timeError('This converted extension switched a date formatter back to case-sensitive after a pattern, which this runtime does not parse in part.');
+  }
+  this.__ci = false;
+  return this;
+};
 DateTimeFormatterBuilder.prototype.appendPattern = function (pattern) {
   this.__pattern += __str(pattern);
   return this;
@@ -1697,7 +1731,7 @@ DateTimeFormatterBuilder.prototype.parseDefaulting = function (field, value) {
   return this;
 };
 DateTimeFormatterBuilder.prototype.toFormatter = function (locale) {
-  return __withDefaults(new __DateTimeFormatter(this.__pattern, locale), this.__defaults);
+  return __withDefaults(new __DateTimeFormatter(this.__pattern, locale), this.__defaults, this.__ci);
 };
 
 var DateTimeFormatter = {

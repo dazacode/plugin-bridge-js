@@ -2834,6 +2834,40 @@ var __k = {
     return wrapped >= 128 ? wrapped - 256 : wrapped;
   },
 
+  /**
+   * Kotlin's 'toUByte()': the low eight bits, read as 0–255. A UByte here is
+   * the plain number, so 'toInt()' after it is the same value, which is the
+   * whole idiom ('it.toUByte().toInt()'). Only the conversion into a UByte is
+   * here; the UInt/ULong arithmetic that wraps at 2^32 is not modelled.
+   */
+  /** Kotlin's 'String?.toBoolean()': "true" ignoring case; null and anything else false. */
+  toBoolean: function (value) {
+    if (value === null || value === undefined) return false;
+    if (typeof value === 'boolean') return value;
+    return __str(value).toLowerCase() === 'true';
+  },
+
+  /** 'toBooleanStrict()': exactly "true" or "false", else IllegalArgumentException. */
+  toBooleanStrict: function (value) {
+    var read = __k.toBooleanStrictOrNull(value);
+    if (read === null) {
+      throw new Error('The string does not represent a boolean value: ' + __str(value));
+    }
+    return read;
+  },
+
+  /** 'toBooleanStrictOrNull()': exactly "true" or "false", else null. */
+  toBooleanStrictOrNull: function (value) {
+    var text = value === null || value === undefined ? null : __str(value);
+    return text === 'true' ? true : text === 'false' ? false : null;
+  },
+
+  toUByte: function (value) {
+    var number = Number(value);
+    if (!Number.isFinite(number)) throw new Error('This converted extension read a non-finite UByte.');
+    return Math.trunc(number) & 255;
+  },
+
   /* -- strings ------------------------------------------------------------ */
 
   substringAfter: function (value, delimiter, missing) {
@@ -5661,7 +5695,15 @@ var __k = {
   toIntArray: function (value) { return __arr(value); },
 
   /** JSON stringification used by small request/signature helpers. */
-  toJsonString: function (value) { return JSON.stringify(value); },
+  /**
+   * keiyoushi's 'T.toJsonString()', whose Json is the injected one. Encoded
+   * the way kotlinx encodes wherever the value reaches a '@Serializable'
+   * class this bundle registered — see '__serialEncode' — and stringified as
+   * it stands everywhere else, which is what it always was.
+   */
+  toJsonString: function (value) {
+    return JSON.stringify(__serialEncode(value, __JSON_INJECTED, 'value', 0, false));
+  },
 
   /** Encode one query component without turning spaces into form plus signs. */
   asQueryPart: function (value) { return encodeURIComponent(__str(value)); },
@@ -5932,6 +5974,26 @@ var __k = {
    * 'compareBy(comparator, { … })' means.
    */
   compareBy: function () { return __byKeys(Array.prototype.slice.call(arguments), 1); },
+
+  /**
+   * 'Comparator<T> { a, b -> … }' — the SAM constructor, whose lambda is the
+   * compare function itself. Kotlin's is synchronous (Comparator.compare is
+   * not a suspend function), so an answer that is a Promise is refused where
+   * it happens rather than read as a non-zero number, which would sort by
+   * nothing and look almost right.
+   */
+  comparatorOf: function (compare) {
+    if (typeof compare !== 'function') {
+      throw new Error('This converted extension built a Comparator from something that is not a function.');
+    }
+    return __comparator(function (a, b) {
+      var delta = compare(a, b);
+      if (__thenable(delta)) {
+        throw new Error('This converted extension compared with a function that suspends, which Kotlin cannot do either.');
+      }
+      return Number(delta);
+    });
+  },
   compareByDescending: function () { return __byKeys(Array.prototype.slice.call(arguments), -1); },
 
   thenBy: function (comparator, selector) {
@@ -7259,8 +7321,15 @@ var __k = {
    * maps each serializer the class names to a thunk answering the object, or
    * is null when it names none.
    */
-  serial: function (name, make, meta, custom) {
-    __SERIAL[name] = { make: make, meta: meta, custom: custom };
+  serial: function (name, make, meta, custom, ctor) {
+    var registration = { make: make, meta: meta, custom: custom };
+    __SERIAL[name] = registration;
+    // The class (or a data class's factory) answers for its instances, which
+    // is how the encoder finds the registration from a value — see
+    // '__serialEncode'. Absent from a bundle emitted before it was passed.
+    if (typeof ctor === 'function') {
+      Object.defineProperty(ctor, '__kSerial', { value: registration, configurable: true });
+    }
   },
 
   /** A JsonTransformingSerializer object, and the type its base serializer decodes. */
@@ -7294,7 +7363,7 @@ var __k = {
    * copied as it stands.
    */
   toJsonElement: function (value) {
-    return __encodeElement(value, 0);
+    return __serialEncode(value, __JSON_INJECTED, 'value', 0, false);
   },
 
   /**
@@ -7425,6 +7494,9 @@ var __k = {
    * that serialising it or comparing it sees only its fields.
    */
   dataRecord: function (record, factory, names) {
+    // Which data class this is, for the encoder: a record is a plain object
+    // and its constructor says nothing. See '__serialOf'.
+    Object.defineProperty(record, '__kFactory', { value: factory, enumerable: false });
     Object.defineProperty(record, '__kCopy', {
       value: function (named, positional) {
         var args = [];
@@ -7737,6 +7809,260 @@ function __encodeElement(value, depth) {
     out[renames[key] === undefined ? key : renames[key]] = __encodeElement(held, depth + 1);
   }
   return out;
+}
+
+/* --- typed encoding, the way kotlinx encodes --------------------------------- */
+
+/**
+ * The Json the host injects, which is what keiyoushi's 'jsonInstance' is and
+ * what its encoding helpers default to: 'ignoreUnknownKeys' and
+ * 'explicitNulls = false' over kotlinx's defaults, so 'encodeDefaults' is
+ * false too. Both matter only here: a property still holding its default is
+ * left out, and so is a null.
+ */
+var __JSON_INJECTED = { encodeDefaults: false, explicitNulls: false };
+
+/** The registration answering for this value, or null. See '__k.serial'. */
+function __serialOf(value) {
+  if (value === null || typeof value !== 'object') return null;
+  var owner = value.__kFactory !== undefined ? value.__kFactory : value.constructor;
+  return typeof owner === 'function' && owner.__kSerial !== undefined ? owner.__kSerial : null;
+}
+
+function __serialRefuse(path, why) {
+  return new Error('This converted extension encoded "' + path + '", ' + why +
+    ', which this runtime cannot write the way kotlinx would.');
+}
+
+/**
+ * One value, as kotlinx's Json encoder writes it.
+ *
+ * The decoder builds a record from its registration (see '__serialDecode');
+ * this is the other direction over the same registration, and it is what the
+ * old encoder guessed at. That one copied a record's *field* names — posting
+ * 'query' to a server that reads the '@SerialName' 'q' — and wrote every
+ * default and every null, which kotlinx leaves out. A request built that way
+ * is answered with nothing in it, and the source looks as if it went quiet.
+ *
+ * 'strict' is whether a value this runtime cannot vouch for is refused
+ * (a request body, which used to be refused whole) or left to the old copy
+ * (the JsonElement and string helpers, which have always answered one).
+ */
+function __serialEncode(value, config, path, depth, strict) {
+  if (depth > 32) throw __serialRefuse(path, 'nested past any payload a request carries');
+  if (value === null || value === undefined) return null;
+  var kind = typeof value;
+  if (kind === 'string' || kind === 'boolean') return value;
+  if (kind === 'number') {
+    if (!isFinite(value)) throw __serialRefuse(path, 'a number JSON has no spelling for');
+    return value;
+  }
+  if (kind === 'bigint') {
+    // JSON.stringify refuses a BigInt; a Long past 2^53 has no exact number.
+    if (value > BigInt(Number.MAX_SAFE_INTEGER) || value < BigInt(-Number.MAX_SAFE_INTEGER)) {
+      throw __serialRefuse(path, 'a Long past what a JSON number carries exactly here');
+    }
+    return Number(value);
+  }
+  if (kind !== 'object') throw __serialRefuse(path, 'a ' + kind);
+  if (value instanceof Uint8Array) {
+    // A ByteArray is a list of signed bytes to kotlinx.
+    var bytes = [];
+    for (var b = 0; b < value.length; b += 1) bytes.push(value[b] > 127 ? value[b] - 256 : value[b]);
+    return bytes;
+  }
+  if (__isJson(value)) return value;
+  var registration = __serialOf(value);
+  if (registration !== null) return __serialEncodeObject(registration, value, config, path, depth, strict);
+  var i;
+  if (Array.isArray(value)) {
+    // A Pair or Triple is an array here and a class to kotlinx, which writes
+    // its components by name. A map entry is written as a one-key object
+    // there, which nothing in this catalogue encodes.
+    if (Object.prototype.hasOwnProperty.call(value, 'key')) {
+      throw __serialRefuse(path, 'a Map.Entry');
+    }
+    if (Object.prototype.hasOwnProperty.call(value, 'first') && Object.prototype.hasOwnProperty.call(value, 'second')) {
+      var pair = {
+        first: __serialEncode(value.first, config, path + '.first', depth + 1, strict),
+        second: __serialEncode(value.second, config, path + '.second', depth + 1, strict)
+      };
+      if (Object.prototype.hasOwnProperty.call(value, 'third')) {
+        pair.third = __serialEncode(value.third, config, path + '.third', depth + 1, strict);
+      }
+      return pair;
+    }
+    var list = [];
+    for (i = 0; i < value.length; i += 1) list.push(__serialEncode(value[i], config, path + '[' + i + ']', depth + 1, strict));
+    return list;
+  }
+  if (value instanceof Set) {
+    var fromSet = [];
+    value.forEach(function (held) { fromSet.push(__serialEncode(held, config, path + '[]', depth + 1, strict)); });
+    return fromSet;
+  }
+  if (value instanceof Map) {
+    var fromMap = {};
+    value.forEach(function (held, key) {
+      fromMap[__serialKey(key, path)] = __serialEncode(held, config, path + '.' + String(key), depth + 1, strict);
+    });
+    return fromMap;
+  }
+  var ctor = value.constructor;
+  if (ctor && ctor.entries !== undefined && typeof value.ordinal === 'number' && typeof value.name === 'string') {
+    return __serialEnum(value, ctor);
+  }
+  var proto = Object.getPrototypeOf(value);
+  var plain = (proto === Object.prototype || proto === null) && value.__kCopy === undefined;
+  if (!plain) {
+    if (strict) {
+      throw __serialRefuse(path, 'an instance of a class with no @Serializable registration in this bundle');
+    }
+    return __encodeElement(value, depth);
+  }
+  // A plain object is a JsonObject or a Kotlin Map, and both are written as
+  // the keys they already carry.
+  var out = {};
+  for (var key in value) {
+    if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+    if (typeof value[key] === 'function') continue;
+    out[key] = __serialEncode(value[key], config, path + '.' + key, depth + 1, strict);
+  }
+  return out;
+}
+
+/** A map key, which kotlinx's Json writes as a string and only for a primitive or an enum. */
+function __serialKey(key, path) {
+  var kind = typeof key;
+  if (kind === 'string' || kind === 'number' || kind === 'boolean' || kind === 'bigint') return String(key);
+  if (key !== null && typeof key === 'object' && key.constructor && key.constructor.entries !== undefined &&
+      typeof key.name === 'string') {
+    return __serialEnum(key, key.constructor);
+  }
+  throw __serialRefuse(path, 'a map whose keys are not primitives');
+}
+
+/** An enum entry: its '@SerialName' when the emitter recorded one, else its name. */
+function __serialEnum(value, ctor) {
+  var names = ctor.__kSerialNames;
+  if (names !== undefined && Object.prototype.hasOwnProperty.call(names, value.name)) return names[value.name];
+  return value.name;
+}
+
+/**
+ * One registered record: its fields under their wire names, in declaration
+ * order, the constructor's and then the body's.
+ *
+ * A default is decided the way the generated serializer decides it — the
+ * property is left out when it equals what its default expression gives — and
+ * the default is found by asking the class itself: built again with that one
+ * argument left out and every other as the record has it, which is where the
+ * emitter put the default expressions. So a default that reads another
+ * parameter — 'val size: Int = page * 10' — reads the same value kotlinx's
+ * would, and a body property is compared with the class built from the
+ * record's own arguments.
+ */
+function __serialEncodeObject(registration, value, config, path, depth, strict) {
+  var meta = registration.meta;
+  if (meta.with !== null) throw __serialRefuse(path, 'a class with a custom serializer');
+  var actual = [];
+  for (var a = 0; a < meta.fields.length; a += 1) actual.push(value[meta.fields[a][0]]);
+  // The class built again with one argument left to its default and every
+  // other one as this record has it — which is exactly the expression the
+  // generated serializer compares against, evaluated over the same values.
+  function rebuilt(without) {
+    var args = actual.slice();
+    if (without >= 0) args[without] = undefined;
+    var built;
+    try {
+      built = registration.make(args);
+    } catch (error) {
+      throw __serialRefuse(path, 'a class whose defaults could not be worked out (' +
+        (error && error.message ? error.message : String(error)) + ')');
+    }
+    if (__thenable(built)) throw __serialRefuse(path, 'a class whose construction suspends');
+    return built;
+  }
+  var out = {};
+  var bodyDefaults = null;
+  var fields = meta.fields.concat(meta.body);
+  for (var i = 0; i < fields.length; i += 1) {
+    var field = fields[i];
+    if (field[5] === true) continue;
+    var held = value[field[0]];
+    if (held === undefined) held = null;
+    // '@EncodeDefault' decides for its own property: ALWAYS writes a default,
+    // NEVER leaves one out whatever the Json says.
+    var mode = field.length > 6 ? field[6] : null;
+    var skipDefaults = mode === 'NEVER' || (mode !== 'ALWAYS' && !config.encodeDefaults);
+    if (field[3] && skipDefaults) {
+      var isBody = i >= meta.fields.length;
+      var fresh;
+      if (isBody) {
+        if (bodyDefaults === null) bodyDefaults = rebuilt(-1);
+        fresh = bodyDefaults;
+      } else {
+        fresh = rebuilt(i);
+      }
+      if (__serialSame(held, fresh[field[0]], 0)) continue;
+    }
+    if (held === null && !config.explicitNulls) continue;
+    // A serializer named on the property, or on a type argument inside it
+    // ('List<@Serializable(X::class) String>', spelled '@X|' in the type):
+    // what it writes is its own business, and only decoding runs one here.
+    if (field[4] !== null || field[2].indexOf('@') !== -1) {
+      throw __serialRefuse(path + '.' + field[0], 'a field with a custom serializer');
+    }
+    out[field[1][0]] = __serialEncode(held, config, path + '.' + field[0], depth + 1, strict);
+  }
+  return out;
+}
+
+/**
+ * Kotlin's '==' as a generated serializer asks it of a default: structural
+ * for a list, a set, a map and a data class, identity for anything else —
+ * which is 'equals' for every type a default is written as.
+ */
+function __serialSame(a, b, depth) {
+  if (a === b) return true;
+  if (a === null || b === null || a === undefined || b === undefined) return a == b;
+  if (typeof a !== 'object' || typeof b !== 'object' || depth > 16) return false;
+  var i;
+  if (Array.isArray(a) && Array.isArray(b)) {
+    if (a.length !== b.length) return false;
+    for (i = 0; i < a.length; i += 1) if (!__serialSame(a[i], b[i], depth + 1)) return false;
+    return true;
+  }
+  if (a instanceof Uint8Array || b instanceof Uint8Array) return false;
+  if (a instanceof Set && b instanceof Set) {
+    if (a.size !== b.size) return false;
+    var every = true;
+    a.forEach(function (one) { if (!b.has(one)) every = false; });
+    return every;
+  }
+  if (a instanceof Map && b instanceof Map) {
+    if (a.size !== b.size) return false;
+    var same = true;
+    a.forEach(function (held, key) { if (!b.has(key) || !__serialSame(held, b.get(key), depth + 1)) same = false; });
+    return same;
+  }
+  var plainA = Object.getPrototypeOf(a) === Object.prototype;
+  var plainB = Object.getPrototypeOf(b) === Object.prototype;
+  // A data class, or a JsonObject/Map written as a plain object: by fields.
+  var recordA = a.__kCopy !== undefined && a.__kFactory !== undefined;
+  var recordB = b.__kCopy !== undefined && b.__kFactory !== undefined;
+  if (recordA || recordB) {
+    if (!(recordA && recordB) || a.__kFactory !== b.__kFactory) return false;
+  } else if (!(plainA && plainB)) {
+    return false;
+  }
+  var keys = Object.keys(a);
+  if (keys.length !== Object.keys(b).length) return false;
+  for (i = 0; i < keys.length; i += 1) {
+    if (!Object.prototype.hasOwnProperty.call(b, keys[i])) return false;
+    if (!__serialSame(a[keys[i]], b[keys[i]], depth + 1)) return false;
+  }
+  return true;
 }
 
 /** True when this record carries every field the shape requires. */
@@ -9465,12 +9791,149 @@ __k.toJsonRequestBody = function (value) {
     return __requestBody('application/json; charset=utf-8', JSON.stringify(value));
   }
   if (typeof value !== 'string') {
-    throw new Error(
-      'This converted extension serialised an object into a request body. Yorozo carries the ' +
-      '@Serializable field names only for decoding, so encoding one here could post the wrong keys.'
-    );
+    // Encoded as kotlinx would, through the registration the emitter wrote
+    // beside each '@Serializable' class: its '@SerialName's, its defaults
+    // left out, its nulls left out — the injected Json's configuration, which
+    // is the one keiyoushi's helper encodes with. Anything the encoder cannot
+    // spell faithfully (a class it has no registration for, a custom
+    // serializer, a polymorphic value) is refused inside it, by name.
+    var encoded = __serialEncode(value, __JSON_INJECTED, 'body', 0, true);
+    return __requestBody('application/json; charset=utf-8', JSON.stringify(encoded));
   }
   return __requestBody('application/json; charset=utf-8', value);
+};
+
+/* --- keiyoushi core's GraphQL helpers --------------------------------------- */
+
+/**
+ * keiyoushi core's 'utils/GraphQL.kt', ported: the request builders and the
+ * envelope reader, over the typed encoder and decoder above.
+ *
+ * Supplied by the host, as the other 'keiyoushi.utils' helpers are, because
+ * the file itself does not translate: it overloads each builder on whether
+ * 'variables' is a JsonElement or a '@Serializable' value, and JavaScript has
+ * one slot per name. The two overloads differ only in that the typed one runs
+ * 'variables.toJsonElement(json)' first, and encoding a JsonElement is the
+ * element itself — so one function answers both, exactly.
+ *
+ * Every one of them encodes with its 'json' parameter, which defaults to the
+ * injected instance. A Json passed explicitly carries a configuration this
+ * runtime does not keep (every 'Json { }' collapses to one parser here), so
+ * that is refused rather than encoded under the wrong rules.
+ */
+function __graphQLJson(json, what) {
+  if (json !== undefined && json !== null) {
+    throw new Error('This converted extension passed its own Json to ' + what +
+      ', whose encoding settings this runtime does not carry.');
+  }
+  return __JSON_INJECTED;
+}
+
+/** 'GraphQLRequest(operationName, query, variables, extensions)', encoded. */
+function __graphQLRequest(query, operationName, variables, extensions, json, what) {
+  var config = __graphQLJson(json, what);
+  var fields = [
+    ['operationName', operationName],
+    ['query', query],
+    ['variables', variables],
+    ['extensions', extensions]
+  ];
+  var out = {};
+  for (var i = 0; i < fields.length; i += 1) {
+    var held = fields[i][1] === undefined ? null : fields[i][1];
+    // Every field defaults to null and the injected Json leaves out both a
+    // default and a null, so an absent one is simply not written.
+    if (held === null) continue;
+    out[fields[i][0]] = __serialEncode(held, config, 'graphQL.' + fields[i][0], 0, true);
+  }
+  return out;
+}
+
+__k.graphQLBody = function (query, operationName, variables, extensions, json) {
+  var request = __graphQLRequest(query, operationName, variables, extensions, json, 'graphQLBody');
+  return __requestBody('application/json; charset=utf-8', JSON.stringify(request));
+};
+
+__k.graphQLPost = function (url, headers, query, operationName, variables, extensions, cache, json) {
+  var body = __k.graphQLBody(query, operationName, variables, extensions, json);
+  return POST(url, headers, body, cache === undefined ? null : cache);
+};
+
+/**
+ * 'HttpUrl.Builder.appendGraphQLParams(…)': the four as query parameters, in
+ * core's order, a null one left out.
+ */
+__k.appendGraphQLParams = function (builder, query, operationName, variables, extensions, json) {
+  var config = __graphQLJson(json, 'appendGraphQLParams');
+  if (operationName !== undefined && operationName !== null) builder.addQueryParameter('operationName', operationName);
+  if (query !== undefined && query !== null) builder.addQueryParameter('query', query);
+  if (variables !== undefined && variables !== null) {
+    builder.addQueryParameter('variables', JSON.stringify(__serialEncode(variables, config, 'graphQL.variables', 0, true)));
+  }
+  if (extensions !== undefined && extensions !== null) {
+    builder.addQueryParameter('extensions', JSON.stringify(__serialEncode(extensions, config, 'graphQL.extensions', 0, true)));
+  }
+  return builder;
+};
+
+/** The top-level 'graphQLGet(url, headers, …)', which builds a Request. */
+__k.graphQLGet = function (url, headers, query, operationName, variables, extensions, cache, json) {
+  var built = __k.appendGraphQLParams(
+    __k.httpUrl(url).newBuilder(), query, operationName, variables, extensions, json
+  ).build();
+  return GET(built, headers, cache === undefined ? null : cache);
+};
+
+/** '{"persistedQuery":{"version":…,"sha256Hash":…}}' — neither field has a default. */
+__k.persistedQueryExtension = function (hash, version) {
+  return { persistedQuery: { version: version === undefined ? 1 : version, sha256Hash: __str(hash) } };
+};
+
+/**
+ * 'parseGraphQLAs<T>()', on a Response or a String: the envelope decoded,
+ * a non-empty 'errors' thrown as their messages joined by newlines, and a
+ * missing 'data' an IllegalStateException — in that order, as core has it.
+ */
+__k.parseGraphQLAs = function (receiver, type, json) {
+  if (typeof type !== 'string' || type.length === 0) {
+    throw new Error('This converted extension read a GraphQL response with no type to decode it as.');
+  }
+  var text = typeof receiver === 'string' ? receiver : __jsonText(receiver);
+  if (text === null) throw new Error('This converted extension read a GraphQL response from something with no body.');
+  var raw;
+  try {
+    raw = JSON.parse(text);
+  } catch (error) {
+    throw new Error('This converted extension expected JSON, and this source did not answer with JSON.');
+  }
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error('This converted extension expected a GraphQL response to be a JSON object.');
+  }
+  var data = raw.data === undefined ? null : raw.data;
+  // Decoded first: kotlinx builds the whole envelope before anything is
+  // asked of it, so a 'data' that does not fit T fails before 'errors' does.
+  var decoded = data === null ? null : __k.decode(Json, type, JSON.stringify(data));
+  var errors = raw.errors === undefined ? null : raw.errors;
+  if (errors !== null) {
+    if (!Array.isArray(errors)) {
+      throw new Error('This converted extension expected "errors" to be a list in a GraphQL response.');
+    }
+    if (errors.length > 0) {
+      var messages = [];
+      for (var i = 0; i < errors.length; i += 1) {
+        var message = errors[i] === null || typeof errors[i] !== 'object' ? undefined : errors[i].message;
+        if (typeof message !== 'string') throw __serialMissing('response.errors[' + i + '].message');
+        messages.push(message);
+      }
+      var failure = new Error(messages.join('\\n'));
+      failure.name = 'GraphQLException';
+      throw failure;
+    }
+  }
+  if (decoded === null || decoded === undefined) {
+    return __k.error("GraphQL response is missing the 'data' field");
+  }
+  return decoded;
 };
 
 __k.bodyString = function (value) {
@@ -10694,7 +11157,9 @@ function __serialObject(registration, typeArgs, raw, path) {
 }
 
 /**
- * One field: [name, wireNames, type, hasDefault, serializer, transient].
+ * One field: [name, wireNames, type, hasDefault, serializer, transient,
+ * encodeDefault] — the last is the property's '@EncodeDefault' mode, which only
+ * the encoder reads (see '__serialEncodeObject').
  *
  * Undefined means "use the declared default" — the constructor's own default
  * parameter, which is where the emitter put it. An absent field with no
@@ -11095,6 +11560,24 @@ function __nextInferred(type) {
   var text = __str(type).trim().replace(/\\?$/, '');
   var list = /^(?:[\\w.]*\\.)?(?:List|MutableList|ArrayList)\\s*<(.*)>$/.exec(text);
   var element = (list === null ? text : list[1]).trim().replace(/\\?$/, '').replace(/^.*\\./, '');
+  var required = [];
+  // The registration every '@Serializable' class now carries is kotlinx's own
+  // descriptor, so it is read first and exactly as upstream reads one: an
+  // element is required unless it has a default or a nullable type, and it is
+  // present under its '@SerialName' or any of its '@JsonNames'. The shapes
+  // below are registered only for a class with a rename or a computed field,
+  // so a plain DTO had none and was refused for a predicate it plainly has.
+  var registration = Object.prototype.hasOwnProperty.call(__SERIAL, element) ? __SERIAL[element] : null;
+  if (registration !== null && registration.meta.with === null) {
+    var elements = registration.meta.fields.concat(registration.meta.body);
+    for (var e = 0; e < elements.length; e += 1) {
+      var described = elements[e];
+      if (described[5] === true || described[3] === true) continue;
+      if (/\\?$/.test(__str(described[2]).replace(/\\s+/g, ''))) continue;
+      required.push(described[1].slice());
+    }
+    return __nextRequired(element, required, list !== null);
+  }
   var shape = null;
   for (var s = 0; s < __SHAPES.length; s += 1) {
     var ctor = __SHAPES[s].ctor;
@@ -11105,7 +11588,6 @@ function __nextInferred(type) {
   if (shape === null) {
     throw new Error('Cannot infer a predicate for ' + element + ': this conversion has no @Serializable declaration of it.');
   }
-  var required = [];
   for (var f = 0; f < shape.fields.length; f += 1) {
     var field = shape.fields[f];
     if (shape.optional.indexOf(field) !== -1) continue;
@@ -11115,6 +11597,11 @@ function __nextInferred(type) {
     }
     required.push(names);
   }
+  return __nextRequired(element, required, list !== null);
+}
+
+/** The predicate over a set of required keys, each present under one of its names. */
+function __nextRequired(element, required, isList) {
   if (required.length === 0) {
     throw new Error(
       'Cannot infer a predicate for ' + element +
@@ -11127,7 +11614,7 @@ function __nextInferred(type) {
       return names.some(function (name) { return __nextHas(value, name); });
     });
   };
-  return list === null
+  return !isList
     ? fits
     : function (value) { return Array.isArray(value) && value.length > 0 && fits(value[0]); };
 }

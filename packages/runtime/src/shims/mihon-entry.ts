@@ -60,6 +60,13 @@ export interface MihonEntrypointOptions {
 	readonly baseUrl: string;
 	/** The language this listing serves, which the generated subclass supplies. */
 	readonly lang?: string;
+	/**
+	 * The source's display name, which the generated subclass supplies as well —
+	 * the `source {}` block's own `name`, else the module's. Absent reads as
+	 * the old behaviour: nothing is put on the class, and `name` is whatever the
+	 * translated source makes it.
+	 */
+	readonly name?: string;
 	/** Foreign preference key to manifest setting id. */
 	readonly settingIds?: Readonly<Record<string, string>>;
 	/**
@@ -87,8 +94,8 @@ export interface MihonEntrypointOptions {
 	readonly keiSource?: boolean;
 }
 
-const MIHON_DRIVER = String.raw`
-/* --- the base class this build supplies ------------------------------------ */
+const MIHON_BASE = String.raw`
+/* --- the base class this build supplies, before the class is built -------- */
 
 /**
  * 'headers' and 'headersBuilder()', which the base class owns and the extension
@@ -105,72 +112,107 @@ const MIHON_DRIVER = String.raw`
  * deliberately NOT lazy there — the base class replaces the delegate so a
  * preference that changes the base url changes the next request — so it is
  * rebuilt on each read rather than memoised as 'HttpSource' does.
- */
-if (__KEI_SOURCE) {
-  __source.headersBuilder = function () {
-    var base = String(__source.baseUrl || __BASE_URL);
-    var builder = Headers.Builder().set('Referer', base + '/').set('Origin', base);
-    if (typeof __source.configureHeaders !== 'function') return builder;
-    var configured = __source.configureHeaders(builder);
-    return configured === undefined || configured === null ? builder : configured;
-  };
-} else if (typeof __source.headersBuilder !== 'function') {
-  __source.headersBuilder = function () { return Headers.Builder(); };
-}
-if (!('headers' in __source)) {
-  var __headerCache = null;
-  Object.defineProperty(__source, 'headers', {
-    configurable: true,
-    get: function () {
-      if (__KEI_SOURCE) return __headers();
-      if (__headerCache === null) __headerCache = __headers();
-      return __headerCache;
-    }
-  });
-}
-
-/**
- * 'client', 'network', 'json' and 'preferences', which the base class owns
- * and an extension reaches through bare: 'client.newCall(…)', 'network.client',
- * 'json.decodeFromString(…)'.
  *
- * None was on the instance, so 'this.client' was undefined and every request a
- * translated member made itself died on the first search — while the bundle
- * imported cleanly and was counted as working. Each is defined only when the
- * class has none of its own: an extension that overrides 'client' with its own
- * interceptor chain means that one.
+ * 'client', 'network', 'json' and 'preferences' are the base class's too, and
+ * an extension reaches them bare: 'client.newCall(…)', 'network.client',
+ * 'json.decodeFromString(…)'. Under 'KeiSource' the client is final and lazy:
+ * the shared client, rebuilt with whatever the extension's 'configureClient'
+ * adds. That hook is where the catalogue declares its rate limits —
+ * 'configureClient() = rateLimit(3)' — so a client that skipped it would send
+ * as fast as it liked on behalf of a source that asked it not to.
  *
- * Under 'KeiSource' the client is final and lazy: the shared client, rebuilt
- * with whatever the extension's 'configureClient' adds. That hook is where the
- * catalogue declares its rate limits — 'configureClient() = rateLimit(3)' — so
- * a client that skipped it would send as fast as it liked on behalf of a source
- * that asked it not to.
+ * **All of it goes on the class's prototype before the constructor runs.** A
+ * base class's members exist while a subclass initialises, and extensions
+ * build on that: 'override val client = network.client.newBuilder()…',
+ * 'private val apiHeaders = headers.newBuilder()…'. These were attached to the
+ * instance after 'new', so such an initialiser read 'undefined' — one bundle
+ * died at load on 'this.network.client', and any that read 'headers' built
+ * its requests from nothing. The getters read 'this', not '__source', which
+ * does not exist yet while the constructor runs.
+ *
+ * Each is defined only where the class has none of its own, which is the
+ * order Kotlin resolves an override in: a method or getter the chain declares
+ * is found by the 'in' check and left alone, and a value the extension assigns
+ * in its constructor lands on the instance through the setter and shadows the
+ * prototype. The Kei builder is the exception, as it always was — final
+ * upstream, so it replaces anything the chain declares.
  */
-if (__KEI_SOURCE && !('client' in __source)) {
-  var __keiClient = null;
-  Object.defineProperty(__source, 'client', {
-    configurable: true,
-    get: function () {
-      if (__keiClient === null) {
+function __supplyBase(proto) {
+  function define(key, descriptor) {
+    descriptor.configurable = true;
+    Object.defineProperty(proto, key, descriptor);
+  }
+  /** A setter that makes an assignment what it is in Kotlin: the instance's own value. */
+  function ownValue(key) {
+    return function (value) {
+      Object.defineProperty(this, key, { value: value, writable: true, enumerable: true, configurable: true });
+    };
+  }
+  if (__KEI_SOURCE) {
+    define('headersBuilder', {
+      writable: true,
+      value: function () {
+        var base = String(this.baseUrl || __BASE_URL);
+        var builder = Headers.Builder().set('Referer', base + '/').set('Origin', base);
+        if (typeof this.configureHeaders !== 'function') return builder;
+        var configured = this.configureHeaders(builder);
+        return configured === undefined || configured === null ? builder : configured;
+      }
+    });
+  } else if (!('headersBuilder' in proto)) {
+    define('headersBuilder', { writable: true, value: function () { return Headers.Builder(); } });
+  }
+  if (!('headers' in proto)) {
+    define('headers', {
+      get: function () {
+        var built = __headers(this);
+        // HttpSource's is 'by lazy': built once, on the first read.
+        if (!__KEI_SOURCE) {
+          Object.defineProperty(this, 'headers', { value: built, writable: true, configurable: true });
+        }
+        return built;
+      },
+      set: ownValue('headers')
+    });
+  }
+  if (__KEI_SOURCE && !('client' in proto)) {
+    define('client', {
+      get: function () {
         var builder = network.client.newBuilder();
-        if (typeof __source.configureClient === 'function') {
-          var configured = __source.configureClient(builder);
+        if (typeof this.configureClient === 'function') {
+          var configured = this.configureClient(builder);
           if (configured !== undefined && configured !== null) builder = configured;
         }
-        __keiClient = builder.build();
-      }
-      return __keiClient;
-    }
-  });
+        var built = builder.build();
+        Object.defineProperty(this, 'client', { value: built, writable: true, configurable: true });
+        return built;
+      },
+      set: ownValue('client')
+    });
+  }
+  // 'getFilterList()': HttpSource's answers an empty FilterList, and so does
+  // KeiSource's 'getFilterList(data)' that its final no-argument one builds
+  // from — one slot here. An extension calling it without declaring it —
+  // 'getSearchMangaList(page, "", getFilterList(null))' — found nothing on the
+  // instance and died on the first search. The host never calls it (a search
+  // is handed no filters), so this is only ever the extension's own call.
+  if (!('getFilterList' in proto)) {
+    define('getFilterList', { writable: true, value: function () { return FilterList(); } });
+  }
+  var shared = [
+    ['client', client],
+    ['network', network],
+    ['json', Json],
+    ['preferences', getPreferences()]
+  ];
+  for (var i = 0; i < shared.length; i += 1) {
+    if (!(shared[i][0] in proto)) define(shared[i][0], { value: shared[i][1], writable: true });
+  }
 }
-for (const __own of [
-  ['client', client],
-  ['network', network],
-  ['json', Json],
-  ['preferences', getPreferences()]
-]) {
-  if (!(__own[0] in __source)) __source[__own[0]] = __own[1];
-}
+
+`;
+
+const MIHON_DRIVER = String.raw`
 
 /** Whether the translated class actually defines a member. */
 function __declares(name) {
@@ -425,10 +467,11 @@ function __textOf(document, selector) {
   }
 }
 
-function __headers() {
-  if (__declares('headersBuilder')) {
+function __headers(self) {
+  const target = self === undefined ? __source : self;
+  if (typeof target.headersBuilder === 'function') {
     try {
-      const built = __source.headersBuilder();
+      const built = target.headersBuilder();
       if (built && typeof built.build === 'function') return built.build();
       if (built && typeof built === 'object') return built;
     } catch (error) {
@@ -659,6 +702,7 @@ export function mihonEntrypoint(options: MihonEntrypointOptions): string {
 		`const __PLUGIN_ID = ${JSON.stringify(options.pluginId)};`,
 		`const __BASE_URL = ${JSON.stringify(options.baseUrl.replace(/\/+$/, ''))};`,
 		`const __LANG = ${JSON.stringify(options.lang ?? '')};`,
+		`const __NAME = ${JSON.stringify(options.name ?? '')};`,
 		`const __KEI_SOURCE = ${options.keiSource === true};`
 	].join('\n');
 
@@ -684,6 +728,7 @@ ${settingIds}
 ${resources}
 ${kotlinRuntime()}
 ${constants}
+${MIHON_BASE}
 
 /* --- the translated extension ---------------------------------------------- */
 
@@ -697,7 +742,38 @@ ${options.translatedSource}
  * of them. \`mihon-build-file.ts\` reads those from the module's build file and
  * they are attached here, because a source that builds every request from
  * \`baseUrl\` gets \`undefined/manga/1\` without them.
+ *
+ * **Before the constructor runs, not after it.** The generated class is the
+ * most-derived one, so what it supplies is already there while every class
+ * above it initialises — and extensions rely on that: a single-series template
+ * builds its whole catalogue as \`listOf(Pair(name, baseUrl))\` in a property
+ * initialiser, and its instances list \`"$baseUrl/manga/…"\` the same way.
+ * Attached after \`new\`, every one of those initialisers had already read
+ * \`undefined\`: the shelf listed \`undefined/manga/…\` entries that answered
+ * without a request, in every instance of the template, and nothing was
+ * refused.
+ *
+ * So they go on the class's prototype first, as plain writable values, and
+ * only where nothing in the chain answers the name already. A class that
+ * declares one itself still wins — a constructor parameter or a field
+ * assignment lands on the instance and shadows the prototype, and a getter
+ * (\`by lazy\`, a preference-backed mirror) is found by the \`in\` check and
+ * left alone — which is the order Kotlin resolves an override in. The two
+ * lines after \`new\` stay for a declaration that answered nothing.
  */
+(function (proto) {
+  var supplied = { baseUrl: __BASE_URL, lang: __LANG, name: __NAME };
+  for (var key in supplied) {
+    if (supplied[key].length === 0 || key in proto) continue;
+    Object.defineProperty(proto, key, {
+      value: supplied[key],
+      writable: true,
+      enumerable: false,
+      configurable: true
+    });
+  }
+})(${options.className}.prototype);
+__supplyBase(${options.className}.prototype);
 const __source = new ${options.className}();
 if (!__source.baseUrl) __source.baseUrl = __BASE_URL;
 if (!__source.lang && __LANG.length > 0) __source.lang = __LANG;

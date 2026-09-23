@@ -1479,6 +1479,36 @@ describe('which refusals the host can reach', () => {
 		expect(result.blocking.map((one) => one.member)).toContain('FILTERS');
 	});
 
+	it('blocks on a refused property of the template the extension extends', async () => {
+		// Building the extension builds its base class, and a getter-bodied
+		// property is read as `this.apiUrl` — a read, not a call, so it drew
+		// no edge. The template was never reached as a type, the refused getter
+		// was pruned, and every request went to `undefined/search` out of a
+		// conversion that reported nothing refused.
+		const result = await convertKotlin(
+			[
+				{
+					path: 'Demo.kt',
+					source: kt('class Demo : Template() {', '    override val lang = "en"', '}')
+				},
+				{
+					path: 'Template.kt',
+					source: kt(
+						'abstract class Template : Source() {',
+						'    protected open val apiUrl: String',
+						'        get() = Injekt.get<Api>().url',
+						'    private fun searchUrl(page: Int) = "$apiUrl/search?page=$page"',
+						'    override fun popularMangaRequest(page: Int) = GET(searchUrl(page))',
+						'}'
+					)
+				}
+			],
+			{ parser }
+		);
+
+		expect(result.blocking.map((one) => one.member)).toEqual(['apiUrl']);
+	});
+
 	it('keeps a member reached only through a receiver it cannot resolve', async () => {
 		// The graph is built from the text, not from resolved calls: pruning
 		// something that is in fact called trades a refusal for `undefined is not
