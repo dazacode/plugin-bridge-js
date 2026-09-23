@@ -5877,13 +5877,30 @@ class Emitter {
 			if (TYPED_HELPERS.has(helper) && typeArgument !== null && args.length === 0) {
 				tail.push(this.typeReference(typeArgument));
 			}
+			// A class in this conversion declares a method under the same name,
+			// so the receiver may be one of its instances — and a member beats an
+			// extension in Kotlin. `parser.substringBefore("',")` on the unpacker
+			// module's own `SubstringExtractor` went to the string helper, which
+			// read the extractor as "[object Object]" and unpacked nothing. The
+			// receiver's type is not known here, so the runtime asks it: see
+			// `__k.ownOr`. Only for names something declares, so no other call
+			// changes.
+			const ambiguous = !indexed && this.declaredMethods.has(name);
+			const invoke = (subject: string): string =>
+				ambiguous
+					? `${this.helper('ownOr')}(${[subject, JSON.stringify(name), JSON.stringify(helper), ...tail].join(', ')})`
+					: `${this.helper(helper)}(${[subject, ...tail].join(', ')})`;
+			if (ambiguous) this.helper(helper);
 			const call = safe
 				? // `a?.substringAfter("x")` cannot use JavaScript's own `?.`: the
 					// helper takes the receiver as an argument and would be handed
 					// the null, and a conditional would evaluate it twice.
-					`${this.helper('sc')}(${receiverText}, (__r) => ${this.helper(helper)}(${['__r', ...tail].join(', ')}))`
-				: `${this.helper(helper)}(${[receiverText, ...tail].join(', ')})`;
-			const suspends = AWAITING_HELPERS.has(helper) || this.asyncLambdas > before;
+					`${this.helper('sc')}(${receiverText}, (__r) => ${invoke('__r')})`
+				: invoke(receiverText);
+			const suspends =
+				AWAITING_HELPERS.has(helper) ||
+				this.asyncLambdas > before ||
+				(ambiguous && this.declaredSuspends.has(name));
 			return suspends ? this.awaited(call) : call;
 		}
 

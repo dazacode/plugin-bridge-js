@@ -1107,7 +1107,13 @@ export const EXTENSION_PROPERTIES: ReadonlyMap<string, string> = new Map([
 	// been the honest outcome; silence was not. See `indices` in the runtime.
 	['indices', 'indices'],
 	['groupValues', 'groupValues'],
-	['destructured', 'destructured']
+	['destructured', 'destructured'],
+	// `Char.code`. A Char is a one-character string here, so the read came out
+	// as a property of a string — `undefined` — and `ch.code - '0'.code` was
+	// NaN: the unpacker module's radix parser answered NaN for every word and
+	// returned its packed input unchanged, with nothing refused. The name is
+	// also okhttp's `response.code`, which the helper hands straight back.
+	['code', 'code']
 ]);
 
 /**

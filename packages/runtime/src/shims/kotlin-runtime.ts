@@ -269,6 +269,16 @@ function __firstIndex(items, predicate) {
   return -1;
 }
 
+/** Whether a value is an instance of a converted class with this method. See __k.ownOr. */
+function __ownsMethod(receiver, name) {
+  if (receiver === null || typeof receiver !== 'object') return false;
+  if (Array.isArray(receiver) || receiver instanceof Map || receiver instanceof Set) return false;
+  if (receiver instanceof Date || receiver instanceof RegExp || receiver instanceof Promise) return false;
+  var proto = Object.getPrototypeOf(receiver);
+  if (proto === null || proto === Object.prototype) return false;
+  return typeof receiver[name] === 'function';
+}
+
 function __str(value) {
   return value === null || value === undefined ? '' : String(value);
 }
@@ -2842,6 +2852,19 @@ var __k = {
    * one in this ecosystem does with it, and it is what __k.range and __k.until
    * already answer.
    */
+  /**
+   * Char.code, and every other .code read, which is the same spelling.
+   *
+   * A Char is a one-character string here, so its code is the character's own
+   * code unit; a String has no .code in Kotlin, so a one-character string
+   * reaching this is always a Char. Anything else — okhttp's response.code, a
+   * DTO field — is handed back as the property it is.
+   */
+  code: function (value) {
+    if (__isChar(value)) return value.charCodeAt(0);
+    return value === null || value === undefined ? value : value.code;
+  },
+
   indices: function (value) {
     var length = typeof value === 'string' ? value.length : __arr(value).length;
     var out = [];
@@ -5123,6 +5146,23 @@ var __k = {
    * is not the class itself reach this inside the arguments of a Log call,
    * where the difference is a word in a diagnostic and never a branch taken.
    */
+  /**
+   * A stdlib helper's name called on a receiver that may declare it itself.
+   *
+   * Kotlin resolves a member before an extension, so 'parser.substringBefore(x)'
+   * on a converted class that declares substringBefore is that method, and on
+   * a String it is the stdlib's. The emitter cannot type the receiver, and
+   * only routes a call here when some converted class declares the name; the
+   * instance then answers for itself. The built-in collections, strings and
+   * plain objects never do — their methods are JavaScript's, not Kotlin
+   * members — so they keep the helper.
+   */
+  ownOr: function (receiver, name, helper) {
+    var rest = Array.prototype.slice.call(arguments, 3);
+    if (__ownsMethod(receiver, name)) return receiver[name].apply(receiver, rest);
+    return __k[helper].apply(null, [receiver].concat(rest));
+  },
+
   simpleName: function (value) {
     if (value === null || value === undefined) {
       throw new Error('This converted extension asked for the class of a null value.');

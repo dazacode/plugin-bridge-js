@@ -553,7 +553,14 @@ export const RUNTIME_HELPERS = [
 	'classLoader',
 	/* A class's simple name — see `SIMPLE_NAME` in `subset.ts` for the two
 	   chains that reach it and why a value only reaches it inside a log line. */
-	'simpleName'
+	'simpleName',
+	/* A call whose name is both a stdlib helper and a method some converted
+	   class declares: the receiver's own method when it has one. See
+	   `__k.ownOr` and the helper path of `methodCall` in `emit.ts`. */
+	'ownOr',
+	/* `.code`: a Char's code unit, or the property of that name on anything
+	   else. See `EXTENSION_PROPERTIES` in `subset.ts`. */
+	'code'
 ] as const;
 
 export type RuntimeHelper = (typeof RUNTIME_HELPERS)[number];

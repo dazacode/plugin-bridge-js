@@ -233,6 +233,27 @@ describe('what the emitter is promised', () => {
 		expect(k.javaClass).toBeUndefined();
 	});
 
+	it('reads a Char’s code, and any other .code as the property it is', () => {
+		expect(k.code('A')).toBe(65);
+		expect(k.code('0')).toBe(48);
+		expect(k.code({ code: 404 })).toBe(404);
+		expect(k.code(null)).toBe(null);
+	});
+
+	it('lets an instance that declares a helper’s name answer for itself', () => {
+		// A converted class's member wins, as Kotlin's member-over-extension
+		// rule says; a string, a list, a Map and a plain object keep the helper.
+		class Cursor {
+			substringBefore(delimiter: string) {
+				return 'own:' + delimiter;
+			}
+		}
+		expect(k.ownOr(new Cursor(), 'substringBefore', 'substringBefore', ',')).toBe('own:,');
+		expect(k.ownOr('a,b', 'substringBefore', 'substringBefore', ',')).toBe('a');
+		expect(k.ownOr(['x'], 'first', 'first')).toBe('x');
+		expect(k.ownOr({ first: () => 'own' }, 'first', 'first')).not.toBe('own');
+	});
+
 	it('names a class by the instance’s own constructor, and an error by its name', () => {
 		// The emitter writes each Kotlin class as a JavaScript class of the same
 		// name, so a subclass instance answers with the subclass. An error answers

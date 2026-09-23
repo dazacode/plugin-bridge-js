@@ -4487,6 +4487,28 @@ describe('the shared playlist module’s signatures', () => {
 		expect(shown).toEqual(['none', 'z']);
 	});
 
+	it('asks the receiver first when a converted class declares a helper’s name', () => {
+		// The unpacker module's `SubstringExtractor.substringBefore` is a member,
+		// and a member beats the stdlib extension in Kotlin. Which one a call
+		// means depends on a receiver this build cannot type, so it is asked.
+		const emitted = translate(
+			kt(
+				'class Cursor(private val text: String) {',
+				'    fun substringBefore(s: String): String = text',
+				'}',
+				'class Demo : Source() {',
+				'    fun a(c: Cursor): String = c.substringBefore("x")',
+				'    fun b(): Char = "ab"[0]',
+				"    fun n(ch: Char): Int = ch.code - '0'.code",
+				'}'
+			)
+		);
+
+		expect(emitted.refusals).toEqual([]);
+		expect(emitted.js).toContain('__k.ownOr(c, "substringBefore", "substringBefore", \'x\')');
+		expect(emitted.js).toContain("(__k.code(ch) - __k.code('0'))");
+	});
+
 	it('calls an object’s own member over the runtime function of that name', () => {
 		const shown = evaluate(
 			kt(
