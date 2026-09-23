@@ -1101,6 +1101,28 @@ describe('the parts of Kotlin that have no JavaScript spelling', () => {
 		expect(() => k.step(k.until(0, 4), 0)).toThrow(/positive/);
 	});
 
+	it('dispatches `+` and `-` on the left operand, as Kotlin resolves them', () => {
+		expect(k.plus(1, 2)).toBe(3);
+		expect(k.plus('a', 1)).toBe('a1');
+		expect(k.plus(null, 'x')).toBe('nullx');
+		expect(k.plus([1], [2, 3])).toEqual([1, 2, 3]);
+		expect(k.plus([1], 2)).toEqual([1, 2]);
+		// A Pair is an array here, and is one element rather than two.
+		expect(k.plus([k.to('a', 1)], k.to('b', 2)).length).toBe(2);
+		const merged = k.plus(k.mapOf(k.to('a', 1)), k.to('b', 2));
+		expect([...merged.entries()]).toEqual([
+			['a', 1],
+			['b', 2]
+		]);
+		expect([...k.plus(k.setOf(1, 2), [2, 3])]).toEqual([1, 2, 3]);
+		expect(k.minus(5, 2)).toBe(3);
+		// No String minus exists, so a string on the left is a Char.
+		expect(k.minus('C', 'A')).toBe(2);
+		expect(k.minus('c', 1)).toBe('b');
+		expect([...k.minus(k.mapOf(k.to('a', 1), k.to('b', 2)), 'a').keys()]).toEqual(['b']);
+		expect(k.minus([1, 2, 3], [2])).toEqual([1, 3]);
+	});
+
 	it('reads the infix `matches` from whichever side holds the Regex', () => {
 		expect(k.regexMatches(k.regex('a+'), 'aaa')).toBe(true);
 		expect(k.regexMatches('aaa', k.regex('a+'))).toBe(true);

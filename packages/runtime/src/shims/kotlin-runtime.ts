@@ -512,6 +512,25 @@ function __trimEnds(value, given, fromStart, fromEnd) {
 }
 
 /** A Kotlin Char, which this runtime spells as a one-character string. */
+/** A Kotlin Pair, which is a two-element array carrying first and second. */
+function __isPair(value) {
+  return Array.isArray(value) && value.length === 2 &&
+    Object.prototype.hasOwnProperty.call(value, 'first');
+}
+
+/**
+ * Whether a '+' or '-' operand is a collection of elements or one element.
+ *
+ * A string is one element (a String in a List<String>), and so is a Pair and a
+ * Map: none of the three is an Iterable in Kotlin, whatever it is here.
+ */
+function __isCollection(value) {
+  if (value === null || value === undefined || typeof value !== 'object') return false;
+  if (__isPair(value) || value instanceof Map) return false;
+  return Array.isArray(value) || value instanceof Set ||
+    typeof value.toArray === 'function' || typeof value[Symbol.iterator] === 'function';
+}
+
 function __isChar(value) {
   return typeof value === 'string' && value.length === 1;
 }
@@ -2965,14 +2984,52 @@ var __k = {
     return __each(chunks, function (chunk) { return transform(chunk); });
   },
 
-  /** Kotlin's list + x, where x may be a list or a single element. */
-  plus: function (list, other) {
-    var items = __arr(list).slice();
-    if (Array.isArray(other) || (other !== null && other !== undefined && typeof other !== 'string' &&
-        typeof other[Symbol.iterator] === 'function')) {
-      return items.concat(__arr(other));
+  /**
+   * Kotlin's '+', and the plus() it is spelled as — dispatched on the LEFT
+   * operand, which is where Kotlin resolves it.
+   *
+   * The emitter has no types, and JavaScript's '+' reads a list as its text:
+   * 'listOf(1) + listOf(2)' was the string "12", a filter list built as
+   * 'EVERY + getPairList(n)' was one long string, and nothing refused or threw.
+   * So an operand the emitter cannot prove is a number or a string comes here.
+   *
+   * A number adds and a string (or a null String?) concatenates, exactly as
+   * the plain operator would. A Map merges a Map, a Pair or a list of Pairs;
+   * a Set unions; anything else that iterates is a list, which concatenates a
+   * collection and appends anything else. A Pair is an array here, and is one
+   * element rather than two. A class that declares its own 'operator fun plus'
+   * is asked for it.
+   *
+   * 'Char + Int' is the one case this cannot see: a Char is a one-character
+   * string, so it concatenates. The emitter answers that where the Char is a
+   * literal, which is the only place it can be told apart.
+   */
+  plus: function (left, right) {
+    if (typeof left === 'number' || typeof left === 'string' || left === null || left === undefined) {
+      return left + right;
     }
-    items.push(other);
+    if (left instanceof Map) {
+      var merged = new Map(left);
+      if (right instanceof Map) right.forEach(function (value, key) { merged.set(key, value); });
+      else if (__isPair(right)) merged.set(right.first, right.second);
+      else {
+        var entries = __arr(right);
+        for (var e = 0; e < entries.length; e += 1) merged.set(entries[e].first, entries[e].second);
+      }
+      return merged;
+    }
+    if (left instanceof Set) {
+      var union = __k.toSet(__arr(left));
+      var adding = __isCollection(right) ? __arr(right) : [right];
+      for (var u = 0; u < adding.length; u += 1) union.add(adding[u]);
+      return union;
+    }
+    if (!Array.isArray(left) && typeof left === 'object' && typeof left.plus === 'function') {
+      return left.plus(right);
+    }
+    var items = __arr(left).slice();
+    if (__isCollection(right)) return items.concat(__arr(right));
+    items.push(right);
     return items;
   },
 
@@ -4159,6 +4216,24 @@ var __k = {
    */
   minus: function (value, other) {
     if (typeof value === 'number') return value - Number(other);
+    // Kotlin has no String minus, so a string on the left is a Char: 'c - 'A''
+    // is the distance between two, and 'c - 1' is the Char one before. As
+    // JavaScript's '-' both were NaN.
+    if (typeof value === 'string') {
+      var code = value.charCodeAt(0);
+      if (typeof other === 'string') return code - other.charCodeAt(0);
+      return String.fromCharCode(code - Number(other));
+    }
+    if (value instanceof Map) {
+      var without = new Map(value);
+      var keys = __isCollection(other) ? __arr(other) : [other];
+      for (var k = 0; k < keys.length; k += 1) without.delete(keys[k]);
+      return without;
+    }
+    if (value !== null && typeof value === 'object' && !Array.isArray(value) &&
+        !(value instanceof Set) && typeof value.minus === 'function') {
+      return value.minus(other);
+    }
     if (value instanceof Set) {
       var removing = other instanceof Set || Array.isArray(other) ? __arr(other) : [other];
       var kept = new Set(value);

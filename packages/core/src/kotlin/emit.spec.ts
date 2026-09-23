@@ -136,7 +136,35 @@ const helpers: Record<string, (...args: never[]) => unknown> = {
 	addAll: (list: Any[], items: Any[]) => list.push(...items),
 	size: (value: Any) => (value as Any[]).length,
 	flatten: (list: Any[][]) => list.flat(),
-	plus: (list: Any[], other: Any) => list.concat(other as Any[]),
+	// Kotlin's `+`, dispatched on the left operand as the runtime's is.
+	plus: (left: Any, right: Any) => {
+		if (typeof left === 'number' || typeof left === 'string' || nullish(left)) {
+			return (left as number) + (right as number);
+		}
+		if (left instanceof Map) {
+			const merged = new Map(left);
+			if (right instanceof Map) right.forEach((value, key) => merged.set(key, value));
+			else {
+				const pair = right as { first: Any; second: Any };
+				merged.set(pair.first, pair.second);
+			}
+			return merged;
+		}
+		const isPair = Array.isArray(right) && 'first' in right;
+		return Array.isArray(right) && !isPair
+			? (left as Any[]).concat(right)
+			: [...(left as Any[]), right];
+	},
+	minus: (left: Any, right: Any) => {
+		if (typeof left === 'number') return left - Number(right);
+		if (typeof left === 'string') {
+			return typeof right === 'string'
+				? left.charCodeAt(0) - right.charCodeAt(0)
+				: String.fromCharCode(left.charCodeAt(0) - Number(right));
+		}
+		const dropping = Array.isArray(right) ? right : [right];
+		return (left as Any[]).filter((item) => !dropping.includes(item));
+	},
 
 	// The collection helpers settle a suspending callback, as `runtime-api.ts`
 	// requires of them. A `map` that returned a list of promises would look
@@ -2651,7 +2679,11 @@ describe('an extension function declared in an `object`', () => {
 		const emitted = translate(source);
 
 		expect(emitted.refusals).toEqual([]);
-		expect(emitted.js).toContain("text += 'b'");
+		// A rebinding, through Kotlin's `+` rather than JavaScript's: the
+		// helper concatenates a string exactly as the operator would, and a
+		// list as a list. See `additive`.
+		expect(emitted.js).toContain("text = __k.plus(text, 'b')");
+		expect(evaluate(source, 'new Demo().go()')).toBe('ab');
 	});
 
 	it('runs an `object`’s `by lazy` on first read, and only once', () => {
@@ -4635,6 +4667,13 @@ describe('control flow written in the middle of an expression', () => {
 		expect(demo.walk([1, 2], 7)).toEqual([1, 2]);
 	});
 
+	it('calls a backticked method by its name', () => {
+		// jsoup's `val()` has to be quoted in Kotlin, where `val` is a keyword.
+		const demo = instantiate(inClass('    fun value(input: Element): String = input.`val`()'));
+
+		expect(demo.value({ val: () => 'on' })).toBe('on');
+	});
+
 	it('reads an infix `matches` with the Regex on either side', () => {
 		const demo = instantiate(
 			inClass(
@@ -4696,5 +4735,81 @@ describe('a receiver named by its label', () => {
 		expect(
 			refusalNames(inClass('    fun go(x: String) = listOf(1).map { this@nowhere.size }'))
 		).toContain('`this@nowhere`');
+	});
+});
+
+describe("Kotlin `+` and `-`, which are not JavaScript's", () => {
+	it('concatenates lists rather than their text', () => {
+		// `EVERY + getPairList(n)` built one long string with JavaScript's `+`,
+		// and nothing refused or threw.
+		const found = evaluate(
+			kt(
+				'object F {',
+				'    val EVERY = listOf("all")',
+				'    val GENRES by lazy { EVERY + listOf("a", "b") }',
+				'    fun more(x: List<Int>, y: List<Int>) = x + y',
+				'    fun one(x: List<Int>) = x + 3',
+				'}'
+			),
+			'[F.GENRES, F.more([1], [2]), F.one([1, 2])]'
+		);
+
+		expect(found).toEqual([
+			['all', 'a', 'b'],
+			[1, 2],
+			[1, 2, 3]
+		]);
+	});
+
+	it('adds numbers and concatenates strings exactly as before', () => {
+		const found = evaluate(
+			kt(
+				'object F {',
+				'    fun next(page: Int) = page + 1',
+				'    fun title(name: String, n: Int) = "Chapter " + n + ": " + name',
+				'    fun back(page: Int) = page - 1',
+				'}'
+			),
+			'[F.next(2), F.title("x", 3), F.back(2)]'
+		);
+
+		expect(found).toEqual([3, 'Chapter 3: x', 1]);
+	});
+
+	it('merges a map with a pair and rebinds a `var` list on `+=`', () => {
+		const found = evaluate(
+			kt(
+				'object F {',
+				'    fun put(m: Map<String, Int>) = m + ("b" to 2)',
+				'    fun grow(xs: List<Int>): List<Int> {',
+				'        var acc = listOf(0)',
+				'        acc += xs',
+				'        acc -= 0',
+				'        return acc',
+				'    }',
+				'}'
+			),
+			'[F.put(new Map([["a", 1]])), F.grow([4, 5])]'
+		) as [Map<string, number>, number[]];
+
+		expect([...found[0]]).toEqual([
+			['a', 1],
+			['b', 2]
+		]);
+		expect(found[1]).toEqual([4, 5]);
+	});
+
+	it('does Char arithmetic, which a one-character string cannot say by itself', () => {
+		const found = evaluate(
+			kt(
+				'object F {',
+				"    fun rot(c: Char) = (c - 'A' + 13) % 26",
+				"    fun shift(i: Int) = 'a' + i",
+				'}'
+			),
+			'[F.rot("B"), F.shift(2)]'
+		);
+
+		expect(found).toEqual([14, 'c']);
 	});
 });

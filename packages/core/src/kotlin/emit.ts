@@ -1186,6 +1186,8 @@ class Emitter {
 	private readonly scopes: Map<string, Local>[] = [];
 	private readonly frames: Frame[] = [];
 	private temporaries = 0;
+	/** What an unlabelled `break` here would land on; see `loopBody`. */
+	private readonly loops: ('loop' | 'barrier')[] = [];
 	/** Bumped per captured receiver; see `Frame.capture`. */
 	private captures = 0;
 	/** Bumped per inlined Kotlin block, for the label a `return@x` leaves by. */
@@ -4050,11 +4052,13 @@ class Emitter {
 				return this.assignment(node);
 			case 'for_statement':
 				return this.forStatement(node);
-			case 'while_statement':
-				return `while (${this.expr(kids(node)[0])}) ${block(this.bodyLines(kids(node)[1] ?? null))}`;
+			case 'while_statement': {
+				const test = this.expr(kids(node)[0]);
+				return `while (${test}) ${block(this.loopBody(kids(node)[1] ?? null))}`;
+			}
 			case 'do_while_statement': {
 				const body = kids(node).find((child) => child.type === 'control_structure_body') ?? null;
-				return `do ${block(this.bodyLines(body))} while (${this.expr(kids(node)[kids(node).length - 1])});`;
+				return `do ${block(this.loopBody(body))} while (${this.expr(kids(node)[kids(node).length - 1])});`;
 			}
 			case 'jump_expression':
 				return this.jump(node, detached);
@@ -4465,10 +4469,22 @@ class Emitter {
 
 		const indexed = this.isIndexedTarget(target);
 		if (indexed && operator !== '=') this.refuse(node, `an indexed \`${operator}\``);
-		const write = (text: string): string =>
-			indexed
-				? `${this.helper('setIndex')}(${this.indexedTarget(target).join(', ')}, ${text});`
-				: `${this.assignable(target)} ${operator} ${text};`;
+		const write = (text: string): string => {
+			if (indexed)
+				return `${this.helper('setIndex')}(${this.indexedTarget(target).join(', ')}, ${text});`;
+			const written = this.assignable(target);
+			// `var genres = listOf(…); genres += more` rebinds the name to
+			// `genres + more`, and that `+` is Kotlin's — a list concatenation —
+			// where JavaScript's `+=` made it one long string. The same `+` as
+			// `additive`, and for the same reason: the target's type is what
+			// decides it, and nothing here can see one. A `val` local that
+			// mutates in place took `plusAssign` above.
+			if (rebound !== undefined) {
+				const helper = operator === '+=' ? 'plus' : 'minus';
+				return `${written} = ${this.helper(helper)}(${written}, ${text});`;
+			}
+			return `${written} ${operator} ${text};`;
+		};
 
 		// `title = element.selectFirst(x)?.text() ?: return@mapNotNull null` is
 		// the single most common shape of `?: return` in this catalogue, and it
@@ -4640,7 +4656,7 @@ class Emitter {
 				this.declare(name);
 				head = `const ${this.safe(name)}`;
 			}
-			return `for (${head} of ${sequence}) ${block(this.bodyLines(body))}`;
+			return `for (${head} of ${sequence}) ${block(this.loopBody(body))}`;
 		} finally {
 			this.popScope();
 		}
@@ -4657,7 +4673,16 @@ class Emitter {
 		}
 
 		if (keyword === 'break' || keyword === 'continue') {
-			if (this.inLambda()) this.refuse(node, `a \`${keyword}\` crossing a lambda`);
+			// Answered by what encloses it most closely, not by whether a lambda
+			// encloses it anywhere: `forEach { for (x in xs) { … break } }` breaks
+			// a loop inside the lambda, which is ordinary, and was refused as
+			// crossing one. What must not happen is a JavaScript `break` landing
+			// on a loop Kotlin did not mean — past a callback, which is a syntax
+			// error, or out of an inlined `forEach`, which is a `for…of` here and
+			// a lambda in Kotlin. See `loopBody`.
+			if (this.loops[this.loops.length - 1] !== 'loop') {
+				this.refuse(node, `a \`${keyword}\` crossing a lambda`);
+			}
 			return `${keyword};`;
 		}
 
@@ -4848,6 +4873,25 @@ class Emitter {
 		return this.branchLines(node, null);
 	}
 
+	/**
+	 * A Kotlin loop's body, with the loop recorded as what a `break` inside it
+	 * leaves.
+	 *
+	 * `loops` is the innermost-last list of the constructs an unlabelled
+	 * `break` or `continue` could land on: a Kotlin loop, or a barrier — a
+	 * callback, which JavaScript's `break` cannot cross, and an inlined
+	 * `forEach`, which is a JavaScript loop where Kotlin had a lambda. Only a
+	 * Kotlin loop on top is a `break` that means what it says.
+	 */
+	private loopBody(node: KNode | null): string[] {
+		this.loops.push('loop');
+		try {
+			return this.bodyLines(node);
+		} finally {
+			this.loops.pop();
+		}
+	}
+
 	/** One branch of an `if`/`when`/`try`, delivering its tail to the sink. */
 	private branchLines(node: KNode | null, sink: Sink): string[] {
 		if (node === null) return [];
@@ -4970,6 +5014,7 @@ class Emitter {
 				return this.binary(node, (operator) => operator);
 			}
 			case 'additive_expression':
+				return this.additive(node);
 			case 'multiplicative_expression':
 				return this.binary(node, (operator) => operator);
 			case 'conjunction_expression':
@@ -5031,6 +5076,51 @@ class Emitter {
 	}
 
 	/**
+	 * `a + b` and `a - b`, which are JavaScript's operators only for numbers
+	 * and strings.
+	 *
+	 * Kotlin resolves `+` on the left operand's type, and most of what an
+	 * extension adds is not a number: `listOf(a) + listOf(b)`, `EVERY +
+	 * getPairList(n)`, `map + (k to v)`, `ids - seen`. JavaScript's `+` reads
+	 * every one of those as text — `"1,2"` where a list was meant — and its
+	 * `-` answers NaN, with nothing refused and nothing thrown. So an operand
+	 * this cannot *prove* is a number or a string goes through `__k.plus` or
+	 * `__k.minus`, which dispatch on the value at run time the way Kotlin
+	 * dispatched on its type.
+	 *
+	 * Proof is the left operand's shape, because that is the one Kotlin reads:
+	 * a numeric literal or arithmetic, or a string literal or template. `x + 1`
+	 * proves nothing — `x` may be a list — so it takes the helper, which adds
+	 * two numbers exactly as the operator would.
+	 *
+	 * A `Char` literal on the left is the one type a value cannot reveal at run
+	 * time, since a Char is a one-character string here and `'a' + 1` would
+	 * concatenate. Kotlin has no other `Char.plus`, so it is code arithmetic.
+	 */
+	private additive(node: KNode, prefix = ''): string {
+		const operator = node.allChildren.find((child) => child.type === '+' || child.type === '-');
+		if (operator === undefined) {
+			this.refuse(node, `an operator this build could not read, in ${spoken(node)}`);
+		}
+		const left = kids(node)[0];
+		const right = kids(node)[kids(node).length - 1];
+		const head = prefix.length === 0 ? this.expr(left) : this.prefixOver(prefix, left);
+		const tail = this.expr(right);
+		const shape = prefix === '-' || prefix === '+' ? 'number' : primitiveShape(left);
+		if (shape === 'number' || (shape === 'string' && operator.type === '+')) {
+			return `(${head} ${operator.type} ${tail})`;
+		}
+		if (shape === 'char' && prefix.length === 0) {
+			const code = `${head}.charCodeAt(0)`;
+			return operator.type === '+'
+				? `String.fromCharCode(${code} + ${tail})`
+				: `${this.helper('minus')}(${head}, ${tail})`;
+		}
+		const helper = operator.type === '+' ? 'plus' : 'minus';
+		return `${this.helper(helper)}(${head}, ${tail})`;
+	}
+
+	/**
 	 * A prefix operator applied to its operand — which is not what the tree says.
 	 *
 	 * The vendored grammar parses `!a && b` as `prefix(conjunction(a, b))`: the
@@ -5053,8 +5143,9 @@ class Emitter {
 		switch (node.type) {
 			case 'equality_expression':
 				return this.binary(node, (token) => (token.startsWith('==') ? '===' : '!=='), operator);
-			case 'comparison_expression':
 			case 'additive_expression':
+				return this.additive(node, operator);
+			case 'comparison_expression':
 			case 'multiplicative_expression':
 				return this.binary(node, (token) => token, operator);
 			case 'conjunction_expression':
@@ -5581,8 +5672,16 @@ class Emitter {
 	): string {
 		const receiver = kids(callee)[0];
 		const suffix = kids(callee)[kids(callee).length - 1];
-		const name = kids(suffix).find((child) => child.type === 'simple_identifier')?.text ?? null;
-		if (name === null) this.refuse(callee, 'a call through something with no name');
+		const written = kids(suffix).find((child) => child.type === 'simple_identifier')?.text ?? null;
+		if (written === null) this.refuse(callee, 'a call through something with no name');
+		// jsoup's `element.\`val\`()` — backticked only because `val` is a
+		// Kotlin keyword. The quoting is not part of the name, and every table
+		// below is keyed by the name: left on, a method the DOM shim implements
+		// was refused as one nobody had heard of. A name JavaScript cannot take
+		// after a dot at all is still refused, rather than emitted as a syntax
+		// error.
+		const name = fieldName(written);
+		if (!JS_IDENTIFIER.test(name)) this.refuse(suffix, `\`.${written}()\``);
 		const safe = suffix.allChildren[0]?.type === '?.';
 
 		if (receiver.type === 'super_expression') {
@@ -6087,7 +6186,13 @@ class Emitter {
 			// `EXTENSION_METHODS`. Because Kotlin inlines it, a `return` inside
 			// belongs to the enclosing function — which the lambda frame refuses
 			// rather than quietly rerouting into the wrapper.
-			return this.iife(() => this.lambdaLines(lambda));
+			//
+			// Labelled with the block's own name, as every other callback is:
+			// `return@run x` leaves exactly this block with `x`, which is what
+			// the arrow's `return` does. Unlabelled, the label had no frame to
+			// name and a plain early exit out of a `for` inside the block was
+			// refused as crossing a lambda it never left.
+			return this.iife(() => this.lambdaLines(lambda), labelled ?? name);
 		}
 		if (name === 'buildString') {
 			// The block is called with a string accumulator as its receiver, so
@@ -7368,12 +7473,17 @@ class Emitter {
 			broke: false
 		};
 		this.frames.push(frame);
+		// An inlined `forEach` is a `for…of` here: a `break` inside it would
+		// end the walk, where Kotlin's — non-local, out of an inline lambda —
+		// meant a loop outside it.
+		if (frame.loop === true) this.loops.push('barrier');
 		this.pushScope();
 		for (const name of options.bound ?? []) this.declare(name);
 		try {
 			return { lines: run(), broke: frame.broke === true };
 		} finally {
 			this.popScope();
+			if (frame.loop === true) this.loops.pop();
 			this.frames.pop();
 		}
 	}
@@ -7815,6 +7925,7 @@ class Emitter {
 	): Emitted {
 		const frame: Frame = { kind, label, usesAwait: false, usesSelf: false, model };
 		this.frames.push(frame);
+		this.loops.push('barrier');
 		this.pushScope();
 		for (const param of params) this.declare(param);
 		try {
@@ -7841,6 +7952,7 @@ class Emitter {
 			return { text, isAsync: frame.usesAwait, usesSelf: frame.usesSelf };
 		} finally {
 			this.popScope();
+			this.loops.pop();
 			this.frames.pop();
 		}
 	}
@@ -7861,8 +7973,8 @@ class Emitter {
 	}
 
 	/** A statement sequence used where a value is needed. */
-	private iife(lines: () => string[]): string {
-		const emitted = this.functionScope('lambda', null, [], () => block(lines()));
+	private iife(lines: () => string[], label: string | null = null): string {
+		const emitted = this.functionScope('lambda', label, [], () => block(lines()));
 		if (!emitted.isAsync) return `(() => ${emitted.text})()`;
 		const outer = this.frames[this.frames.length - 1];
 		if (outer !== undefined) outer.usesAwait = true;
@@ -7977,6 +8089,49 @@ class Emitter {
 }
 
 /* ── shared shapes ────────────────────────────────────────────────────────── */
+
+/**
+ * What an operand is provably, from its shape alone, or null.
+ *
+ * Deliberately short. Anything a name, a call or a property read produced is
+ * null, because none of those says what it holds; see `additive`.
+ */
+function primitiveShape(node: KNode | undefined): 'number' | 'string' | 'char' | null {
+	if (node === undefined) return null;
+	switch (node.type) {
+		case 'integer_literal':
+		case 'hex_literal':
+		case 'bin_literal':
+		case 'long_literal':
+		case 'unsigned_literal':
+		case 'real_literal':
+		case 'multiplicative_expression':
+			return 'number';
+		case 'string_literal':
+			return 'string';
+		case 'character_literal':
+			return 'char';
+		case 'parenthesized_expression':
+			return primitiveShape(kids(node)[0]);
+		case 'prefix_expression':
+			return node.allChildren[0]?.type === '-' || node.allChildren[0]?.type === '+'
+				? primitiveShape(kids(node)[0])
+				: null;
+		case 'additive_expression': {
+			// Left-associative, so the leftmost operand decides the whole chain:
+			// `"a" + x + y` is a string throughout, and `1 + x` is a number.
+			const left = primitiveShape(kids(node)[0]);
+			if (left === 'char') {
+				// `'a' + 1` is a Char and `'z' - 'a'` an Int; neither is worth a
+				// fast path, so the chain goes through the helper.
+				return null;
+			}
+			return left;
+		}
+		default:
+			return null;
+	}
+}
 
 function sameNames(left: readonly string[], right: readonly string[]): boolean {
 	return left.length === right.length && left.every((name, index) => name === right[index]);
