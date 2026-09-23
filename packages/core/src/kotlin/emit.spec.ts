@@ -4777,3 +4777,23 @@ describe('file annotations, and a serializer on a type argument', () => {
 		).toEqual(['a custom serializer `RankingMangaSerializer` on a type argument']);
 	});
 });
+
+describe('use-site variance, which is a fact about types', () => {
+	it('translates a member whose types say `out`', () => {
+		// `mutableListOf<AnimeFilter<out Any>>()` and `chain: Array<out X>?` were
+		// refused as `type_projection_modifiers`, for syntax nothing emits.
+		const demo = instantiate(
+			inClass(
+				'    fun make(): List<Any> {',
+				'        val result = mutableListOf<List<out Any>>()',
+				'        return result',
+				'    }',
+				'    fun count(chain: Array<out String>?) = chain?.size ?: 0'
+			)
+		);
+
+		expect(demo.make()).toEqual([]);
+		expect(demo.count(null)).toBe(0);
+		expect(demo.count(['a', 'b'])).toBe(2);
+	});
+});
