@@ -335,6 +335,31 @@ object Filters {
 		expect(value).not.toBeNull();
 	});
 
+	it('keeps the generic-operand rewrite when the file also needs a known-gap repair', async () => {
+		// The Dailymotion extractor, in two lines: a dotted receiver type the
+		// pinned grammar cannot read, and `?: emptyList<Track>()`. The rewrite
+		// alone left the first error in place, so it lost to the source — which
+		// parses the second line *cleanly and wrongly*, as the whole elvis being
+		// called with `<Track>()`, and refused it as "a call through".
+		const parse = await loadKotlinGrammar(vendorWasm);
+		const tree = parse(`
+class Demo {
+    private fun build(block: Headers.Builder.() -> Unit = {}) = headers.newBuilder().apply(block)
+    private fun tracks(parsed: Dto): List<Track> {
+        return parsed.subtitles?.map {
+            Track(it.url, it.label)
+        } ?: emptyList<Track>()
+    }
+}
+`);
+
+		expect(tree.hasError).toBe(false);
+		const elvis = firstOfType(tree.root, 'elvis_expression');
+		expect(elvis).not.toBeNull();
+		// The elvis is the value, not the callee of a call.
+		expect(elvis?.allChildren.at(-1)?.text).toBe('(emptyList<Track>())');
+	});
+
 	it('leaves a genuine pair of comparisons alone', async () => {
 		// `x + a < b && c > (d)` has the same characters in the same order and is
 		// two comparisons. The angle brackets have to hold nothing but type

@@ -117,6 +117,18 @@ async function build(loader: WasmLoader): Promise<KotlinParser> {
 		if (normalised !== source) {
 			const rewritten = wrap(parser.parse(normalised).rootNode as unknown as RawNode);
 			if (!rewritten.hasError) return { root: rewritten, hasError: false };
+			// The rewrite can be right and the file still carry a second, unrelated
+			// gap the retry below exists for. Judged alone, the rewrite then lost
+			// to a source that parses *without error and wrongly* — the Dailymotion
+			// extractor's `} ?: emptyList<Track>()` read as `(… ?: emptyList)<Track>()`
+			// and refused as "a call through" its whole left operand, in five
+			// listings. So the rewrite gets the same retry the source would, and is
+			// kept only if the two together parse cleanly.
+			const both = repairKnownGrammarGaps(maskSupertypeAnnotations(normalised));
+			if (both !== normalised) {
+				const repaired = wrap(parser.parse(both).rootNode as unknown as RawNode);
+				if (!repaired.hasError) return { root: repaired, hasError: false };
+			}
 		}
 
 		const tree = parser.parse(source);
