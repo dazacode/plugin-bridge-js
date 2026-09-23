@@ -197,6 +197,15 @@ export const RUNTIME_HELPERS = [
 	'jeFloatOrNull',
 	'jeBoolean',
 	'jeBooleanOrNull',
+	/* keiyoushi's keyed JsonObject readers from core/ — see `jeGetStringOrNull`. */
+	'jeGetStringOrNull',
+	'jeGetIntOrNull',
+	'jeGetLongOrNull',
+	'jeGetBooleanOrNull',
+	'jeGetArrayOrNull',
+	'jeGetObjectOrNull',
+	'jeGetArray',
+	'jeGetObject',
 	/* A Kotlin Map's views and transforms — see `__mapPart` in the runtime. */
 	'kKeys',
 	'kValues',

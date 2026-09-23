@@ -1049,6 +1049,22 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 	['keys', 'jsonKeys'],
 	['opt', 'jsonOpt'],
 
+	// keiyoushi's keyed readers over a kotlinx JsonObject, from `core/`'s
+	// `utils/JsonElement.kt` — `obj.getStringOrNull("id")`. The host supplies
+	// them the way it supplies the other `keiyoushi.utils` helpers, because
+	// `core/` is read only for named objects. They are not org.json's: the
+	// receiver must be a JsonObject, and `getArrayOrNull` over a JSON null
+	// throws as upstream does. The one-argument `getString`/`getInt`/… reach
+	// org.json's `jsonGet*`, which agree with upstream's `getValue(k)` forms.
+	['getStringOrNull', 'jeGetStringOrNull'],
+	['getIntOrNull', 'jeGetIntOrNull'],
+	['getLongOrNull', 'jeGetLongOrNull'],
+	['getBooleanOrNull', 'jeGetBooleanOrNull'],
+	['getArrayOrNull', 'jeGetArrayOrNull'],
+	['getObjectOrNull', 'jeGetObjectOrNull'],
+	['getArray', 'jeGetArray'],
+	['getObject', 'jeGetObject'],
+
 	// The long tail. Each of these refused extensions by name while the
 	// behaviour was already spelled somewhere in the runtime — `xor` as an
 	// infix operator, `isLowerCase` as a `Character` static, `toMillis` on the

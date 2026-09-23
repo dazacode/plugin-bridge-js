@@ -578,6 +578,39 @@ describe("kotlinx's JsonElement accessors, over the plain parsed value", () => {
 		expect(() => k.jeBoolean('yes')).toThrow(/as a boolean/);
 	});
 
+	it("reads keiyoushi's keyed JsonObject helpers with upstream's null and throw cases", () => {
+		// `get(key)?.jsonPrimitive?.contentOrNull`: absent and JSON null are
+		// both null, a number is its text, and an object under the key throws
+		// because `.jsonPrimitive` of one does.
+		expect(k.jeGetStringOrNull(doc, 'name')).toBe('A');
+		expect(k.jeGetStringOrNull(doc, 'f')).toBe('1.5');
+		expect(k.jeGetStringOrNull(doc, 'missing')).toBeNull();
+		expect(k.jeGetStringOrNull(doc, 'nul')).toBeNull();
+		expect(() => k.jeGetStringOrNull(doc, 'xs')).toThrow(/JsonArray as a JsonPrimitive/);
+		expect(k.jeGetIntOrNull(doc, 'n')).toBe(12);
+		expect(k.jeGetIntOrNull(doc, 'f')).toBeNull();
+		expect(k.jeGetLongOrNull(doc, 'missing')).toBeNull();
+		expect(k.jeGetBooleanOrNull(doc, 'b')).toBe(true);
+		// `get(key)?.jsonArray`: only an absent key is null; JsonNull.jsonArray throws.
+		expect(k.jeGetArrayOrNull(doc, 'xs')).toBe(doc.xs);
+		expect(k.jeGetArrayOrNull(doc, 'missing')).toBeNull();
+		expect(() => k.jeGetArrayOrNull(doc, 'nul')).toThrow(/JsonNull as a JsonArray/);
+		expect(k.jeGetObjectOrNull({ o: doc }, 'o')).toBe(doc);
+		expect(() => k.jeGetObject(doc, 'missing')).toThrow(/required JSON field "missing"/);
+		expect(k.jeGetArray(doc, 'xs')).toBe(doc.xs);
+		// A Map is a JsonObject too: kotlinx's untyped decode answers one.
+		expect(k.jeGetStringOrNull(new Map([['id', 7]]), 'id')).toBe('7');
+	});
+
+	it('refuses a keyed read from something that is not a JsonObject', () => {
+		// Typed on JsonObject upstream. An absent `memo` or an absent DTO
+		// field answering null here would walk into the source's fallback
+		// branch for a reason the source never wrote.
+		expect(() => k.jeGetStringOrNull(undefined, 'id')).toThrow(/as a JsonObject/);
+		expect(() => k.jeGetStringOrNull(doc.xs, 'id')).toThrow(/JsonArray as a JsonObject/);
+		expect(() => k.jeGetIntOrNull('text', 'id')).toThrow(/as a JsonObject/);
+	});
+
 	it('answers a real property unchanged, and an absent DTO field as undefined', () => {
 		// These are ordinary field names too. A record that has one answers
 		// it; a record whose optional field was not in the payload answered
@@ -4288,15 +4321,37 @@ describe('the types a manga extension writes by name', () => {
 	});
 
 	it('is the same object under both names where the fork only renamed it', () => {
-		// Aniyomi's `SAnime` is `SManga` one rename later, and `AnimeFilter` is
-		// `Filter`. Aliased rather than copied, because two definitions of one
-		// thing drift and the drift would be a filter misreading its own state.
-		expect(runtime.globals.SManga).toBe(runtime.globals.SAnime);
+		// Aniyomi's `AnimeFilter` is `Filter` one rename later. Aliased rather
+		// than copied, because two definitions of one thing drift and the drift
+		// would be a filter misreading its own state.
 		expect(runtime.globals.Filter).toBe(runtime.globals.AnimeFilter);
 		expect(runtime.globals.FilterList).toBe(runtime.globals.AnimeFilterList);
 
 		const filter = runtime.globals.Filter as { TriState: { STATE_INCLUDE: number } };
 		expect(filter.TriState.STATE_INCLUDE).toBe(1);
+	});
+
+	it('gives a title the anime record plus a memo, sharing the constants and the url setter', () => {
+		// `SManga` stopped being an alias of `SAnime` when keiyoushi's lib gave
+		// the manga half a `memo`. Everything else is still the anime record's.
+		const SManga = runtime.globals.SManga as Record<string, unknown> & {
+			create(): Record<string, unknown> & { setUrlWithoutDomain(url: string): unknown };
+		};
+		const SAnime = runtime.globals.SAnime as Record<string, unknown> & {
+			create(): Record<string, unknown>;
+		};
+		for (const name of ['UNKNOWN', 'ONGOING', 'COMPLETED', 'ON_HIATUS']) {
+			expect(SManga[name]).toBe(SAnime[name]);
+		}
+		const manga = SManga.create();
+		expect(Object.keys(manga).sort()).toEqual([...Object.keys(SAnime.create()), 'memo'].sort());
+		manga.setUrlWithoutDomain('https://read.example.invalid/title/1');
+		expect(manga.url).toBe('/title/1');
+		// Empty, and a fresh object per record: one title's memo written into
+		// must not become another's.
+		expect(manga.memo).toEqual({});
+		expect(SManga.create().memo).not.toBe(manga.memo);
+		expect((runtime.globals.SChapter as { create(): { memo: unknown } }).create().memo).toEqual({});
 	});
 
 	it('exposes the nested filter types under the bare names an import produces', () => {

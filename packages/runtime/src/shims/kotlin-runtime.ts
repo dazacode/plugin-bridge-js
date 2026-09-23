@@ -836,6 +836,35 @@ function __jeNumber(value, name, whole, orNull) {
   throw new Error('This converted extension read "' + text.slice(0, 24) + '" as a number (' + name + ').');
 }
 
+/**
+ * 'JsonObject.get(key)' for the keyed readers: undefined for an absent key,
+ * null for JSON null, and a throw for a receiver that is not a JsonObject.
+ * A Map is one — kotlinx's untyped decode answers a Map for an object.
+ */
+function __jeFieldOf(value, key, name) {
+  if (value instanceof Map) return value.get(key);
+  if (__jeKind(value) !== 'object') __jeWrongKind(value, 'JsonObject (for ' + name + ')');
+  return Object.prototype.hasOwnProperty.call(value, key) ? value[key] : undefined;
+}
+
+/** 'getValue(key)', which is NoSuchElementException for an absent key. */
+function __jeRequiredField(value, key, name) {
+  var found = __jeFieldOf(value, key, name);
+  if (found === undefined) {
+    throw new Error('This converted extension asked for a required JSON field "' + __str(key) + '".');
+  }
+  return found;
+}
+
+/** 'get(key)?.jsonPrimitive': undefined when absent, a throw for an object or array. */
+function __jePrimitiveAt(value, key, name) {
+  var found = __jeFieldOf(value, key, name);
+  if (found === undefined) return undefined;
+  var kind = __jeKind(found);
+  if (kind !== 'primitive' && kind !== 'null') __jeWrongKind(found, 'JsonPrimitive (for ' + name + ')');
+  return found;
+}
+
 /** '.boolean' is kotlinx's toBooleanStrict: exactly "true" or "false". */
 function __jeBoolean(value, name, orNull) {
   var own = __jeOwn(value, name);
@@ -5601,6 +5630,64 @@ var __k = {
   jeFloatOrNull: function (value) { return __jeNumber(value, 'floatOrNull', false, true); },
   jeBoolean: function (value) { return __jeBoolean(value, 'boolean', false); },
   jeBooleanOrNull: function (value) { return __jeBoolean(value, 'booleanOrNull', true); },
+
+  /**
+   * keiyoushi's JsonObject readers from 'core/', by key: 'obj.getStringOrNull(k)'
+   * and its siblings.
+   *
+   * Upstream each is one line over the accessors above, and the '?.' in it is
+   * the whole meaning: 'get(key)?.jsonPrimitive?.contentOrNull' answers null
+   * for an absent key and for JSON null, and still THROWS for a key holding an
+   * object or an array, because '.jsonPrimitive' of those is an
+   * IllegalArgumentException. 'getArrayOrNull' is 'get(key)?.jsonArray', so
+   * there only an absent key is null — a JSON null under it throws, as
+   * JsonNull.jsonArray does. The plain 'getArray'/'getObject' are 'getValue',
+   * which throws for an absent key.
+   *
+   * The receiver must be a JsonObject. The org.json-shaped readers accept
+   * anything and answer undefined; these are typed on JsonObject upstream,
+   * and a receiver that is not one (a manga record whose 'memo' was never
+   * set, a DTO field that was absent) is a bug to report, not a null to walk
+   * into a fallback branch.
+   */
+  jeGetStringOrNull: function (value, key) {
+    var found = __jePrimitiveAt(value, key, 'getStringOrNull');
+    return found === undefined || found === null ? null : String(found);
+  },
+  jeGetIntOrNull: function (value, key) {
+    var found = __jePrimitiveAt(value, key, 'getIntOrNull');
+    return found === undefined ? null : __jeNumber(found, 'intOrNull', true, true);
+  },
+  jeGetLongOrNull: function (value, key) {
+    var found = __jePrimitiveAt(value, key, 'getLongOrNull');
+    return found === undefined ? null : __jeNumber(found, 'longOrNull', true, true);
+  },
+  jeGetBooleanOrNull: function (value, key) {
+    var found = __jePrimitiveAt(value, key, 'getBooleanOrNull');
+    return found === undefined ? null : __jeBoolean(found, 'booleanOrNull', true);
+  },
+  jeGetArrayOrNull: function (value, key) {
+    var found = __jeFieldOf(value, key, 'getArrayOrNull');
+    if (found === undefined) return null;
+    if (__jeKind(found) !== 'array') __jeWrongKind(found, 'JsonArray');
+    return found;
+  },
+  jeGetObjectOrNull: function (value, key) {
+    var found = __jeFieldOf(value, key, 'getObjectOrNull');
+    if (found === undefined) return null;
+    if (__jeKind(found) !== 'object') __jeWrongKind(found, 'JsonObject');
+    return found;
+  },
+  jeGetArray: function (value, key) {
+    var found = __jeRequiredField(value, key, 'getArray');
+    if (__jeKind(found) !== 'array') __jeWrongKind(found, 'JsonArray');
+    return found;
+  },
+  jeGetObject: function (value, key) {
+    var found = __jeRequiredField(value, key, 'getObject');
+    if (__jeKind(found) !== 'object') __jeWrongKind(found, 'JsonObject');
+    return found;
+  },
 
   /* -- the contract functions ---------------------------------------------- */
 
@@ -11682,11 +11769,34 @@ var CheckBox = AnimeFilter.CheckBox;
 
 /**
  * 'SManga' is what 'SAnime' was renamed from: same fields, same status
- * constants, same 'setUrlWithoutDomain'. Aliased for that reason, and the one
- * thing that would force them apart is a field added to one and not the other
- * — at which point this line has to become a definition, deliberately.
+ * constants, same 'setUrlWithoutDomain'. It was an alias for that reason, and
+ * the one thing that would force them apart was a field added to one and not
+ * the other. That happened: keiyoushi's lib gave the manga half a 'memo', so
+ * this is now the anime record plus that one field, deliberately, and still
+ * shares every constant and the url setter rather than copying them.
+ *
+ * 'memo' is a JsonObject a source stashes on a title or chapter —
+ * 'memo = buildJsonObject { put("id", id) }' in a parse — for a later call
+ * to read back with 'memo.getStringOrNull("id")'. Upstream it is non-null
+ * and defaults to an empty object, and the app persists it with the entry.
+ *
+ * **This host does not persist it.** A title or chapter reaches a later call
+ * as its url alone (see '__mangaRef' in the driver), so it arrives with the
+ * empty memo — which is exactly what upstream hands a source for an entry the
+ * app stored before the source started writing one, and every reader in the
+ * catalogue is written against that case: 'getStringOrNull(k) ?: <fetch it>'.
+ * Within one call a memo a parse set is read back as written. A source that
+ * requires one ('memo.getString(k)') throws, naming the field, rather than
+ * reading undefined.
  */
-var SManga = SAnime;
+function __withMemo(record) {
+  record.memo = {};
+  return record;
+}
+
+var SManga = Object.assign({}, SAnime, {
+  create: function () { return __withMemo(SAnime.create()); }
+});
 
 /**
  * The library-update hint a source may set on a title.
@@ -11743,7 +11853,9 @@ var SChapter = {
       name: '',
       date_upload: 0,
       chapter_number: -1,
-      scanlator: null
+      scanlator: null,
+      // A chapter's 'memo', exactly as a title's — see 'SManga'.
+      memo: {}
     };
     chapter.setUrlWithoutDomain = function (url) {
       chapter.url = __withoutDomain(url);
