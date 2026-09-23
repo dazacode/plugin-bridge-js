@@ -31,14 +31,14 @@ Measured over two whole published indexes of the Kotlin extension family,
 translated from source: a Mihon-family manga repository and an Aniyomi-family
 anime repository. Counts are of distinct listings, on the merged commit.
 
-|                          | before v0.5.0 | v0.5.0 | **v0.5.1**      | change since v0.5.0 |
-| ------------------------ | ------------- | ------ | --------------- | ------------------- |
-| manga, loaded (of 1,396) | 828           | 949    | **993 (71%)**   | **+44**             |
-| manga, all three stages  | 412           | 609    | **657 (47%)**   | **+48**             |
-| anime, loaded (of 256)   | 74            | 101    | **130 (51%)**   | **+29**             |
-| anime, all three stages  | 62            | 82     | **115 (45%)**   | **+33**             |
-| **combined, loaded**     | 902 of 1,652  | 1,050  | **1,123 (68%)** | **+73**             |
-| **combined, all three**  | 474           | 691    | **772 (47%)**   | **+81**             |
+|                          | before v0.5.0 | **v0.5.1**      | change   |
+| ------------------------ | ------------- | --------------- | -------- |
+| manga, loaded (of 1,396) | 828           | **993 (71%)**   | **+165** |
+| manga, all three stages  | 412           | **657 (47%)**   | **+245** |
+| anime, loaded (of 256)   | 74            | **130 (51%)**   | **+56**  |
+| anime, all three stages  | 62            | **115 (45%)**   | **+53**  |
+| **combined, loaded**     | 902 of 1,652  | **1,123 (68%)** | **+221** |
+| **combined, all three**  | 474           | **772 (47%)**   | **+298** |
 
 v0.5.1 continues the v0.5.0 pass over the same two catalogues, with the same
 method; the v0.5.0 section below is kept as it was measured.

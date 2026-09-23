@@ -99,14 +99,14 @@ drive their code through browse, list and read, up from 691 and 474.** Every
 one of those gains came from fixing a _semantic_ once, not from patching a
 source.
 
-|                                | before v0.5.0 | v0.5.0 | **v0.5.1**      | change since v0.5.0 |
-| ------------------------------ | ------------- | ------ | --------------- | ------------------- |
-| Mihon manga, loaded (of 1,396) | 828           | 949    | **993 (71%)**   | **+44**             |
-| Mihon manga, all three stages  | 412           | 609    | **657 (47%)**   | **+48**             |
-| Aniyomi anime, loaded (of 256) | 74            | 101    | **130 (51%)**   | **+29**             |
-| Aniyomi anime, all three       | 62            | 82     | **115 (45%)**   | **+33**             |
-| **Combined, loaded**           | 902           | 1,050  | **1,123 (68%)** | **+73**             |
-| **Combined, all three stages** | 474           | 691    | **772 (47%)**   | **+81**             |
+|                                | before v0.5.0 | **v0.5.1**      | change   |
+| ------------------------------ | ------------- | --------------- | -------- |
+| Mihon manga, loaded (of 1,396) | 828           | **993 (71%)**   | **+165** |
+| Mihon manga, all three stages  | 412           | **657 (47%)**   | **+245** |
+| Aniyomi anime, loaded (of 256) | 74            | **130 (51%)**   | **+56**  |
+| Aniyomi anime, all three       | 62            | **115 (45%)**   | **+53**  |
+| **Combined, loaded**           | 902           | **1,123 (68%)** | **+221** |
+| **Combined, all three stages** | 474           | **772 (47%)**   | **+298** |
 
 The manga figure is net of seven listings that loaded in v0.5.0 and are now
 refused by name, because each was sending its requests somewhere broken — see
