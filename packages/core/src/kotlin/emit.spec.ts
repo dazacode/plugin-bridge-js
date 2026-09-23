@@ -4756,6 +4756,23 @@ describe('the shared playlist module’s signatures', () => {
 	});
 });
 
+describe('the shared Next.js reader', () => {
+	it('routes an explicit predicate and infers a type from a typed return', () => {
+		const emitted = translate(
+			kt(
+				'@Serializable data class PageDto(val slug: String)',
+				'class Demo : Source() {',
+				'    fun page(document: Document): PageDto? = document.extractNextJs { it.jsonObject.containsKey("slug") }',
+				'    fun flight(text: String): PageDto? = text.extractNextJsRsc()',
+				'}'
+			)
+		);
+		expect(emitted.refusals).toEqual([]);
+		expect(emitted.js).toContain('__k.extractNextJs(');
+		expect(emitted.js).toContain('__k.extractNextJsRsc(');
+	});
+});
+
 describe('a class’s simple name', () => {
 	it('answers a final class with its own name, and an object with its', () => {
 		// `private val tag by lazy { javaClass.simpleName }` is the whole idiom.

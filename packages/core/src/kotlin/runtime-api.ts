@@ -301,6 +301,9 @@ export const RUNTIME_HELPERS = [
 	/* keiyoushi's `client.get(url)` and its three siblings, which build the
 	   request, send it and await it in one suspend call. See `clientVerb`. */
 	'okhttp',
+	/* keiyoushi core's Next.js Flight and page-data extraction. */
+	'extractNextJs',
+	'extractNextJsRsc',
 
 	/* Throwing. `error("…")` is Kotlin's, and an extension that throws a plain
 	   exception should surface as a plugin error rather than as a refusal. */

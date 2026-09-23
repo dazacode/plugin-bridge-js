@@ -169,8 +169,12 @@ const ENTRYPOINT = 'source';
  *     through checked runtime behavior: null filtering, maxOf, replaceAll,
  *     mapNotNullTo, toMap, and nullable double parsing. Reconvert to include
  *     extensions previously refused for those calls.
+ *
+ * 55: Next.js App Router, Pages Router, and React Flight extraction now run
+ *     through the runtime for typed `extractNextJs` and `extractNextJsRsc`.
+ *     Reconvert bundles that use those core helpers.
  */
-export const CONVERTER_VERSION = 54;
+export const CONVERTER_VERSION = 55;
 
 export interface BundleInput {
 	readonly id: string;

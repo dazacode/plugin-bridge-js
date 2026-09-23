@@ -7102,6 +7102,34 @@ class Emitter {
 			return `!(${this.expr(receiver)})`;
 		}
 
+		if (
+			(name === 'extractNextJs' || name === 'extractNextJsRsc') &&
+			!this.extensionFunctions.has(name)
+		) {
+			// The core helper reads either an HTML page or React Flight rows, then
+			// decodes the first predicate match as T. With no predicate it derives
+			// required fields from T's translated @Serializable shape; an unknown
+			// shape cannot be guessed without selecting the wrong page object.
+			const shape = typeArgument ?? expected;
+			if (shape === null) this.refuse(suffix, `\`.${name}()\` with no type argument`);
+			const predicate = this.callArguments(name, args, lambda, labelled, false);
+			if (predicate.length > 1) this.refuse(suffix, `\`.${name}()\` with a deserializer`);
+			if (predicate.length === 0) {
+				const element = /^(?:List|MutableList)<(.+)>\??$/.exec(shape)?.[1] ?? shape;
+				const bare = element.replace(/\?$/, '').replace(/^.*\./, '');
+				if (!this.declaredTypes.has(bare)) {
+					this.refuse(
+						suffix,
+						`\`.${name}()\` inferring a predicate from a type this build did not read`
+					);
+				}
+			}
+			const value = this.expr(receiver);
+			const call = (target: string) =>
+				`${this.helper(name)}(${[target, JSON.stringify(shape), ...predicate].join(', ')})`;
+			return safe ? `${this.helper('sc')}(${value}, (__r) => ${call('__r')})` : call(value);
+		}
+
 		if (DECODING_METHODS.has(name)) {
 			// The shape being decoded is named in the type argument, not the
 			// arguments. Without one the runtime would have to guess a

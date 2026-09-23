@@ -4293,6 +4293,45 @@ describe('names that are a companion rather than a constructor', () => {
 	});
 });
 
+/* ── the shared Next.js reader ─────────────────────────────────────────────── */
+
+describe('Next.js data extraction', () => {
+	it('resolves App Router Flight text and model references', () => {
+		// The text row is 14 UTF-8 bytes: the non-ASCII character is two.
+		const rows =
+			'1:Te,{"x":"héllo"}\n' +
+			'3:{"cover":"c.png"}\n' +
+			'2:{"series":{"title":"One","cover":"$3:cover","raw":"$1"}}\n';
+		const html = `<script>self.__next_f.push(${JSON.stringify([1, rows])})</script>`;
+		const document = runtime.globals.Jsoup.parse(html, 'https://example.invalid/');
+		expect(
+			k.extractNextJs(document, 'Series', (value: Record<string, unknown>) => 'title' in value)
+		).toEqual({
+			title: 'One',
+			cover: 'c.png',
+			raw: '{"x":"héllo"}'
+		});
+	});
+
+	it('reads Pages Router data and infers required fields from a translated shape', () => {
+		class PageDto {}
+		k.shape(PageDto, ['mangaId', 'label'], ['label'], {});
+		const document = runtime.globals.Jsoup.parse(
+			'<script id="__NEXT_DATA__" type="application/json">{"props":{"pageProps":{"wrap":{"mangaId":"m-1"}}}}</script>',
+			'https://example.invalid/'
+		);
+		expect(k.extractNextJs(document, 'PageDto').mangaId).toBe('m-1');
+		expect(() => k.extractNextJs(document, 'UnknownDto')).toThrow(/Cannot infer a predicate/);
+	});
+
+	it('reads a raw Flight body as a typed list', () => {
+		class RscItemDto {}
+		k.shape(RscItemDto, ['slug'], [], {});
+		const body = '0:{"a":1}\n1:[{"slug":"x"},{"slug":"y"}]\n';
+		expect(k.extractNextJsRsc(body, 'List<RscItemDto>')).toEqual([{ slug: 'x' }, { slug: 'y' }]);
+	});
+});
+
 /* ── the classpath, and the i18n files it exists to reach ─────────────────── */
 
 /**
