@@ -667,6 +667,31 @@ describe('a reference to a member the template declares', () => {
 	});
 });
 
+describe('a constructor reference, and a local mutated inside a receiver block', () => {
+	it('constructs through `::Type`, and adds to the local rather than the receiver', async () => {
+		// `.map(::TagCheckBox)` called the class without `new`; and
+		// `chapters += …` inside `Observable.fromCallable { … }` mutated
+		// `this.chapters`, which the block's receiver does not have.
+		const d = await instantiate(
+			'Demo',
+			kt(
+				'open class Box(val name: String)',
+				'class TagBox(name: String) : Box(name)',
+				'class Demo {',
+				'    fun boxes(): List<String> = listOf("a", "b").map(::TagBox).map { it.name }',
+				'    fun collected(): List<String> = listOf(1).run {',
+				'        val out = mutableListOf<String>()',
+				'        out += map { "n$it" }',
+				'        out',
+				'    }',
+				'}'
+			)
+		);
+		expect(d.boxes()).toEqual(['a', 'b']);
+		expect(d.collected()).toEqual(['n1']);
+	});
+});
+
 describe('a lazy property whose block blocks', () => {
 	it('awaits every read, and every member that reads one', async () => {
 		// `override val client by lazy { fetchDomain(); … }` where the helper

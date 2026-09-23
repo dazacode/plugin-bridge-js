@@ -190,6 +190,15 @@ function __supplyBase(proto) {
       set: ownValue('client')
     });
   }
+  // 'getFilterList()': HttpSource's answers an empty FilterList, and so does
+  // KeiSource's 'getFilterList(data)' that its final no-argument one builds
+  // from — one slot here. An extension calling it without declaring it —
+  // 'getSearchMangaList(page, "", getFilterList(null))' — found nothing on the
+  // instance and died on the first search. The host never calls it (a search
+  // is handed no filters), so this is only ever the extension's own call.
+  if (!('getFilterList' in proto)) {
+    define('getFilterList', { writable: true, value: function () { return FilterList(); } });
+  }
   var shared = [
     ['client', client],
     ['network', network],

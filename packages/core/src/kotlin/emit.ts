@@ -6561,7 +6561,13 @@ class Emitter {
 			// which is not JavaScript at all — the bundle failed to parse.
 			const receiverSelf = inner !== undefined && inner.type === 'this_expression';
 			if (receiverSelf || (local !== null && !local.mutable)) {
-				const receiver = this.assignable(target);
+				// The local itself, as Kotlin resolves it: a name declared in this
+				// scope wins over any implicit receiver. Asked of `assignable`,
+				// which writes an `apply {}` block's bare names to its receiver,
+				// `chapters += …` inside `Observable.fromCallable { … }` mutated
+				// `this.chapters` — undefined — and the page loop died on the
+				// first chapter list.
+				const receiver = local !== null && !receiverSelf ? local.text : this.assignable(target);
 				// `all += page.entries ?: throw Exception("…")` — the elvis guard
 				// below, on the one path that returned before reaching it. The
 				// guard is a statement in front of the mutation, which is where
@@ -7667,6 +7673,20 @@ class Emitter {
 				if (extension !== undefined) {
 					return `(...__a) => ${this.helper(extension)}(...__a)`;
 				}
+			}
+			// `.map(::TagCheckBox)` — a *constructor* reference, to a class this
+			// build emits as an ES6 class. Called as a function, as the reference
+			// below would, it throws "Cannot call a class constructor without
+			// new" at the first search; Kotlin constructs, and so does this, with
+			// the arguments the function type hands it (one, for a `map`).
+			if (
+				this.lookup(member.text) === null &&
+				!this.isSourceMember(member.text) &&
+				this.newableTypes.has(this.aliased(member.text))
+			) {
+				const declared = this.aliased(member.text);
+				const target = this.safe(this.localTypes.get(declared) ?? declared);
+				return `(__a) => new ${target}(__a)`;
 			}
 			// As many arguments as the function needs, and no more.
 			//

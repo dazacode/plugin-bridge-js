@@ -207,6 +207,26 @@ class Extension {
 		expect(page.entries[0].title).toBe(`${BASE_URL}/ 1`);
 	});
 
+	it('answers the base class’s empty getFilterList when the extension calls it undeclared', async () => {
+		// `getSearchMangaList(page, "", getFilterList(null))` in an extension
+		// that declares no filters: KeiSource's answers an empty FilterList.
+		const module = await load(
+			`
+class Extension {
+  async getPopularManga(page) {
+    const filters = this.getFilterList(null);
+    return MangasPage([{ title: 'filters: ' + filters.length, url: '/x' }], false);
+  }
+}
+`,
+			{},
+			true
+		);
+
+		const page = await module.browse('popular', 1, context());
+		expect(page.entries[0].title).toBe('filters: 0');
+	});
+
 	it('leaves a base URL the extension declares itself to win over the generated one', async () => {
 		// A constructor parameter or field lands on the instance and shadows the
 		// prototype; a getter is found in the chain and nothing is put beside it.
