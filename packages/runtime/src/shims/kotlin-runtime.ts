@@ -3069,6 +3069,68 @@ var __k = {
     return __k.await(call);
   },
 
+  /**
+   * keiyoushi's 'client.get(url)', 'post', 'put' and 'head': build the request,
+   * send it through the client, await it, and throw on a non-2xx unless told
+   * 'ensureSuccess = false'.
+   *
+   * Each is declared twice in that repository's core/ network helpers — once
+   * taking 'headers', once reading them off the HttpSource context receiver —
+   * and the emitter cannot tell which was written, because the second
+   * positional argument is 'headers' in one and 'cacheControl' or 'body' in
+   * the other. The values can tell: a Headers value, a request body and a
+   * boolean are each recognisable, and whatever is none of them is the cache
+   * policy, which this runtime leaves to the host exactly as GET does.
+   *
+   * With no headers passed, the source's own 'headers' are used, which is what
+   * the context-receiver overload reads. A receiver that is not this runtime's
+   * client is somebody else's class with a 'get' of its own, and is called as
+   * written — or, for 'get' with one argument, indexed, which is what that
+   * spelling meant before this helper existed.
+   */
+  okhttp: function (client, verb, positional, named) {
+    var args = positional || [];
+    var options = named || {};
+    if (client === null || client === undefined || typeof client.newCall !== 'function') {
+      if (Object.keys(options).length > 0) {
+        throw new Error(
+          'This converted extension passed named arguments to a ' + verb + '() that is not an ' +
+          'okhttp client, so which parameter each one is could not be read.'
+        );
+      }
+      if (client !== null && client !== undefined && typeof client[verb] === 'function') {
+        return client[verb].apply(client, args);
+      }
+      if (verb === 'get' && args.length === 1) return __k.getAt(client, args[0]);
+      throw new Error('This converted extension called ' + verb + '() on something that has none.');
+    }
+
+    var url = options.url !== undefined ? options.url : args[0];
+    var headers = options.headers;
+    var body = options.body;
+    var ensureSuccess = options.ensureSuccess;
+    for (var i = options.url !== undefined ? 0 : 1; i < args.length; i += 1) {
+      var value = args[i];
+      if (typeof value === 'boolean') ensureSuccess = value;
+      else if (__isHeadersValue(value)) headers = value;
+      else if (value !== null && typeof value === 'object' && (value.__kBody === true || typeof value.text === 'string')) {
+        body = value;
+      }
+      /* Anything else is the CacheControl, which the host owns. */
+    }
+    if (url === undefined || url === null) {
+      throw new Error('This converted extension called ' + verb + '() with no url.');
+    }
+    if ((verb === 'post' || verb === 'put') && (body === undefined || body === null)) {
+      throw new Error('This converted extension called ' + verb + '() with no request body.');
+    }
+    if (headers === undefined || headers === null) headers = __sourceHeaders();
+
+    var request = __kRequest(verb.toUpperCase(), url, headers, verb === 'get' || verb === 'head' ? null : body);
+    var call = client.newCall(request);
+    return ensureSuccess === false ? call.await() : call.awaitSuccess();
+  },
+
   await: function (value) {
     if (value !== null && value !== undefined && typeof value.await === 'function') {
       return value.await();
@@ -5971,6 +6033,35 @@ function __headerPairs(value) {
  * the methods are non-enumerable. Spreading or serialising one therefore gives
  * the headers and nothing else.
  */
+/**
+ * Whether a value is a Headers this runtime built, as opposed to a CacheControl
+ * or a body in the same argument position. See '__k.okhttp'.
+ */
+function __isHeadersValue(value) {
+  return (
+    value !== null && typeof value === 'object' &&
+    typeof value.names === 'function' && typeof value.newBuilder === 'function' &&
+    typeof value.toMap === 'function'
+  );
+}
+
+/**
+ * The source's own 'headers', which a keiyoushi request helper reads off its
+ * HttpSource context receiver when it is not handed any.
+ *
+ * Read through 'typeof' and a try because the instance is declared by the
+ * entry point after this runtime, and a runtime evaluated on its own (as its
+ * spec does) has no instance at all: that is the empty set, not a crash.
+ */
+function __sourceHeaders() {
+  try {
+    if (typeof __source !== 'undefined' && __source && __source.headers) return __source.headers;
+  } catch (error) {
+    /* Not constructed yet. */
+  }
+  return {};
+}
+
 function __headersObject(pairs) {
   var headers = {};
   for (var i = 0; i < pairs.length; i += 1) headers[pairs[i][0]] = pairs[i][1];
@@ -9103,6 +9194,25 @@ function Mutex(locked) {
   if (!(this instanceof Mutex)) return new Mutex(locked);
   this.isLocked = Boolean(locked);
 }
+
+/**
+ * java.lang.ref's SoftReference and WeakReference: a holder whose get() may
+ * answer null once the collector has taken the value.
+ *
+ * "May" is the whole contract — the JVM is allowed never to clear one, and
+ * every caller has to handle both answers already, which is why the one
+ * template that uses it re-fetches on a null. Holding the value until clear()
+ * is therefore one of the behaviours the Kotlin was written against, not an
+ * approximation of it. The template caching a URL map this way also resets
+ * the reference itself on a timer, so nothing grows without bound.
+ */
+function SoftReference(value) {
+  if (!(this instanceof SoftReference)) return new SoftReference(value);
+  var held = value === undefined ? null : value;
+  this.get = function () { return held; };
+  this.clear = function () { held = null; };
+}
+var WeakReference = SoftReference;
 
 /** Small access-ordered cache for generic utility code. */
 function LruCache(maxSize) {

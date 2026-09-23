@@ -72,10 +72,105 @@ export interface MihonEntrypointOptions {
 	 * none, which the runtime reads as an empty classpath.
 	 */
 	readonly resources?: Readonly<Record<string, string>>;
+	/**
+	 * Whether the class descends from keiyoushi's `KeiSource`, the repository's
+	 * own base between the extension and `HttpSource`.
+	 *
+	 * It is a different base class, not a style: it makes `headersBuilder` and
+	 * `client` final and builds them itself — `Referer` and `Origin` on every
+	 * request, then the extension's `configureHeaders`; the extension's
+	 * `configureClient` on a copy of the shared client, which is where its
+	 * rate limit is declared — and it owns `getMangaUpdate`. None of that is in
+	 * the translated source, because none of it is in the extension. The
+	 * adapter reads the class hierarchy it fetched and says so here.
+	 */
+	readonly keiSource?: boolean;
 }
 
 const MIHON_DRIVER = String.raw`
 /* --- the base class this build supplies ------------------------------------ */
+
+/**
+ * 'headers' and 'headersBuilder()', which the base class owns and the extension
+ * reads bare.
+ *
+ * Nothing defined either on the instance, so 'GET(url, headers)' sent
+ * 'undefined' as its headers — a request with no Referer, which an image host
+ * answers 403 — and a bare 'headersBuilder()' was not a function. The video
+ * driver closed the same gap long ago; this is its other half.
+ *
+ * Under 'KeiSource' both are the base class's and final: the builder is the
+ * plain one with 'Referer' and 'Origin' set from 'baseUrl', then handed to the
+ * extension's own 'configureHeaders' when it declares one. And 'headers' is
+ * deliberately NOT lazy there — the base class replaces the delegate so a
+ * preference that changes the base url changes the next request — so it is
+ * rebuilt on each read rather than memoised as 'HttpSource' does.
+ */
+if (__KEI_SOURCE) {
+  __source.headersBuilder = function () {
+    var base = String(__source.baseUrl || __BASE_URL);
+    var builder = Headers.Builder().set('Referer', base + '/').set('Origin', base);
+    if (typeof __source.configureHeaders !== 'function') return builder;
+    var configured = __source.configureHeaders(builder);
+    return configured === undefined || configured === null ? builder : configured;
+  };
+} else if (typeof __source.headersBuilder !== 'function') {
+  __source.headersBuilder = function () { return Headers.Builder(); };
+}
+if (!('headers' in __source)) {
+  var __headerCache = null;
+  Object.defineProperty(__source, 'headers', {
+    configurable: true,
+    get: function () {
+      if (__KEI_SOURCE) return __headers();
+      if (__headerCache === null) __headerCache = __headers();
+      return __headerCache;
+    }
+  });
+}
+
+/**
+ * 'client', 'network', 'json' and 'preferences', which the base class owns
+ * and an extension reaches through bare: 'client.newCall(…)', 'network.client',
+ * 'json.decodeFromString(…)'.
+ *
+ * None was on the instance, so 'this.client' was undefined and every request a
+ * translated member made itself died on the first search — while the bundle
+ * imported cleanly and was counted as working. Each is defined only when the
+ * class has none of its own: an extension that overrides 'client' with its own
+ * interceptor chain means that one.
+ *
+ * Under 'KeiSource' the client is final and lazy: the shared client, rebuilt
+ * with whatever the extension's 'configureClient' adds. That hook is where the
+ * catalogue declares its rate limits — 'configureClient() = rateLimit(3)' — so
+ * a client that skipped it would send as fast as it liked on behalf of a source
+ * that asked it not to.
+ */
+if (__KEI_SOURCE && !('client' in __source)) {
+  var __keiClient = null;
+  Object.defineProperty(__source, 'client', {
+    configurable: true,
+    get: function () {
+      if (__keiClient === null) {
+        var builder = network.client.newBuilder();
+        if (typeof __source.configureClient === 'function') {
+          var configured = __source.configureClient(builder);
+          if (configured !== undefined && configured !== null) builder = configured;
+        }
+        __keiClient = builder.build();
+      }
+      return __keiClient;
+    }
+  });
+}
+for (const __own of [
+  ['client', client],
+  ['network', network],
+  ['json', Json],
+  ['preferences', getPreferences()]
+]) {
+  if (!(__own[0] in __source)) __source[__own[0]] = __own[1];
+}
 
 /** Whether the translated class actually defines a member. */
 function __declares(name) {
@@ -296,6 +391,27 @@ const __super = {
     return __call('imageUrlParse', [await __send(__call('imageRequest', [page]))]);
   },
 
+  /* The current API's final entry point, and all it does upstream: check it
+   * was asked for something, run the extension's own 'fetchMangaUpdate', and
+   * mark the title initialised. Nothing is composed out of the older members
+   * for an extension that has no 'fetchMangaUpdate' — the base class only
+   * ever calls that one, and inventing a fallback is a request the author
+   * never wrote. */
+  getMangaUpdate: async function (manga, chapters, fetchDetails, fetchChapters) {
+    if (!fetchDetails && !fetchChapters) {
+      throw new Error('getMangaUpdate was called with nothing to fetch.');
+    }
+    if (!__declares('fetchMangaUpdate')) {
+      throw new Error('This extension declares no fetchMangaUpdate for getMangaUpdate to run.');
+    }
+    const update = await __source.fetchMangaUpdate(manga, chapters, fetchDetails, fetchChapters);
+    if (update === null || update === undefined || update.manga === null || update.manga === undefined) {
+      throw new Error('The fetchMangaUpdate of this extension answered no manga.');
+    }
+    update.manga.initialized = true;
+    return SMangaUpdate(update.manga, update.chapters);
+  },
+
   setupPreferenceScreen: function () {}
 };
 
@@ -396,7 +512,14 @@ async function __send(request) {
     throw new Error('This extension built no request.');
   }
   const call = typeof request === 'string' ? GET(request, __headers()) : request;
-  return await client.newCall(call).execute();
+  // The instance's client, not the runtime's shared one: an extension that
+  // overrides 'client' — or configures it under KeiSource — declared its rate
+  // limit and interceptors there, and this is the path every request/parse
+  // pair takes.
+  const through = __source.client && typeof __source.client.newCall === 'function'
+    ? __source.client
+    : client;
+  return await through.newCall(call).execute();
 }
 
 function __normalisePage(value) {
@@ -481,7 +604,8 @@ export function mihonEntrypoint(options: MihonEntrypointOptions): string {
 	const constants = [
 		`const __PLUGIN_ID = ${JSON.stringify(options.pluginId)};`,
 		`const __BASE_URL = ${JSON.stringify(options.baseUrl.replace(/\/+$/, ''))};`,
-		`const __LANG = ${JSON.stringify(options.lang ?? '')};`
+		`const __LANG = ${JSON.stringify(options.lang ?? '')};`,
+		`const __KEI_SOURCE = ${options.keiSource === true};`
 	].join('\n');
 
 	// Before the runtime, for the reason the video entry gives: the preference
@@ -566,10 +690,21 @@ export default {
     const manga = __mangaRef(sourceMediaId);
     // Same rule as '__page': the override wins, because an extension that
     // wrote 'fetchChapterList' may not have written the pair at all.
-    const chapterOverride = __overrideName(['getChapterList', 'fetchChapterList']);
-    const rows = chapterOverride !== null
-      ? await __source[chapterOverride](manga)
-      : __call('chapterListParse', [await __send(__call('chapterListRequest', [manga]))]);
+    //
+    // 'fetchMangaUpdate' first, because under the current API it is the one
+    // the host calls: details and chapters from one request, asked here for
+    // the chapters only. An extension that implements it usually declares no
+    // chapter member of any other generation, so the pair below would be the
+    // base class's request sent to a site whose author wrote something else.
+    let rows;
+    if (__declares('fetchMangaUpdate')) {
+      rows = (await __super.getMangaUpdate(manga, [], false, true)).chapters;
+    } else {
+      const chapterOverride = __overrideName(['getChapterList', 'fetchChapterList']);
+      rows = chapterOverride !== null
+        ? await __source[chapterOverride](manga)
+        : __call('chapterListParse', [await __send(__call('chapterListRequest', [manga]))]);
+    }
 
     const chapters = [];
     for (const row of Array.isArray(rows) ? rows : []) {

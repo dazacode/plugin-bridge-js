@@ -333,6 +333,80 @@ function entryFirst(files: readonly { path: string; source: string }[]): typeof 
 	return [files[entry], ...files.filter((_, at) => at !== entry)];
 }
 
+/**
+ * The supertypes each class in these files names, by simple name.
+ *
+ * Read off the declaration header — the text between `class Name` and the
+ * body's `{`, with the constructor's parentheses skipped — which is exactly
+ * where Kotlin puts them. Only the head identifier of each supertype is kept,
+ * so `KeiSource()`, `ConfigurableSource` and `Madara(…)` read as those names.
+ * A class declared twice under one name in different files keeps both lists,
+ * which can only make an answer below *more* inclusive for a name the
+ * translator would have had to resolve anyway.
+ */
+function supertypesByClass(files: readonly { source: string }[]): Map<string, string[]> {
+	const out = new Map<string, string[]>();
+	const declaration = /\bclass\s+([A-Za-z_]\w*)/g;
+	for (const { source } of files) {
+		for (const match of source.matchAll(declaration)) {
+			let depth = 0;
+			let colon = -1;
+			let end = source.length;
+			for (let at = (match.index ?? 0) + match[0].length; at < source.length; at += 1) {
+				const char = source[at];
+				if (char === '(' || char === '<') depth += 1;
+				else if (char === ')' || char === '>') depth -= 1;
+				else if (depth === 0 && char === ':' && colon === -1) colon = at;
+				else if (depth === 0 && char === '{') {
+					end = at;
+					break;
+				} else if (depth === 0 && char === '\n' && colon !== -1) {
+					// A class with no body ends at its line, unless the list of
+					// supertypes is still open — a trailing comma, or a colon with
+					// nothing after it yet.
+					const written = source.slice(colon + 1, at).trim();
+					if (written.length > 0 && !written.endsWith(',')) {
+						end = at;
+						break;
+					}
+				}
+			}
+			if (colon === -1) continue;
+			const names = [...source.slice(colon + 1, end).matchAll(/(?:^|,)\s*([A-Za-z_][\w.]*)/g)].map(
+				(one) => one[1].split('.').pop() ?? one[1]
+			);
+			out.set(match[1], [...(out.get(match[1]) ?? []), ...names]);
+		}
+	}
+	return out;
+}
+
+/**
+ * Whether the extension class descends from keiyoushi's `KeiSource`, through
+ * its template or directly.
+ *
+ * Walked over the files the conversion translated rather than guessed from a
+ * member it happens to declare, because the base class decides behaviour the
+ * extension never states — the `Referer` on every request, where its rate
+ * limit is applied — and an extension that declares no hook at all is still
+ * one. See `MihonEntrypointOptions.keiSource`.
+ */
+function descendsFromKeiSource(files: readonly { source: string }[], className: string): boolean {
+	const supertypes = supertypesByClass(files);
+	const seen = new Set<string>();
+	const pending = [className];
+	while (pending.length > 0) {
+		const name = pending.pop()!;
+		if (seen.has(name)) continue;
+		seen.add(name);
+		for (const parent of supertypes.get(name) ?? []) {
+			if (parent === 'KeiSource') return true;
+			pending.push(parent);
+		}
+	}
+	return false;
+}
+
 export const mihonAdapter: ForeignAdapter = {
 	format: 'mihon',
 
@@ -619,6 +693,7 @@ export const mihonAdapter: ForeignAdapter = {
 			className: conversion.className,
 			baseUrl,
 			lang,
+			keiSource: descendsFromKeiSource(kotlin, conversion.className),
 			// The `.properties` files this extension's own repository keeps
 			// beside its Kotlin, which `Intl` reads through the classloader. An
 			// extension with none passes an empty map and the classpath is

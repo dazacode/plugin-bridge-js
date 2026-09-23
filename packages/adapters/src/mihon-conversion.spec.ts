@@ -30,7 +30,8 @@ const BASE_URL = 'https://read.example.invalid';
 
 async function convert(
 	translated: string,
-	resources: Record<string, string> = {}
+	resources: Record<string, string> = {},
+	keiSource = false
 ): Promise<Uint8Array> {
 	return await packageBundle({
 		id: PLUGIN_ID,
@@ -53,7 +54,8 @@ async function convert(
 			className: 'Extension',
 			baseUrl: BASE_URL,
 			lang: 'en',
-			resources
+			resources,
+			keiSource
 		}),
 		usesCookies: formatProfile('mihon').implicitCookies || namesCookieJar(translated),
 		license: 'Apache-2.0',
@@ -68,12 +70,17 @@ interface Page {
 
 interface Loaded {
 	id: string;
+	listChapters(id: string, ctx: unknown): Promise<{ sourceChapterId: string; title?: string }[]>;
 	browse(shelf: string, page: number, ctx: unknown): Promise<Page>;
 	searchCatalog(query: string, page: number, ctx: unknown): Promise<Page>;
 }
 
-async function load(translated: string, resources: Record<string, string> = {}): Promise<Loaded> {
-	const bundle = await openPluginArchive(await convert(translated, resources));
+async function load(
+	translated: string,
+	resources: Record<string, string> = {},
+	keiSource = false
+): Promise<Loaded> {
+	const bundle = await openPluginArchive(await convert(translated, resources, keiSource));
 	// A file rather than a `data:` URL: this bundle carries a whole runtime and
 	// is far past the length a data URL can be imported at.
 	const { writeFileSync, mkdtempSync } = await import('node:fs');
@@ -302,5 +309,128 @@ class Extension {
 
 		const page = await module.browse('popular', 1, context());
 		expect(page.entries[0].title).toBe('[author_filter_title]');
+	});
+});
+
+/**
+ * What the base class owns and the extension reaches through bare.
+ *
+ * `client`, `headers` and the rest were never on the instance, so every
+ * request a translated member made itself — `client.newCall(…)`, and the
+ * whole of the current API's `client.get(url)` — died on the first search of a
+ * bundle that had imported cleanly and been counted as working.
+ */
+describe('the members a manga extension inherits', () => {
+	/** A context that records what was sent and what policy was declared. */
+	function recording() {
+		const sent: { url: string; headers: Record<string, string> }[] = [];
+		const policies: unknown[] = [];
+		const ctx = {
+			...(context() as Record<string, unknown>),
+			http: {
+				policy: async (declared: unknown) => {
+					policies.push(declared);
+				},
+				send: async (url: string, request: { headers: Record<string, string> }) => {
+					sent.push({ url, headers: request.headers });
+					return {
+						status: 200,
+						url,
+						headers: {},
+						text: async () => '<html><body><a class="ch" href="/c/1">One</a></body></html>',
+						json: async () => ({})
+					};
+				}
+			}
+		};
+		return { ctx, sent, policies };
+	}
+
+	it('gives the extension a client and headers to send with', async () => {
+		const module = await load(`
+class Extension {
+  constructor() { this.baseUrl = '${BASE_URL}'; }
+  async getPopularManga(page) {
+    const response = await this.client.newCall(GET(this.baseUrl + '/p', this.headers)).execute();
+    return { mangas: [{ url: '/m', title: String(response.code) }], hasNextPage: false };
+  }
+}
+`);
+		const { ctx, sent } = recording();
+		const page = await module.browse('popular', 1, ctx);
+		expect(page.entries[0].title).toBe('200');
+		expect(sent[0].url).toBe(`${BASE_URL}/p`);
+	});
+
+	it('builds KeiSource headers with Referer and Origin, then the extension hook', async () => {
+		const module = await load(
+			`
+class Extension {
+  constructor() { this.baseUrl = '${BASE_URL}'; }
+  configureHeaders(builder) { return builder.add('X-Extra', 'yes'); }
+  async getPopularManga(page) {
+    await __k.okhttp(this.client, 'get', [this.baseUrl + '/p'], {});
+    return { mangas: [], hasNextPage: false };
+  }
+}
+`,
+			{},
+			true
+		);
+		const { ctx, sent } = recording();
+		await module.browse('popular', 1, ctx);
+		expect(sent[0].headers).toMatchObject({
+			Referer: `${BASE_URL}/`,
+			Origin: BASE_URL,
+			'X-Extra': 'yes'
+		});
+	});
+
+	it('runs configureClient, which is where a KeiSource declares its rate limit', async () => {
+		const module = await load(
+			`
+class Extension {
+  constructor() { this.baseUrl = '${BASE_URL}'; }
+  configureClient(builder) { return __k.rateLimit(builder, 2, 1000); }
+  async getPopularManga(page) {
+    await __k.okhttp(this.client, 'get', [this.baseUrl + '/p'], {});
+    return { mangas: [], hasNextPage: false };
+  }
+}
+`,
+			{},
+			true
+		);
+		const { ctx, policies } = recording();
+		await module.browse('popular', 1, ctx);
+		expect(policies).toContainEqual(
+			expect.objectContaining({ rateLimit: { permits: 2, periodMs: 1000 } })
+		);
+	});
+
+	it('lists chapters through fetchMangaUpdate, asking for chapters only', async () => {
+		// The current API's one member for both, which the host calls through
+		// the base class's final getMangaUpdate. An extension that implements
+		// it declares no chapter member of any older generation.
+		const module = await load(
+			`
+class Extension {
+  constructor() { this.baseUrl = '${BASE_URL}'; this.asked = null; }
+  async fetchMangaUpdate(manga, chapters, fetchDetails, fetchChapters) {
+    const chapter = SChapter.create();
+    chapter.url = manga.url + '/1';
+    chapter.name = 'details=' + fetchDetails + ' chapters=' + fetchChapters;
+    return SMangaUpdate(manga, [chapter]);
+  }
+}
+`,
+			{},
+			true
+		);
+		const { ctx } = recording();
+		const chapters = await module.listChapters('/m', ctx);
+		expect(chapters).toHaveLength(1);
+		expect(chapters[0].sourceChapterId).toBe('/m/1');
+		expect(chapters[0].title).toBe('details=false chapters=true');
 	});
 });

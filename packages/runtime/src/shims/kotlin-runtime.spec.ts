@@ -1636,6 +1636,71 @@ describe('okhttp, over the host', () => {
 		expect(response.isSuccessful).toBe(false);
 	});
 
+	it('sends keiyoushi client.get(url) and throws on a non-2xx by default', async () => {
+		const { ctx, sent } = context({
+			'https://example.invalid/ok': { body: 'fine' },
+			'https://example.invalid/gone': { status: 404, body: '' }
+		});
+		runtime.enter(ctx);
+
+		const response = await k.okhttp(runtime.client, 'get', ['https://example.invalid/ok'], {});
+		expect(await response.body.string()).toBe('fine');
+		expect(sent[0].method).toBe('GET');
+
+		await expect(
+			k.okhttp(runtime.client, 'get', ['https://example.invalid/gone'], {})
+		).rejects.toThrow(/404/);
+		// `ensureSuccess = false` is the author asking to branch on the code.
+		const gone = await k.okhttp(runtime.client, 'get', ['https://example.invalid/gone'], {
+			ensureSuccess: false
+		});
+		expect(gone.code).toBe(404);
+	});
+
+	it('tells the overloads apart by what each argument is', async () => {
+		// `post(url, headers, body)` and `post(url, body)` share a name and a
+		// first argument; the second is Headers in one and the body in the other.
+		const { ctx, sent } = context();
+		runtime.enter(ctx);
+		const headers = runtime.globals.Headers.Builder().add('X-A', 'b').build();
+		const body = k.toRequestBody('{"q":1}', 'application/json');
+
+		await k.okhttp(runtime.client, 'post', ['https://example.invalid/a', headers, body], {});
+		await k.okhttp(runtime.client, 'post', ['https://example.invalid/b', body, false], {});
+		await k.okhttp(runtime.client, 'get', ['https://example.invalid/c', headers, {}], {});
+
+		expect(sent[0]).toMatchObject({ method: 'POST', body: '{"q":1}' });
+		expect(sent[0].headers['X-A']).toBe('b');
+		expect(sent[1]).toMatchObject({ method: 'POST', body: '{"q":1}' });
+		expect(sent[1].headers['X-A']).toBeUndefined();
+		expect(sent[2]).toMatchObject({ method: 'GET', body: null });
+		expect(sent[2].headers['X-A']).toBe('b');
+	});
+
+	it('refuses a post with no body rather than sending an empty one', async () => {
+		const { ctx } = context();
+		runtime.enter(ctx);
+		expect(() => k.okhttp(runtime.client, 'post', ['https://example.invalid/a'], {})).toThrow(
+			/no request body/
+		);
+	});
+
+	it('calls the get of a receiver that is not a client, as written', () => {
+		// An extension class that happens to be named `ApiClient`: its own
+		// method is what the Kotlin called, and nothing is sent.
+		const own = { get: (key: string) => `own:${key}` };
+		expect(k.okhttp(own, 'get', ['x'], {})).toBe('own:x');
+		expect(() => k.okhttp(own, 'get', ['x'], { ensureSuccess: false })).toThrow(/named arguments/);
+	});
+
+	it('holds a SoftReference until it is cleared', () => {
+		const ref = runtime.globals.SoftReference({ a: 1 });
+		expect(ref.get()).toEqual({ a: 1 });
+		ref.clear();
+		expect(ref.get()).toBeNull();
+		expect(runtime.globals.WeakReference(null).get()).toBeNull();
+	});
+
 	// What the runtime hands an interceptor. Declared here because this file
 	// drives an *emitted module*, so nothing it calls has a type of its own.
 	interface Chain {

@@ -280,6 +280,9 @@ export const RUNTIME_HELPERS = [
 	/* `call.execute()` and `call.awaitSuccess()`, both of which suspend. */
 	'executeCall',
 	'awaitSuccess',
+	/* keiyoushi's `client.get(url)` and its three siblings, which build the
+	   request, send it and await it in one suspend call. See `clientVerb`. */
+	'okhttp',
 
 	/* Throwing. `error("…")` is Kotlin's, and an extension that throws a plain
 	   exception should surface as a plugin error rather than as a refusal. */
@@ -674,6 +677,10 @@ export const RUNTIME_GLOBALS = [
 	'StandardCharsets',
 	'JsonObject',
 	'LruCache',
+	/* `SoftReference(map)` / `WeakReference(x)`, then `.get()`. See the runtime
+	   for why holding the value strongly is exact rather than approximate. */
+	'SoftReference',
+	'WeakReference',
 	'Log',
 	/* kotlin.random.Random, which is `Math.random` and promises nothing. Its
 	   neighbour `SecureRandom` is the one that does, and is separate below. */

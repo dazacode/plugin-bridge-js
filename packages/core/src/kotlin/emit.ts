@@ -325,7 +325,27 @@ const INJEKT_GET = /^Injekt\.get<(\w+)>\(\)$/;
  * that decrypts makes its callers `async` too.
  */
 const BLOCKING_CALLS =
-	/\.(?:execute|awaitSuccess|await|doFinal|generateKeyPair|verify)\s*\(|(?<!\bMath)\.sign\s*\(|\bThread\s*\.\s*sleep\s*\(/;
+	/\.(?:execute|awaitSuccess|await|doFinal|generateKeyPair|verify)\s*\(|(?<!\bMath)\.sign\s*\(|\bThread\s*\.\s*sleep\s*\(|\b(?:client|[a-z]\w*Client)\s*\.\s*(?:get|post|put|head)\s*\(/;
+
+/**
+ * keiyoushi's suspend verbs on an okhttp client, and what they are called on.
+ *
+ * See `clientVerb`. The receiver is read by name because that is all the call
+ * site has: the base class's `client`, `network.client`, or a property the
+ * extension named for what it is — `apiClient`, `imageClient`,
+ * `noRedirectClient`. The runtime checks the value really is a client before
+ * sending anything, so the name decides only that the call is awaited.
+ */
+const CLIENT_VERBS: ReadonlySet<string> = new Set(['get', 'post', 'put', 'head']);
+const CLIENT_RECEIVER = /^(?:this\.)?(?:network\.)?(?:client|cloudflareClient|[a-z]\w*Client)$/;
+/** Every parameter any overload of the four declares, by the name core/ gives it. */
+const CLIENT_VERB_PARAMETERS: ReadonlySet<string> = new Set([
+	'url',
+	'headers',
+	'body',
+	'cacheControl',
+	'ensureSuccess'
+]);
 
 /**
  * The SharedPreferences readers, which share four names with org.json.
@@ -5356,6 +5376,16 @@ class Emitter {
 			return SUPER_SUSPEND_MEMBERS.has(name) ? this.awaited(call) : call;
 		}
 
+		if (
+			CLIENT_VERBS.has(name) &&
+			lambda === null &&
+			args.length > 0 &&
+			!safe &&
+			CLIENT_RECEIVER.test(receiver.text.replace(/\s+/g, ''))
+		) {
+			return this.clientVerb(receiver, name, args);
+		}
+
 		if (name === 'not' && args.length === 0 && lambda === null && !safe) {
 			// `Boolean.not()` is the operator written as a call, which this
 			// ecosystem reaches for when negating something already parenthesised:
@@ -5495,8 +5525,12 @@ class Emitter {
 		// and the emitter is the only half of this converter that can still see
 		// which unit was written. Handled before the generic path because that
 		// path erases the distinction it needs. See `rateLimitCall`.
-		if ((name === 'rateLimit' || name === 'rateLimitHost') && lambda === null && !shadowed) {
-			return this.rateLimitCall(suffix, receiver, name, args);
+		if (
+			(name === 'rateLimit' || name === 'rateLimitHost') &&
+			(lambda === null || name === 'rateLimit') &&
+			!this.extensionFunctions.has(name)
+		) {
+			return this.rateLimitCall(suffix, this.expr(receiver), name, args, lambda);
 		}
 		// The same two limits, installed as the shared libraries' own interceptor
 		// objects rather than through the extension function. Only those two: a
@@ -5869,6 +5903,18 @@ class Emitter {
 			const withLambda = this.callArguments(name, args, lambda, labelled, true);
 			return `${implicit}.${name}(${withLambda.join(', ')})`;
 		}
+		// `configureClient() = rateLimit(3)`: the builder is the implicit
+		// receiver, and the period has to be resolved here exactly as it is for
+		// the written-out `.rateLimit(3)` — the generic helper path below passes
+		// the arguments through, and the runtime is then handed no period at all.
+		if (
+			implicit !== null &&
+			(name === 'rateLimit' || name === 'rateLimitHost') &&
+			!this.isSourceMember(name) &&
+			!this.extensionFunctions.has(name)
+		) {
+			return this.rateLimitCall(callee, implicit, name, args, lambda);
+		}
 		if (implicit !== null && !this.isSourceMember(name)) {
 			const helper = EXTENSION_METHODS.get(name);
 			if (helper !== undefined) {
@@ -6152,6 +6198,54 @@ class Emitter {
 	}
 
 	/**
+	 * `client.get(url)`, `client.post(url, body = …)` and the rest of the
+	 * repository's own suspend verbs on an okhttp client.
+	 *
+	 * keiyoushi's shared `core/` declares `get`, `post`, `put` and `head` as
+	 * extension functions on `OkHttpClient`, each twice over: once taking
+	 * `headers`, and once reading them off the `HttpSource` context receiver.
+	 * They are how the current half of the catalogue makes every request —
+	 * 1,647 `client.get(` in one repository — and with nothing recognising them
+	 * a one-argument `client.get(url)` went down the `list.get(i)` path and came
+	 * out as `__k.getAt(this.client, url)`: an index into the client, no
+	 * request, no await, and a bundle that loaded clean and could not fetch.
+	 *
+	 * Two overloads under one name cannot be slotted by a signature, because
+	 * the second positional argument is `headers` in one and `cacheControl` or
+	 * `body` in the other. So the call is handed over as written — positional
+	 * arguments in order, named ones as an object — and `__k.okhttp` tells the
+	 * values apart by what they are, which is a fact at run time and a guess
+	 * here. It also checks the receiver really is a client and otherwise calls
+	 * the receiver's own `get`, so an extension class that happens to be named
+	 * `ApiClient` with a `get` of its own is still called, not requested.
+	 *
+	 * Always awaited: every one of these suspends.
+	 */
+	private clientVerb(receiver: KNode, name: string, args: KNode[]): string {
+		const positional: string[] = [];
+		const named: string[] = [];
+		for (const arg of args) {
+			const key = this.argumentName(arg);
+			if (key === null) {
+				if (named.length > 0)
+					this.refuse(arg, `a positional argument after a named one on \`${name}\``);
+				positional.push(...this.argumentExpressions(arg));
+				continue;
+			}
+			if (!CLIENT_VERB_PARAMETERS.has(key)) {
+				this.refuse(arg, `the argument name \`${key}\` on \`${name}\``);
+			}
+			named.push(`${key}: ${this.expr(this.argumentValue(arg))}`);
+		}
+		if (positional.some((one) => one.startsWith('...'))) {
+			this.refuse(args[0], `a spread passed to \`${name}\``);
+		}
+		return this.awaited(
+			`${this.helper('okhttp')}(${this.expr(receiver)}, '${name}', [${positional.join(', ')}], ${named.length > 0 ? `{ ${named.join(', ')} }` : '{}'})`
+		);
+	}
+
+	/**
 	 * A vararg call's arguments, with its trailing named ones as one object.
 	 *
 	 * `text.split(",", limit = 2)` → `__k.split(text, ",", { limit: 2 })`. See
@@ -6194,8 +6288,31 @@ class Emitter {
 	 * A period this cannot read exactly is **refused**. The wrong answer is a
 	 * converted extension that asks a source for more than it promised, which
 	 * costs a viewer their access rather than throwing anything anybody sees.
+	 *
+	 * **A trailing `shouldLimit` block is honoured by applying the limit to
+	 * every request.** keiyoushi's own `rateLimit(permits, period) { url -> … }`
+	 * scopes a rule to the requests its predicate accepts — nearly always "not
+	 * the image uploads" or "only the site's own host". The host's policy is
+	 * per plugin or per host, and cannot run a predicate; applying the rule to
+	 * everything the plugin sends is stricter than the author asked, never
+	 * looser, which is the direction that cannot cost a viewer their access.
+	 * Image requests are the host's own and are not throttled by it either way.
+	 * The predicate is not emitted, so nothing it reads has to translate.
+	 *
+	 * The receiver arrives as text because a bare `rateLimit(3)` inside
+	 * `configureClient()` has no receiver node — it is the builder the base
+	 * class passes in.
 	 */
-	private rateLimitCall(suffix: KNode, receiver: KNode, name: string, args: KNode[]): string {
+	private rateLimitCall(
+		suffix: KNode,
+		receiver: string,
+		name: string,
+		args: KNode[],
+		predicate: KNode | null = null
+	): string {
+		if (predicate !== null && name !== 'rateLimit') {
+			this.refuse(predicate, `a lambda passed to \`${name}\``);
+		}
 		if (args.some((arg) => arg.allChildren.some((child) => child.type === '='))) {
 			// Reordering named arguments needs the callee's signature, which is in
 			// a library this converter does not read. `plainArguments` guesses in
@@ -6209,7 +6326,7 @@ class Emitter {
 			this.refuse(suffix, `\`.${name}()\` with ${args.length} arguments`);
 		}
 		const periodMs = this.rateLimitPeriod(suffix, name, args[first + 1], args[first + 2]);
-		const parts = [this.expr(receiver)];
+		const parts = [receiver];
 		if (first === 1) parts.push(...this.argumentExpressions(args[0]));
 		parts.push(...this.argumentExpressions(args[first]));
 		parts.push(String(periodMs));
@@ -6296,10 +6413,10 @@ class Emitter {
 		const call = this.flatten(value);
 		if (call.lambda !== null || call.callee.type !== 'simple_identifier') return null;
 		if (call.callee.text === 'RateLimitInterceptor') {
-			return this.rateLimitCall(suffix, receiver, 'rateLimit', call.args);
+			return this.rateLimitCall(suffix, this.expr(receiver), 'rateLimit', call.args);
 		}
 		if (call.callee.text === 'SpecificHostRateLimitInterceptor') {
-			return this.rateLimitCall(suffix, receiver, 'rateLimitHost', call.args);
+			return this.rateLimitCall(suffix, this.expr(receiver), 'rateLimitHost', call.args);
 		}
 		return null;
 	}
