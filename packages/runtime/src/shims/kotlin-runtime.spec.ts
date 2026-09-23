@@ -1026,6 +1026,32 @@ describe('one dead mirror must not lose the page', () => {
 /* ── properties, types, ranges ────────────────────────────────────────────── */
 
 describe('the parts of Kotlin that have no JavaScript spelling', () => {
+	it('keeps equal sort keys stable while sorting a MutableList in place', () => {
+		const list = k.mutableListOf({ n: 1, id: 'a' }, { n: 2, id: 'b' }, { n: 1, id: 'c' });
+		expect(k.sortByDescending(list, (item: { n: number }) => item.n)).toBeUndefined();
+		expect(list.map((item: { id: string }) => item.id)).toEqual(['b', 'a', 'c']);
+		expect(k.sortBy(list, (item: { n: number }) => item.n)).toBeUndefined();
+		expect(list.map((item: { id: string }) => item.id)).toEqual(['a', 'c', 'b']);
+		expect(
+			k.sortWith(list, (a: { id: string }, b: { id: string }) => a.id.localeCompare(b.id))
+		).toBeUndefined();
+		expect(list.map((item: { id: string }) => item.id)).toEqual(['a', 'b', 'c']);
+	});
+
+	it('computes a map default only on misses and builds an insertion-ordered Set', () => {
+		const cache = k.mutableMapOf();
+		let calls = 0;
+		expect(k.getOrPut(cache, 'a', () => ++calls)).toBe(1);
+		expect(k.getOrPut(cache, 'a', () => ++calls)).toBe(1);
+		expect(calls).toBe(1);
+		cache.set('b', null);
+		expect(k.getOrPut(cache, 'b', () => ++calls)).toBe(2);
+		expect(k.getOrPut({}, 'toString', () => 'own')).toBe('own');
+		const built = k.buildSet(function (this: Set<string>) {
+			k.addAll(this, ['b', 'a', 'b']);
+		});
+		expect([...built]).toEqual(['b', 'a']);
+	});
 	it('runs a val initialiser once, however often it is read', () => {
 		// A getter would run per read, and `val client = ...build()` read twice
 		// would be two clients rather than one.

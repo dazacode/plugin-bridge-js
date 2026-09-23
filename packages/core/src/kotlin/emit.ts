@@ -376,6 +376,7 @@ const RECEIVER_SCOPE: ReadonlySet<string> = new Set(['apply', 'run', 'runCatchin
  */
 const RECEIVER_BUILDERS: ReadonlySet<string> = new Set([
 	'buildList',
+	'buildSet',
 	'buildMap',
 	'buildJsonObject',
 	'buildJsonArray'

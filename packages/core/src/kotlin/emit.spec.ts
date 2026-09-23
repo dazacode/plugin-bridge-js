@@ -4604,6 +4604,24 @@ describe('the class loader', () => {
 });
 
 describe('the shared playlist module’s signatures', () => {
+	it('routes in-place sorts, map defaults, receiver builders and Observable callbacks', () => {
+		const emitted = translate(
+			inClass(
+				'    fun order(xs: MutableList<Int>) { xs.sortByDescending { it }; xs.sortDescending() }',
+				'    fun cache(m: MutableMap<String, Int>) = m.getOrPut("a") { 1 }',
+				'    fun unique() = buildSet { add("a"); add("a") }',
+				'    fun observed(o: Observable<Int>) = o.doOnNext { it.toString() }.onErrorReturn { 0 }'
+			)
+		);
+		expect(emitted.refusals).toEqual([]);
+		expect(emitted.js).toContain('__k.sortByDescending(xs,');
+		expect(emitted.js).toContain('__k.sortDescending(xs)');
+		expect(emitted.js).toContain('__k.getOrPut(m,');
+		expect(emitted.js).toContain('__k.buildSet(');
+		expect(emitted.js).toContain('.doOnNext(');
+		expect(emitted.js).toContain('.onErrorReturn(');
+	});
+
 	// Each of these is a shape `PlaylistUtils` is written in, and each was
 	// emitted without a refusal and wrong: the request went out with the wrong
 	// headers or referer, which reads to a viewer as a hoster being down.

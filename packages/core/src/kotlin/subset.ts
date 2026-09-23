@@ -731,6 +731,13 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 	['none', 'none'],
 	['sortedBy', 'sortedBy'],
 	['sortedByDescending', 'sortedByDescending'],
+	// MutableList sorts reorder the receiver and answer Unit.
+	['sortBy', 'sortBy'],
+	['sortByDescending', 'sortByDescending'],
+	['sortWith', 'sortWith'],
+	['sortDescending', 'sortDescending'],
+	// Compute only when the map has no non-null value under the key.
+	['getOrPut', 'getOrPut'],
 	['reversed', 'reversed'],
 	['distinct', 'distinct'],
 	['take', 'take'],
@@ -1133,7 +1140,10 @@ export const ARGUMENT_LAMBDA_METHODS: ReadonlySet<string> = new Set([
 	'addInterceptor',
 	// keiyoushi's `addCookie { listOf("k" to v) }`: the lambda is the cookies,
 	// asked for at each request so a preference can change them.
-	'addCookie'
+	'addCookie',
+	// Observable takes each block as a function of the value or error.
+	'doOnNext',
+	'onErrorReturn'
 ]);
 
 /**
@@ -1777,6 +1787,7 @@ export const FREE_FUNCTIONS: ReadonlyMap<string, string> = new Map([
 	// The builders whose block is handed a receiver. `buildString` is emitted
 	// by name in `emit.ts`; these four are ordinary free functions there.
 	['buildList', 'buildList'],
+	['buildSet', 'buildSet'],
 	['buildMap', 'buildMap'],
 	['buildJsonObject', 'buildJsonObject'],
 	['buildJsonArray', 'buildJsonArray'],

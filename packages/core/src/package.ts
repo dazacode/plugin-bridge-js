@@ -160,8 +160,12 @@ const ENTRYPOINT = 'source';
  * 52: detached class and companion getters, mutable lazy properties, and
  *     empty anonymous subclasses now keep their Kotlin behavior. Previously
  *     refused members can enter a bundle after reconversion.
+ *
+ * 53: mutable sorts, getOrPut, buildSet and Observable lambdas widen the
+ *     supported control-flow subset; descending keyed sorts also preserve
+ *     Kotlin's stable order. Reconvert to include newly emitted members.
  */
-export const CONVERTER_VERSION = 52;
+export const CONVERTER_VERSION = 53;
 
 export interface BundleInput {
 	readonly id: string;

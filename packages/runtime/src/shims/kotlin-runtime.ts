@@ -733,6 +733,15 @@ function __isType(value, type) {
   return check === undefined ? false : check(value);
 }
 
+/** Write a sorted copy back into a MutableList, answering Unit. */
+function __sortInPlace(list, sorted) {
+  if (!Array.isArray(list)) {
+    throw new Error('This converted extension sorted something that is not a mutable list.');
+  }
+  for (var i = 0; i < sorted.length; i += 1) list[i] = sorted[i];
+  return undefined;
+}
+
 /** An array that also answers to a MutableList's method names. */
 function __mutableList(items) {
   function define(name, value) {
@@ -2657,8 +2666,52 @@ var __k = {
     });
   },
 
+  /** Reversing an ascending result would also reverse equal keys. */
   sortedByDescending: function (list, selector) {
-    return __then(__k.sortedBy(list, selector), function (sorted) { return sorted.slice().reverse(); });
+    var items = __arr(list).slice();
+    return __then(__each(items, function (item) { return selector(item); }), function (keys) {
+      var order = [];
+      for (var i = 0; i < items.length; i += 1) order.push(i);
+      order.sort(function (a, b) {
+        var delta = __cmp(keys[b], keys[a]);
+        return delta !== 0 ? delta : a - b;
+      });
+      var out = [];
+      for (var j = 0; j < order.length; j += 1) out.push(items[order[j]]);
+      return out;
+    });
+  },
+
+  /** MutableList sorts change the receiver and answer Unit. */
+  sortBy: function (list, selector) {
+    return __then(__k.sortedBy(list, selector), function (sorted) { return __sortInPlace(list, sorted); });
+  },
+
+  sortByDescending: function (list, selector) {
+    return __then(__k.sortedByDescending(list, selector), function (sorted) {
+      return __sortInPlace(list, sorted);
+    });
+  },
+
+  sortWith: function (list, comparator) {
+    return __sortInPlace(list, __k.sortedWith(list, comparator));
+  },
+
+  sortDescending: function (list) {
+    return __sortInPlace(list, __k.sortedDescending(list));
+  },
+
+  /** Null is a miss, so a fallback may run again for a present key. */
+  getOrPut: function (map, key, make) {
+    if (map instanceof Map) {
+      if (map.has(key) && __present(map.get(key))) return map.get(key);
+      return __then(make(), function (value) { map.set(key, value); return value; });
+    }
+    if (map === null || map === undefined || typeof map !== 'object') {
+      throw new Error('This converted extension called getOrPut on something that is not a map.');
+    }
+    if (Object.prototype.hasOwnProperty.call(map, key) && __present(map[key])) return map[key];
+    return __then(make(), function (value) { map[key] = value; return value; });
   },
 
   /**
@@ -5082,6 +5135,13 @@ var __k = {
     var block = typeof b === 'function' ? b : a;
     var items = __mutableList([]);
     return __then(block.call(items, items), function () { return items; });
+  },
+
+  /** buildSet uses a Set receiver and keeps insertion order. */
+  buildSet: function (a, b) {
+    var block = typeof b === 'function' ? b : a;
+    var set = __k.toSet([]);
+    return __then(block.call(set, set), function () { return set; });
   },
 
   /** buildMap { put(k, v) }, the same shape over a MutableMap. */
