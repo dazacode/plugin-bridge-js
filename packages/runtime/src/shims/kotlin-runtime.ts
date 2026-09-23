@@ -3002,6 +3002,27 @@ var __k = {
   also: function (value, fn) { return __then(fn(value), function () { return value; }); },
   apply: function (value, fn) { return __then(fn.call(value, value), function () { return value; }); },
 
+  /**
+   * A block written for a parameter typed 'R.() -> T', as a plain function
+   * taking R first.
+   *
+   * The block itself is emitted as a receiver function, whose body reads its
+   * receiver as 'this'. A value of such a type travels in the shape Kotlin
+   * gives it wherever a '(R) -> T' is expected — receiver first — because that
+   * is how everything that later calls it will call it: 'block(builder)' from
+   * the translated function, 'apply(block)' through the helper above, or
+   * 'use(parse)' through 'let'. This is the one place the two shapes meet, so
+   * both 'this' and the leading argument are the receiver on the way in — and
+   * a caller that binds only 'this', as a receiver block's own callers did
+   * before this existed, still hands over the receiver it meant.
+   */
+  receiverLambda: function (fn) {
+    return function (receiver) {
+      if (arguments.length === 0) return fn.call(this);
+      return fn.apply(receiver, Array.prototype.slice.call(arguments, 1));
+    };
+  },
+
   takeIf: function (value, predicate) {
     return __then(predicate(value), function (verdict) { return verdict ? value : null; });
   },

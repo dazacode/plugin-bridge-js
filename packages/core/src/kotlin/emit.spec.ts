@@ -290,6 +290,12 @@ const helpers: Record<string, (...args: never[]) => unknown> = {
 		return value;
 	},
 	run: (value: Any, fn: (this: Any) => Any) => fn.call(value),
+	// As the runtime's: receiver first when there is an argument, `this` when
+	// a caller bound only that — which is what `apply` above does.
+	receiverLambda: (fn: (this: Any, ...rest: Any[]) => Any) =>
+		function (this: Any, ...args: Any[]) {
+			return args.length === 0 ? fn.call(this) : fn.apply(args[0], args.slice(1));
+		},
 	firstInstanceOrNull: (list: Any[], type: Any) =>
 		typeof type === 'function'
 			? (list.find((item) => item instanceof (type as new () => unknown)) ?? null)
@@ -4564,6 +4570,85 @@ describe('the order module-scope declarations are emitted in', () => {
 		);
 
 		expect(found).toBe('https://example.invalid');
+	});
+});
+
+describe('a lambda whose parameter is typed with a receiver', () => {
+	// `block: Headers.Builder.() -> Unit`: the block's bare calls are calls on
+	// the builder, and `this` inside it is the builder. Written as an ordinary
+	// arrow, `set` resolved to the *source* — a wrong request, or `this.set is
+	// not a function` — so both ends have to know: the call site writes a
+	// receiver block, and the function calls it with the receiver first.
+	const builder = {
+		Headers: {
+			Builder: () => ({
+				text: '',
+				set(this: { text: string }, name: string, value: string) {
+					this.text += value;
+					return this;
+				},
+				build(this: { text: string }) {
+					return this.text;
+				}
+			})
+		}
+	};
+
+	it('gives the block its receiver, by every spelling of the call', () => {
+		const found = evaluate(
+			kt(
+				'class Demo : Source() {',
+				'    private fun collect(first: String, block: Headers.Builder.() -> Unit = {}): String =',
+				'        Headers.Builder().apply { set("h", first); block() }.build()',
+				'    private fun viaApply(block: Headers.Builder.() -> Unit): String =',
+				'        Headers.Builder().apply(block).build()',
+				'    private fun explicit(block: Headers.Builder.() -> Unit): String {',
+				'        val made = Headers.Builder()',
+				'        made.block()',
+				'        block(made)',
+				'        return made.build()',
+				'    }',
+				'    private fun Headers.Builder.twice(block: Headers.Builder.(String) -> Unit): String {',
+				'        block("1")',
+				'        block(this, "2")',
+				'        return build()',
+				'    }',
+				'    fun plain() = collect("a")',
+				'    fun trailing(q: String) = collect("a") { set("h", q); set("h", "c") }',
+				'    fun applied() = viaApply { set("h", "x") }',
+				'    fun both() = explicit { set("h", "y") }',
+				'    fun arity() = Headers.Builder().twice { n -> set("h", n) }',
+				'}'
+			),
+			'[new Demo().plain(), new Demo().trailing("b"), new Demo().applied(), new Demo().both(), new Demo().arity()]',
+			builder
+		);
+
+		expect(found).toEqual(['a', 'abc', 'x', 'yy', '12']);
+	});
+
+	it('refuses the shapes whose receiver it would have to guess', () => {
+		// A block inside the parentheses would take the arrow path and lose its
+		// receiver; a call with no receiver in reach but the class would hand
+		// the block the source object.
+		expect(
+			refusalNames(
+				kt(
+					'class Demo : Source() {',
+					'    private fun collect(first: String, block: Headers.Builder.() -> Unit): String = first',
+					'    fun inside() = collect("a", { set("h", "b") })',
+					'    fun named() = collect(first = "a", block = { set("h", "b") })',
+					'    private fun plain(first: String, map: (String) -> String): String = map(first)',
+					'    fun ordinary() = plain(first = "a", map = { it + "b" })',
+					'    fun bare(block: Headers.Builder.() -> Unit) = block()',
+					'}'
+				)
+			)
+		).toEqual([
+			'a receiver lambda passed to `collect` inside its parentheses',
+			'a receiver lambda passed to `collect` inside its parentheses',
+			'a receiver function called with no receiver in reach'
+		]);
 	});
 });
 

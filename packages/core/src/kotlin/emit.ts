@@ -704,6 +704,13 @@ class Refused extends Error {}
 interface Local {
 	readonly text: string;
 	readonly mutable: boolean;
+	/**
+	 * Set on a parameter typed `R.(…) -> T`: how many arguments it takes
+	 * *besides* its receiver. See `invokeReceiverLocal`.
+	 */
+	readonly receiverArity?: number;
+	/** On such a parameter: whether its type is `suspend`, so a call is awaited. */
+	readonly receiverSuspends?: boolean;
 }
 
 /** One `function`-ish emission in progress. */
@@ -961,6 +968,30 @@ export interface Declared {
 	 * `overloadsOf` needs.
 	 */
 	readonly classFunctions: ReadonlyMap<string, ReadonlySet<string>>;
+	/**
+	 * Which parameters of each function are typed `R.() -> T`, by name — or
+	 * null where two declarations of the name disagree. See `ReceiverSlots`.
+	 */
+	readonly receiverLambdas: ReadonlyMap<string, ReceiverSlots | null>;
+}
+
+/**
+ * A function's parameters that take a receiver lambda — `block:
+ * HttpUrl.Builder.() -> Unit` — out of how many it declares.
+ *
+ * A lambda written for one of these reads its receiver as `this` and its bare
+ * calls as calls on it: `searchUrl(page) { addQueryParameter("q", query) }`
+ * adds to the *builder*. Emitted as an ordinary arrow, the same lambda has no
+ * receiver at all, and the bare call lands on the source object instead — a
+ * wrong request, or `this.addQueryParameter is not a function`, depending on
+ * which name it was. So the call site has to know, and knowing is a fact about
+ * the callee's declaration, which may be in the file next door.
+ */
+interface ReceiverSlots {
+	readonly count: number;
+	readonly at: readonly number[];
+	/** The same parameters by name, for a call that passes one by name. */
+	readonly names: readonly string[];
 }
 
 /**
@@ -1017,7 +1048,8 @@ const EMPTY_DECLARED: Declared = {
 	qualifiedSignatures: new Map(),
 	objects: new Set(),
 	overloads: new Map(),
-	classFunctions: new Map()
+	classFunctions: new Map(),
+	receiverLambdas: new Map()
 };
 
 /** What one parsed file declares, without translating any of it. */
@@ -1046,7 +1078,11 @@ export function mergeDeclared(parts: readonly Declared[]): Declared {
 	const overloads = new Map<string, Map<string, OverloadSignature>>();
 	const classFunctions = new Map<string, Set<string>>();
 	const ambiguous = new Set<string>();
+	const receiverLambdas = new Map<string, ReceiverSlots | null>();
 	for (const part of parts) {
+		for (const [name, slots] of part.receiverLambdas) {
+			mergeReceiverSlots(receiverLambdas, name, slots);
+		}
 		for (const [owner, names] of part.classFunctions) {
 			const into = classFunctions.get(owner) ?? new Set<string>();
 			for (const name of names) into.add(name);
@@ -1123,8 +1159,33 @@ export function mergeDeclared(parts: readonly Declared[]): Declared {
 		qualifiedSignatures,
 		objects,
 		overloads: new Map([...overloads].map(([name, shapes]) => [name, [...shapes.values()]])),
-		classFunctions
+		classFunctions,
+		receiverLambdas
 	};
+}
+
+/**
+ * Records `slots` for `name`, or null when a declaration already recorded
+ * disagrees — the call site then cannot tell which lambda it is writing, and
+ * refuses rather than guessing.
+ */
+function mergeReceiverSlots(
+	into: Map<string, ReceiverSlots | null>,
+	name: string,
+	slots: ReceiverSlots | null
+): void {
+	if (!into.has(name)) {
+		into.set(name, slots);
+		return;
+	}
+	const existing = into.get(name) ?? null;
+	const same =
+		existing !== null &&
+		slots !== null &&
+		existing.count === slots.count &&
+		existing.at.join(',') === slots.at.join(',') &&
+		existing.names.join(',') === slots.names.join(',');
+	if (!same) into.set(name, null);
 }
 
 class Emitter {
@@ -1164,6 +1225,9 @@ class Emitter {
 			this.qualifiedSignatures.set(name, shape);
 		}
 		for (const name of neighbours.objects) this.declaredObjects.add(name);
+		for (const [name, slots] of neighbours.receiverLambdas) {
+			mergeReceiverSlots(this.receiverLambdas, name, slots);
+		}
 		for (const [owner, members] of neighbours.classMembers) {
 			const into = this.classMemberIndex.get(owner) ?? new Set<string>();
 			for (const member of members) into.add(member);
@@ -1398,6 +1462,8 @@ class Emitter {
 	private suspendMembers = new Set<string>();
 	private readonly signatures = new Map<string, readonly string[]>(KNOWN_SIGNATURES);
 	private readonly ambiguousSignatures = new Set<string>();
+	/** See `ReceiverSlots`. Declared here and next door, merged by name. */
+	private readonly receiverLambdas = new Map<string, ReceiverSlots | null>();
 	/**
 	 * Every parameter list this build has seen under a name, including the ones
 	 * `signatures` had to give up on.
@@ -1455,7 +1521,8 @@ class Emitter {
 			overloads: new Map(
 				[...this.overloadIndex].map(([name, shapes]) => [name, [...shapes.values()]])
 			),
-			classFunctions: this.classFunctionIndex
+			classFunctions: this.classFunctionIndex,
+			receiverLambdas: this.receiverLambdas
 		};
 	}
 
@@ -1474,6 +1541,8 @@ class Emitter {
 				if (name !== null && ownerIsClass && owner !== null) {
 					this.rememberOverload(name, { ...this.signatureOf(child), owners: [owner] });
 				}
+				const slots = receiverSlots(child);
+				if (name !== null && slots !== null) mergeReceiverSlots(this.receiverLambdas, name, slots);
 				if (name !== null && receiverOf(child) === null) {
 					this.rememberSignature(name, this.parameterNames(child));
 					// Also under the class that declares it.
@@ -3669,9 +3738,30 @@ class Emitter {
 		if (reified.length > 0) {
 			this.reifiedTypes = new Map(reified.map((one) => [one, reifiedBinding(one)]));
 		}
+		// The parameters typed `R.() -> T`, so a call of one inside the body is
+		// given its receiver. See `invokeReceiverLocal`.
+		const list = kids(node).find((child) => child.type === 'function_value_parameters');
+		const receiverParams = kids(list)
+			.filter((child) => child.type === 'parameter')
+			.map((child) => ({
+				name: this.nameOf(child),
+				arity: receiverArity(child),
+				suspends: /^suspend\b/.test(
+					kids(child).find((part) => part.type === 'type_modifiers')?.text ?? ''
+				)
+			}))
+			.filter(
+				(one): one is { name: string; arity: number; suspends: boolean } =>
+					one.name !== null && one.arity !== null
+			);
 		let emitted;
 		try {
-			emitted = this.functionScope('function', null, names, () => this.functionBody(body));
+			emitted = this.functionScope('function', null, names, () => {
+				for (const one of receiverParams) {
+					this.declareReceiverLocal(one.name, one.arity, one.suspends);
+				}
+				return this.functionBody(body);
+			});
 		} finally {
 			this.receiverParam = previousReceiver;
 			this.reifiedTypes = previousReified;
@@ -3803,10 +3893,21 @@ class Emitter {
 				spreadAt = names.length;
 				text.push(`...${this.safe(pending.name)}`);
 			} else {
+				// `block: Headers.Builder.() -> Unit = {}` — a default that is itself
+				// a receiver block, and has to be one for the same reason a block
+				// written at the call does. See `ReceiverSlots`.
+				const receiverDefault =
+					fallback !== null &&
+					fallback.type === 'lambda_literal' &&
+					receiverArity(pending.node) !== null;
 				text.push(
 					fallback === null
 						? this.safe(pending.name)
-						: `${this.safe(pending.name)} = ${this.expr(fallback)}`
+						: `${this.safe(pending.name)} = ${
+								receiverDefault
+									? this.receiverLambdaValue(fallback, pending.name)
+									: this.expr(fallback)
+							}`
 				);
 			}
 			names.push(pending.name);
@@ -5587,6 +5688,18 @@ class Emitter {
 		if (name === null) this.refuse(callee, 'a call through something with no name');
 		const safe = suffix.allChildren[0]?.type === '?.';
 
+		// `newBuilder().block()` — a parameter typed `R.() -> T`, invoked on an
+		// explicit receiver. Kotlin resolves a member of the receiver first, and
+		// no receiver type this ecosystem uses has a member called what these
+		// parameters are called (`block`, `query`, `configure`).
+		const receiverLocal = receiver.type === 'super_expression' ? null : this.lookupLocal(name);
+		if (receiverLocal?.receiverArity !== undefined) {
+			const target = this.expr(receiver);
+			if (!safe) return this.invokeReceiverLocal(suffix, receiverLocal, target, args, lambda);
+			const inner = this.invokeReceiverLocal(suffix, receiverLocal, '__r', args, lambda);
+			return `${this.helper('sc')}(${target}, (__r) => ${inner})`;
+		}
+
 		if (receiver.type === 'super_expression') {
 			// **A superclass this build translated is a real JavaScript one.**
 			//
@@ -6118,6 +6231,11 @@ class Emitter {
 			return suspends ? this.awaited(call) : call;
 		}
 
+		const receiverLocal = this.lookupLocal(name);
+		if (receiverLocal?.receiverArity !== undefined) {
+			return this.invokeReceiverLocal(callee, receiverLocal, null, args, lambda);
+		}
+
 		const local = this.lookup(name);
 		if (local !== null) {
 			const call = `${local}(${this.callArguments(name, args, lambda, labelled, false).join(', ')})`;
@@ -6320,16 +6438,74 @@ class Emitter {
 		receiverForm: boolean,
 		model: string | null = null
 	): string[] {
+		const slots = receiverForm ? undefined : this.receiverLambdas.get(name);
+		if (slots === null && lambda !== null) {
+			this.refuse(
+				lambda,
+				`a lambda passed to \`${name}\`, declared both with and without a receiver`
+			);
+		}
 		const out = this.plainArguments(name, args);
 		// An unlabelled lambda carries an implicit label: the name of the
 		// function it was passed to. `return@map` inside `.map {}` is ordinary
 		// Kotlin, and it is a return from the lambda, which translates.
 		if (lambda !== null) {
-			out.push(
-				this.lambda(lambda, receiverForm, labelled ?? name, !NO_BLOCK_PARAMETER.has(name), model)
-			);
+			// A trailing lambda is the last parameter, and when that parameter is
+			// typed `R.() -> T` the block is a receiver block. See `ReceiverSlots`.
+			const last = slots === undefined || slots === null ? -1 : slots.count - 1;
+			if (slots !== undefined && slots !== null && slots.at.includes(last)) {
+				out.push(this.receiverLambdaValue(lambda, labelled ?? name));
+			} else {
+				out.push(
+					this.lambda(lambda, receiverForm, labelled ?? name, !NO_BLOCK_PARAMETER.has(name), model)
+				);
+			}
 		}
 		return out;
+	}
+
+	/**
+	 * A block for a parameter typed `R.() -> T`, in the shape such a value
+	 * travels in here: a receiver function, taking its receiver first. See
+	 * `receiverLambda` in the runtime for why the two shapes meet there.
+	 */
+	private receiverLambdaValue(lambda: KNode, label: string): string {
+		return `${this.helper('receiverLambda')}(${this.lambda(lambda, true, label, false)})`;
+	}
+
+	/**
+	 * Refuses the receiver-lambda call shapes this build does not write.
+	 *
+	 * Only a *trailing* block is converted as a receiver block. A lambda passed
+	 * inside the parentheses to a receiver parameter would take the ordinary
+	 * arrow path and lose its receiver without a word, so it is refused; so is
+	 * any lambda to a name declared twice with different receiver parameters,
+	 * where which one this call means is not something the text says. Asked
+	 * of every argument list, because a call with no trailing block never
+	 * reaches `callArguments` at all.
+	 */
+	private checkReceiverArguments(name: string, args: KNode[]): void {
+		const slots = this.receiverLambdas.get(name);
+		if (slots === undefined) return;
+		const literal = (arg: KNode): boolean =>
+			kids(arg).some((part) => part.type === 'lambda_literal' || part.type === 'annotated_lambda');
+		if (slots === null) {
+			const found = args.find(literal);
+			if (found !== undefined) {
+				this.refuse(
+					found,
+					`a lambda passed to \`${name}\`, declared both with and without a receiver`
+				);
+			}
+			return;
+		}
+		args.forEach((arg, index) => {
+			if (!literal(arg)) return;
+			const named = this.argumentName(arg);
+			if (named === null ? slots.at.includes(index) : slots.names.includes(named)) {
+				this.refuse(arg, `a receiver lambda passed to \`${name}\` inside its parentheses`);
+			}
+		});
 	}
 
 	/**
@@ -6371,6 +6547,7 @@ class Emitter {
 	}
 
 	private plainArguments(name: string, args: KNode[], owner: string | null = null): string[] {
+		this.checkReceiverArguments(name, args);
 		const named = args.filter((arg) => arg.allChildren.some((child) => child.type === '='));
 		if (named.length === 0) return args.flatMap((arg) => this.argumentExpressions(arg));
 
@@ -7711,6 +7888,60 @@ class Emitter {
 		this.scopes[this.scopes.length - 1]?.set(name, { text, mutable });
 	}
 
+	/** A parameter typed `R.(…) -> T`, taking `arity` arguments besides `R`. */
+	private declareReceiverLocal(name: string, arity: number, suspends: boolean): void {
+		this.scopes[this.scopes.length - 1]?.set(name, {
+			text: this.safe(name),
+			mutable: false,
+			receiverArity: arity,
+			receiverSuspends: suspends
+		});
+	}
+
+	/**
+	 * A call of a parameter typed `R.(…) -> T`, which takes its receiver first.
+	 *
+	 * Kotlin has three spellings of one call and all three land here:
+	 * `builder.block(x)` names the receiver in front, `block(builder, x)` passes
+	 * it as the first argument, and `block(x)` inside `apply { … }` leaves it
+	 * implicit — the innermost receiver in scope, which is `this` in a receiver
+	 * block and `__recv` in an extension function. Where there is no receiver in
+	 * scope but the class itself, the call is refused rather than handed the
+	 * source object: that would be a receiver of a type the block never takes.
+	 *
+	 * Told apart by argument count against the declared arity, which is what
+	 * the Kotlin compiler does too.
+	 */
+	private invokeReceiverLocal(
+		node: KNode,
+		local: Local,
+		explicit: string | null,
+		args: KNode[],
+		lambda: KNode | null
+	): string {
+		const arity = local.receiverArity ?? 0;
+		if (lambda !== null) this.refuse(lambda, 'a lambda passed to a receiver function parameter');
+		const passed = this.plainArguments('', args);
+		let all: string[];
+		if (explicit !== null) {
+			if (passed.length !== arity)
+				this.refuse(node, 'a receiver function called with the wrong arguments');
+			all = [explicit, ...passed];
+		} else if (passed.length === arity + 1) {
+			all = passed;
+		} else if (passed.length === arity) {
+			const implicit = this.receiverAlias() ?? this.receiverParam;
+			if (implicit === null) {
+				this.refuse(node, 'a receiver function called with no receiver in reach');
+			}
+			all = [implicit, ...passed];
+		} else {
+			this.refuse(node, 'a receiver function called with the wrong arguments');
+		}
+		const call = `${local.text}(${all.join(', ')})`;
+		return local.receiverSuspends === true ? this.awaited(call) : call;
+	}
+
 	private lookup(name: string): string | null {
 		return this.lookupLocal(name)?.text ?? null;
 	}
@@ -7967,6 +8198,53 @@ function kids(node: KNode | null | undefined): readonly KNode[] {
 	// operand — is the last one.
 	const nulls = node.allChildren.filter((child) => child.type === 'null');
 	return nulls.length === 0 ? named : [...named, ...nulls];
+}
+
+/**
+ * The function type a parameter is declared with, looking through `( … )?`.
+ */
+function parameterFunctionType(parameter: KNode): KNode | null {
+	let type = kids(parameter).find(
+		(child) => child.type === 'function_type' || child.type === 'nullable_type'
+	);
+	if (type?.type === 'nullable_type') {
+		const inner = kids(type).find((child) => child.type === 'parenthesized_type');
+		type = kids(inner).find((child) => child.type === 'function_type');
+	}
+	return type ?? null;
+}
+
+/**
+ * For a parameter typed `R.(A, B) -> T`, how many arguments it takes besides
+ * its receiver — here, 2. Null for any other parameter.
+ *
+ * The receiver is the `.` in front of the parameter list, which is the only
+ * part of the type that says so; the receiver's own name is not needed, and a
+ * dotted one arrives respelled — see `dottedReceiverTypes` in `grammar.ts`.
+ */
+function receiverArity(parameter: KNode): number | null {
+	const type = parameterFunctionType(parameter);
+	if (type === null) return null;
+	const parts = type.allChildren;
+	const list = parts.findIndex((child) => child.type === 'function_type_parameters');
+	if (list <= 0 || parts[list - 1].type !== '.') return null;
+	return kids(parts[list]).length;
+}
+
+/** See `ReceiverSlots`. Null for a function with no function-typed parameter. */
+function receiverSlots(node: KNode): ReceiverSlots | null {
+	const list = kids(node).find((child) => child.type === 'function_value_parameters');
+	const parameters = kids(list).filter((child) => child.type === 'parameter');
+	if (!parameters.some((parameter) => parameterFunctionType(parameter) !== null)) return null;
+	const at: number[] = [];
+	const names: string[] = [];
+	parameters.forEach((parameter, index) => {
+		if (receiverArity(parameter) === null) return;
+		at.push(index);
+		const name = kids(parameter).find((child) => child.type === 'simple_identifier')?.text;
+		if (name !== undefined) names.push(name);
+	});
+	return { count: parameters.length, at, names };
 }
 
 /**

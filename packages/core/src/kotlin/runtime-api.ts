@@ -195,6 +195,10 @@ export const RUNTIME_HELPERS = [
 	'takeIf',
 	'takeUnless',
 	'runCatching',
+	/* A lambda written where a parameter of type `R.() -> T` is expected: its
+	   receiver arrives as the first argument, the shape Kotlin itself gives
+	   such a value when it is passed where `(R) -> T` is wanted. */
+	'receiverLambda',
 
 	/* Coroutines, flattened. The sandbox is single-threaded, so a dispatcher is
 	   a no-op and `awaitAll` is `Promise.all`. `synchronized` is the same fact

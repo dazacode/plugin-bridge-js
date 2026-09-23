@@ -221,11 +221,11 @@ function findHeaderEnd(source: string, start: number): number {
  * still be refused, and several of these are. That is the point: the rewrite
  * buys an honest obstacle in place of "could not parse", nothing more.
  *
- * A third gap — a dotted receiver in a function type, `Headers.Builder.() ->
- * Unit` — is deliberately absent. The parse repair is clean, but the one real
- * file it unlocks then emits a receiver lambda this emitter does not model and
- * throws at run time. An honest "could not parse" is worth more than a plugin
- * that looks complete and does not work.
+ * A dotted receiver in a function type, `Headers.Builder.() -> Unit`, was
+ * once deliberately absent from this list: the parse repair was clean, but
+ * the file it unlocked emitted a receiver lambda the emitter did not model and
+ * threw at run time. It is here now because the emitter does model one — see
+ * `ReceiverSlots` in `emit.ts` — which was the condition, not the repair.
  */
 function repairKnownGrammarGaps(source: string): string {
 	// Ahead of the mask, because the mask cannot read a multi-dollar string
@@ -243,6 +243,7 @@ function repairKnownGrammarGaps(source: string): string {
 		...assignmentsThroughCalls(masked),
 		...whenInConditions(masked),
 		...trailingCommas(masked),
+		...dottedReceiverTypes(masked),
 		...rangeUntil(masked),
 		...nullableCallableReceivers(masked)
 	].sort((left, right) => right.start - left.start);
@@ -729,6 +730,37 @@ function trailingCommas(masked: string): Edit[] {
 			(character === '-' && masked.charAt(next + 1) === '>')
 		) {
 			edits.push({ start: at, end: at + 1, text: ' ' });
+		}
+	}
+	return edits;
+}
+
+/**
+ * `HttpUrl.Builder.() -> Unit` — a function type whose receiver is a dotted
+ * name, which the pinned grammar cannot read (`Builder.() -> Unit` it can).
+ *
+ * The receiver's own dots become underscores, `HttpUrl_Builder.() -> Unit`:
+ * the same length, so no offset moves, and a name the grammar reads as one
+ * type identifier. Nothing is lost by it, because a type is never emitted —
+ * what the emitter needs from a function type is only *that* it has a
+ * receiver, which is the `.` in front of the parameter list, and that is kept.
+ * See `receiverArity` in `emit.ts` for what it does with that.
+ *
+ * Matched only in front of `.(`, whose closing parenthesis is followed by
+ * `->`: no Kotlin expression has that shape — `a.b.(c)` is not a call — so a
+ * navigation chain in code is never touched.
+ */
+function dottedReceiverTypes(masked: string): Edit[] {
+	const edits: Edit[] = [];
+	const receiver = /\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+(?=(?:<[^<>()]*>)?\.\()/g;
+	let match: RegExpExecArray | null;
+	while ((match = receiver.exec(masked)) !== null) {
+		let open = match.index + match[0].length;
+		if (masked.charAt(open) === '<') open = masked.indexOf('>', open) + 1;
+		const close = callEnd(masked, open + 1);
+		if (close === -1 || !/^[ \t]*->/.test(masked.slice(close, close + 16))) continue;
+		for (let at = match.index; at < match.index + match[0].length; at += 1) {
+			if (masked.charAt(at) === '.') edits.push({ start: at, end: at + 1, text: '_' });
 		}
 	}
 	return edits;

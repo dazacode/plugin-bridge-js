@@ -398,6 +398,21 @@ class Demo {
 		expect(tree.hasError).toBe(false);
 	});
 
+	it('reads a function type whose receiver is a dotted name', async () => {
+		// `Builder.() -> Unit` always parsed; `HttpUrl.Builder.() -> Unit` did not,
+		// and the parameter is the whole of a search URL builder's API.
+		const parse = await loadKotlinGrammar(vendorWasm);
+		const tree = parse(`
+class Demo {
+    private fun searchUrl(page: Int, query: HttpUrl.Builder.() -> Unit) =
+        base.newBuilder().apply(query).build()
+}
+`);
+
+		expect(tree.hasError).toBe(false);
+		expect(firstOfType(tree.root, 'function_type')).not.toBeNull();
+	});
+
 	it('reads `..<` as the `until` it means', async () => {
 		const parse = await loadKotlinGrammar(vendorWasm);
 		const tree = parse(`

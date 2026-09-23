@@ -2693,7 +2693,8 @@ export const SYNTAX_HELPERS: readonly string[] = [
 	'synchronized',
 	'index',
 	'setIndex',
-	'overload'
+	'overload',
+	'receiverLambda'
 ];
 
 /** Helper names referenced by the tables, for the spec that checks the contract. */
