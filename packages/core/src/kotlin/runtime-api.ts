@@ -550,7 +550,10 @@ export const RUNTIME_HELPERS = [
 	   conversion fetched from the extension's own repository — see
 	   `CLASS_LOADER` in `subset.ts` for the two spellings that reach it, and
 	   `__RESOURCES` in the entry point for where the files come from. */
-	'classLoader'
+	'classLoader',
+	/* A class's simple name — see `SIMPLE_NAME` in `subset.ts` for the two
+	   chains that reach it and why a value only reaches it inside a log line. */
+	'simpleName'
 ] as const;
 
 export type RuntimeHelper = (typeof RUNTIME_HELPERS)[number];

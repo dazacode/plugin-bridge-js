@@ -233,6 +233,21 @@ describe('what the emitter is promised', () => {
 		expect(k.javaClass).toBeUndefined();
 	});
 
+	it('names a class by the instance’s own constructor, and an error by its name', () => {
+		// The emitter writes each Kotlin class as a JavaScript class of the same
+		// name, so a subclass instance answers with the subclass. An error answers
+		// with what it is here — exceptions are erased, so this is only let
+		// through inside a log line; see SIMPLE_NAME in subset.ts.
+		class Base {}
+		class Leaf extends Base {}
+		expect(k.simpleName(new Base())).toBe('Base');
+		expect(k.simpleName(new Leaf())).toBe('Leaf');
+		expect(k.simpleName(new TypeError('x'))).toBe('TypeError');
+		expect(k.simpleName('text')).toBe('String');
+		expect(k.simpleName(Object.create(null))).toBe('Object');
+		expect(() => k.simpleName(null)).toThrow(/null value/);
+	});
+
 	it('always emits the stdlib, because everything else assigns onto it', async () => {
 		const only = await load(['models']);
 		expect(typeof only.k.nn).toBe('function');

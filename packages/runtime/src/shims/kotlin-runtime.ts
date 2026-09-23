@@ -5111,6 +5111,30 @@ var __k = {
    */
   classLoader: function () { return __theClassLoader; },
 
+  /**
+   * A class's simple name, for the two uses the emitter lets reach here.
+   *
+   * On an instance of a converted class the answer is exact: the emitter
+   * writes each Kotlin class as a JavaScript class of the same name, so the
+   * constructor's name is the subclass's when a template asks for its own tag.
+   * On anything else — a caught exception above all — it is what this runtime
+   * has, which is not always the Kotlin answer: exceptions are plain Errors
+   * here, so an IOException reads 'Error'. The emitter only lets a value that
+   * is not the class itself reach this inside the arguments of a Log call,
+   * where the difference is a word in a diagnostic and never a branch taken.
+   */
+  simpleName: function (value) {
+    if (value === null || value === undefined) {
+      throw new Error('This converted extension asked for the class of a null value.');
+    }
+    if (typeof value === 'string') return 'String';
+    if (typeof value === 'boolean') return 'Boolean';
+    if (value instanceof Error) return value.name;
+    var proto = Object.getPrototypeOf(value);
+    var ctor = proto === null ? null : proto.constructor;
+    return typeof ctor === 'function' && ctor.name ? ctor.name : 'Object';
+  },
+
   /** Map.containsKey(k), over a Map, a plain object, or a shim that has its own. */
   containsKey: function (value, key) {
     if (value === null || value === undefined) return false;

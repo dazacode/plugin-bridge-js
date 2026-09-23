@@ -389,6 +389,10 @@ const NAMED_OBSTACLES: readonly {
 	// other use of reflection, with nothing at runtime able to tell them apart.
 	// Left unrefused it surfaced as `undefined is not an object` at *load*,
 	// which names nothing and takes the whole bundle with it.
+	//
+	// Still the rule for every leaf. The two chains that do have an answer —
+	// `CLASS_LOADER` and `SIMPLE_NAME` below — are exempted whole, at call
+	// level in `scanInto`, so what reaches this pattern is everything else.
 	{ pattern: /\bjavaClass\b/, name: 'the JVM class object' },
 	// The two cookie shapes the host jar cannot honour, refused by name rather
 	// than left to the passthrough allowlist, because both had a way past it.
@@ -571,6 +575,34 @@ const APPLICATION_PREFERENCES = /\bInjekt\.get<Application>\(\)\.getSharedPrefer
  */
 export const CLASS_LOADER =
 	/^(?:(?:[A-Za-z_][\w.]*|this)::class\.java|(?:this\.)?javaClass)\.classLoader$/;
+
+/**
+ * A class's simple name, in the two places this ecosystem asks for one.
+ *
+ * The earlier refusal of `javaClass` said that an answer right for a log tag
+ * would be wrong for every other use of reflection. That is true of reflection
+ * and not of this chain: `simpleName` is one question with one answer, and
+ * over two real repositories (yuzono and keiyoushi, 83 sites) every use of it
+ * is either a log tag — `private val tag by lazy { javaClass.simpleName }` — or
+ * an exception's class inside the text of a `Log.w`. The one exception is
+ * keiyoushi's `KeiSource`, which compares an *interceptor's* name and is
+ * refused for the interceptor long before this matters.
+ *
+ * Both halves are answered, differently, by `emit.ts`:
+ *
+ * - no receiver, or `this.` — the class being emitted. Its Kotlin name is
+ *   known statically, and for a class nothing can subclass that *is* the
+ *   answer. An open or abstract one asks the runtime, because `javaClass` is
+ *   the class of the instance, and a template's `tag` is its subclass's name.
+ * - a named value, `e.javaClass.simpleName` — only inside the arguments of a
+ *   `Log` call. This runtime erases exception types (`IOException("x")` is an
+ *   `Error`), so the honest answer for a caught exception is not the Kotlin
+ *   one; confined to a log line it changes what a diagnostic reads and
+ *   nothing a plugin does. Anywhere else the emitter refuses it by name.
+ *
+ * `?.` and anything longer than one identifier on the left stay refused.
+ */
+export const SIMPLE_NAME = /^(?:this\.|([a-z_]\w*)\.)?javaClass\.simpleName$/;
 
 /** The obstacle this node's own text names, if any. Checked leaf-first. */
 export function namedObstacle(text: string): string | null {
@@ -2604,6 +2636,13 @@ function scanInto(node: KNode, memberName: string, found: Untranslatable[]): voi
 	// `javaClass` leaf below from being refused, and keeps the exemption exactly
 	// as long as the chain the emitter recognises.
 	if (node.type === 'navigation_expression' && CLASS_LOADER.test(node.text.replace(/\s+/g, ''))) {
+		return;
+	}
+
+	// And the fourth: `SIMPLE_NAME`, the chain `emit.ts` answers with a class's
+	// name. Exempt the whole chain here and no more of it, for the reason above;
+	// the emitter still refuses the half of it that is not in a log line.
+	if (node.type === 'navigation_expression' && SIMPLE_NAME.test(node.text.replace(/\s+/g, ''))) {
 		return;
 	}
 

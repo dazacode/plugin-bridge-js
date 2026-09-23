@@ -115,6 +115,7 @@ import {
 	BASE_CONSTANTS,
 	ARGUMENT_LAMBDA_METHODS,
 	CLASS_LOADER,
+	SIMPLE_NAME,
 	BUILDER_LAMBDA_METHODS,
 	TOLERATED_JSON_FLAGS,
 	VARARG_OPTIONS,
@@ -398,6 +399,14 @@ const QUALIFIED_GLOBAL = /^(?:java|javax|kotlin|android)\.[\w.]*?\.?(\w+)$/;
  * left to the refusal.
  */
 const INJEKT_GET = /^Injekt\.get<(\w+)>\(\)$/;
+
+/**
+ * `android.util.Log` at any of its levels, whitespace squeezed out.
+ *
+ * The runtime's `Log` writes to the host log and returns 0, so what is passed
+ * to it is text nobody reads back. That is what licenses `inLogLine`.
+ */
+const LOG_CALL = /^Log\.(?:v|d|i|w|e|wtf)$/;
 
 /**
  * The calls that make a member `async` whether or not it said `suspend`.
@@ -1314,6 +1323,30 @@ class Emitter {
 	/** The class or object whose members are being emitted. */
 	private owner: string | null = null;
 	/**
+	 * What `javaClass.simpleName` means here: the Kotlin name of the class
+	 * whose `this` is in scope, and whether that name is the whole answer.
+	 *
+	 * Not `owner`, for three reasons that each gave a wrong name. `owner` can be
+	 * a module-scope *rename* of a nested type, where Kotlin's simple name is
+	 * the identifier as written; it survives into a companion, whose members
+	 * are hoisted out and whose `javaClass` is `Companion`; and it survives into
+	 * an anonymous `object :`, whose simple name is empty. Null in all of those,
+	 * so the chain is refused there rather than answered with a neighbour's.
+	 *
+	 * `exact` is false for an open or abstract class, where the instance may be
+	 * a subclass's — a template's `tag` is the extension's name — and the
+	 * runtime is asked instead. See `SIMPLE_NAME` in `subset.ts`.
+	 */
+	private selfClass: { readonly name: string; readonly exact: boolean } | null = null;
+	/**
+	 * True while the arguments of an `android.util.Log` call are being emitted.
+	 *
+	 * The one place a value's class name is answered with whatever the runtime
+	 * has, because text that only ever reaches the host log cannot change what
+	 * a plugin does. See `SIMPLE_NAME`.
+	 */
+	private inLogLine = false;
+	/**
 	 * Extension functions declared in this file, and where they live.
 	 *
 	 * `fun Element.getInfo(key: String)` is a function whose first argument is
@@ -2059,8 +2092,13 @@ class Emitter {
 		// forty lines further down.
 		const outerMembers = this.classMembers;
 		const outerSuspends = this.suspendMembers;
+		const outerSelf = this.selfClass;
 		this.owner = name;
 		this.ownerBase = base;
+		this.selfClass = {
+			name: this.nameOf(node) ?? name,
+			exact: !modifiers.has('open') && !modifiers.has('abstract') && !modifiers.has('sealed')
+		};
 
 		this.classMembers = new Set(
 			members
@@ -2277,6 +2315,7 @@ class Emitter {
 		nested.restore();
 		this.owner = outerOwner;
 		this.ownerBase = outerBase;
+		this.selfClass = outerSelf;
 		this.classMembers = outerMembers;
 		this.suspendMembers = outerSuspends;
 		const heritage = base === null ? '' : `extends ${base} `;
@@ -2495,7 +2534,10 @@ class Emitter {
 			// here, and without it the member was refused for saying which of
 			// two receivers it meant, which is the one thing that made it clear.
 			const outerOwner = this.owner;
+			const outerSelf = this.selfClass;
 			this.owner = name;
+			// A `data class` is final, so its own name is the whole answer.
+			this.selfClass = { name: this.nameOf(node) ?? name, exact: true };
 			this.pushScope();
 			// Declared out here because `finally` has to give the nested-type
 			// names back, and a `const` inside the `try` is not in its scope.
@@ -2564,6 +2606,7 @@ class Emitter {
 				scoped?.restore();
 				this.popScope();
 				this.owner = outerOwner;
+				this.selfClass = outerSelf;
 			}
 		});
 	}
@@ -2627,8 +2670,11 @@ class Emitter {
 			const sharedConstants = this.siblingConstants(members);
 
 			const outerOwner = this.owner;
+			const outerSelf = this.selfClass;
 			this.owner = name;
 			const dispatched = new Set<string>();
+			// An `object` is its own only instance.
+			this.selfClass = { name: this.nameOf(node) ?? name, exact: true };
 			try {
 				for (const [index, child] of members.entries()) {
 					if (child.type === 'property_declaration') {
@@ -2719,6 +2765,7 @@ class Emitter {
 				}
 			} finally {
 				this.owner = outerOwner;
+				this.selfClass = outerSelf;
 			}
 
 			// The object's plain names, resolved against the object itself
@@ -2748,6 +2795,17 @@ class Emitter {
 	 * is refused rather than silently shadowing the first.
 	 */
 	private companion(node: KNode): string[] {
+		// Hoisted to module scope, with no `this` of the class's: see `selfClass`.
+		const outerSelf = this.selfClass;
+		this.selfClass = null;
+		try {
+			return this.companionMembers(node);
+		} finally {
+			this.selfClass = outerSelf;
+		}
+	}
+
+	private companionMembers(node: KNode): string[] {
 		const body = kids(node).find((child) => child.type === 'class_body');
 		const out: string[] = [];
 
@@ -5351,19 +5409,26 @@ class Emitter {
 			this.refuse(node, 'a bare `this` inside an anonymous `object :`');
 		}
 		const fields: string[] = [];
-		for (const child of kids(body)) {
-			if (child.type === 'getter' || child.type === 'setter') continue;
-			if (child.type === 'function_declaration') {
-				const name = this.nameOf(child) ?? 'fun';
-				fields.push(`${JSON.stringify(name)}: ${this.functionDeclaration(child, 'local')}`);
-				continue;
+		// An anonymous class has no simple name to give; see `selfClass`.
+		const outerSelf = this.selfClass;
+		this.selfClass = null;
+		try {
+			for (const child of kids(body)) {
+				if (child.type === 'getter' || child.type === 'setter') continue;
+				if (child.type === 'function_declaration') {
+					const name = this.nameOf(child) ?? 'fun';
+					fields.push(`${JSON.stringify(name)}: ${this.functionDeclaration(child, 'local')}`);
+					continue;
+				}
+				if (child.type === 'property_declaration') {
+					const name = this.propertyName(child) ?? 'val';
+					fields.push(`${JSON.stringify(name)}: ${this.propertyValue(child, name)}`);
+					continue;
+				}
+				this.refuse(child, spoken(child));
 			}
-			if (child.type === 'property_declaration') {
-				const name = this.propertyName(child) ?? 'val';
-				fields.push(`${JSON.stringify(name)}: ${this.propertyValue(child, name)}`);
-				continue;
-			}
-			this.refuse(child, spoken(child));
+		} finally {
+			this.selfClass = outerSelf;
 		}
 		return `(${block(fields.map(comma))})`;
 	}
@@ -5371,6 +5436,25 @@ class Emitter {
 	/* ── calls ───────────────────────────────────────────────────────────── */
 
 	private call(node: KNode): string {
+		// `Log.w(TAG, "…${e.javaClass.simpleName}…")`: the arguments are text
+		// for the host log and nothing else. See `inLogLine`. Only the runtime's
+		// own `Log` — an extension that declares something called `Log` gets
+		// no such licence.
+		if (
+			!this.inLogLine &&
+			LOG_CALL.test(kids(node)[0]?.text.replace(/\s+/g, '') ?? '') &&
+			this.lookup('Log') === null &&
+			!this.moduleNames.has('Log') &&
+			!this.declaredTypes.has('Log')
+		) {
+			this.inLogLine = true;
+			try {
+				return this.call(node);
+			} finally {
+				this.inLogLine = false;
+			}
+		}
+
 		// `Injekt.get<Application>()` — the container reached for the one object
 		// the runtime already owns. `subset.ts` lets exactly this idiom past the
 		// Injekt refusal; here it resolves to the same bundle-scope name that
@@ -6663,6 +6747,11 @@ class Emitter {
 		// `subset.ts` refuses reflection for, and this is a class *path*.
 		if (CLASS_LOADER.test(node.text.replace(/\s+/g, ''))) return `${this.helper('classLoader')}()`;
 
+		// The other chain through the class object with an answer: a class's
+		// simple name. See `SIMPLE_NAME` in `subset.ts` for both halves.
+		const simple = SIMPLE_NAME.exec(node.text.replace(/\s+/g, ''));
+		if (simple !== null) return this.simpleName(node, simple[1] ?? null);
+
 		const receiver = kids(node)[0];
 		if (receiver.type === 'super_expression') {
 			// `override val client = super.client.newBuilder()…` — by far the
@@ -7422,8 +7511,15 @@ class Emitter {
 		if (hoisted !== undefined) return this.safe(hoisted);
 		// A member of the `object` this code is being emitted into, reached the
 		// way a frozen literal's members are reached.
+		//
+		// Not when the class being emitted declares the name itself. The table
+		// is file-wide, so without this a `private val tag` on the source read
+		// as `Helper.tag` whenever an `object Helper` in the same file also had
+		// one — a different value, silently, with nothing refused. Kotlin
+		// resolves the innermost declaration first, and outside the object that
+		// is the class's own. Inside the object (`owner` is it) its member wins.
 		const holder = this.objectMembers.get(name);
-		if (holder !== undefined) {
+		if (holder !== undefined && (holder === this.owner || !this.classMembers.has(name))) {
 			// From another property of the same object, through the hoisted const
 			// — the literal is not bound yet. From anywhere else, through the
 			// object, which by then is.
@@ -7513,6 +7609,25 @@ class Emitter {
 	 * its receiver is a `const` — so `this` is still the source and no capture
 	 * is needed. Getting that backwards emits a `__self` nobody declared.
 	 */
+	private simpleName(node: KNode, value: string | null): string {
+		if (value !== null) {
+			// `e.javaClass.simpleName`: whatever the runtime can say about the
+			// value, and only where what it says is a diagnostic.
+			if (!this.inLogLine)
+				this.refuse(node, '`javaClass.simpleName` of a value outside a log line');
+			const receiver = kids(kids(node)[0])[0];
+			return `${this.helper('simpleName')}(${this.expr(receiver)})`;
+		}
+		// Inside `apply {}` or `fun String.x()` the implicit receiver is not the
+		// class, and `javaClass` is the receiver's. Neither is tracked by type.
+		if (this.receiverAlias() !== null || this.receiverParam !== null) {
+			this.refuse(node, '`javaClass` of a receiver that is not the class');
+		}
+		if (this.selfClass === null) this.refuse(node, '`javaClass` where no named class is `this`');
+		if (this.selfClass.exact) return JSON.stringify(this.selfClass.name);
+		return `${this.helper('simpleName')}(${this.selfReference()})`;
+	}
+
 	private selfReference(): string {
 		for (let index = this.frames.length - 1; index >= 0; index -= 1) {
 			const kind = this.frames[index].kind;

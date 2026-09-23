@@ -101,6 +101,9 @@ const helpers: Record<string, (...args: never[]) => unknown> = {
 	// about the two spellings is asserting. The real one reads the files the
 	// conversion fetched; here it need only be the same object twice.
 	classLoader: () => stubLoader,
+	// The real one also answers strings and errors; a fixture here only ever
+	// hands it an instance of a class it declared.
+	simpleName: (value: Any) => (value as { constructor: { name: string } }).constructor.name,
 
 	cast: (value: Any) => value,
 	castOrNull: (value: Any, name: string) =>
@@ -4429,11 +4432,75 @@ describe('the class loader', () => {
 	});
 
 	it('still refuses the JVM class object asked for anything else', () => {
-		// A class *path* has an answer here and a class *name* does not. The
-		// exemption is the length of the one chain and no further.
-		expect(refusalNames(inClass('    val tag = javaClass.simpleName'))).toContain(
-			'the JVM class object'
+		// A class *path* and a class *name* have answers here; a resource read
+		// off the class object does not. Each exemption is the length of its
+		// one chain and no further.
+		expect(
+			refusalNames(inClass('    val script = javaClass.getResource("/assets/a.js")!!.readText()'))
+		).toContain('the JVM class object');
+	});
+});
+
+describe('a class’s simple name', () => {
+	it('answers a final class with its own name, and an object with its', () => {
+		// `private val tag by lazy { javaClass.simpleName }` is the whole idiom.
+		const demo = instantiate(
+			kt(
+				'object Helper { val tag = javaClass.simpleName }',
+				'class Demo : Source() {',
+				'    private val tag by lazy { javaClass.simpleName }',
+				'    private val eager = this.javaClass.simpleName',
+				'    fun tags(): String = tag + "/" + eager + "/" + Helper.tag',
+				'}'
+			)
 		);
+
+		expect(demo.tags()).toBe('Demo/Demo/Helper');
+	});
+
+	it('answers an open class with the name of the instance’s own class', () => {
+		// A template's tag is its subclass's, which is why an open class asks the
+		// instance rather than writing its own name down.
+		const demo = instantiate(
+			kt(
+				'open class Base { val tag by lazy { javaClass.simpleName } }',
+				'class Leaf : Base()',
+				'class Demo : Source() {',
+				'    fun both(): String = Base().tag + "/" + Leaf().tag',
+				'}'
+			)
+		);
+
+		expect(demo.both()).toBe('Base/Leaf');
+	});
+
+	it('answers a value only inside a log line', () => {
+		// Exceptions are erased to Error here, so a caught one's name is not the
+		// Kotlin answer; in a diagnostic that costs a word, anywhere else a branch.
+		const logged = translate(
+			inClass(
+				'    fun run(e: Exception) {',
+				'        Log.w("Demo", "failed: ${e.javaClass.simpleName}: ${e.message}")',
+				'    }'
+			)
+		);
+		expect(logged.refusals).toEqual([]);
+		expect(logged.js).toContain('__k.simpleName(e)');
+
+		expect(refusalNames(inClass('    fun kind(e: Exception) = e.javaClass.simpleName'))).toContain(
+			'`javaClass.simpleName` of a value outside a log line'
+		);
+	});
+
+	it('refuses where the implicit receiver is not the class', () => {
+		// Inside `run {}` on a string, `javaClass` is the string's.
+		expect(
+			refusalNames(inClass('    fun r(): String = "a".run { javaClass.simpleName }'))
+		).toContain('`javaClass` of a receiver that is not the class');
+		// A companion's members are hoisted out; its `javaClass` is `Companion`.
+		expect(
+			refusalNames(inClass('    companion object { val TAG = javaClass.simpleName }'))
+		).toContain('`javaClass` where no named class is `this`');
 	});
 });
 
