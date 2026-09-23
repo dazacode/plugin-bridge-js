@@ -176,8 +176,18 @@ const ENTRYPOINT = 'source';
  *
  * 56: nullable Kotlin comparisons now preserve null/undefined equivalence in
  *     JavaScript. This prevents pagination loops when optional links are absent.
+ *
+ * 57: a decode that names a `@Serializable` class builds it by type, running
+ *     the extension's own custom serializers; JsonElement accessors, Kotlin
+ *     Map views and entries, and a suspending Mihon parse all answered wrong
+ *     or empty before with nothing refused. Several constructs that converted
+ *     and then failed at run time are now refused by name instead (an unread
+ *     keiyoushi core call, a value reference that did not resolve, a
+ *     custom serializer this runtime cannot run). Every bundle made at 56 or
+ *     earlier must be reconverted: some decode differently, and some that
+ *     loaded are now honestly refused.
  */
-export const CONVERTER_VERSION = 56;
+export const CONVERTER_VERSION = 57;
 
 export interface BundleInput {
 	readonly id: string;
