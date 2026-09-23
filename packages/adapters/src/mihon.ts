@@ -165,6 +165,33 @@ function sourceDirFromIconUrl(iconUrl: string | undefined): string | null {
 }
 
 /**
+ * The source directory the package name implies, for a listing whose icon is
+ * not its own.
+ *
+ * An extension that ships no launcher icon of its own is published with the
+ * icon of whatever it inherits one from — its theme's
+ * (`lib-multisrc/<theme>/res/…`) or the repository's default
+ * (`core/src/main/res/…`) — so `sourceDirFromIconUrl` reads nothing for it,
+ * and forty-odd listings in the real catalogue were refused as not saying
+ * where they are built from although their directory is right there.
+ *
+ * The package name says it instead, and not by resemblance: the build plugin
+ * *derives* the application id from the directory, as the namespace plus
+ * `<lang>.<dir>`. The one exception is a module that declares `pkgName` to
+ * keep an old id across a rename, which is exactly the case where this
+ * reading names a directory that is not the module's — so `convert` checks the
+ * build file it then fetches against the package, and refuses rather than
+ * translate whatever else lives at that path. Only the last two segments are
+ * read, so a fork publishing under its own namespace is read the same way.
+ */
+const PACKAGE_SOURCE_DIR = /\.([a-z0-9_-]+)\.([a-z0-9_]+)$/i;
+
+function sourceDirFromPackage(packageName: string): string | null {
+	const match = PACKAGE_SOURCE_DIR.exec(packageName);
+	return match === null ? null : `src/${match[1]}/${match[2]}`;
+}
+
+/**
  * One `Source` submessage, read into the shape `origin.detail` carries.
  *
  * `id` is a decimal string, never a `bigint` and never a rounded `number` —
@@ -244,7 +271,14 @@ function readExtension(extension: ProtoMessage): RepositoryPlugin | null {
 			detail: {
 				contentRating: rating,
 				extensionLib: extension.string(4) ?? '',
-				sourceDir: sourceDirFromIconUrl(resources?.string(2)),
+				// From the icon when the icon is the module's own; from the package
+				// name when it is borrowed, which is only meaningful when the icon
+				// still says which repository to read (see `sourceDirFromPackage`).
+				sourceDir:
+					sourceDirFromIconUrl(resources?.string(2)) ??
+					(sourceRepositoryFromIconUrl(resources?.string(2)) === null
+						? null
+						: sourceDirFromPackage(packageName)),
 				// Where that directory lives, and at which ref. The index is a
 				// list of built artifacts and names no source location; the icon
 				// is served from a CDN mirroring the source repository, so the
@@ -486,6 +520,22 @@ export const mihonAdapter: ForeignAdapter = {
 		if (source.kotlinFiles.size === 0) {
 			throw new ForeignFormatError(
 				`The source for ${listing.name} could not be found in the repository it is built from.`
+			);
+		}
+
+		// **The directory has to be this listing's**, which the package name
+		// checks: the build plugin makes the application id from `pkgName` when
+		// a module declares one and from `<lang>.<dir>` when it does not. A
+		// directory recovered from the package name of a renamed module would
+		// otherwise be a different extension, translated and installed under
+		// this one's name — refusing is the honest answer to a path this
+		// adapter could only have guessed.
+		const declaredPackage =
+			readMihonBuildFile(source.buildGradle ?? '').pkgName ?? `${lang}.${directory}`;
+		if (!origin.foreignId.endsWith(`.${declaredPackage}`)) {
+			throw new ForeignFormatError(
+				`The source directory read for ${listing.name} (${sourceDir}) builds a different ` +
+					'extension, so where it is built from is not known.'
 			);
 		}
 

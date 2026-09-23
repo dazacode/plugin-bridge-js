@@ -327,6 +327,34 @@ describe('parseIndexBytes', () => {
 		expect(plugin.origin?.detail?.['sourceDir']).toBe('src/en/demosource');
 	});
 
+	it('reads the directory off the package name when the icon is borrowed from a theme', async () => {
+		// An extension with no launcher icon of its own is published with its
+		// theme's, or the repository default's — neither of which is under
+		// `src/`. The package name is derived from the directory by the build
+		// plugin, so it names the same place the icon would have.
+		for (const borrowed of [
+			'https://cdn.jsdelivr.net/gh/someowner/somerepo@main/lib-multisrc/sometheme/res/mipmap-xhdpi/ic_launcher.png',
+			'https://cdn.jsdelivr.net/gh/someowner/somerepo@main/core/src/main/res/mipmap-xhdpi/ic_launcher.png'
+		]) {
+			const bytes = indexBytes({
+				extensions: [
+					demoExtension({
+						resources: resourcesBody({
+							apkUrl: 'https://raw.githubusercontent.com/owner/repo/repo/apk/en.demosource.apk',
+							iconUrl: borrowed
+						})
+					})
+				]
+			});
+			const [plugin] = (await parseIndexBytes(bytes, INDEX_URL)).plugins;
+
+			expect(plugin.origin?.detail?.['sourceDir']).toBe('src/en/demosource');
+			expect(plugin.origin?.detail?.['sourceRepository']).toBe(
+				'https://github.com/someowner/somerepo/tree/main'
+			);
+		}
+	});
+
 	it('answers null for a source directory when the icon is not served from jsDelivr', async () => {
 		const bytes = indexBytes({
 			extensions: [
@@ -426,5 +454,42 @@ describe('convert', () => {
 				listFiles: async () => []
 			})
 		).rejects.toThrow(ForeignFormatError);
+	});
+
+	it('refuses a directory read off the package name when it builds another package', async () => {
+		// A module renamed on disk keeps its old application id through
+		// `pkgName`, so the directory the package name implies can be a
+		// different extension altogether. Translating it would install that one
+		// under this one's name; the build file says which, before anything is
+		// translated.
+		const bytes = indexBytes({
+			extensions: [
+				demoExtension({
+					resources: resourcesBody({
+						apkUrl: 'https://raw.githubusercontent.com/owner/repo/repo/apk/en.demosource.apk',
+						iconUrl:
+							'https://cdn.jsdelivr.net/gh/someowner/somerepo@main/core/src/main/res/mipmap-xhdpi/ic_launcher.png'
+					})
+				})
+			]
+		});
+		const [plugin] = (await parseIndexBytes(bytes, INDEX_URL)).plugins;
+		const directory =
+			'https://raw.githubusercontent.com/someowner/somerepo/main/src/en/demosource/';
+
+		await expect(
+			mihonAdapter.convert(plugin, {
+				fetchArtifact: async () => new Uint8Array(0),
+				getText: async (url: string) => {
+					if (url === `${directory}build.gradle.kts`) {
+						return 'keiyoushi {\n    name = "Renamed"\n    pkgName = "en.renamed"\n}\n';
+					}
+					if (url === `${directory}src/Renamed.kt`) return '@Source\nabstract class Renamed\n';
+					throw new Error(`404 ${url}`);
+				},
+				listFiles: async (url: string) =>
+					url === directory ? [`${directory}src/Renamed.kt`, `${directory}build.gradle.kts`] : []
+			})
+		).rejects.toThrow(/builds a different extension/);
 	});
 });
