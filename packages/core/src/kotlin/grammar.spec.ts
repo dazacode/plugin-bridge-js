@@ -146,6 +146,41 @@ class Demo {
 		expect(tree.hasError).toBe(false);
 	});
 
+	it('reads `in` entries below an entry whose body is an expression', async () => {
+		// Without the repair the second entry's `in` continues the first
+		// entry's body as an infix operator and its arrow has no condition —
+		// ZeistManga's `parseStatus` and VoeExtractor's `rot13`, each shared
+		// by dozens of extensions.
+		const parse = await loadKotlinGrammar(vendorWasm);
+		const tree = parse(`
+class Demo {
+    fun status(s: String): Int = when (s) {
+        in ongoing -> SManga.ONGOING
+        in completed -> SManga.COMPLETED // trailing
+        !in known -> SManga.UNKNOWN
+        else -> 0
+    }
+    fun rot(c: Char): Char = when (c) {
+        in 'A'..'Z' -> ((c - 'A' + 13) % 26 + 'A'.code).toChar()
+        in 'a'..'z' -> ((c - 'a' + 13) % 26 + 'a'.code).toChar()
+        else -> c
+    }
+}
+`);
+
+		expect(tree.hasError).toBe(false);
+		const whens: KNode[] = [];
+		const collect = (node: KNode): void => {
+			if (node.type === 'when_expression') whens.push(node);
+			node.allChildren.forEach(collect);
+		};
+		collect(tree.root);
+		// Four entries and three, not one entry swallowing the next.
+		expect(
+			whens.map((when) => when.allChildren.filter((c) => c.type === 'when_entry').length)
+		).toEqual([4, 3]);
+	});
+
 	it('leaves a lambda arrow alone, because it already parses', async () => {
 		// `{ x -> if (a) "p" else "q" }` is not a `when` entry and needs no
 		// repair. Rewriting a file the grammar already reads would make this a

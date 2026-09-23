@@ -238,9 +238,11 @@ function repairKnownGrammarGaps(source: string): string {
 	const masked = maskLiteralsAndComments(plain);
 	// Descending, so an earlier edit's offsets are still the ones the mask
 	// computed once a later one has been spliced in.
-	const edits = [...whenEntryBodies(masked), ...assignmentsThroughCalls(masked)].sort(
-		(left, right) => right.start - left.start
-	);
+	const edits = [
+		...whenEntryBodies(masked),
+		...assignmentsThroughCalls(masked),
+		...whenInConditions(masked)
+	].sort((left, right) => right.start - left.start);
 	let output = plain;
 	for (const edit of edits) {
 		output = output.slice(0, edit.start) + edit.text + output.slice(edit.end);
@@ -583,6 +585,72 @@ function whenEntryBodies(masked: string): Edit[] {
 		edits.push({ start: open, end: open, text: '(' });
 	}
 	return edits;
+}
+
+/**
+ * A `when` entry whose condition is `in …` or `!in …`, below an entry whose
+ * body ended in an expression.
+ *
+ *     when (status) {
+ *         in ongoing -> SManga.ONGOING
+ *         in completed -> SManga.COMPLETED
+ *
+ * Kotlin ends an entry at the newline. The pinned grammar does not: it reads
+ * `SManga.ONGOING in completed` as one infix `in` expression continuing onto
+ * the next line, and the second entry's arrow is left with no condition — a
+ * *missing* identifier rather than an ERROR, which is why nothing about it
+ * looks like the entry above. `is` does not have the gap; a body ending in `}`
+ * does not either. Only an entry after an expression body.
+ *
+ * It is two shared files' worth of catalogue on its own. `ZeistManga`'s
+ * `parseStatus` is written this way, and so is `VoeExtractor`'s `rot13`
+ * (`in 'A'..'Z' -> …` / `in 'a'..'z' -> …`) — one a template, the other a
+ * stream extractor that most of an anime repository reaches through
+ * `lib/`. Each refused every extension built on it as "a passage this build
+ * could not parse".
+ *
+ * The repair is a `;` at the end of the line above, which Kotlin permits
+ * after a when entry and which settles the question the newline should have.
+ * It is inserted after the last code character — a trailing comment is filler
+ * in the mask and stays where it is — so no newline moves and every line an
+ * obstacle names is still the line it was. Only where the arrow on the `in`
+ * line belongs to a `when` (`isWhenEntryArrow`), and only after a character
+ * that can end an expression: after `{`, `,` or an operator the `in` really
+ * is a continuation, or the first entry, and is left alone.
+ */
+function whenInConditions(masked: string): Edit[] {
+	const edits: Edit[] = [];
+	const lead = /^[ \t]*!?in[ \t(]/;
+	let lineStart = 0;
+	while (lineStart < masked.length) {
+		let lineEnd = masked.indexOf('\n', lineStart);
+		if (lineEnd === -1) lineEnd = masked.length;
+		const line = masked.slice(lineStart, lineEnd);
+		if (lead.test(line)) {
+			const arrow = entryArrow(masked, lineStart, lineEnd);
+			if (arrow !== -1 && isWhenEntryArrow(masked, arrow)) {
+				let before = lineStart - 1;
+				while (before >= 0 && /[\s\u0002]/.test(masked.charAt(before))) before -= 1;
+				if (before >= 0 && /[\w)\]\u0001!]/.test(masked.charAt(before))) {
+					edits.push({ start: before + 1, end: before + 1, text: ';' });
+				}
+			}
+		}
+		lineStart = lineEnd + 1;
+	}
+	return edits;
+}
+
+/** The first `->` on this line outside any bracket, or -1. */
+function entryArrow(masked: string, from: number, to: number): number {
+	let depth = 0;
+	for (let index = from; index < to - 1; index += 1) {
+		const character = masked.charAt(index);
+		if (character === '(' || character === '[' || character === '{') depth += 1;
+		else if (character === ')' || character === ']' || character === '}') depth -= 1;
+		else if (depth === 0 && character === '-' && masked.charAt(index + 1) === '>') return index;
+	}
+	return -1;
 }
 
 /**
