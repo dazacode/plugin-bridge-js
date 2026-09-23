@@ -48,6 +48,7 @@ import { DOM_RUNTIME_SOURCE } from './generated/dom-source';
 import { JS_RUNTIME } from './js-runtime';
 import { kotlinRuntime } from './kotlin-runtime';
 import { STREAM_GUARDS } from './stream-guards';
+import { synchronyPrelude } from './aniyomi-entry';
 
 export interface MihonEntrypointOptions {
 	/** Must equal the manifest id, or the sandbox refuses to load the bundle. */
@@ -72,6 +73,7 @@ export interface MihonEntrypointOptions {
 	 * none, which the runtime reads as an empty classpath.
 	 */
 	readonly resources?: Readonly<Record<string, string>>;
+	readonly synchronyScript?: string;
 	/**
 	 * Whether the class descends from keiyoushi's `KeiSource`, the repository's
 	 * own base between the extension and `HttpSource`.
@@ -684,6 +686,7 @@ ${settingIds}
 ${resources}
 ${kotlinRuntime()}
 ${constants}
+${synchronyPrelude(options.synchronyScript)}
 
 /* --- the translated extension ---------------------------------------------- */
 

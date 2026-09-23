@@ -405,7 +405,8 @@ export const aniyomiAdapter: ForeignAdapter = {
 			translatedSource: conversion.js,
 			className: conversion.className,
 			settingIds: settingKeyMap(settings),
-			baseUrl
+			baseUrl,
+			synchronyScript: conversion.js.includes('SynchronyEngine') ? source.synchronyScript : undefined
 		});
 
 		// Over the *emitted* module, not the Kotlin: the emitter has already
@@ -639,6 +640,14 @@ function describeRefusal(name: string, conversion: KotlinConversion): string {
  * members as roots — a shared file's members are kept when something reachable
  * calls them and pruned when nothing does.
  */
+/** THROWAWAY GRANT: lib/synchrony's Deobfuscator, answered by the embedded script. */
+const SYNCHRONY_STUB = `package keiyoushi.lib.synchrony
+
+object Deobfuscator {
+    fun deobfuscateScript(source: String): String? = SynchronyEngine.deobfuscate(source)
+}
+`;
+
 async function readExtensionSource(
 	repositoryUrl: string,
 	pkg: string,
@@ -647,6 +656,7 @@ async function readExtensionSource(
 ): Promise<{
 	files: { path: string; source: string }[];
 	licenseText: string | null;
+	synchronyScript?: string;
 } | null> {
 	// The repository's own file list, fetched once and shared by every listing in
 	// it. Two things come out of it, and both used to cost requests per listing:
@@ -691,7 +701,7 @@ async function readExtensionSource(
 			.flatMap(([name, files]) =>
 				[...files].map(([path, source]) => ({
 					path: `lib/${name}/${path}`,
-					source
+					source: name === 'synchrony' && /Deobfuscator\.kt$/.test(path) ? SYNCHRONY_STUB : source
 				}))
 			);
 		const core = [...found.coreFiles].map(([path, source]) => ({
@@ -723,7 +733,8 @@ async function readExtensionSource(
 
 		return {
 			files: [...own, ...theme, ...modules, ...core],
-			licenseText: await readLicence(repositoryUrl, services, index)
+			licenseText: await readLicence(repositoryUrl, services, index),
+			synchronyScript: [...found.resources].find(([p]) => /^assets\/synchrony-[\w.-]+\.js$/.test(p))?.[1]
 		};
 	}
 	return null;

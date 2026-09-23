@@ -2273,6 +2273,7 @@ export const GLOBAL_NAMES: ReadonlySet<string> = new Set([
 	'Protocol',
 	'Unpacker',
 	'JsUnpacker',
+	'SynchronyEngine',
 	'Unbaser',
 
 	// The boxed numeric limits. `Float.MAX_VALUE` is how this ecosystem says

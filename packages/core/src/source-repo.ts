@@ -185,7 +185,7 @@ export const MAX_RESOURCE_FILES = 12;
  * path that happens to contain those segments, and the filename is matched
  * whole so a `.properties.bak` beside it is not fetched.
  */
-const RESOURCE_PATHS = /^assets\/i18n\/[\w.-]+\.properties$/;
+const RESOURCE_PATHS = /^assets\/(?:i18n\/[\w.-]+\.properties|synchrony-[\w.-]+\.js)$/;
 
 /**
  * The per-group caps, and the shared budget that stops them multiplying.

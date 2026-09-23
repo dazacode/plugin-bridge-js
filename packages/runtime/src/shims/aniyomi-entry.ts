@@ -119,6 +119,8 @@ export interface AniyomiEntrypointOptions {
 	 * every read answers whatever default its own call site carried.
 	 */
 	readonly settingIds?: Readonly<Record<string, string>>;
+	/** THROWAWAY GRANT: the synchrony script, embedded as static code. */
+	readonly synchronyScript?: string;
 }
 
 /**
@@ -936,6 +938,7 @@ const __rt = globalThis.__yorozoRuntime;
 ${settingIds}
 ${kotlinRuntime()}
 ${constants}
+${synchronyPrelude(options.synchronyScript)}
 
 /* --- the translated extension ---------------------------------------------- */
 
@@ -1120,4 +1123,28 @@ function __subtitlesOf(video) {
   return out.length > 0 ? out : undefined;
 }
 `;
+}
+
+/**
+ * THROWAWAY GRANT. The synchrony deobfuscator shipped in the extension's own
+ * repository, embedded as static code: its ESM export becomes a return value,
+ * and its console is a no-op, as the Kotlin wrapper made it. Nothing fetched at
+ * run time is evaluated; the site's script is only parsed and transformed.
+ */
+export function synchronyPrelude(script: string | undefined): string {
+	if (script === undefined) return '';
+	const m = /export\{(.*) as Deobfuscator,(.*) as Transformer\};/.exec(script);
+	if (m === null) return '';
+	const body = script.replace(m[0], () => `return { Deobfuscator: ${m[1]}, Transformer: ${m[2]} };`);
+	const noop = '{ log: function () {}, warn: function () {}, error: function () {}, trace: function () {}, info: function () {}, debug: function () {} }';
+	return [
+		'var __SYNCHRONY_MODULE = null;',
+		'function __synchronyModule() {',
+		'  if (__SYNCHRONY_MODULE === null) __SYNCHRONY_MODULE = (function (console) {',
+		body,
+		`  })(${noop});`,
+		'  return __SYNCHRONY_MODULE;',
+		'}',
+		'var SynchronyEngine = { deobfuscate: function (source) { var S = __synchronyModule(); return new S.Deobfuscator().deobfuscateSource(String(source)); } };'
+	].join('\n');
 }

@@ -980,6 +980,7 @@ export const RUNTIME_GLOBALS = [
 	'Protocol',
 	'Unpacker',
 	'JsUnpacker',
+	'SynchronyEngine',
 	'Unbaser',
 
 	/* The boxed numeric limits, which this ecosystem reads to mean "last" and

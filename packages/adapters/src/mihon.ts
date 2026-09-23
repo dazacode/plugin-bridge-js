@@ -409,6 +409,13 @@ function descendsFromKeiSource(files: readonly { source: string }[], className: 
 	return false;
 }
 
+const SYNCHRONY_STUB_M = `package keiyoushi.lib.synchrony
+
+object Deobfuscator {
+    fun deobfuscateScript(source: String): String? = SynchronyEngine.deobfuscate(source)
+}
+`;
+
 export const mihonAdapter: ForeignAdapter = {
 	format: 'mihon',
 
@@ -629,7 +636,7 @@ export const mihonAdapter: ForeignAdapter = {
 		const modules = [...source.libModules]
 			.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
 			.flatMap(([name, files]) =>
-				[...files].map(([path, text]) => ({ path: `lib/${name}/${path}`, source: text }))
+				[...files].map(([path, text]) => ({ path: `lib/${name}/${path}`, source: name === 'synchrony' && /Deobfuscator\.kt$/.test(path) ? SYNCHRONY_STUB_M : text }))
 			);
 		const core = [...source.coreFiles].map(([path, text]) => ({
 			path: `core/${path}`,
@@ -705,7 +712,8 @@ export const mihonAdapter: ForeignAdapter = {
 			// beside its Kotlin, which `Intl` reads through the classloader. An
 			// extension with none passes an empty map and the classpath is
 			// empty, which is what it was before they were fetched at all.
-			resources: Object.fromEntries(source.resources)
+			resources: Object.fromEntries([...source.resources].filter(([p]) => !p.endsWith('.js'))),
+			synchronyScript: conversion.js.includes('SynchronyEngine') ? [...source.resources].find(([p]) => /^assets\/synchrony-[\w.-]+\.js$/.test(p))?.[1] : undefined
 		});
 
 		// Over the emitted module rather than the Kotlin: the emitter has
