@@ -12,10 +12,12 @@ to exhaustion and deliberately closed it. `v0.1.x` is for fixes to what has
 already been promised; a minor bump whose case is "the number went up" is not a
 minor bump.
 
-## v0.6.0 — interceptors and a named deobfuscator run, and measuring a boundary is an instrument
+## v0.5.1 — the v0.5.0 pass, continued: interceptors and a named deobfuscator run, and a boundary's cost is measurable
 
-The same two whole catalogues as v0.5.0, a Mihon-family repository of 1,396
-manga listings and an Aniyomi-family repository of 256 anime listings. **1,123
+A continuation of the v0.5.0 pass rather than a new direction: the same two
+whole catalogues, a Mihon-family repository of 1,396 manga listings and an
+Aniyomi-family repository of 256 anime listings, the same method, and the work
+that pass had left on branches. **1,123
 of 1,652 now load (was 1,050) and 772 reach all three probe stages (was
 691).** The manga count is net of seven listings refused on purpose (below).
 `CONVERTER_VERSION` moves from 59 to 60, so every bundle converted earlier is
