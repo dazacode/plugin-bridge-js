@@ -999,7 +999,35 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 	['xor', 'bitwiseXor'],
 	// `length()` with the parentheses is org.json's, never Kotlin's
 	// `String.length` — that one is a property and reaches a different table.
-	['length', 'jsonLength']
+	['length', 'jsonLength'],
+
+	// The next pass of the same long tail, each a stdlib extension with a
+	// Kotlin meaning its JavaScript namesake lacks or does not have: see
+	// `kotlin-stdlib-more.ts` for each. `sort` is deliberately NOT here: in the
+	// video half `videos.sort()` is the base class's own member extension,
+	// which answers a sorted list, and reading it as the in-place stdlib sort
+	// would answer nothing.
+	['toDoubleOrNull', 'toFloatOrNull'],
+	['filterNotNull', 'filterNotNull'],
+	['getOrPut', 'getOrPut'],
+	['getValue', 'getValue'],
+	['toMap', 'toMap'],
+	['mapValues', 'mapValues'],
+	['mapKeys', 'mapKeys'],
+	['mapNotNullTo', 'mapNotNullTo'],
+	['padEnd', 'padEnd'],
+	['prependIndent', 'prependIndent'],
+	['removeAt', 'removeAt'],
+	['reverse', 'reverse'],
+	['replaceAll', 'replaceAll'],
+	['reduceIndexed', 'reduceIndexed'],
+	['maxOf', 'maxOf'],
+	['minOf', 'minOf'],
+	['toUByte', 'toUByte'],
+	['toUShort', 'toUShort'],
+	['toUInt', 'toUInt'],
+	['toBigDecimal', 'toBigDecimal'],
+	['toHashSet', 'hashSet']
 ]);
 
 /**
@@ -1555,7 +1583,13 @@ export const HOST_METHODS: ReadonlySet<string> = new Set([
 	'getAndSet',
 	'compareAndSet',
 	'updateAndGet',
-	'getAndUpdate'
+	'getAndUpdate',
+
+	// kotlin.Result's reader of the failure, which the runtime's Result has.
+	'exceptionOrNull',
+	// java.util.Base64's decoder, which the runtime answers with the android
+	// coder it already is: `Base64.getDecoder().decode(text)`.
+	'decode'
 ]);
 
 /**
@@ -1727,7 +1761,26 @@ export const FREE_FUNCTIONS: ReadonlyMap<string, string> = new Map([
 	// `.scheme` precisely to decide whether it wants the value. `java.net.URL`
 	// is deliberately absent: nothing in the catalogue constructs one, and a
 	// name here shadows a declaration of the same name in the converted source.
-	['URI', 'uri']
+	['URI', 'uri'],
+	// `java.net.URL(text)`, for its readers — `.host`, `.path`. Two sources
+	// construct one now, which is what the note above waited for.
+	['URL', 'javaUrl'],
+
+	// java.util's sets and the concurrent map, whose number argument is a
+	// capacity and not an element — see `__k.hashSet`.
+	['HashSet', 'hashSet'],
+	['LinkedHashSet', 'hashSet'],
+	['HashMap', 'hashMap'],
+	['LinkedHashMap', 'hashMap'],
+	['ConcurrentHashMap', 'hashMap'],
+
+	// An exception built as a VALUE — `Observable.error(Exception("…"))` —
+	// rather than thrown, which `thrownHelper` already covers.
+	['Exception', 'exceptionOf'],
+	['RuntimeException', 'exceptionOf'],
+	['IOException', 'exceptionOf'],
+	['IllegalStateException', 'exceptionOf'],
+	['IllegalArgumentException', 'exceptionOf']
 ]);
 
 /**

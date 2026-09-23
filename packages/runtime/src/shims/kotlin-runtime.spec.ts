@@ -4711,3 +4711,118 @@ describe('HttpUrl.Builder, and android.net.Uri over the same parse', () => {
 		);
 	});
 });
+
+/* ── the next pass of the stdlib's long tail ──────────────────────────────── */
+
+describe('the stdlib calls the next catalogue pass named', () => {
+	it('filters nulls, and parses a Double the way toDouble does', () => {
+		expect(k.filterNotNull([1, null, 2, undefined, 0])).toEqual([1, 2, 0]);
+		expect(k.toFloatOrNull('4.5')).toBe(4.5);
+		expect(k.toFloatOrNull('4.5 stars')).toBeNull();
+	});
+
+	it('computes getOrPut once, stores it, and recomputes a null', () => {
+		const cache = k.mutableMapOf();
+		let calls = 0;
+		expect(k.getOrPut(cache, 'a', () => ++calls)).toBe(1);
+		expect(k.getOrPut(cache, 'a', () => ++calls)).toBe(1);
+		expect(calls).toBe(1);
+		cache.set('b', null);
+		expect(k.getOrPut(cache, 'b', () => 'made')).toBe('made');
+		// A keyed object — kotlinx's JsonObject is one here — reads the same.
+		expect(k.getOrPut({ x: 3 }, 'x', () => 9)).toBe(3);
+	});
+
+	it('throws from getValue where get answers null', () => {
+		expect(k.getValue(k.mapOf(k.to('iv', 'v')), 'iv')).toBe('v');
+		expect(k.getValue({ iv: 'w' }, 'iv')).toBe('w');
+		expect(() => k.getValue(k.mapOf(), 'iv')).toThrow(/missing/);
+	});
+
+	it('builds a map from pairs, copies one, fills a destination, and lets Headers answer', () => {
+		const made = k.toMap([k.to('a', 1), k.to('b', 2), k.to('a', 3)]);
+		expect([...made]).toEqual([
+			['a', 3],
+			['b', 2]
+		]);
+		const into = k.mutableMapOf(k.to('z', 0));
+		expect(k.toMap([k.to('y', 1)], into)).toBe(into);
+		expect(into.get('y')).toBe(1);
+		expect(k.toMap(runtime.globals.Headers.headersOf('A', '1'))).toEqual({ A: '1' });
+	});
+
+	it('reads a map entry as Kotlin does, by key and value', () => {
+		const values = k.mapValues(k.mapOf(k.to('a', [1, null])), (entry: any) =>
+			k.filterNotNull(entry.value)
+		);
+		expect(values.get('a')).toEqual([1]);
+		expect([...k.mapKeys(k.mapOf(k.to('a', 1)), (entry: any) => entry.key + '!')]).toEqual([['a!', 1]]);
+		expect(k.map(k.mapOf(k.to('k', 'v')), (entry: any) => `${entry.key}=${entry.value}`)).toEqual(['k=v']);
+	});
+
+	it('appends mapNotNullTo into its destination', () => {
+		const out = k.mutableListOf('x');
+		expect(k.mapNotNullTo([1, 2, 3], out, (n: number) => (n === 2 ? null : n * 10))).toBe(out);
+		expect([...out]).toEqual(['x', 10, 30]);
+	});
+
+	it('pads, indents and edits in place with Kotlin’s rules', () => {
+		expect(k.padEnd('ab', 4, '=')).toBe('ab==');
+		expect(k.padEnd('abcdef', 4, '=')).toBe('abcdef');
+		expect(() => k.padEnd('a', -1)).toThrow(/less than zero/);
+		expect(k.prependIndent('slug', '/en/comic/')).toBe('/en/comic/slug');
+		expect(k.prependIndent('a\n\nb', '> ')).toBe('> a\n> \n> b');
+		const list = [1, 2, 3];
+		expect(k.reverse(list)).toBeUndefined();
+		expect(list).toEqual([3, 2, 1]);
+		expect(k.removeAt(list, 1)).toBe(2);
+		expect(list).toEqual([3, 1]);
+		expect(() => k.removeAt(list, 5)).toThrow(/out of bounds/);
+		k.replaceAll(list, () => true);
+		expect(list).toEqual([true, true]);
+		// java.lang.String.replaceAll takes a PATTERN.
+		expect(k.replaceAll('a1b22', '[0-9]+', '#')).toBe('a#b#');
+	});
+
+	it('reduces with an index, and takes a max or min that must exist', () => {
+		expect(k.reduceIndexed([1, 2, 3], (i: number, acc: number, n: number) => acc + n * i)).toBe(1 + 2 + 6);
+		expect(() => k.reduceIndexed([], () => 0)).toThrow(/Empty/);
+		expect(k.maxOf([[1], [1, 2, 3], []], (l: unknown[]) => l.length)).toBe(3);
+		expect(k.minOf([3, 1, 2], (n: number) => n)).toBe(1);
+		expect(() => k.maxOf([], (n: number) => n)).toThrow(/empty/);
+	});
+
+	it('reads a byte unsigned', () => {
+		expect(k.toUByte(-1)).toBe(255);
+		expect(k.toUByte(k.toByte(200))).toBe(200);
+		expect(k.toUInt(-1)).toBe(4294967295);
+		expect(k.toUShort(-1)).toBe(65535);
+	});
+
+	it('prints a volume number without its trailing zeros', () => {
+		expect(k.toBigDecimal(2.0).stripTrailingZeros().toPlainString()).toBe('2');
+		expect(k.toBigDecimal(1.5).stripTrailingZeros().toPlainString()).toBe('1.5');
+		expect(k.toBigDecimal(10).stripTrailingZeros().toPlainString()).toBe('10');
+		expect(k.toBigDecimal(1e21).toPlainString()).toBe('1000000000000000000000');
+		expect(k.toBigDecimal(1.5e-7).toPlainString()).toBe('0.00000015');
+	});
+
+	it('builds java.util sets and maps without taking a capacity for an element', () => {
+		expect([...k.hashSet(16)]).toEqual([]);
+		expect([...k.hashSet(['a', 'a', 'b'])]).toEqual(['a', 'b']);
+		const concurrent = k.hashMap(16, 0.75);
+		expect(concurrent.size).toBe(0);
+		concurrent.put('k', 'v');
+		expect(concurrent.get('k')).toBe('v');
+	});
+
+	it('makes an exception value, and reads a java.net.URL', () => {
+		const error = k.exceptionOf('No search');
+		expect(error).toBeInstanceOf(Error);
+		expect(error.message).toBe('No search');
+		const url = k.javaUrl('https://example.invalid/sub/path?q=1');
+		expect(url.host).toBe('example.invalid');
+		expect(url.path).toBe('/sub/path');
+		expect(url.protocol).toBe('https');
+	});
+});

@@ -92,6 +92,7 @@
 
 import { DOM_RUNTIME_SOURCE } from './generated/dom-source';
 import { KOTLIN_TIME } from './kotlin-time';
+import { KOTLIN_STDLIB_MORE } from './kotlin-stdlib-more';
 
 /**
  * The Kotlin standard library, as much of it as a scraper reaches for.
@@ -200,6 +201,16 @@ function __arr(value) {
   // runtime exists to prevent.
   if (typeof value === 'string') return value.length === 0 ? [] : [value];
   if (typeof value.toArray === 'function') return value.toArray();
+  // A Map's entries are [key, value] pairs, and Kotlin reads one as
+  // 'entry.key' / 'entry.value' — which on a bare pair is undefined, and the
+  // 'mapValues { it.value … }' after it a wrong value rather than an error.
+  if (value instanceof Map) {
+    return Array.from(value, function (entry) {
+      entry.key = entry[0];
+      entry.value = entry[1];
+      return entry;
+    });
+  }
   if (typeof value[Symbol.iterator] === 'function') return Array.from(value);
   if (typeof value.length === 'number') return Array.prototype.slice.call(value);
   return [value];
@@ -5564,6 +5575,7 @@ var Html = {
 };
 
 ${KOTLIN_TIME}
+${KOTLIN_STDLIB_MORE}
 /**
  * okhttp's CacheControl, which the host's transport decides for itself.
  *
@@ -7362,6 +7374,16 @@ __k.resolve = function (base, reference) {
   var scheme = resolved.scheme === null ? '' : resolved.scheme.toLowerCase();
   if (scheme !== 'http' && scheme !== 'https') return null;
   return __httpUrlOf(resolved.toString());
+};
+
+/**
+ * 'URL(text)', java.net's. Only its readers are asked for — '.host', '.path',
+ * '.protocol' — so it is the reader 'toUrl' already answers, over a parse of
+ * the text rather than of the host alone.
+ */
+__k.javaUrl = function (text) {
+  if (text !== null && text !== undefined && typeof text === 'object') return __k.toUrl(text);
+  return __k.toUrl(__httpUrlOf(__str(text), true));
 };
 
 __k.getQueryParameter = function (value, name) {

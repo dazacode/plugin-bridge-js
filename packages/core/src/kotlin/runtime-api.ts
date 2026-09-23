@@ -566,7 +566,32 @@ export const RUNTIME_HELPERS = [
 	   conversion fetched from the extension's own repository — see
 	   `CLASS_LOADER` in `subset.ts` for the two spellings that reach it, and
 	   `__RESOURCES` in the entry point for where the files come from. */
-	'classLoader'
+	'classLoader',
+
+	/* The next pass of the long tail — see `kotlin-stdlib-more.ts`. */
+	'filterNotNull',
+	'getOrPut',
+	'getValue',
+	'toMap',
+	'mapValues',
+	'mapKeys',
+	'mapNotNullTo',
+	'padEnd',
+	'prependIndent',
+	'removeAt',
+	'reverse',
+	'replaceAll',
+	'reduceIndexed',
+	'maxOf',
+	'minOf',
+	'toUByte',
+	'toUShort',
+	'toUInt',
+	'toBigDecimal',
+	'hashSet',
+	'hashMap',
+	'exceptionOf',
+	'javaUrl'
 ] as const;
 
 export type RuntimeHelper = (typeof RUNTIME_HELPERS)[number];
