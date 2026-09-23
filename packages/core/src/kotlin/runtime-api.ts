@@ -399,6 +399,13 @@ export const RUNTIME_HELPERS = [
 	   See `recoveryCut` in `emit.ts`. */
 	'recoveryRefused',
 
+	/* A call a helper class makes back into the source object through a typed
+	   property, emitted without an await because the source class did not
+	   start out async there — and checked, because that class's emitter can
+	   still make it async while emitting. A promise here is a loud error, not
+	   a value. See `typedMemberOwner` in `emit.ts`. */
+	'notSuspended',
+
 	/* jsoup's `Elements.eachText()` / `eachAttr()`, which return every match's
 	   text at once — the shortcut scraper code reaches for instead of a `map`. */
 	'eachText',

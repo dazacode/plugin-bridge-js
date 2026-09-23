@@ -1692,3 +1692,77 @@ describe('a base class written through the object that holds it', () => {
 		expect(demo.label()).toBe('Type');
 	});
 });
+
+describe('a helper class calling back into the source object it was handed', () => {
+	// A multisrc template's shape: `class Extractor(private val theme: Theme)`,
+	// built with `Extractor(this)`, calling `theme.displayName(…)`. The entry
+	// class's methods are never passthroughs, so the call was refused as a
+	// method nothing declares — while the method sat translated one file over.
+	const THEME = kt(
+		'abstract class Theme : AnimeHttpSource() {',
+		"    open fun displayName(name: String): String = name.trimEnd('-', ' ')",
+		'    suspend fun slow(name: String): String {',
+		'        delay(1)',
+		'        return name + "?"',
+		'    }',
+		'    fun viaOther(): String = Other().load()',
+		'    fun label(name: String): String = Helper(this).label(name)',
+		'    suspend fun late(name: String): String = Helper(this).late(name)',
+		'    fun loud(): String = Helper(this).loud()',
+		'}'
+	);
+	const HELPER = kt(
+		'class Helper(private val theme: Theme) {',
+		'    fun label(name: String): String = theme.displayName(name) + "!"',
+		'    suspend fun late(name: String): String = theme.slow(name) + "!"',
+		'    fun loud(): String = theme.viaOther() + "!"',
+		'}',
+		'class Other {',
+		'    fun load(): String = client.get("https://example.invalid/x").body.string()',
+		'}'
+	);
+	const ENTRY = kt(
+		'class Demo : Theme() {',
+		'    override fun displayName(name: String): String = "[" + super.displayName(name) + "]"',
+		'}'
+	);
+
+	it('resolves the member on the declared type, and dispatches to the override', async () => {
+		const demo = await instantiate('Demo', THEME, HELPER, ENTRY);
+		expect(demo.label('one -')).toBe('[one]!');
+	});
+
+	it('awaits a member the source class declares `suspend`', async () => {
+		const demo = await instantiate('Demo', THEME, HELPER, ENTRY);
+		await expect(demo.late('two')).resolves.toBe('two?!');
+	});
+
+	it('fails loudly when the member turned out to be async after all', async () => {
+		// `viaOther` is not `suspend` and reads as no request, so the survey
+		// calls it plain; its emitter made it async for the request inside
+		// `Other.load`. Handed on, the promise would have been "[object
+		// Promise]!" — so the call throws, naming the member, instead.
+		const demo = await instantiate('Demo', THEME, HELPER, ENTRY);
+		expect(() => demo.loud()).toThrow(/Theme\.viaOther as a plain function/);
+	});
+
+	it('leaves a parameter that shadows the property alone', async () => {
+		// Only the property read counts: a local named `theme` of some other
+		// type is not the source object, and stays the refusal it was.
+		const emission = emitKotlin(
+			parse(
+				kt(
+					'abstract class Theme : AnimeHttpSource() {',
+					'    fun displayName(name: String): String = name',
+					'}',
+					'class Helper(private val theme: Theme) {',
+					'    fun label(theme: Any, name: String): String = theme.displayName(name)',
+					'}'
+				)
+			)
+		);
+		expect(emission.refusals.flatMap((one) => one.obstacles.map((o) => o.kind))).toEqual([
+			'`.displayName()`'
+		]);
+	});
+});

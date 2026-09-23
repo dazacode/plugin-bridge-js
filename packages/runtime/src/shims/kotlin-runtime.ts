@@ -5201,6 +5201,31 @@ var __k = {
    * point the recovery would have begun. Not an empty answer, and not the
    * challenge page handed on as if it were the content.
    */
+  /**
+   * A value a converted call expected to be plain, checked for being one.
+   *
+   * The emitter writes this around a call into the source object from a helper
+   * class that holds it ('theme.getServerDisplayName(name)'), when the source
+   * class's own starting set of async members does not include the callee. The
+   * class's emitter can still make that member async for an await it meets
+   * along the way, which nothing surveying the files beforehand can see. Handed
+   * on unchecked, the promise would become '[object Promise]' in a video name,
+   * or a truthy condition; this throws instead, naming the member, so the
+   * failure is the loud one.
+   */
+  notSuspended: function (value, member) {
+    if (__thenable(value)) {
+      // The promise is dropped here, so its own rejection must not surface
+      // later as an unhandled one on top of this error.
+      value.then(null, function () {});
+      throw new Error(
+        'This converted extension called ' + __str(member) + ' as a plain function, ' +
+        'and it answered later instead. It cannot be used from here as converted.'
+      );
+    }
+    return value;
+  },
+
   recoveryRefused: function (owner, kinds) {
     var needed = __arr(kinds).map(function (one) { return __str(one); }).join(', ');
     return new Error(
