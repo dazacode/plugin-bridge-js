@@ -382,7 +382,8 @@ export const aniyomiAdapter: ForeignAdapter = {
 			baseUrlFromPreference(source.files[0]?.source ?? '', conversion.constants.stringConstants) ||
 			(conversion.superClass === 'AnimeSourceFactory'
 				? baseUrlFromFactoryTarget(source.files, source.files[0]?.source ?? '')
-				: '');
+				: '') ||
+			baseUrlOfClass(source.files, conversion.className);
 		if (!baseUrl.startsWith('https://')) {
 			throw new ForeignFormatError(
 				`${listing.name} declares no https base URL that can be read without running it.`
@@ -522,6 +523,41 @@ function baseUrlFromPreference(
 	}
 	const literal = /"(https:\/\/[^"\s$]+)"/.exec(declared[1]);
 	return literal === null ? '' : literal[1];
+}
+
+/**
+ * The base url of the class the conversion chose, read off that class alone.
+ *
+ * The token reader takes the *first* class in the entry file as the one it
+ * describes, and a file can open with something else: `class
+ * SamatoDenVideosFactory : AnimeSourceFactory { … listOf(SamatoDenVideos()) }`
+ * sits above `class SamatoDenVideos : AnimeHttpLegacySource() { override val
+ * baseUrl = "https://…" }`. The emitter picks the second — it is the one that
+ * constructs a base — while the reader had already read the first, found no
+ * base url, and the listing was refused for declaring none.
+ *
+ * So the file declaring the chosen class is cut at that declaration and read
+ * again, the same three ways the entry file is. Nothing is guessed: the
+ * answer is a literal in that class, or in its header, or the literal default
+ * of its domain setting, or nothing.
+ */
+function baseUrlOfClass(
+	files: readonly { path: string; source: string }[],
+	className: string
+): string {
+	const declaration = new RegExp(`\\bclass\\s+${escapeForRegExp(className)}\\b`);
+	for (const file of files) {
+		const at = declaration.exec(file.source);
+		if (at === null) continue;
+		const slice = file.source.slice(at.index);
+		const constants = readKotlinFast(slice).stringConstants;
+		const found =
+			constants['baseUrl'] ||
+			baseUrlFromSupertype(slice) ||
+			baseUrlFromPreference(slice, constants);
+		if (found.startsWith('https://')) return found;
+	}
+	return '';
 }
 
 /**
