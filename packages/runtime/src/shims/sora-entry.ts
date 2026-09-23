@@ -23,6 +23,14 @@
  * container from a url's extension is how a player ends up with a black screen
  * and no error, and the module author knows what their source serves.
  *
+ * ## What the host lends in place of the globals these were written for
+ *
+ * `fetchv2` is the shared runtime's, and reads all six of its arguments —
+ * including whether to follow a redirect and which charset the body is in
+ * (`js-runtime.ts`). `crypto` is a WebCrypto-shaped façade over `ctx.crypto`
+ * (`web-crypto.ts`), declared at module scope where a module's free `crypto`
+ * finds it.
+ *
  * ## Identity
  *
  * The `id` is the converted plugin id, injected at conversion time, because
@@ -33,6 +41,8 @@
 
 import { JS_RUNTIME } from './js-runtime';
 import { STREAM_GUARDS } from './stream-guards';
+import { DIGESTS } from './digests';
+import { WEB_CRYPTO } from './web-crypto';
 
 export interface SoraEntrypointOptions {
 	/** Must equal the manifest id, or the sandbox refuses to load the bundle. */
@@ -126,6 +136,8 @@ export function soraEntrypoint(options: SoraEntrypointOptions): string {
 
 	return `${JS_RUNTIME}
 ${STREAM_GUARDS}
+${DIGESTS}
+${WEB_CRYPTO}
 ${constants}
 ${HOST_GATE}
 
