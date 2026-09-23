@@ -931,6 +931,37 @@ describe('a conversion that refuses', () => {
 });
 
 describe('which refusals stop a build', () => {
+	it('blocks on a refused helper called with nothing but a trailing lambda', async () => {
+		// `observableSeries { series -> series.search(q) }`: no parenthesis, and
+		// a `.search(` inside the lambda. Neither text scan drew the edge, the
+		// helper was pruned, and its callers survived calling nothing.
+		const result = await convertKotlin(
+			[
+				{
+					path: 'Demo.kt',
+					source: kt(
+						'class Demo : Theme() {',
+						'    override val baseUrl = "https://example.invalid"',
+						'}'
+					)
+				},
+				{
+					path: 'Theme.kt',
+					source: kt(
+						'abstract class Theme : HttpSource() {',
+						'    private fun <R> cached(block: (List<String>) -> R): R = block(listOf(Build.MODEL))',
+						'    override fun popularMangaRequest(page: Int): Request = cached { all ->',
+						'        GET(all.first().trim(), headers)',
+						'    }',
+						'}'
+					)
+				}
+			],
+			{ parser }
+		);
+		expect(result.blocking.map((one) => one.member)).toEqual(['cached']);
+	});
+
 	it('does not block on a private helper only the settings screen calls', async () => {
 		// A `private fun` is not the host's to call, so it is a root no longer;
 		// it is reached when a reachable member names it — by a call, or by a

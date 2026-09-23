@@ -11872,6 +11872,35 @@ function callEdges(node: KNode): CallEdge[] {
 		}
 		if (child.type !== 'call_expression') continue;
 		const text = child.text;
+		// The callee itself, read off the tree. The scans below read the whole
+		// call's text for `name(`, and missed it two ways: a call whose only
+		// argument is a trailing lambda has no parenthesis at all, and any
+		// `.x(` inside the arguments or the lambda made the bare scan skip the
+		// callee. `observableSeries { series -> series.search(q) }` recorded
+		// `search` and not `observableSeries`, the refused helper was pruned
+		// while every member calling it survived, and the bundle threw
+		// `this.observableSeries is not a function` on its first search with
+		// nothing refused. Only a bare name or one on `this` — those are the
+		// source's own members, which is what a missing edge prunes.
+		const callee = kids(child)[0];
+		const own =
+			callee?.type === 'simple_identifier'
+				? callee
+				: callee?.type === 'navigation_expression' &&
+					  kids(callee)[0]?.type === 'this_expression' &&
+					  kids(callee).length === 2
+					? kids(kids(callee)[1]).find((part) => part.type === 'simple_identifier')
+					: undefined;
+		const lambdaOnly =
+			kids(kids(child)[1]).length > 0 &&
+			kids(kids(child)[1]).every((part) => part.type === 'annotated_lambda');
+		if (
+			own !== undefined &&
+			lambdaOnly &&
+			!/^(if|for|while|when|catch|try|else|do)$/.test(own.text)
+		) {
+			found.set(own.text, found.get(own.text) ?? callee?.type !== 'simple_identifier');
+		}
 		const dotted = new RegExp(`\\.\\s*([A-Za-z_]\\w*)\\s*${TYPE_ARGUMENTS}\\(`, 'g');
 		let match: RegExpExecArray | null;
 		let foundDotted = false;
