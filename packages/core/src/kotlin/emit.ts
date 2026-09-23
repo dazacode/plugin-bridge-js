@@ -124,6 +124,7 @@ import {
 	VARARG_OPTIONS,
 	VIDEO_V16_ONLY,
 	VIDEO_V16_PARAMETERS,
+	iterableDelegateOf,
 	scanObstacles,
 	thrownHelper,
 	type Refusal,
@@ -416,10 +417,13 @@ const RECEIVER_BUILDERS: ReadonlySet<string> = new Set([
 const PACKAGE_ROOTS: ReadonlySet<string> = new Set(['java', 'javax', 'android', 'okhttp3', 'okio']);
 
 /** `java.net.URLEncoder`, and the other packages written out in full. */
-const QUALIFIED_GLOBAL = /^(?:java|javax|kotlin|android|okhttp3|okio)\.[\w.]*?\.?(\w+)$/;
+const QUALIFIED_GLOBAL = /^(?:java|javax|kotlin|android|okhttp3|okio|rx)\.[\w.]*?\.?(\w+)$/;
 
 /** `Filter.Sort.Selection` and the video fork's `AnimeFilter.Sort.Selection`. */
 const SORT_SELECTION = /^(?:Anime)?Filter\.Sort\.Selection$/;
+
+/** A package path and nothing else: `java.net`, `java.text`, `rx` — lowercase segments. */
+const PACKAGE_PATH = /^(?:java|javax|kotlin|android|okhttp3|okio|rx)(?:\.[a-z_][a-z0-9_]*)*$/;
 
 /**
  * `Injekt.get<T>()`, whitespace already squeezed out of the text.
@@ -781,7 +785,37 @@ interface Local {
 	readonly receiverArity?: number;
 	/** On such a parameter: whether its type is `suspend`, so a call is awaited. */
 	readonly receiverSuspends?: boolean;
+	/**
+	 * Set on a parameter declared with a type that has no `invoke` — see
+	 * `VALUE_ONLY_TYPES`. Kotlin resolves `name(…)` to a local only when the
+	 * local can be invoked, so a call through this name is a member's.
+	 */
+	readonly valueOnly?: boolean;
 }
+
+/**
+ * Parameter types that cannot be called, so `name(…)` never means the parameter.
+ *
+ * keiyoushi's `fetchMangaUpdate(manga, chapters, fetchDetails: Boolean,
+ * fetchChapters: Boolean)` is overridden by Madara and others, and its body
+ * calls the source's own `fetchChapters(path, id)` with the Boolean in scope.
+ * Kotlin resolves that to the member, because a Boolean has no `invoke`;
+ * emitted as a bare call it called the Boolean — "fetchChapters is not a
+ * function" on the first library refresh, with nothing refused. Only the
+ * standard library's value types are listed: a user type could declare an
+ * `operator fun invoke`, and a function type obviously can.
+ */
+const VALUE_ONLY_TYPES: ReadonlySet<string> = new Set([
+	'Boolean',
+	'String',
+	'Int',
+	'Long',
+	'Short',
+	'Byte',
+	'Float',
+	'Double',
+	'Char'
+]);
 
 /** One `function`-ish emission in progress. */
 interface Frame {
@@ -1522,6 +1556,15 @@ class Emitter {
 	 * `__k.durationOf` for why the receiver still decides.
 	 */
 	private readonly durationImports = new Set<string>();
+
+	/**
+	 * `import eu.kanade.tachiyomi.source.model.SManga.Companion.COMPLETED`,
+	 * then `status = COMPLETED` — a companion constant of a type the runtime
+	 * defines by name, imported so it can be written bare. Name to the
+	 * qualified read. Only for a runtime global (`GLOBAL_NAMES`): anything
+	 * else is a class this build may not have, and stays refused by name.
+	 */
+	private readonly companionImports = new Map<string, string>();
 	private readonly declaredMethods = new Set<string>();
 	private readonly declaredSuspends = new Set<string>();
 	/**
@@ -2088,6 +2131,7 @@ class Emitter {
 			this.qualifiedTypes.has(name) ||
 			GLOBAL_NAMES.has(name) ||
 			BASE_CONSTANTS.has(name) ||
+			this.companionImports.has(name) ||
 			this.aliased(name) !== name
 		);
 	}
@@ -2174,6 +2218,12 @@ class Emitter {
 				if (found[1] === '*')
 					for (const unit of DURATION_UNITS.keys()) this.durationImports.add(unit);
 				else this.durationImports.add(found[1]);
+			}
+			for (const found of list.text.matchAll(
+				/^\s*import\s+[\w.]*?\b([A-Z]\w*)\.Companion\.([A-Z][A-Z0-9_]*)\s*$/gm
+			)) {
+				if (GLOBAL_NAMES.has(found[1]))
+					this.companionImports.set(found[2], `${found[1]}.${found[2]}`);
 			}
 		}
 		// Registered before anything is emitted: an extension function is
@@ -2759,6 +2809,9 @@ class Emitter {
 			}
 		}
 
+		// Iterable, made iterable here too. See `iterationMembers`.
+		memberLines.push(...this.iterationMembers(node, members, constructorParams, false));
+
 		// The plain name of an overloaded method, for everything that calls it
 		// by that name — this file's own `this.x(…)`, the files next door, and
 		// the driver. It resolves against the *instance*, so an override a
@@ -3231,6 +3284,10 @@ class Emitter {
 					if (emitted.isAsync) this.refuse(getter, 'a suspending getter');
 					fields.push(`get ${member}() ${emitted.text}`);
 				}
+
+				// Iterable, made iterable here too — see `iterationMembers`. The
+				// parameters are this factory's own, in scope as locals.
+				fields.push(...this.iterationMembers(node, bodyMembers, params, true));
 
 				// Handed to `dataRecord` with its own factory and field order, so
 				// `copy(count = 3)` can rebuild it: a computed property here
@@ -5096,6 +5153,13 @@ class Emitter {
 				const key = expectationKey(node);
 				const known = this.expectedTypes.get(key);
 				this.expectedTypes.set(key, known === undefined || known === type ? type : null);
+				// `= use { json.decodeFromString(it.body.string()) }` — a scope
+				// function whose value IS its block's, so Kotlin infers the
+				// block's result from the same expected type. Only the three that
+				// answer the block: `also`/`apply` answer their receiver, and a
+				// type pushed into their block would be a wrong one.
+				const block = valueScopeBlock(node);
+				if (block !== null) this.expectLast(block, type);
 				return;
 			}
 		}
@@ -5237,12 +5301,23 @@ class Emitter {
 				(one): one is { name: string; arity: number; suspends: boolean } =>
 					one.name !== null && one.arity !== null
 			);
+		const valueParams = kids(list)
+			.filter((child) => child.type === 'parameter')
+			.filter((child) => {
+				const type = kids(child).find(
+					(part) => part.type === 'user_type' || part.type === 'nullable_type'
+				);
+				return type !== undefined && VALUE_ONLY_TYPES.has(type.text.replace(/\?$/, ''));
+			})
+			.map((child) => this.nameOf(child))
+			.filter((one): one is string => one !== null);
 		let emitted;
 		try {
 			emitted = this.functionScope('function', null, names, () => {
 				for (const one of receiverParams) {
 					this.declareReceiverLocal(one.name, one.arity, one.suspends);
 				}
+				for (const one of valueParams) this.markValueOnly(one);
 				return this.functionBody(body);
 			});
 		} finally {
@@ -6615,14 +6690,37 @@ class Emitter {
 	 */
 	private whenChain(node: KNode, sink: Sink): string {
 		const subject = kids(node).find((child) => child.type === 'when_subject');
-		const subjectValue = kids(subject)[0];
+		// `when (val e = m.groupValues[1]) { … }` binds the subject to a name
+		// the branches read. The grammar gives the binding first and the value
+		// second; read as the subject, the binding was an undeclared `e`.
+		const binding = kids(subject)[0]?.type === 'variable_declaration' ? kids(subject)[0] : null;
+		const subjectValue = binding === null ? kids(subject)[0] : kids(subject)[1];
+		const bound =
+			binding === null
+				? null
+				: (kids(binding).find((child) => child.type === 'simple_identifier')?.text ?? null);
+		if (binding !== null && (bound === null || subjectValue === undefined)) {
+			this.refuse(binding, 'a `when` subject binding this build could not read');
+		}
 		const name = subjectValue === undefined ? null : this.temporary();
 
 		const lines: string[] = [];
 		if (name !== null && subjectValue !== undefined) {
 			lines.push(`const ${name} = ${this.expr(subjectValue)};`);
 		}
+		// The name is in scope for the branches and nowhere else, as Kotlin's.
+		if (bound !== null && name !== null) {
+			this.pushScope();
+			this.declareAs(bound, name, false);
+		}
+		try {
+			return this.whenBranches(node, sink, name, lines);
+		} finally {
+			if (bound !== null && name !== null) this.popScope();
+		}
+	}
 
+	private whenBranches(node: KNode, sink: Sink, name: string | null, lines: string[]): string {
 		const clauses: string[] = [];
 		let fallback: string | null = null;
 		for (const entry of kids(node)) {
@@ -7344,6 +7442,13 @@ class Emitter {
 			) {
 				this.refuse(node, `\`::${member.text}\` on \`${owner.text}\``);
 			}
+			// A runtime type's own function, `createdAt?.let(Instant::parseOrNull)`:
+			// one argument, not all of them. A collection helper hands a lambda the
+			// index too, and `Instant.parse(text, format)` would take it as the
+			// format.
+			if (RUNTIME_STATIC_REFERENCES.get(owner.text)?.has(member.text) === true) {
+				return `(__a) => ${receiver}.${member.text}(__a)`;
+			}
 			return `(...__a) => ${receiver}.${member.text}(...__a)`;
 		}
 
@@ -7676,6 +7781,23 @@ class Emitter {
 		if (!JS_IDENTIFIER.test(name)) this.refuse(suffix, `\`.${written}()\``);
 		const safe = suffix.allChildren[0]?.type === '?.';
 
+		// `java.net.URI(url)` and `java.text.SimpleDateFormat(…)` — a constructor
+		// written with its package, which is the bare constructor the imported
+		// spelling already reaches. Only a package path in front and only a
+		// name the bare path knows (`FREE_FUNCTIONS`, or a runtime global), so
+		// an unknown qualified class still refuses.
+		if (
+			!safe &&
+			/^[A-Z]/.test(name) &&
+			PACKAGE_PATH.test(receiver.text.replace(/\s+/g, '')) &&
+			(FREE_FUNCTIONS.has(name) || GLOBAL_NAMES.has(name))
+		) {
+			const bare = kids(suffix).find((child) => child.type === 'simple_identifier');
+			if (bare !== undefined) {
+				return this.bareCall(bare, args, lambda, labelled, typeArgument, expected);
+			}
+		}
+
 		// `newBuilder().block()` — a parameter typed `R.() -> T`, invoked on an
 		// explicit receiver. Kotlin resolves a member of the receiver first, and
 		// no receiver type this ecosystem uses has a member called what these
@@ -7862,7 +7984,33 @@ class Emitter {
 				const withBlock = this.callArguments(name, args, lambda, labelled, false);
 				return `${this.helper('decodeWith')}(${[this.expr(receiver), this.decodeType(shape), ...withBlock].join(', ')})`;
 			}
-			const tail = this.plainArguments(name, args);
+			// `response.parseAs<Manga>(transform = ::transformJsonResponse)` —
+			// core's overload that runs the text through a function before the
+			// parse, named rather than trailing. The same `decodeWith` the block
+			// form takes; `json =` names a parser the runtime is already, and
+			// anything else keeps the refusal.
+			if (name === 'parseAs' && args.length > 0) {
+				const named = args.map((arg) => this.argumentName(arg));
+				const transform = args.find((arg) => this.argumentName(arg) === 'transform');
+				if (
+					transform !== undefined &&
+					named.every((one) => one === 'transform' || one === 'json')
+				) {
+					const fn = this.expr(this.argumentValue(transform));
+					return `${this.helper('decodeWith')}(${[this.expr(receiver), this.decodeType(shape), fn].join(', ')})`;
+				}
+			}
+
+			// `json.decodeFromStream(body.byteStream())` reads the whole body as
+			// the document, which is what the body's text already is here. Only
+			// that argument, read straight off a body: `.byteStream()` anywhere
+			// else is a stream of image bytes this runtime does not keep.
+			const streamed =
+				name === 'decodeFromStream' && args.length === 1
+					? okioStreamOf(this.argumentValue(args[0]), 'byteStream')
+					: null;
+			const tail =
+				streamed !== null ? [`${this.expr(streamed)}.string()`] : this.plainArguments(name, args);
 			return `${this.helper('decode')}(${[this.expr(receiver), this.decodeType(shape), ...tail].join(', ')})`;
 		}
 
@@ -7955,6 +8103,51 @@ class Emitter {
 		// Arity separates them cleanly. Every SharedPreferences call in this
 		// ecosystem passes a default (`getString(KEY, DEFAULT)!!`); every
 		// org.json read passes only the field.
+		// `n.toString(16)` and `bytes.toString(Charsets.UTF_8)`: toString WITH an
+		// argument is a radix or a charset, never the plain one — see
+		// `toStringWith`. The plain helper ignored the argument.
+		if (
+			name === 'toString' &&
+			args.length === 1 &&
+			lambda === null &&
+			!this.extensionFunctions.has(name) &&
+			!this.declaredMethods.has(name)
+		) {
+			const value = this.expr(receiver);
+			const argument = this.plainArguments(name, args)[0];
+			const call = (target: string) => `${this.helper('toStringWith')}(${target}, ${argument})`;
+			return safe ? `${this.helper('sc')}(${value}, (__r) => ${call('__r')})` : call(value);
+		}
+
+		// `Filter.Sort.Selection(3, false)` — the sort state written qualified,
+		// which is the same value the bare `Selection(…)` already builds
+		// through `__k.selection`. The receiver is the framework's nested type,
+		// not a value, so it is dropped rather than passed through.
+		if (
+			name === 'Selection' &&
+			lambda === null &&
+			!safe &&
+			/^(?:Anime)?Filter\.Sort$/.test(receiver.text.replace(/\s+/g, ''))
+		) {
+			return `${this.helper('selection')}(${this.callArguments(name, args, null, labelled, false).join(', ')})`;
+		}
+
+		// `body.source().asResponseBody(type)` — okio's spelling of "the same
+		// bytes under another content type", which is how an interceptor fixes a
+		// host that serves its pages as `application/octet-stream`. A response
+		// here is the text the host read, so the same body is its `string()`,
+		// handed to `toResponseBody` with the new type. Only this whole chain:
+		// `.source()` on its own is an okio stream (`readByteArray`,
+		// `cipherSource`) over bytes this runtime does not keep, and stays
+		// refused, as does the two-argument form, which also asserts a length.
+		if (name === 'asResponseBody' && args.length === 1 && lambda === null) {
+			const body = okioSourceOf(receiver);
+			if (body !== null) {
+				const type = this.plainArguments(name, args)[0];
+				return `${this.helper('toResponseBody')}(${this.expr(body)}.string(), ${type})`;
+			}
+		}
+
 		const jsonGetter = JSON_GETTERS.get(name);
 		if (jsonGetter !== undefined && args.length === 1 && lambda === null) {
 			return `${this.helper(jsonGetter)}(${[this.expr(receiver), ...this.plainArguments(name, args)].join(', ')})`;
@@ -8459,7 +8652,13 @@ class Emitter {
 			const inEnum = this.enumMember(name);
 			if (inEnum !== null) return `${inEnum}(${this.plainArguments(name, args).join(', ')})`;
 		}
-		const local = this.lookup(name);
+		// A parameter that cannot be invoked does not hide a member of the same
+		// name from a call — see `VALUE_ONLY_TYPES`. Asked only when something
+		// the source declares answers to the name, so the call still goes
+		// somewhere real.
+		const bound = this.lookupLocal(name);
+		const local =
+			bound?.valueOnly === true && this.callableMember(name) ? null : (bound?.text ?? null);
 		if (local !== null) {
 			const call = `${local}(${this.callArguments(name, args, lambda, labelled, false).join(', ')})`;
 			return this.localSuspends.has(name) ? this.awaited(call) : call;
@@ -8498,6 +8697,24 @@ class Emitter {
 			const types = this.reifiedArguments(callee, name, typeArgument, expected);
 			const call = `${this.safe(importedFrom)}.${fieldName(name)}(${[...types, ...tail].join(', ')})`;
 			return this.declaredSuspends.has(name) ? this.awaited(call) : call;
+		}
+
+		// `Observable.error(Exception("Licensed"))` — an exception built as a
+		// value rather than thrown on the spot. `throw` already reads the same
+		// names (`thrownHelper`); here the error is made and handed on, which
+		// is `__k.exception`. Only a type this build did not see declared: an
+		// extension's own `class LoginRequired : Exception()` is a class like
+		// any other, and a name nothing declares that does not end in
+		// Exception/Error/Throwable is not this.
+		if (
+			thrownHelper(name) === 'error' &&
+			lambda === null &&
+			args.length <= 2 &&
+			!this.classMembers.has(name) &&
+			!this.declaredTypes.has(name) &&
+			!this.moduleNames.has(name)
+		) {
+			return `${this.helper('exception')}(${this.plainArguments(name, args).join(', ')})`;
 		}
 
 		// A capitalised bare call is a constructor of a class this build has not
@@ -8567,6 +8784,21 @@ class Emitter {
 
 		if (implicit !== null && lambda !== null && BUILDER_LAMBDA_METHODS.has(name)) {
 			const withLambda = this.callArguments(name, args, lambda, labelled, true);
+			return `${implicit}.${name}(${withLambda.join(', ')})`;
+		}
+		// `configureClient() = addCookie { listOf("age" to "18") }` — the same
+		// call the written-receiver form already makes, on the builder that is
+		// the implicit receiver, with the block as an ordinary argument (the
+		// cookies, asked for per request). Only `addCookie`: the other
+		// argument-lambda method is `addInterceptor`, and an interceptor lambda
+		// is a boundary this path must not open by the back door.
+		if (
+			implicit !== null &&
+			lambda !== null &&
+			name === 'addCookie' &&
+			!this.isSourceMember(name)
+		) {
+			const withLambda = this.callArguments(name, args, lambda, labelled, false);
 			return `${implicit}.${name}(${withLambda.join(', ')})`;
 		}
 		// `configureClient() = rateLimit(3)`: the builder is the implicit
@@ -10265,6 +10497,8 @@ class Emitter {
 		// so a source that declares the same name keeps meaning its own.
 		const inherited = BASE_CONSTANTS.get(name);
 		if (inherited !== undefined) return inherited;
+		const imported = this.companionImports.get(name);
+		if (imported !== undefined) return imported;
 
 		// A capitalised name this file did not declare belongs to another
 		// module — `Injekt`, `Dispatchers`, an extractor object. Reading it as a
@@ -10401,6 +10635,18 @@ class Emitter {
 	 * Whether the class or object being emitted declares `name` itself, or a
 	 * local of that name is in scope. See the free-function check in `bareCall`.
 	 */
+	/**
+	 * Whether a call `name(…)` could reach something other than a local: a
+	 * member of this class or of a template it extends, an `object`'s own
+	 * member, or a file-scope `fun`. See `Local.valueOnly`.
+	 */
+	private callableMember(name: string): boolean {
+		if (this.isSourceMember(name) || this.moduleNames.has(name)) return true;
+		if (this.owner !== null && this.objectMembers.get(name) === this.owner) return true;
+		const base = this.owner === null ? undefined : this.classBaseIndex.get(this.owner);
+		return base !== undefined && this.baseDeclares(base, name);
+	}
+
 	private declaresOwn(name: string): boolean {
 		if (this.lookup(name) !== null) return true;
 		if (this.owner !== null && this.objectMembers.get(name) === this.owner) return true;
@@ -10535,6 +10781,13 @@ class Emitter {
 	/** A local bound under a JavaScript name other than its own. See `localBinding`. */
 	private declareAs(name: string, text: string, mutable: boolean): void {
 		this.scopes[this.scopes.length - 1]?.set(name, { text, mutable });
+	}
+
+	/** See `Local.valueOnly`. Rebinds the innermost binding of `name`, unchanged otherwise. */
+	private markValueOnly(name: string): void {
+		const scope = this.scopes[this.scopes.length - 1];
+		const found = scope?.get(name);
+		if (found !== undefined) scope.set(name, { ...found, valueOnly: true });
 	}
 
 	/** A parameter typed `R.(…) -> T`, taking `arity` arguments besides `R`. */
@@ -10763,6 +11016,71 @@ class Emitter {
 		return null;
 	}
 
+	/**
+	 * What makes a Kotlin `Iterable` iterable here.
+	 *
+	 * Two spellings reach this. `class Volume(val chapters: List<Chapter>) :
+	 * Iterable<Chapter> by chapters` delegates the interface, which was refused
+	 * as an `explicit_delegation`; and `override fun iterator() = (a +
+	 * b).iterator()` declares it, which translated — into a class JavaScript
+	 * cannot iterate. `for (x in volume)` then threw "is not iterable", and
+	 * worse, `volume.map { … }` went through `__arr`, which read a value with
+	 * no protocol as a list of one: the map ran once, over the Volume itself,
+	 * and answered a plausible list of the wrong thing with nothing refused.
+	 *
+	 * So a delegate becomes `iterator()` over it — read each time from the
+	 * `val`s it names, which is the same list Kotlin captured at construction
+	 * because a `val` cannot be reassigned (a plain constructor parameter is
+	 * gone after construction, so a delegate naming one is refused) — and a
+	 * class with either gets `[Symbol.iterator]` draining its Kotlin iterator,
+	 * which is what `for…of`, `Array.from` and so `__arr` all ask for.
+	 */
+	private iterationMembers(
+		node: KNode,
+		members: readonly KNode[],
+		params: readonly { name: string; isProperty?: boolean }[],
+		record: boolean
+	): string[] {
+		let delegate: KNode | null = null;
+		for (const specifier of kids(node)) {
+			if (specifier.type !== 'delegation_specifier') continue;
+			const explicit = kids(specifier).find((child) => child.type === 'explicit_delegation');
+			if (explicit === undefined) continue;
+			delegate = iterableDelegateOf(explicit);
+			if (delegate === null) this.refuse(explicit, 'explicit_delegation');
+		}
+		const declares = members.some(
+			(child) =>
+				child.type === 'function_declaration' &&
+				this.nameOf(child) === 'iterator' &&
+				!this.hasModifier(child, 'abstract') &&
+				kids(kids(child).find((part) => part.type === 'function_value_parameters')).length === 0
+		);
+		if (delegate === null && !declares) return [];
+		const out: string[] = [];
+		if (delegate !== null) {
+			if (declares) this.refuse(delegate, 'an `Iterable` delegate beside its own `iterator()`');
+			if (!record) {
+				for (const used of walk(delegate)) {
+					if (used.type !== 'simple_identifier') continue;
+					const param = params.find((one) => one.name === used.text);
+					if (param !== undefined && param.isProperty !== true) {
+						this.refuse(used, 'an `Iterable` delegate reading a parameter that is not a property');
+					}
+				}
+			}
+			const body = this.functionScope('function', null, [], () =>
+				block([`return ${this.helper('iterator')}(${this.expr(delegate as KNode)});`])
+			);
+			if (body.isAsync) this.refuse(delegate, 'an `Iterable` delegate that suspends');
+			out.push(`iterator() ${body.text}`);
+		}
+		out.push(
+			'*[Symbol.iterator]() { const __it = this.iterator(); while (__it.hasNext()) yield __it.next(); }'
+		);
+		return out;
+	}
+
 	/** A base constructor's arguments, read with the subclass's own parameters in scope. */
 	private baseArguments(
 		invoked: { type: string; args: readonly KNode[] },
@@ -10967,6 +11285,51 @@ function receiverArity(parameter: KNode): number | null {
 	const list = parts.findIndex((child) => child.type === 'function_type_parameters');
 	if (list <= 0 || parts[list - 1].type !== '.') return null;
 	return kids(parts[list]).length;
+}
+
+/**
+ * `x` in `x.source()` — a zero-argument, non-safe call of `source` — or null.
+ * See the `asResponseBody` case in `methodCall`.
+ */
+function okioSourceOf(node: KNode): KNode | null {
+	return okioStreamOf(node, 'source');
+}
+
+/** `x` in `x.<name>()`, zero arguments and not safe, or null. */
+function okioStreamOf(node: KNode, name: string): KNode | null {
+	if (node.type !== 'call_expression') return null;
+	const [callee, suffix] = kids(node);
+	if (callee?.type !== 'navigation_expression' || suffix?.type !== 'call_suffix') return null;
+	if (suffix.allChildren.some((part) => part.type === 'annotated_lambda')) return null;
+	const args = kids(suffix).find((part) => part.type === 'value_arguments');
+	if (args !== undefined && kids(args).length > 0) return null;
+	const [inner, step] = kids(callee);
+	if (step?.type !== 'navigation_suffix' || step.text !== `.${name}`) return null;
+	return inner ?? null;
+}
+
+/**
+ * The block of `x.use { … }`, `x.let { … }` or `x.run { … }`, the receiver
+ * written or implicit — the scope functions whose value is the block's last
+ * expression — or null. Only a call whose single argument is that trailing
+ * block, so `let(::f)` and a `use` with parentheses are not read as one.
+ */
+const VALUE_SCOPE_FUNCTIONS: ReadonlySet<string> = new Set(['use', 'let', 'run']);
+function valueScopeBlock(call: KNode): KNode | null {
+	const [callee, suffix] = kids(call);
+	if (suffix?.type !== 'call_suffix' || kids(suffix).length !== 1) return null;
+	const name =
+		callee?.type === 'simple_identifier'
+			? callee.text
+			: callee?.type === 'navigation_expression'
+				? kids(kids(callee)[1] ?? callee)[0]?.text
+				: undefined;
+	// Bare is the implicit receiver's: `fun String.parseAs(): T = let { … }`.
+	if (name === undefined || !VALUE_SCOPE_FUNCTIONS.has(name)) return null;
+	const lambda = kids(kids(suffix)[0])[0];
+	return kids(suffix)[0].type === 'annotated_lambda' && lambda?.type === 'lambda_literal'
+		? lambda
+		: null;
 }
 
 /** See `ReceiverSlots`. Null for a function with no function-typed parameter. */

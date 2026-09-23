@@ -442,6 +442,31 @@ class Extension {
 		);
 	});
 
+	it('sends the cookies a configureClient `addCookie { … }` block answers', async () => {
+		// The block form, exactly as the emitter writes
+		// `configureClient() = addCookie { listOf("age" to "18") }` — a function
+		// asked per request, on the builder that is the implicit receiver.
+		const module = await load(
+			`
+class Extension {
+  constructor() { this.baseUrl = '${BASE_URL}'; }
+  configureClient(__recv) {
+    return __recv.addCookie((it) => { return __k.listOf(__k.to('confirm_age', '1')); });
+  }
+  async getPopularManga(page) {
+    await __k.okhttp(this.client, 'get', [this.baseUrl + '/p'], {});
+    return { mangas: [], hasNextPage: false };
+  }
+}
+`,
+			{},
+			true
+		);
+		const { ctx, sent } = recording();
+		await module.browse('popular', 1, ctx);
+		expect(sent[0].headers.Cookie).toBe('confirm_age=1');
+	});
+
 	it('lists chapters through fetchMangaUpdate, asking for chapters only', async () => {
 		// The current API's one member for both, which the host calls through
 		// the base class's final getMangaUpdate. An extension that implements

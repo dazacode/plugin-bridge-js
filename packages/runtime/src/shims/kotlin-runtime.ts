@@ -617,6 +617,41 @@ function __trimEnds(value, given, fromStart, fromEnd) {
 
 /** A Kotlin Char, which this runtime spells as a one-character string. */
 /** A Kotlin Pair, which is a two-element array carrying first and second. */
+/**
+ * okio's ByteString, as the bytes with its readers on them: 'utf8()',
+ * 'toByteArray()', 'hex()', 'base64()' and 'size'. Non-enumerable, so the
+ * value is still the Uint8Array every byte helper here already reads.
+ */
+function __byteString(bytes) {
+  var readers = {
+    utf8: function () { return __host().text.decode(bytes); },
+    toByteArray: function () { return bytes.slice(); },
+    hex: function () {
+      var out = '';
+      for (var i = 0; i < bytes.length; i += 1) out += (bytes[i] < 16 ? '0' : '') + bytes[i].toString(16);
+      return out;
+    },
+    base64: function () { return __host().bytes.toBase64(bytes); }
+  };
+  for (var name in readers) {
+    Object.defineProperty(bytes, name, { value: readers[name], enumerable: false });
+  }
+  Object.defineProperty(bytes, 'size', { get: function () { return bytes.length; }, enumerable: false });
+  return bytes;
+}
+
+function __component(value, n) {
+  if (value !== null && value !== undefined && typeof value['component' + n] === 'function' &&
+      !Array.isArray(value)) {
+    return value['component' + n]();
+  }
+  var parts = __k.destructured(value);
+  if (n > parts.length) {
+    throw new Error('This converted extension asked for component' + n + ' of a value with ' + parts.length + '.');
+  }
+  return parts[n - 1];
+}
+
 function __isPair(value) {
   return Array.isArray(value) && value.length === 2 &&
     Object.prototype.hasOwnProperty.call(value, 'first');
@@ -840,6 +875,35 @@ function __jeNumber(value, name, whole, orNull) {
   if (fits) return number;
   if (orNull) return null;
   throw new Error('This converted extension read "' + text.slice(0, 24) + '" as a number (' + name + ').');
+}
+
+/**
+ * 'JsonObject.get(key)' for the keyed readers: undefined for an absent key,
+ * null for JSON null, and a throw for a receiver that is not a JsonObject.
+ * A Map is one — kotlinx's untyped decode answers a Map for an object.
+ */
+function __jeFieldOf(value, key, name) {
+  if (value instanceof Map) return value.get(key);
+  if (__jeKind(value) !== 'object') __jeWrongKind(value, 'JsonObject (for ' + name + ')');
+  return Object.prototype.hasOwnProperty.call(value, key) ? value[key] : undefined;
+}
+
+/** 'getValue(key)', which is NoSuchElementException for an absent key. */
+function __jeRequiredField(value, key, name) {
+  var found = __jeFieldOf(value, key, name);
+  if (found === undefined) {
+    throw new Error('This converted extension asked for a required JSON field "' + __str(key) + '".');
+  }
+  return found;
+}
+
+/** 'get(key)?.jsonPrimitive': undefined when absent, a throw for an object or array. */
+function __jePrimitiveAt(value, key, name) {
+  var found = __jeFieldOf(value, key, name);
+  if (found === undefined) return undefined;
+  var kind = __jeKind(found);
+  if (kind !== 'primitive' && kind !== 'null') __jeWrongKind(found, 'JsonPrimitive (for ' + name + ')');
+  return found;
 }
 
 /** '.boolean' is kotlinx's toBooleanStrict: exactly "true" or "false". */
@@ -1466,6 +1530,16 @@ Locale.prototype.getDisplayName = function (inLocale) {
     ? __REGION_NAMES[region]
     : region;
   return name + ' (' + place + ')';
+};
+
+/**
+ * The language half of that name alone — 'Locale("pt").getDisplayLanguage(
+ * Locale.ENGLISH)' is "Portuguese" — with the same English-only limit, and
+ * java.util's answer for a language it has no name for: the code itself.
+ */
+Locale.prototype.getDisplayLanguage = function (inLocale) {
+  var base = __str(this.language).toLowerCase();
+  return Object.prototype.hasOwnProperty.call(__LANGUAGE_NAMES, base) ? __LANGUAGE_NAMES[base] : base;
 };
 
 /**
@@ -2120,6 +2194,23 @@ function __singleByteEncode(text, kind) {
   }
   return out;
 }
+/**
+ * java.nio's Charset by name. 'defaultCharset()' is UTF-8, which is what
+ * Android's always is. 'forName' answers the named charset, and every reader
+ * here that takes one asks '__utf8Only' of it — so a charset other than UTF-8
+ * fails where it is used, by name, as it did before this existed.
+ */
+var Charset = {
+  forName: function (name) {
+    var wanted = __str(name);
+    for (var key in Charsets) {
+      if (Object.prototype.hasOwnProperty.call(Charsets, key) &&
+          Charsets[key].name.toLowerCase() === wanted.toLowerCase()) return Charsets[key];
+    }
+    return { name: wanted };
+  },
+  defaultCharset: function () { return Charsets.UTF_8; }
+};
 
 function __utf8Only(charset) {
   if (charset === null || charset === undefined) return;
@@ -2591,6 +2682,196 @@ var __k = {
   },
 
   /**
+   * okio's String.decodeBase64(): a ByteString, or NULL for text that is not
+   * base64 — the '?.utf8() ?: throw' after it is how an extension says the
+   * page changed. Both alphabets, whitespace and trailing '=' skipped, as
+   * okio does; any other character, or a length no encoding produces, is null
+   * rather than a best effort.
+   */
+  okioDecodeBase64: function (value) {
+    if (value === null || value === undefined) return null;
+    var text = __str(value).replace(/[ \\t\\r\\n]/g, '').replace(/=+$/, '');
+    if (!/^[A-Za-z0-9+\\/_-]*$/.test(text) || text.length % 4 === 1) return null;
+    var normalised = text.replace(/-/g, '+').replace(/_/g, '/');
+    while (normalised.length % 4 !== 0) normalised += '=';
+    return __byteString(__host().bytes.fromBase64(normalised));
+  },
+
+  /**
+   * CharSequence.findAnyOf(strings, startIndex = 0, ignoreCase = false): the
+   * first index at which any of the strings occurs, paired with the one that
+   * does, or null. Kotlin's own order: indices ascending, and at one index
+   * the first string in the collection's order that matches there — not the
+   * longest.
+   */
+  findAnyOf: function (value, strings, startIndex, ignoreCase) {
+    var text = __str(value);
+    var wanted = __arr(strings).map(__str);
+    var fold = ignoreCase === true;
+    var hay = fold ? text.toLowerCase() : text;
+    var start = Math.max(0, Number(startIndex) || 0);
+    for (var at = start; at <= text.length; at += 1) {
+      for (var i = 0; i < wanted.length; i += 1) {
+        var needle = fold ? wanted[i].toLowerCase() : wanted[i];
+        if (hay.startsWith(needle, at)) return __k.to(at, wanted[i]);
+      }
+    }
+    return null;
+  },
+
+  /**
+   * runningFold(initial) { acc, x -> … }: every accumulator in turn, the
+   * initial one first — a list one longer than the input.
+   */
+  runningFold: function (list, initial, operation) {
+    var items = __arr(list);
+    var out = [initial];
+    var accumulator = initial;
+    for (var i = 0; i < items.length; i += 1) {
+      accumulator = operation(accumulator, items[i]);
+      out.push(accumulator);
+    }
+    return out;
+  },
+
+  /** mapIndexedTo(destination) { index, x -> … }: appended to it, which is answered. */
+  mapIndexedTo: function (list, destination, transform) {
+    return __then(
+      __each(__arr(list), function (item, index) { return transform(index, item); }),
+      function (values) {
+        for (var at = 0; at < values.length; at += 1) __k.add(destination, values[at]);
+        return destination;
+      }
+    );
+  },
+
+  /** containsAll(other): every element of it is in this one, by Kotlin's equality. */
+  containsAll: function (collection, other) {
+    var items = __arr(collection);
+    var wanted = __arr(other);
+    for (var i = 0; i < wanted.length; i += 1) {
+      var found = false;
+      for (var j = 0; j < items.length && !found; j += 1) if (__equal(items[j], wanted[i])) found = true;
+      if (!found) return false;
+    }
+    return true;
+  },
+
+  /**
+   * retainAll { keep }: a MutableList filtered IN PLACE, answering whether
+   * anything went — the list the next line reads is the one that shrank.
+   */
+  retainAll: function (collection, subject) {
+    if (!Array.isArray(collection)) {
+      throw new Error('This converted extension retained elements of something that is not a list.');
+    }
+    var keep = typeof subject === 'function'
+      ? subject
+      : function (item) { return __arr(subject).some(function (one) { return __equal(one, item); }); };
+    var kept = collection.filter(function (item) { return keep(item) === true; });
+    var removed = kept.length !== collection.length;
+    collection.length = 0;
+    for (var i = 0; i < kept.length; i += 1) collection.push(kept[i]);
+    return removed;
+  },
+
+  /**
+   * replaceAfterLast(delimiter, replacement, missing = this): everything after
+   * the last delimiter swapped for the replacement, the delimiter kept.
+   */
+  replaceAfterLast: function (value, delimiter, replacement, missing) {
+    var text = __str(value);
+    var at = text.lastIndexOf(__str(delimiter));
+    if (at === -1) return missing === undefined ? text : __str(missing);
+    return text.slice(0, at + __str(delimiter).length) + __str(replacement);
+  },
+
+  /**
+   * windowed(size, step = 1, partialWindows = false): each run of 'size'
+   * consecutive elements, starting every 'step'; a short tail only when
+   * partial windows were asked for.
+   */
+  windowed: function (list, size, step, partial, transform) {
+    var items = __arr(list);
+    var width = Math.trunc(Number(size));
+    var stride = step === undefined || step === null ? 1 : Math.trunc(Number(step));
+    if (!(width > 0) || !(stride > 0)) {
+      throw new Error('This converted extension asked for windows of size ' + size + ' and step ' + step + '.');
+    }
+    var out = [];
+    for (var at = 0; at < items.length; at += stride) {
+      var window = items.slice(at, at + width);
+      if (window.length < width && partial !== true) break;
+      out.push(typeof transform === 'function' ? transform(window) : window);
+    }
+    return out;
+  },
+
+  /** okio's ByteArray.toByteString(): the same bytes with ByteString's readers. */
+  toByteString: function (bytes) {
+    return __byteString(__bytesOf(bytes).slice());
+  },
+
+  /**
+   * Iterable.min()/max() — Kotlin 1.7's, which THROW on an empty collection
+   * (minOrNull is the forgiving one). A receiver with its own min/max answers
+   * for itself: 'Math.min(a, b)' reaches this table by name too.
+   */
+  collectionMin: function (list) {
+    if (list !== null && list !== undefined && !Array.isArray(list) && typeof list.min === 'function') {
+      return list.min.apply(list, Array.prototype.slice.call(arguments, 1));
+    }
+    var best = __k.minOrNull(list);
+    if (best === null && __arr(list).length === 0) {
+      throw new Error('This converted extension asked for the minimum of an empty collection.');
+    }
+    return best;
+  },
+  collectionMax: function (list) {
+    if (list !== null && list !== undefined && !Array.isArray(list) && typeof list.max === 'function') {
+      return list.max.apply(list, Array.prototype.slice.call(arguments, 1));
+    }
+    var best = __k.maxOrNull(list);
+    if (best === null && __arr(list).length === 0) {
+      throw new Error('This converted extension asked for the maximum of an empty collection.');
+    }
+    return best;
+  },
+
+  /** average() of numbers: NaN for an empty collection, as Kotlin's. */
+  average: function (list) {
+    var items = __arr(list);
+    if (items.length === 0) return NaN;
+    var total = 0;
+    for (var i = 0; i < items.length; i += 1) total += Number(items[i]);
+    return total / items.length;
+  },
+
+  /**
+   * String.capitalize(), deprecated in Kotlin and still written: the first
+   * character upper-cased when it is lower case, the rest untouched. The
+   * locale argument is accepted and not applied — the language core has no
+   * locale casing without 'Intl' (ABI.md section 6) — which differs from
+   * Kotlin only for a locale with its own rule for that letter, Turkish 'i'.
+   */
+  capitalize: function (value) {
+    var text = __str(value);
+    if (text.length === 0) return text;
+    var first = String.fromCodePoint(text.codePointAt(0));
+    if (first.toLowerCase() !== first || first.toUpperCase() === first) return text;
+    return first.toUpperCase() + text.slice(first.length);
+  },
+
+  /** padEnd(length, padChar = ' '), padStart's mirror. */
+  padEnd: function (value, length, pad) {
+    var text = __str(value);
+    var filler = pad === undefined ? ' ' : __str(pad);
+    if (filler.length === 0) return text;
+    while (text.length < Number(length)) text = text + filler.charAt(0);
+    return text;
+  },
+
+  /**
    * Kotlin's 'in', which is one operator over three receivers.
    *
    * A substring in a String, an element in a Collection, a key in a Map and a
@@ -2676,6 +2957,7 @@ var __k = {
   toStringOf: function (value) {
     if (value === null || value === undefined) return 'null';
     if (typeof value === 'string') return value;
+
     // jsoup's Element and Elements both answer their outer HTML, and an
     // extension reaching for a script block writes select(...).toString().
     // Elements is a real Array here, so the list branch below rendered every
@@ -2695,6 +2977,31 @@ var __k = {
       return '[' + parts.join(', ') + ']';
     }
     return String(value);
+  },
+
+  /**
+   * toString(argument), which is two different functions and neither is
+   * toString(): 'Int.toString(radix)' — '255.toString(16)' is "ff" — and
+   * 'ByteArray.toString(charset)', which DECODES the bytes. Both used to reach
+   * 'toStringOf', which ignores an argument: the radix was dropped (a hex
+   * digest came out decimal) and the bytes printed as a list. A receiver with
+   * its own one-argument toString answers for itself.
+   */
+  toStringWith: function (value, argument) {
+    if (typeof argument === 'number') {
+      if (typeof value === 'number' || typeof value === 'bigint') {
+        var radix = Math.trunc(argument);
+        if (radix < 2 || radix > 36) throw new Error('This converted extension asked for radix ' + radix + '.');
+        return value.toString(radix);
+      }
+    } else if (typeof Uint8Array !== 'undefined' && value instanceof Uint8Array) {
+      return __k.stringOf(value, argument);
+    }
+    if (value !== null && value !== undefined && typeof value === 'object' &&
+        typeof value.toString === 'function' && value.toString.length === 1) {
+      return value.toString(argument);
+    }
+    throw new Error('This converted extension called toString with an argument this runtime does not read.');
   },
 
   /**
@@ -3409,6 +3716,19 @@ var __k = {
     var out = [];
     for (var i = 0; i < length; i += 1) out.push(i);
     return out;
+  },
+
+  /**
+   * List.lastIndex / CharSequence.lastIndex: size minus one, so -1 for an
+   * empty one, as Kotlin's. It is also an ordinary field name, so a receiver
+   * that is neither a string nor a list and has the property answers it.
+   */
+  lastIndex: function (value) {
+    if (typeof value === 'string' || Array.isArray(value)) return value.length - 1;
+    if (value !== null && value !== undefined && typeof value === 'object' && 'lastIndex' in value) {
+      return value.lastIndex;
+    }
+    return __arr(value).length - 1;
   },
 
   /** associateBy: the lambda answers the key, and the item is the value. */
@@ -4638,6 +4958,19 @@ var __k = {
   },
 
   /**
+   * 'Exception(message)', 'IOException(message, cause)' and their kin built as
+   * a VALUE — 'Observable.error(Exception("Licensed"))' — rather than thrown
+   * where they stand, which is 'error' above. The error is made, not thrown;
+   * whoever it is handed to decides. A cause is kept as the standard one.
+   */
+  exception: function (message, cause) {
+    var text = message === undefined || message === null ? '' : __str(message);
+    var made = new Error(text.length > 0 ? text : 'This converted extension failed.');
+    if (cause !== undefined && cause !== null) made.cause = cause;
+    return made;
+  },
+
+  /**
    * The safe answer to the common packed-script helper. The decoder itself is
    * in the generated generic runtime and never evaluates the returned text.
    * An unpacker that needs custom alphabet or delimiters is intentionally
@@ -4682,6 +5015,17 @@ var __k = {
    * list. The emitter writes the same helper for all of them because it cannot
    * tell which it has, so the shape decides here.
    */
+  /**
+   * componentN() written out — 'match.destructured.component1()' — which is
+   * the Nth of what destructuring the same value would bind (see
+   * 'destructured' below), or the value's own componentN where it has one.
+   */
+  component1: function (value) { return __component(value, 1); },
+  component2: function (value) { return __component(value, 2); },
+  component3: function (value) { return __component(value, 3); },
+  component4: function (value) { return __component(value, 4); },
+  component5: function (value) { return __component(value, 5); },
+
   destructured: function (value) {
     if (!__present(value)) return [];
     if (Array.isArray(value.groupValues)) return value.groupValues.slice(1);
@@ -5543,6 +5887,68 @@ var __k = {
     return removed;
   },
 
+  /**
+   * MutableList.removeAt(index): takes the element out and answers it, and
+   * THROWS for an index outside the list — the '.removeAt(list.lastIndex)'
+   * that pops a sentinel off a page's results is written against a list the
+   * extension knows is not empty, and an empty one is an error there, not an
+   * undefined carried on. A receiver with its own removeAt answers for itself.
+   */
+  removeAt: function (list, index) {
+    if (list !== null && list !== undefined && !Array.isArray(list) &&
+        typeof list.removeAt === 'function') {
+      return list.removeAt(index);
+    }
+    if (!Array.isArray(list)) {
+      throw new Error('This converted extension removed an element from something that is not a list.');
+    }
+    var at = Number(index);
+    if (!Number.isInteger(at) || at < 0 || at >= list.length) {
+      throw new Error(
+        'This converted extension removed index ' + String(index) + ' of a list of length ' +
+        list.length + '.'
+      );
+    }
+    return list.splice(at, 1)[0];
+  },
+
+  /**
+   * MutableList.reverse(), in place and answering nothing — which is where it
+   * differs from 'reversed()', a new list. 'chapters.reverse()' on its own
+   * line is how an extension flips a page it read oldest-first; answering a
+   * reversed copy there would leave the list the next line reads unchanged.
+   * A StringBuilder or anything else with its own reverse answers for itself.
+   */
+  reverseInPlace: function (list) {
+    if (list !== null && list !== undefined && !Array.isArray(list) &&
+        typeof list.reverse === 'function') {
+      return list.reverse();
+    }
+    if (!Array.isArray(list)) {
+      throw new Error('This converted extension reversed something that is not a list.');
+    }
+    list.reverse();
+    return undefined;
+  },
+
+  /**
+   * Map.getValue(key): the value, or NoSuchElementException for a key the map
+   * does not hold. A key held with a null value answers null, as Kotlin's
+   * does; only absence throws. A JSON object is a map here, and a receiver
+   * with its own getValue answers for itself.
+   */
+  mapGetValue: function (map, key) {
+    if (map instanceof Map) {
+      if (map.has(key)) return map.get(key);
+    } else if (map !== null && map !== undefined && typeof map === 'object' && !Array.isArray(map)) {
+      if (!__mapLike(map) && typeof map.getValue === 'function') return map.getValue(key);
+      if (Object.prototype.hasOwnProperty.call(map, key)) return map[key];
+    } else {
+      throw new Error('This converted extension read a key from something that is not a map.');
+    }
+    throw new Error('This converted extension asked for key "' + __str(key) + '", which is missing in the map.');
+  },
+
   /* -- Result, past getOrNull ---------------------------------------------- */
 
   /**
@@ -5594,6 +6000,8 @@ var __k = {
         return builder;
       },
       clear: function () { parts = []; return builder; },
+      // By code point, as Java's keeps a surrogate pair in order.
+      reverse: function () { parts = [Array.from(parts.join('')).reverse().join('')]; return builder; },
       isEmpty: function () { return parts.join('').length === 0; },
       isNotEmpty: function () { return parts.join('').length > 0; },
       toString: function () { return parts.join(''); }
@@ -5832,6 +6240,64 @@ var __k = {
   jeFloatOrNull: function (value) { return __jeNumber(value, 'floatOrNull', false, true); },
   jeBoolean: function (value) { return __jeBoolean(value, 'boolean', false); },
   jeBooleanOrNull: function (value) { return __jeBoolean(value, 'booleanOrNull', true); },
+
+  /**
+   * keiyoushi's JsonObject readers from 'core/', by key: 'obj.getStringOrNull(k)'
+   * and its siblings.
+   *
+   * Upstream each is one line over the accessors above, and the '?.' in it is
+   * the whole meaning: 'get(key)?.jsonPrimitive?.contentOrNull' answers null
+   * for an absent key and for JSON null, and still THROWS for a key holding an
+   * object or an array, because '.jsonPrimitive' of those is an
+   * IllegalArgumentException. 'getArrayOrNull' is 'get(key)?.jsonArray', so
+   * there only an absent key is null — a JSON null under it throws, as
+   * JsonNull.jsonArray does. The plain 'getArray'/'getObject' are 'getValue',
+   * which throws for an absent key.
+   *
+   * The receiver must be a JsonObject. The org.json-shaped readers accept
+   * anything and answer undefined; these are typed on JsonObject upstream,
+   * and a receiver that is not one (a manga record whose 'memo' was never
+   * set, a DTO field that was absent) is a bug to report, not a null to walk
+   * into a fallback branch.
+   */
+  jeGetStringOrNull: function (value, key) {
+    var found = __jePrimitiveAt(value, key, 'getStringOrNull');
+    return found === undefined || found === null ? null : String(found);
+  },
+  jeGetIntOrNull: function (value, key) {
+    var found = __jePrimitiveAt(value, key, 'getIntOrNull');
+    return found === undefined ? null : __jeNumber(found, 'intOrNull', true, true);
+  },
+  jeGetLongOrNull: function (value, key) {
+    var found = __jePrimitiveAt(value, key, 'getLongOrNull');
+    return found === undefined ? null : __jeNumber(found, 'longOrNull', true, true);
+  },
+  jeGetBooleanOrNull: function (value, key) {
+    var found = __jePrimitiveAt(value, key, 'getBooleanOrNull');
+    return found === undefined ? null : __jeBoolean(found, 'booleanOrNull', true);
+  },
+  jeGetArrayOrNull: function (value, key) {
+    var found = __jeFieldOf(value, key, 'getArrayOrNull');
+    if (found === undefined) return null;
+    if (__jeKind(found) !== 'array') __jeWrongKind(found, 'JsonArray');
+    return found;
+  },
+  jeGetObjectOrNull: function (value, key) {
+    var found = __jeFieldOf(value, key, 'getObjectOrNull');
+    if (found === undefined) return null;
+    if (__jeKind(found) !== 'object') __jeWrongKind(found, 'JsonObject');
+    return found;
+  },
+  jeGetArray: function (value, key) {
+    var found = __jeRequiredField(value, key, 'getArray');
+    if (__jeKind(found) !== 'array') __jeWrongKind(found, 'JsonArray');
+    return found;
+  },
+  jeGetObject: function (value, key) {
+    var found = __jeRequiredField(value, key, 'getObject');
+    if (__jeKind(found) !== 'object') __jeWrongKind(found, 'JsonObject');
+    return found;
+  },
 
   /* -- the contract functions ---------------------------------------------- */
 
@@ -6500,6 +6966,24 @@ var __k = {
   initialized: function (value) { return value !== undefined && value !== null; },
 
   /** ArrayList(), ArrayList(n) and ArrayList(collection) — a mutable list. */
+  /**
+   * HashMap() / LinkedHashMap(), and the copying constructor that takes a
+   * map. A capacity (a number) builds an empty one. A JS Map keeps insertion
+   * order, which is LinkedHashMap's promise and a HashMap's permitted order.
+   */
+  hashMap: function (value) {
+    if (value === null || value === undefined || typeof value === 'number') {
+      return __mutableMap(new Map());
+    }
+    return __k.toMutableMap(value);
+  },
+
+  /** HashSet() / LinkedHashSet(), and the copying constructor over a collection. */
+  hashSet: function (value) {
+    if (value === null || value === undefined || typeof value === 'number') return __k.toSet([]);
+    return __k.toSet(__arr(value));
+  },
+
   arrayList: function (value) {
     if (value === null || value === undefined || typeof value === 'number') return __mutableList([]);
     return __mutableList(__arr(value).slice());
@@ -8468,6 +8952,27 @@ function __httpUrlBuilder(scheme, authority, path, pairs, fragment) {
 }
 
 /**
+ * okhttp's HttpUrl, by name — for 'HttpUrl.Builder()', a url built from
+ * nothing: '.scheme("https").host("…").addPathSegments(…)…build()'. The
+ * builder is the one 'newBuilder()' answers, started empty, and 'build()'
+ * throws as okhttp's does when the scheme or the host was never set, rather
+ * than answering a url with neither.
+ */
+var HttpUrl = {
+  Builder: function () {
+    var builder = __httpUrlBuilder('', '', '/', [], '');
+    var complete = builder.build;
+    builder.build = function () {
+      var built = complete();
+      if (built.scheme.length === 0) throw new Error('This converted extension built a url with no scheme.');
+      if (built.host.length === 0) throw new Error('This converted extension built a url with no host.');
+      return built;
+    };
+    return builder;
+  }
+};
+
+/**
  * 'response.body.string()', which this ecosystem writes as one call.
  *
  * Total over what it may be handed: the response, its body, or a string an
@@ -10408,7 +10913,21 @@ function __requireUtf8(charset, which) {
   );
 }
 
-var Random = {
+/**
+ * kotlin.random.Random's default instance, which is also what java.util's
+ * 'Random()' constructs here: 'val random = Random(); random.nextInt(n)'.
+ * Callable for that reason. A SEEDED 'Random(seed)' is refused: a seed asks
+ * for one reproducible sequence — a descrambler reorders tiles by it — and
+ * this generator cannot give it, so answering any sequence would be a wrong
+ * image rather than an error.
+ */
+function Random(seed) {
+  if (seed !== undefined && seed !== null) {
+    throw new Error('This converted extension seeded a Random, and this build cannot reproduce a seeded sequence.');
+  }
+  return Random;
+}
+Object.assign(Random, {
   nextBytes: function (array) {
     var bytes = __arr(array);
     for (var i = 0; i < bytes.length; i += 1) {
@@ -10425,7 +10944,7 @@ var Random = {
   nextLong: function (from, until) { return Random.nextInt(from, until); },
   nextDouble: function () { return Math.random(); },
   nextBoolean: function () { return Math.random() < 0.5; }
-};
+});
 
 /**
  * java.security.MessageDigest, over MD5, SHA-1 and SHA-256.
@@ -12077,11 +12596,34 @@ var CheckBox = AnimeFilter.CheckBox;
 
 /**
  * 'SManga' is what 'SAnime' was renamed from: same fields, same status
- * constants, same 'setUrlWithoutDomain'. Aliased for that reason, and the one
- * thing that would force them apart is a field added to one and not the other
- * — at which point this line has to become a definition, deliberately.
+ * constants, same 'setUrlWithoutDomain'. It was an alias for that reason, and
+ * the one thing that would force them apart was a field added to one and not
+ * the other. That happened: keiyoushi's lib gave the manga half a 'memo', so
+ * this is now the anime record plus that one field, deliberately, and still
+ * shares every constant and the url setter rather than copying them.
+ *
+ * 'memo' is a JsonObject a source stashes on a title or chapter —
+ * 'memo = buildJsonObject { put("id", id) }' in a parse — for a later call
+ * to read back with 'memo.getStringOrNull("id")'. Upstream it is non-null
+ * and defaults to an empty object, and the app persists it with the entry.
+ *
+ * **This host does not persist it.** A title or chapter reaches a later call
+ * as its url alone (see '__mangaRef' in the driver), so it arrives with the
+ * empty memo — which is exactly what upstream hands a source for an entry the
+ * app stored before the source started writing one, and every reader in the
+ * catalogue is written against that case: 'getStringOrNull(k) ?: <fetch it>'.
+ * Within one call a memo a parse set is read back as written. A source that
+ * requires one ('memo.getString(k)') throws, naming the field, rather than
+ * reading undefined.
  */
-var SManga = SAnime;
+function __withMemo(record) {
+  record.memo = {};
+  return record;
+}
+
+var SManga = Object.assign({}, SAnime, {
+  create: function () { return __withMemo(SAnime.create()); }
+});
 
 /**
  * The library-update hint a source may set on a title.
@@ -12138,7 +12680,9 @@ var SChapter = {
       name: '',
       date_upload: 0,
       chapter_number: -1,
-      scanlator: null
+      scanlator: null,
+      // A chapter's 'memo', exactly as a title's — see 'SManga'.
+      memo: {}
     };
     chapter.setUrlWithoutDomain = function (url) {
       chapter.url = __withoutDomain(url);

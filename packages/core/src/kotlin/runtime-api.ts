@@ -183,6 +183,7 @@ export const RUNTIME_HELPERS = [
 	'associate',
 	'associateBy',
 	'indices',
+	'lastIndex',
 	/* kotlinx's JsonElement accessors, read as properties — see `jeObject`. */
 	'jeObject',
 	'jeArray',
@@ -201,6 +202,43 @@ export const RUNTIME_HELPERS = [
 	'jeFloatOrNull',
 	'jeBoolean',
 	'jeBooleanOrNull',
+	/* An exception built as a value, not thrown — see `exception`. */
+	'exception',
+	/* MutableList.removeAt/reverse and Map.getValue — see each in the runtime. */
+	'padEnd',
+	'collectionMin',
+	'collectionMax',
+	'average',
+	'capitalize',
+	'runningFold',
+	'mapIndexedTo',
+	'containsAll',
+	'retainAll',
+	'replaceAfterLast',
+	'windowed',
+	'toByteString',
+	'toStringWith',
+	'findAnyOf',
+	'okioDecodeBase64',
+	'hashMap',
+	'hashSet',
+	'component1',
+	'component2',
+	'component3',
+	'component4',
+	'component5',
+	'removeAt',
+	'reverseInPlace',
+	'mapGetValue',
+	/* keiyoushi's keyed JsonObject readers from core/ — see `jeGetStringOrNull`. */
+	'jeGetStringOrNull',
+	'jeGetIntOrNull',
+	'jeGetLongOrNull',
+	'jeGetBooleanOrNull',
+	'jeGetArrayOrNull',
+	'jeGetObjectOrNull',
+	'jeGetArray',
+	'jeGetObject',
 	/* A Kotlin Map's views and transforms — see `__mapPart` in the runtime. */
 	'kKeys',
 	'kValues',
@@ -720,6 +758,9 @@ export const HOST_BACKED_HELPERS: ReadonlySet<RuntimeHelper> = new Set([
 	'toJsonBody',
 	'toRequestBody',
 	'toResponseBody',
+	'toStringWith',
+	'okioDecodeBase64',
+	'toByteString',
 	'uri'
 ]);
 
@@ -792,6 +833,26 @@ export const RUNTIME_GLOBALS = [
 	/* Aniyomi's spelling of the same library-refresh hint. */
 	'AnimeUpdateStrategy',
 	'SMangaUpdate',
+	/* okhttp's HttpUrl, for `HttpUrl.Builder()` — a url built from nothing.
+	   Everything else on it is an instance member the runtime already has. */
+	'HttpUrl',
+	/* androidx's preference types, as declarations (see `KOTLIN_PREFS`). A
+	   plugin never draws them — the manifest's settings are derived from
+	   `setupPreferenceScreen` before packaging — but a helper that builds one
+	   is ordinary code: MangaThemesia's `MangaThemesiaPaidChapterHelper`
+	   constructs a `SwitchPreferenceCompat` in a member the template's own
+	   screen calls, and every instance refused on that constructor while the
+	   runtime already defined the type. Running one records its default,
+	   which is the one thing it does here. */
+	'PreferenceCategory',
+	'SwitchPreferenceCompat',
+	'SwitchPreference',
+	'CheckBoxPreference',
+	'EditTextPreference',
+	'ListPreference',
+	'DropDownPreference',
+	'MultiSelectListPreference',
+	'SeekBarPreference',
 	'SimpleDateFormat',
 	/* The `java.time` formatter the same helpers are called on —
 	   `DateTimeFormatter.ofPattern("yyyy-MM-dd").tryParseDate(date)`. Shimmed
@@ -981,6 +1042,11 @@ export const RUNTIME_GLOBALS = [
 	'ZoneOffset',
 	'ChronoUnit',
 	'ChronoField',
+	/* `DateTimeFormatterBuilder().appendPattern(…).parseDefaulting(YEAR, …)
+	   .toFormatter(locale)` — a pattern whose text leaves the year out. */
+	'DateTimeFormatterBuilder',
+	/* java.nio's Charset by name — `defaultCharset()` is Android's UTF-8. */
+	'Charset',
 	'DayOfWeek',
 	'Month',
 	'TextStyle',

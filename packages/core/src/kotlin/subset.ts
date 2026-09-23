@@ -1096,6 +1096,49 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 	['keys', 'jsonKeys'],
 	['opt', 'jsonOpt'],
 
+	// keiyoushi's keyed readers over a kotlinx JsonObject, from `core/`'s
+	// `utils/JsonElement.kt` — `obj.getStringOrNull("id")`. The host supplies
+	// them the way it supplies the other `keiyoushi.utils` helpers, because
+	// `core/` is read only for named objects. They are not org.json's: the
+	// receiver must be a JsonObject, and `getArrayOrNull` over a JSON null
+	// throws as upstream does. The one-argument `getString`/`getInt`/… reach
+	// org.json's `jsonGet*`, which agree with upstream's `getValue(k)` forms.
+	// MutableList's in-place pair and Map's throwing read. `reverse` is not
+	// JavaScript's: Kotlin's answers Unit and `reversed()` is the copy, and a
+	// StringBuilder has one of its own — see the helper for both.
+	['removeAt', 'removeAt'],
+	['padEnd', 'padEnd'],
+	['min', 'collectionMin'],
+	['max', 'collectionMax'],
+	['average', 'average'],
+	['capitalize', 'capitalize'],
+	['runningFold', 'runningFold'],
+	['mapIndexedTo', 'mapIndexedTo'],
+	['containsAll', 'containsAll'],
+	['retainAll', 'retainAll'],
+	['replaceAfterLast', 'replaceAfterLast'],
+	['windowed', 'windowed'],
+	['toByteString', 'toByteString'],
+	['findAnyOf', 'findAnyOf'],
+	// okio's, answering a ByteString or null; an extension's own
+	// `String.decodeBase64()` shadows it, as any declaration does.
+	['decodeBase64', 'okioDecodeBase64'],
+	['component1', 'component1'],
+	['component2', 'component2'],
+	['component3', 'component3'],
+	['component4', 'component4'],
+	['component5', 'component5'],
+	['reverse', 'reverseInPlace'],
+	['getValue', 'mapGetValue'],
+	['getStringOrNull', 'jeGetStringOrNull'],
+	['getIntOrNull', 'jeGetIntOrNull'],
+	['getLongOrNull', 'jeGetLongOrNull'],
+	['getBooleanOrNull', 'jeGetBooleanOrNull'],
+	['getArrayOrNull', 'jeGetArrayOrNull'],
+	['getObjectOrNull', 'jeGetObjectOrNull'],
+	['getArray', 'jeGetArray'],
+	['getObject', 'jeGetObject'],
+
 	// The long tail. Each of these refused extensions by name while the
 	// behaviour was already spelled somewhere in the runtime — `xor` as an
 	// infix operator, `isLowerCase` as a `Character` static, `toMillis` on the
@@ -1226,6 +1269,10 @@ export const EXTENSION_PROPERTIES: ReadonlyMap<string, string> = new Map([
 	// `undefined`, and handed that to whatever iterated it. A refusal would have
 	// been the honest outcome; silence was not. See `indices` in the runtime.
 	['indices', 'indices'],
+	// `List.lastIndex` and `CharSequence.lastIndex`, the same gap one name
+	// over: `list.removeAt(list.lastIndex)` read undefined and removed nothing
+	// it named, and `x < segments.lastIndex` compared against undefined.
+	['lastIndex', 'lastIndex'],
 	['groupValues', 'groupValues'],
 	['destructured', 'destructured'],
 	// `Char.code`. A Char is a one-character string here, so the read came out
@@ -1320,6 +1367,32 @@ export const HOST_METHODS: ReadonlySet<string> = new Set([
 	'eachCount',
 	// java.text.CharacterIterator's reads, on the one this runtime builds.
 	'current',
+	// A PreferenceScreen's (`KOTLIN_PREFS`), which is the one call the
+	// preference idiom ends on: `SwitchPreferenceCompat(ctx).apply { … }
+	// .also(screen::addPreference)`. It records the child and its default.
+	// `setDefaultValue` is the call inside that block, bare, on the
+	// preference: without it here the block's implicit receiver lost to the
+	// source object and the default was asked of the extension instead.
+	// java.time's DateTimeFormatterBuilder (`kotlin-time.ts`).
+	// okhttp's CacheControl.Builder (`KOTLIN_HTTP`), which the host's
+	// transport treats as advice; the builder answers these already.
+	'noCache',
+	'noStore',
+	// java.util.Locale's language name — see `getDisplayLanguage`.
+	'getDisplayLanguage',
+	// java.util.Random's reader, on the runtime's `Random` (which `Random()`
+	// answers), and java.lang.String's code point reader, which is
+	// JavaScript's under the same name and the same UTF-16 index.
+	'nextInt',
+	'codePointAt',
+	'appendPattern',
+	'parseDefaulting',
+	'toFormatter',
+	'addPreference',
+	'setDefaultValue',
+	// okio's ByteString readers, on what `decodeBase64()` answers (see
+	// `__byteString` in the runtime).
+	'utf8',
 	// kotlinx's JsonDecoder, as a KSerializer's `deserialize` is handed it by
 	// the typed decoder (`__jsonDecoder` in the runtime). The `encode*` half
 	// is what the same object's `serialize` writes; the runtime never calls
@@ -1989,6 +2062,19 @@ export const FREE_FUNCTIONS: ReadonlyMap<string, string> = new Map([
 
 	['ArrayList', 'arrayList'],
 	['LinkedList', 'arrayList'],
+	// java.util's maps and sets by constructor — empty, sized, or copying.
+	// `IntRange(0, 9)` is `0..9` by constructor, and a range here is the list
+	// of its values — see `range` in the runtime.
+	['IntRange', 'range'],
+	['LongRange', 'range'],
+	// `Array(size) { i -> … }` builds, exactly as `List(size) { … }` does.
+	['Array', 'listOfSize'],
+	['HashMap', 'hashMap'],
+	// Thread-safe in Java; there is one thread here, so it is a map.
+	['ConcurrentHashMap', 'hashMap'],
+	['LinkedHashMap', 'hashMap'],
+	['HashSet', 'hashSet'],
+	['LinkedHashSet', 'hashSet'],
 	// `List(n) { at -> … }` BUILDS: it is an episode list as often as not, and
 	// an empty array of that length answers undefined for every entry.
 	['List', 'listOfSize'],
@@ -2117,6 +2203,17 @@ export const GLOBAL_NAMES: ReadonlySet<string> = new Set([
 	'UpdateStrategy',
 	'AnimeUpdateStrategy',
 	'SMangaUpdate',
+	'HttpUrl',
+	// androidx's preference types — see `RUNTIME_GLOBALS`.
+	'PreferenceCategory',
+	'SwitchPreferenceCompat',
+	'SwitchPreference',
+	'CheckBoxPreference',
+	'EditTextPreference',
+	'ListPreference',
+	'DropDownPreference',
+	'MultiSelectListPreference',
+	'SeekBarPreference',
 	'SimpleDateFormat',
 	'DateTimeFormatter',
 	'Locale',
@@ -2217,6 +2314,8 @@ export const GLOBAL_NAMES: ReadonlySet<string> = new Set([
 	'ZoneOffset',
 	'ChronoUnit',
 	'ChronoField',
+	'DateTimeFormatterBuilder',
+	'Charset',
 	'DayOfWeek',
 	'Month',
 	'TextStyle',
@@ -2543,6 +2642,26 @@ export const KNOWN_SIGNATURES: ReadonlyMap<string, readonly string[]> = new Map(
 	// counterpart and named about as often as it is passed positionally.
 	['MangasPage', ['mangas', 'hasNextPage']],
 
+	// The framework's filter constructors, which a filter class names in its
+	// supertype call — `: Filter.Group<TriStateItem>(name = "Genre", state =
+	// genres.map(::TriStateItem))` — and which were refused for the names
+	// alone. The lists are upstream's parameter order, which is also the
+	// runtime's (`AnimeFilter` in `KOTLIN_MODELS`), under both spellings of
+	// the type. `Header` and `Separator` take only a name.
+	...['Filter', 'AnimeFilter'].flatMap((base): [string, readonly string[]][] => [
+		[`${base}.Select`, ['name', 'values', 'state']],
+		[`${base}.Sort`, ['name', 'values', 'state']],
+		[`${base}.Text`, ['name', 'state']],
+		[`${base}.CheckBox`, ['name', 'state']],
+		[`${base}.TriState`, ['name', 'state']],
+		[`${base}.Group`, ['name', 'state']],
+		[`${base}.Header`, ['name']],
+		[`${base}.Separator`, ['name']]
+	]),
+	// `Filter.Sort.Selection(index, ascending)`, a sort filter's state, which
+	// the catalogue writes as `Selection(2, ascending = false)`.
+	['Selection', ['index', 'ascending']],
+
 	// **`SMangaUpdate(manga = …, chapters = …)`**, the pair the current
 	// manga API returns details and chapters in, from one request. Every
 	// construction site in the measured catalogue names both — 92 listings
@@ -2589,6 +2708,16 @@ export const KNOWN_SIGNATURES: ReadonlyMap<string, readonly string[]> = new Map(
 	// mean the same in both languages, stay on the passthrough.
 	['indexOf', ['string', 'startIndex', 'ignoreCase']],
 	['lastIndexOf', ['string', 'startIndex', 'ignoreCase']],
+	['findAnyOf', ['strings', 'startIndex', 'ignoreCase']],
+	['windowed', ['size', 'step', 'partialWindows', 'transform']],
+	['replaceAfterLast', ['delimiter', 'replacement', 'missingDelimiterValue']],
+	// `substringBeforeLast('.', missingDelimiterValue = name)` — what the
+	// four answer when the delimiter is absent, which the runtime's helpers
+	// already take third.
+	['substringBefore', ['delimiter', 'missingDelimiterValue']],
+	['substringBeforeLast', ['delimiter', 'missingDelimiterValue']],
+	['substringAfter', ['delimiter', 'missingDelimiterValue']],
+	['substringAfterLast', ['delimiter', 'missingDelimiterValue']],
 
 	// `AnimesPage(animes = …, hasNextPage = …)`, which a list parse returns by
 	// hand. Both halves are required, so nothing is filled with `undefined`.
@@ -2936,6 +3065,26 @@ const HOST_DRAWN_MEMBERS: ReadonlySet<string> = new Set([
 	'restartApp'
 ]);
 
+/**
+ * Host-drawn members that nothing runs, ever — so what they call is not a
+ * caller's need.
+ *
+ * `setupPreferenceScreen` is read *statically* (`aniyomi-preferences.ts`
+ * derives the manifest's settings from its source) and no driver invokes it:
+ * the Mihon driver's `__super` answers it with an empty function and the
+ * Aniyomi driver has no such member. So its body is inert, and two things it
+ * used to decide were wrong. It was a reachability root, like everything the
+ * extension declares, so a refused helper only it called blocked the build;
+ * and its calls counted as a translated caller's, so once the preference
+ * types translated, `super.setupPreferenceScreen(screen)` in an extension
+ * made its template's refused screen block — one DooPlay extension stopped
+ * loading for a preference listener lambda that can never run.
+ *
+ * `getFilterList` is host-drawn too and is NOT here: the driver calls it on
+ * every search, which is exactly why a refused helper it calls must block.
+ */
+export const NEVER_INVOKED_MEMBERS: ReadonlySet<string> = new Set(['setupPreferenceScreen']);
+
 /** True when refusing this member does not stop a bundle from being built. */
 export function isHostDrawn(member: string): boolean {
 	if (HOST_DRAWN_MEMBERS.has(member)) return true;
@@ -3170,6 +3319,18 @@ function scanInto(node: KNode, memberName: string, found: Untranslatable[]): voi
 		}
 	}
 
+	// `class Volume(val chapters: List<Chapter>) : Iterable<Chapter> by
+	// chapters` — the one interface delegation the emitter implements (see
+	// `iterableDelegate` there). The node kind stays refused for any other
+	// interface; for this one only the delegate expression is scanned.
+	if (node.type === 'explicit_delegation') {
+		const delegate = iterableDelegateOf(node);
+		if (delegate !== null) {
+			scanInto(delegate, memberName, found);
+			return;
+		}
+	}
+
 	// The third of the same shape, and the emitter's other half: see
 	// `CLASS_LOADER`. Returning rather than descending is what keeps the
 	// `javaClass` leaf below from being refused, and keeps the exemption exactly
@@ -3226,6 +3387,34 @@ function scanInto(node: KNode, memberName: string, found: Untranslatable[]): voi
 		if (swallowed !== null && (child.type === 'ERROR' || child.type === 'else')) continue;
 		scanInto(child, memberName, found);
 	}
+}
+
+/**
+ * The expression after `by` in `Iterable<T> by expr`, or null for any other
+ * delegation. Shared by the scanner and the emitter so the two agree on
+ * exactly which delegations translate.
+ */
+export function iterableDelegateOf(node: KNode): KNode | null {
+	if (node.type !== 'explicit_delegation') return null;
+	// Named children only: the type, then the delegate. The `by` between them
+	// is an anonymous token, asked of `allChildren`.
+	const parts = node.children.filter((child) => !COMMENT_KINDS.has(child.type));
+	if (parts.length !== 2 || !node.allChildren.some((child) => child.type === 'by')) return null;
+	const [type, delegate] = parts;
+	const name = type.children.find((child) => child.type === 'type_identifier')?.text;
+	if (type.type !== 'user_type' || name !== 'Iterable') return null;
+	// `: Iterable<Chapter> by pages { … }` — the grammar reads the class body
+	// as a trailing lambda passed to `pages`, so the members are inside the
+	// delegate. Refused as the delegation it is rather than emitted as a call.
+	if (
+		delegate.type === 'call_expression' &&
+		delegate.allChildren.some((child) =>
+			child.allChildren.some((part) => part.type === 'annotated_lambda')
+		)
+	) {
+		return null;
+	}
+	return delegate;
 }
 
 /** Node kinds under this one with no handler. For the survey and the specs. */

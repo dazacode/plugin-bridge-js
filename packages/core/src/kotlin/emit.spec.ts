@@ -5164,6 +5164,97 @@ describe('a local that shadows a name already in scope', () => {
 	});
 });
 
+describe('a parameter that cannot be invoked', () => {
+	it('does not hide a member of the same name from a call', () => {
+		// keiyoushi's `fetchMangaUpdate(…, fetchDetails: Boolean, fetchChapters:
+		// Boolean)`, overridden by Madara, calls the source's own
+		// `fetchChapters(path, id)` with the Boolean in scope. Kotlin resolves
+		// that to the member because a Boolean has no `invoke`; emitted bare, it
+		// called the Boolean. A function-typed parameter is still the callee.
+		const demo = instantiate(
+			inClass(
+				'    fun update(fetchChapters: Boolean, id: String?): String =',
+				'        if (fetchChapters) fetchChapters(id ?: "none") else "skipped"',
+				'    fun through(fetchChapters: (String) -> String): String = fetchChapters("x")',
+				'    private fun fetchChapters(id: String): String = "chapters of " + id'
+			)
+		);
+
+		expect(demo.update(true, '7')).toBe('chapters of 7');
+		expect(demo.update(false, '7')).toBe('skipped');
+		expect(demo.through((id: string) => 'lambda ' + id)).toBe('lambda x');
+	});
+});
+
+describe("okio's source, which is only ever the same body under another type", () => {
+	it('rewraps `body.source().asResponseBody(type)` as the body text, and refuses the stream', () => {
+		// The Madara interceptors that fix a host serving pages as
+		// `application/octet-stream`. A response here is text, so the same
+		// bytes are its `string()`; the runtime half is proved in
+		// kotlin-runtime.spec.ts. Reading the source as a stream is not
+		// something a text body can answer, and stays refused.
+		const emission = translate(
+			inClass(
+				'    fun fix(response: Response): Response {',
+				'        val body = response.body.source().asResponseBody("image/jpeg".toMediaType())',
+				'        return response.newBuilder().body(body).build()',
+				'    }',
+				'    fun stream(response: Response) = response.body.source().readByteArray(12)',
+				'    fun sized(response: Response) = response.body.source().asResponseBody(null, -1)'
+			)
+		);
+		expect(emission.js).toContain(
+			"__k.toResponseBody(response.body.string(), __k.toMediaType('image/jpeg'))"
+		);
+		expect(emission.refusals.map((one) => one.member).sort()).toEqual(['sized', 'stream']);
+	});
+});
+
+describe("keiyoushi's addCookie block on an implicit builder", () => {
+	it('passes the block to the builder `configureClient` receives', () => {
+		// The written-receiver form already did this; the implicit one refused
+		// the block. The runtime half is in mihon-conversion.spec.ts. An
+		// interceptor block on the same path stays refused.
+		const emission = translate(
+			inClass(
+				'    override fun OkHttpClient.Builder.configureClient() = addCookie { listOf("age" to "18") }'
+			)
+		);
+		expect(emission.refusals).toEqual([]);
+		expect(emission.js).toContain('return __recv.addCookie((it) => {');
+		expect(
+			refusalNames(
+				inClass(
+					'    override fun OkHttpClient.Builder.configureClient() = addInterceptor { it.proceed(it.request()) }'
+				)
+			)
+		).toContain('a lambda passed to `addInterceptor`');
+	});
+});
+
+describe('the androidx preference idiom', () => {
+	it('builds the preference and hands it to the screen, not to the source', () => {
+		// MangaThemesia's paid-chapter helper. `setDefaultValue` inside the
+		// block is the preference's; the runtime half is in kotlin-runtime.spec.
+		const emission = translate(
+			kt(
+				'class Helper {',
+				'    fun addTo(screen: PreferenceScreen) {',
+				'        SwitchPreferenceCompat(screen.context).apply {',
+				'            key = "hide_paid"',
+				'            setDefaultValue(true)',
+				'        }.also(screen::addPreference)',
+				'    }',
+				'}'
+			)
+		);
+		expect(emission.refusals).toEqual([]);
+		expect(emission.js).toContain('SwitchPreferenceCompat(screen.context)');
+		expect(emission.js).toContain('return this.setDefaultValue(true);');
+		expect(emission.js).toContain('(...__a) => screen.addPreference(...__a)');
+	});
+});
+
 describe('a safe assignment', () => {
 	it('writes when the receiver is there, and evaluates nothing when it is not', () => {
 		// `firstOrNull()?.date_upload = time` on an empty list does nothing in

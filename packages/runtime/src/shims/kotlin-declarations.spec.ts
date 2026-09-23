@@ -97,6 +97,385 @@ function refusalNames(source: string): string[] {
 	return emission.refusals.flatMap((one) => one.obstacles.map((obstacle) => obstacle.kind));
 }
 
+describe('the collection members a catalogue pass named, run', () => {
+	// Each was refused by name, or — `lastIndex` — read as a property a JS
+	// array does not have and answered undefined with nothing refused.
+	const source = kt(
+		'class Demo {',
+		'    fun pop(items: List<String>): String {',
+		'        val list = items.toMutableList()',
+		'        val last = list.removeAt(list.lastIndex)',
+		'        list.reverse()',
+		'        return last + "|" + list.joinToString(",") + "|" + "abc".lastIndex',
+		'    }',
+		'    fun popEmpty(): String = mutableListOf<String>().removeAt(0)',
+		'    fun value(m: Map<String, Int?>, k: String): Int? = m.getValue(k)',
+		'    fun flipped(): String = StringBuilder("ab").append("c").reverse().toString()',
+		'    fun date(text: String?): Long = text?.let(Instant::parseOrNull)?.toEpochMilliseconds() ?: 0L',
+		'}'
+	);
+
+	it('pops, reverses in place, and reads the last index', async () => {
+		const demo = await instantiate('Demo', source);
+		expect(demo.pop(['a', 'b', 'c'])).toBe('c|b,a|2');
+		expect(() => demo.popEmpty()).toThrow(/removed index 0 of a list of length 0/);
+		expect(demo.flipped()).toBe('cba');
+	});
+
+	it('reads a map value, a held null included, and throws only for absence', async () => {
+		const demo = await instantiate('Demo', source);
+		expect(demo.value(new Map([['x', 1]]), 'x')).toBe(1);
+		expect(demo.value({ y: null }, 'y')).toBeNull();
+		expect(() => demo.value(new Map(), 'z')).toThrow(/"z", which is missing/);
+	});
+
+	it('calls a runtime type’s member through a `::` reference', async () => {
+		const demo = await instantiate('Demo', source);
+		expect(demo.date('2024-05-20T10:15:30Z')).toBe(Date.UTC(2024, 4, 20, 10, 15, 30));
+		expect(demo.date('not a date')).toBe(0);
+		expect(demo.date(null)).toBe(0);
+	});
+
+	it('decodes `decodeFromStream(body.byteStream())` from the body text', async () => {
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    private val json = Json { ignoreUnknownKeys = true }',
+				'    private inline fun <reified T> Response.decode(): T = json.decodeFromStream(body.byteStream())',
+				'    fun names(r: Response): List<String> = r.decode()',
+				'}'
+			)
+		);
+		expect(demo.names({ body: { string: () => '["a","b"]' } })).toEqual(['a', 'b']);
+		// Anywhere else it is a stream of bytes this runtime does not keep.
+		expect(
+			refusalNames(kt('class Demo {', '    fun raw(r: Response) = r.body.byteStream()', '}'))
+		).toEqual(['`.byteStream()`']);
+	});
+});
+
+describe('the framework filters a filter class names in its supertype call', () => {
+	it('slots named arguments by upstream parameter order, sort selection included', async () => {
+		// `: Filter.Group<X>(name = …, state = …)` and friends were refused
+		// for the names alone; `Filter.Sort.Selection(3, false)` for being a
+		// call on a nested type. Both now build what the runtime's filters hold.
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class SortFilter(state: Selection = Selection(2, ascending = false)) :',
+				'    Filter.Sort(name = "Sort", values = arrayOf("a", "b", "c"), state = state)',
+				'class TypeFilter : Filter.Select<String>(values = arrayOf("x", "y"), name = "Type", state = 1)',
+				'class Genres(genres: List<String>) :',
+				'    Filter.Group<Filter.CheckBox>(name = "Genres", state = genres.map { Filter.CheckBox(it) })',
+				'class Demo {',
+				'    fun filters() = listOf(SortFilter(), TypeFilter(), Genres(listOf("g")),',
+				'        SortFilter(Filter.Sort.Selection(1, true)))',
+				'}'
+			)
+		);
+		const [sort, type, genres, chosen] = demo.filters();
+		expect([sort.name, sort.values.length, sort.state]).toEqual([
+			'Sort',
+			3,
+			{ index: 2, ascending: false }
+		]);
+		expect([type.name, type.values, type.state]).toEqual(['Type', ['x', 'y'], 1]);
+		expect([genres.name, genres.state[0].name, genres.state[0].state]).toEqual([
+			'Genres',
+			'g',
+			false
+		]);
+		expect(chosen.state).toEqual({ index: 1, ascending: true });
+	});
+});
+
+describe('the string and collection members a second catalogue pass named', () => {
+	const source = kt(
+		'@Serializable',
+		'class Manga(val title: String = "")',
+		'class Demo {',
+		'    fun pad(s: String): String = s.padEnd(5, \'0\') + "|" + "abc".padEnd(2) + "|" + "ab".padEnd(4) + "."',
+		'    fun comp(t: String): String {',
+		'        val m = Regex("(\\w+)-(\\d+)").find(t)!!',
+		'        return m.destructured.component1() + ":" + m.destructured.component2() + ":" + Pair("x", 1).component2()',
+		'    }',
+		'    fun maps(): String {',
+		'        val m = LinkedHashMap<String, Int>()',
+		'        m["b"] = 2',
+		'        m["a"] = 1',
+		'        val copy = HashMap(m)',
+		'        copy["c"] = 3',
+		'        val set = LinkedHashSet<String>()',
+		'        set.add("z"); set.add("z"); set.add("y")',
+		'        return m.keys.joinToString() + "|" + copy.size + "|" + m.size + "|" + set.joinToString()',
+		'    }',
+		'    fun digit(name: String): Int = name.findAnyOf(IntRange(0, 9).map { it.toString() })?.first ?: -1',
+		'    fun which(s: String): String = s.findAnyOf(listOf("ab", "a"), ignoreCase = true)?.second ?: "none"',
+		'    fun b64(s: String): String = s.decodeBase64()?.utf8() ?: "bad"',
+		'    private fun strip(s: String): String = s.removePrefix(")]}\'")',
+		'    fun transformed(r: Response): String = r.parseAs<Manga>(transform = ::strip).title',
+		'}'
+	);
+
+	it('pads, reads components, and builds maps and sets by constructor', async () => {
+		const demo = await instantiate('Demo', source);
+		expect(demo.pad('12')).toBe('12000|abc|ab  .');
+		expect(demo.comp('abc-42')).toBe('abc:42:1');
+		// Insertion order kept, and the copy is its own map.
+		expect(demo.maps()).toBe('b, a|3|2|z, y');
+	});
+
+	it('finds the first of several strings, in Kotlin’s order', async () => {
+		const demo = await instantiate('Demo', source);
+		expect(demo.digit('Vol… 12')).toBe(5);
+		expect(demo.digit('none')).toBe(-1);
+		// At one index, the first in the list that matches — not the longest.
+		expect(demo.which('xAB')).toBe('ab');
+	});
+
+	it('decodes okio base64 to a ByteString, and null for text that is not base64', async () => {
+		const demo = await instantiate('Demo', source);
+		expect(demo.b64('aGVsbG8gd29ybGQ=')).toBe('hello world');
+		expect(demo.b64('aGVs bG8')).toBe('hello');
+		expect(demo.b64('aGVsbG8*')).toBe('bad');
+		expect(demo.b64('a')).toBe('bad');
+	});
+
+	it('builds a url from nothing with `HttpUrl.Builder()`, and refuses one with no scheme', async () => {
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    fun u(q: String): String = HttpUrl.Builder().scheme("https").host("search.example.invalid")',
+				'        .addPathSegment("search").addQueryParameter("text", q).build().toString()',
+				'    fun bare(): String = HttpUrl.Builder().host("x.example.invalid").build().toString()',
+				'}'
+			)
+		);
+		expect(demo.u('a b')).toBe('https://search.example.invalid/search?text=a%20b');
+		expect(() => demo.bare()).toThrow(/no scheme/);
+	});
+
+	it('runs a named `transform` before the parse', async () => {
+		const demo = await instantiate('Demo', source);
+		const body = ")]}'" + '{"title":"t"}';
+		expect(demo.transformed({ body: { string: () => body }, string: () => body })).toBe('t');
+	});
+});
+
+describe('names a third catalogue pass found, run', () => {
+	const source = kt(
+		'import eu.kanade.tachiyomi.source.model.SManga.Companion.COMPLETED',
+		'import eu.kanade.tachiyomi.source.model.SManga.Companion.ONGOING',
+		'class Demo {',
+		'    fun status(done: Boolean): Int = SManga.create().apply { status = if (done) COMPLETED else ONGOING }.status',
+		'    fun date(s: String, year: Long): Long {',
+		'        val parser = DateTimeFormatterBuilder()',
+		'            .appendPattern("d MMMM")',
+		'            .parseDefaulting(ChronoField.YEAR, year)',
+		'            .toFormatter(Locale.ENGLISH)',
+		'        return LocalDate.parse(s, parser).atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli()',
+		'    }',
+		'    fun dated(s: String): Long {',
+		'        val parser = DateTimeFormatterBuilder().appendPattern("d MMMM yyyy")',
+		'            .parseDefaulting(ChronoField.YEAR, 1999L).toFormatter(Locale.ENGLISH)',
+		'        return LocalDate.parse(s, parser).atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli()',
+		'    }',
+		'    fun decoded(s: String): String = Base64.decode(s, Base64.DEFAULT).toString(Charset.defaultCharset())',
+		'    fun latin(s: String): String = String(Base64.decode(s, Base64.DEFAULT), Charset.forName("ISO-8859-1"))',
+		'    fun sjis(s: String): String = String(Base64.decode(s, Base64.DEFAULT), Charset.forName("Shift_JIS"))',
+		'    fun hex(n: Int): String = n.toString(16) + "|" + (-10).toString(16) + "|" + n.toString(2)',
+		'}'
+	);
+
+	it('reads a companion constant imported by name', async () => {
+		const demo = await instantiate('Demo', source);
+		expect(demo.status(true)).toBe(2);
+		expect(demo.status(false)).toBe(1);
+	});
+
+	it('defaults a field the pattern leaves out, and only that one', async () => {
+		const demo = await instantiate('Demo', source);
+		expect(demo.date('12 March', 2024)).toBe(Date.UTC(2024, 2, 12));
+		// A year in the text wins over the default, as java.time has it.
+		expect(demo.dated('12 March 2020')).toBe(Date.UTC(2020, 2, 12));
+	});
+
+	it('decodes bytes through the charset named, and refuses one it does not implement', async () => {
+		// ISO-8859-1 is decoded exactly (one byte, one character), which the
+		// Voe extractor's own decoder depends on; a multi-byte charset this
+		// runtime has no table for is still refused by name, never guessed.
+		const demo = await instantiate('Demo', source);
+		expect(demo.decoded('aGVsbG8=')).toBe('hello');
+		expect(demo.latin('6ek=')).toBe('\u00e9\u00e9');
+		expect(() => demo.sjis('aGVsbG8=')).toThrow(/Shift_JIS/);
+	});
+
+	it('answers `missingDelimiterValue` when a substring delimiter is absent', async () => {
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    fun f(n: String): String =',
+				'        n.substringBeforeLast(\'.\', missingDelimiterValue = n) + "|" + n.substringAfter("/", missingDelimiterValue = "none")',
+				'}'
+			)
+		);
+		expect(demo.f('a.b.c')).toBe('a.b|none');
+		expect(demo.f('x/y')).toBe('x/y|y');
+	});
+
+	it('formats in the radix `toString(radix)` names, which the plain helper dropped', async () => {
+		const demo = await instantiate('Demo', source);
+		expect(demo.hex(255)).toBe('ff|-a|11111111');
+	});
+});
+
+describe('a fourth pass: collection members, a when-subject binding, qualified constructors', () => {
+	const source = kt(
+		'class Demo {',
+		'    fun running(): String = listOf(1, 2, 3).runningFold(10) { acc, x -> acc + x }.joinToString()',
+		'    fun indexedTo(): String {',
+		'        val into = mutableListOf("start")',
+		'        listOf("a", "b").mapIndexedTo(into) { i, x -> "$i$x" }',
+		'        return into.joinToString()',
+		'    }',
+		'    fun all(): String = "${listOf(1, 2, 3).containsAll(listOf(3, 1))}${listOf(1, 2).containsAll(listOf(4))}"',
+		'    fun retained(): String {',
+		'        val xs = mutableListOf(1, 2, 3, 4)',
+		'        val changed = xs.retainAll { it % 2 == 0 }',
+		'        return "$changed:" + xs.joinToString()',
+		'    }',
+		'    fun afterLast(u: String): String = u.replaceAfterLast("/", "comics.json")',
+		'    fun windows(): String = listOf(1, 2, 3, 4).windowed(size = 2).joinToString { it.joinToString("") } +',
+		'        "|" + listOf(1, 2, 3).windowed(2, 2, true).joinToString { it.joinToString("") }',
+		'    fun built(): String = Array(3) { i -> "x$i" }.joinToString()',
+		'    fun subject(s: String): String = when (val e = s.trim()) {',
+		'        "" -> "empty"',
+		'        else -> "[$e]"',
+		'    }',
+		'    fun path(u: String): String? = java.net.URI(u).path',
+		'    fun language(): String = Locale("pt").getDisplayLanguage(Locale.ENGLISH) + "|" + Locale("xx").getDisplayLanguage(Locale.ENGLISH)',
+		'}'
+	);
+
+	it('runs each with Kotlin’s semantics', async () => {
+		const demo = await instantiate('Demo', source);
+		expect(demo.running()).toBe('10, 11, 13, 16');
+		expect(demo.indexedTo()).toBe('start, 0a, 1b');
+		expect(demo.all()).toBe('truefalse');
+		// In place, answering whether anything went.
+		expect(demo.retained()).toBe('true:2, 4');
+		expect(demo.afterLast('https://a.example.invalid/x/y')).toBe(
+			'https://a.example.invalid/x/comics.json'
+		);
+		expect(demo.windows()).toBe('12, 23, 34|12, 3');
+		expect(demo.built()).toBe('x0, x1, x2');
+		expect(demo.path('https://a.example.invalid/p/q?x=1')).toBe('/p/q');
+		expect(demo.language()).toBe('Portuguese|xx');
+	});
+
+	it('binds a `when` subject for its branches', async () => {
+		const demo = await instantiate('Demo', source);
+		expect(demo.subject('  ')).toBe('empty');
+		expect(demo.subject(' a ')).toBe('[a]');
+	});
+});
+
+describe('aggregates, capitalize, java.util.Random and code points', () => {
+	const source = kt(
+		'class Demo {',
+		'    fun agg(): String = listOf("b", "a", "c").min() + listOf(3, 9, 1).max() + listOf(1, 2).average() + "|" + Math.min(4, 2)',
+		'    fun empty(): String = emptyList<String>().min()',
+		'    fun cap(): String = "hello".capitalize() + "|" + "Hi".capitalize() + "|" + "élan".capitalize()',
+		'    fun roll(): Int { val random = Random(); return random.nextInt(5) }',
+		'    fun seeded(): Int = Random(42L).nextInt(5)',
+		'    fun point(): Int = "a😀".codePointAt(1)',
+		'}'
+	);
+
+	it('answers each as Kotlin and the JVM do, empty and seeded cases loudly', async () => {
+		const demo = await instantiate('Demo', source);
+		expect(demo.agg()).toBe('a91.5|2');
+		expect(() => demo.empty()).toThrow(/minimum of an empty collection/);
+		expect(demo.cap()).toBe('Hello|Hi|Élan');
+		const rolled = demo.roll();
+		expect(rolled >= 0 && rolled < 5).toBe(true);
+		// A seed asks for one reproducible sequence, which this cannot give.
+		expect(() => demo.seeded()).toThrow(/seeded a Random/);
+		expect(demo.point()).toBe(0x1f600);
+	});
+});
+
+describe('a Kotlin Iterable, declared or delegated', () => {
+	// `Iterable<T> by list` was refused; `override fun iterator()` translated
+	// into a class JavaScript could not iterate, and `x.map { }` over it ran
+	// once, over the object itself, with nothing refused.
+	const source = kt(
+		'data class D(private val data: List<String>) : Iterable<String> by data',
+		'data class S(val series: D, val oneShots: D) : Iterable<String> {',
+		'    override fun iterator() = (series + oneShots).iterator()',
+		'}',
+		'data class Rev(private val issues: List<String>) : Iterable<String> by issues.reversed()',
+		'class Plain(val items: List<Int>) : Iterable<Int> by items',
+		'class Demo {',
+		'    fun mapped(): String = S(D(listOf("a", "b")), D(listOf("c"))).map { it + "!" }.joinToString()',
+		'    fun looped(): Int { var n = 0; for (x in Plain(listOf(1, 2, 3))) n += x; return n }',
+		'    fun reversed(): String = Rev(listOf("1", "2", "3")).joinToString()',
+		'    fun first(): String = D(listOf("x", "y")).first()',
+		'}'
+	);
+
+	it('iterates the elements, through map, for, and first alike', async () => {
+		const demo = await instantiate('Demo', source);
+		expect(demo.mapped()).toBe('a!, b!, c!');
+		expect(demo.looped()).toBe(6);
+		expect(demo.reversed()).toBe('3, 2, 1');
+		expect(demo.first()).toBe('x');
+	});
+
+	it('still refuses any other delegation, and a delegate the instance cannot reach', () => {
+		expect(
+			refusalNames(kt('class M(private val m: Map<String, Int>) : Map<String, Int> by m'))
+		).toEqual(['explicit_delegation']);
+		expect(
+			refusalNames(kt('class P(items: List<Int>) : Iterable<Int> by items', 'class Demo'))
+		).toEqual(['an `Iterable` delegate reading a parameter that is not a property']);
+		// With a body, the grammar reads `by pages { … }` as a call passing the
+		// body as a lambda; refused as the delegation, not emitted as a call.
+		expect(
+			refusalNames(
+				kt(
+					'data class Q(val pages: List<String>) : Iterable<String> by pages {',
+					'    val n: Int',
+					'        get() = pages.size',
+					'}'
+				)
+			)
+		).toEqual(['explicit_delegation']);
+	});
+});
+
+describe('an exception built as a value', () => {
+	it('is made, not thrown, and rejects the Observable it is handed to', async () => {
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    fun licensed(): Observable<List<String>> = Observable.error(Exception("Licensed"))',
+				'    fun wrapped(cause: Throwable): Throwable = IOException("wrapped", cause)',
+				'}'
+			)
+		);
+		await expect(demo.licensed()).rejects.toThrow('Licensed');
+		const made = demo.wrapped('root');
+		expect(made).toBeInstanceOf(Error);
+		expect(made.message).toBe('wrapped');
+		expect(made.cause).toBe('root');
+	});
+});
+
 describe('a Kotlin Map, as a JS Map and as a JsonObject', () => {
 	// A Map iterated as bare [k, v] arrays, so `it.key` was undefined, and its
 	// `keys`/`values`/`entries` were property reads of a JS Map's *methods*; a
@@ -387,6 +766,40 @@ describe('a decode whose type is written where the value goes', () => {
 		// Inside the helper the type is the *call site's* — `List<String>` —
 		// and not the letter `T`, which names nothing and decoded as "any".
 		expect(demo.viaHelper('"single"')).toEqual(['single']);
+	});
+
+	it('reads the type through a `use`, `let` or `run` whose value is the block', async () => {
+		// `private inline fun <reified T> Response.parseAs(): T = use {
+		// json.decodeFromString(it.body.string()) }` — the block is the value,
+		// so Kotlin infers its result from the return type. `also` answers its
+		// receiver, so a type is not pushed into its block.
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    private val json = Json { ignoreUnknownKeys = true }',
+				'    fun viaLet(text: String): List<String> = text.parseLet()',
+				'    private inline fun <reified T> String.parseLet(): T = let { json.decodeFromString(it) }',
+				'    fun viaRun(text: String): List<Int> = text.run { json.decodeFromString(this) }',
+				'    fun viaUse(text: String): String = text.let { it.trim() }.let {',
+				'        json.decodeFromString(it)',
+				'    }',
+				'}'
+			)
+		);
+		expect(demo.viaLet('"single"')).toEqual(['single']);
+		expect(demo.viaRun('[1,2]')).toEqual([1, 2]);
+		expect(demo.viaUse(' 42 ')).toBe('42');
+		expect(
+			refusalNames(
+				kt(
+					'class Demo {',
+					'    private val json = Json { ignoreUnknownKeys = true }',
+					'    fun kept(text: String): String = text.also { json.decodeFromString(it) }',
+					'}'
+				)
+			)
+		).toEqual(['`.decodeFromString()` with no type argument']);
 	});
 
 	it('still refuses a decode with nowhere to read its type from', () => {

@@ -77,6 +77,7 @@ import {
 	describeRefusals,
 	HOST_ENTRY_POINTS,
 	isHostDrawn,
+	NEVER_INVOKED_MEMBERS,
 	type Refusal
 } from './subset';
 
@@ -359,7 +360,10 @@ export async function convertKotlin(
 			// private helper in the extension is a rounding error, and a wrongly
 			// pruned one there would be the extension's own behaviour going
 			// missing.
-			for (const edges of emission.graph) entryMembers.add(edges.member);
+			// Except a member no driver runs: see `NEVER_INVOKED_MEMBERS`.
+			for (const edges of emission.graph) {
+				if (!NEVER_INVOKED_MEMBERS.has(edges.member)) entryMembers.add(edges.member);
+			}
 			if (emission.className !== null) entryMembers.add(emission.className);
 		}
 		if (emission.js.length > 0) bodies.push(emission.js);
@@ -406,6 +410,8 @@ export async function convertKotlin(
 	const kept = new Set(translated);
 	for (const edges of graph) {
 		if (!kept.has(edges.member)) continue;
+		// Its body never runs, so what it calls or names is needed by nothing.
+		if (NEVER_INVOKED_MEMBERS.has(edges.member)) continue;
 		for (const called of edges.calls) calledByTranslated.add(called.member);
 		// References as well as calls, for the reason `reach` already learned one
 		// level out: a name can be needed without being called. `object
