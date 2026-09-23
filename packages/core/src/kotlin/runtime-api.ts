@@ -156,6 +156,9 @@ export const RUNTIME_HELPERS = [
 	'joinTo',
 	/* `map` with a destination, same shape as `joinTo`. */
 	'mapTo',
+	/* The same with no transform: every element added to a collection the
+	   caller already holds, and that collection answered. */
+	'toCollection',
 	/* keiyoushi's readers for a heterogeneous list. `filters.firstInstance<
 	   GenreFilter>()` is how every filter panel in the image ecosystem reads
 	   the filter it cares about out of the list the host hands back. */
@@ -428,12 +431,22 @@ export const RUNTIME_HELPERS = [
 	   catalogue moved: the whole `MangaThemesia` template (112 instances) and
 	   every `Keyoapp` one (18) call the new spelling, so being one rename
 	   behind refused both templates entirely. */
-	/* Only the one helper: `tryParseDateTime` and `tryParseZonedDateTime` are
-	   Kotlin spellings the member table folds onto this, not helpers the
-	   emitter ever calls. `RUNTIME_HELPERS` is what the emitter may emit, and
-	   listing a name here that nothing emits fails the runtime's own
-	   cross-check — which is how this comment came to exist. */
+	/* And its two siblings, which are NOT the same helper: upstream separates
+	   them by what the text must carry — a date, a date and a time, or its own
+	   offset — and `tryParseZonedDateTime` has to FAIL on a text with no offset
+	   so the `?:` chain after it runs. Folding all three onto one reader parsed
+	   such a text as UTC and stopped the chain a zone early. */
 	'tryParseDate',
+	'tryParseDateTime',
+	'tryParseZonedDateTime',
+	/* kotlin.time: a unit property on a non-literal (`(n * 7).days`), a
+	   Duration's `inWhole…` readers, and an Instant's millisecond reading —
+	   each dispatched on the receiver, because a Duration is milliseconds here
+	   and `Clock.System.now() - d` is already a number. See `kotlin-time.ts`. */
+	'durationOf',
+	'inWhole',
+	'toEpochMilliseconds',
+	'toJavaInstant',
 	/* keiyoushi's `Element?.textOrNull()` — `text()` with blank read as
 	   absent. The same template reads its description through it. */
 	'textOrNull',
@@ -445,6 +458,9 @@ export const RUNTIME_HELPERS = [
 	'toRequestBody',
 	'toJsonBody',
 	'toJsonRequestBody',
+	/* The response-side twin, which an interceptor hands to
+	   `response.newBuilder().body(…)` when it replaces what came back. */
+	'toResponseBody',
 
 	/* jsoup's `closest()` and `ownerDocument()`, the two calls that go up rather
 	   than down — `shims/dom.ts` defines them and these reach them. */
@@ -589,6 +605,7 @@ export const HOST_BACKED_HELPERS: ReadonlySet<RuntimeHelper> = new Set([
 	'toByteArray',
 	'toJsonBody',
 	'toRequestBody',
+	'toResponseBody',
 	'uri'
 ]);
 
@@ -827,6 +844,24 @@ export const RUNTIME_GLOBALS = [
 	'OffsetDateTime',
 	'ZonedDateTime',
 	'LocalDateTime',
+	/* okhttp's MultipartBody: `MultipartBody.Builder().setType(MultipartBody
+	   .FORM)` reads a constant off the type, so it has to be a name. */
+	'MultipartBody',
+	/* The rest of the java.time subset `kotlin-time.ts` implements, and
+	   kotlin.time's `Clock` and `Duration`. Each is a capitalised receiver the
+	   emitter passes through — `ZoneId.of(…)` in a property initialiser died at
+	   load as `ZoneId is not defined` in six bundles that had refused nothing. */
+	'LocalDate',
+	'ZoneId',
+	'ZoneOffset',
+	'ChronoUnit',
+	'ChronoField',
+	'DayOfWeek',
+	'Month',
+	'TextStyle',
+	'Year',
+	'Clock',
+	'Duration',
 
 	/* `keiyoushi.lib.i18n.Intl`, which is one small Kotlin file in the shared
 	   `lib/` directory and the largest single blocker the manga half had: 95 of

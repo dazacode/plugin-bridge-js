@@ -91,6 +91,7 @@
  */
 
 import { DOM_RUNTIME_SOURCE } from './generated/dom-source';
+import { KOTLIN_TIME } from './kotlin-time';
 
 /**
  * The Kotlin standard library, as much of it as a scraper reaches for.
@@ -384,6 +385,12 @@ function __present(value) {
 /** Kotlin's natural ordering, for the two types a scraper ever sorts by. */
 function __cmp(a, b) {
   if (typeof a === 'number' && typeof b === 'number') return a < b ? -1 : (a > b ? 1 : 0);
+  // A java.time value orders by its own compareTo — by instant, or by date —
+  // where the string fallback below would order '2024-10-01' after '2024-9-…'.
+  if (a !== null && a !== undefined && a.__kTime === true && typeof a.compareTo === 'function') {
+    var order = a.compareTo(b);
+    return order < 0 ? -1 : (order > 0 ? 1 : 0);
+  }
   // Kotlin's Boolean is Comparable and false sorts before true, which is the
   // whole point of 'compareBy { it.title.contains(quality) }' — the falses go
   // first and the caller reverses. Spelled out rather than left to the string
@@ -1410,8 +1417,11 @@ function __unescapeProperty(text) {
  * '?.time ?: 0L' and a throw there would lose the whole episode list over a
  * date nobody displays.
  *
- * Fields are read as UTC. The alternative is the host's timezone, which would
- * make the same page produce different values on two devices.
+ * Fields are read in the format's own zone — 'timeZone = …' or
+ * 'setTimeZone(…)' — and UTC when it names none. UTC rather than the host's
+ * zone, which would make the same page produce different values on two
+ * devices. An offset in the TEXT ('+0700', 'GMT+9') outranks both, as it does
+ * in java.text. The pattern reader is java.time's, in 'kotlin-time.ts'.
  */
 function SimpleDateFormat(pattern, locale) {
   if (!(this instanceof SimpleDateFormat)) return new SimpleDateFormat(pattern, locale);
@@ -1420,101 +1430,13 @@ function SimpleDateFormat(pattern, locale) {
   this.__parts = __datePattern(this.pattern);
 }
 
-/**
- * java.time's formatter, over the pattern reader SimpleDateFormat already has.
- *
- * Extensions reach it one way — 'DateTimeFormatter.ofPattern("yyyy-MM-dd")',
- * usually straight into 'tryParseDate' — and the two pattern languages agree
- * on every letter that appears in one of those. Where they differ is in
- * fields a scraper does not write, so a second pattern reader would be a
- * second thing to keep correct for no case anybody has.
- */
-var DateTimeFormatter = {
-  ofPattern: function (pattern, locale) {
-    return new SimpleDateFormat(pattern, locale);
-  },
-  /* The constants upstream exposes for the shapes with no pattern of their
-     own. ISO dates are what a JSON API sends. */
-  ISO_LOCAL_DATE: null,
-  ISO_LOCAL_DATE_TIME: null,
-  ISO_INSTANT: null,
-  ISO_OFFSET_DATE_TIME: null,
-  ISO_ZONED_DATE_TIME: null
-};
-DateTimeFormatter.ISO_LOCAL_DATE = DateTimeFormatter.ofPattern('yyyy-MM-dd');
-DateTimeFormatter.ISO_LOCAL_DATE_TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss");
-DateTimeFormatter.ISO_INSTANT = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'");
-DateTimeFormatter.ISO_OFFSET_DATE_TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ssXXX");
-DateTimeFormatter.ISO_ZONED_DATE_TIME = DateTimeFormatter.ISO_OFFSET_DATE_TIME;
-
-function __datePattern(pattern) {
-  var source = '';
-  var fields = [];
-  var i = 0;
-
-  while (i < pattern.length) {
-    var ch = pattern.charAt(i);
-
-    if (ch === "'") {
-      var close = pattern.indexOf("'", i + 1);
-      var literal = close === -1 ? pattern.slice(i + 1) : pattern.slice(i + 1, close);
-      source += literal.length === 0 ? "'" : __regexQuote(literal);
-      i = close === -1 ? pattern.length : close + 1;
-      continue;
-    }
-
-    if (/[A-Za-z]/.test(ch)) {
-      var run = 1;
-      while (i + run < pattern.length && pattern.charAt(i + run) === ch) run += 1;
-      if (ch === 'y') { source += '([0-9]{2,4})'; fields.push(run <= 2 ? 'year2' : 'year'); }
-      else if (ch === 'M') {
-        if (run >= 3) { source += '([A-Za-z\\\\u00c0-\\\\u024f.]+)'; fields.push('monthName'); }
-        else { source += '([0-9]{1,2})'; fields.push('month'); }
-      } else if (ch === 'd') { source += '([0-9]{1,2})'; fields.push('day'); }
-      else if (ch === 'H') { source += '([0-9]{1,2})'; fields.push('hour'); }
-      else if (ch === 'h') { source += '([0-9]{1,2})'; fields.push('hour12'); }
-      else if (ch === 'm') { source += '([0-9]{1,2})'; fields.push('minute'); }
-      else if (ch === 's') { source += '([0-9]{1,2})'; fields.push('second'); }
-      else if (ch === 'a') { source += '([AaPp][Mm])'; fields.push('meridiem'); }
-      else if (ch === 'E') { source += '[A-Za-z.]+'; }
-      else if (ch === 'z' || ch === 'Z' || ch === 'X') { source += '[A-Za-z0-9:+-]*'; }
-      else source += '.{' + run + '}';
-      i += run;
-      continue;
-    }
-
-    if (/\\s/.test(ch)) { source += '\\\\s+'; i += 1; continue; }
-    source += __regexQuote(ch);
-    i += 1;
-  }
-
-  return { source: '^\\\\s*' + source + '\\\\s*$', fields: fields };
-}
-
 SimpleDateFormat.prototype.parse = function (text) {
-  var found = new RegExp(this.__parts.source).exec(__str(text));
-  if (found === null) return null;
-
-  var read = { year: 1970, month: 0, day: 1, hour: 0, minute: 0, second: 0, meridiem: '' };
-  for (var i = 0; i < this.__parts.fields.length; i += 1) {
-    var value = found[i + 1];
-    var field = this.__parts.fields[i];
-    if (field === 'year') read.year = Number(value);
-    else if (field === 'year2') read.year = 2000 + Number(value);
-    else if (field === 'month') read.month = Number(value) - 1;
-    else if (field === 'monthName') read.month = __monthIndex(value);
-    else if (field === 'day') read.day = Number(value);
-    else if (field === 'hour' || field === 'hour12') read.hour = Number(value);
-    else if (field === 'minute') read.minute = Number(value);
-    else if (field === 'second') read.second = Number(value);
-    else if (field === 'meridiem') read.meridiem = __str(value).toLowerCase();
-  }
-
-  if (read.month < 0) return null;
-  if (read.meridiem === 'pm' && read.hour < 12) read.hour += 12;
-  if (read.meridiem === 'am' && read.hour === 12) read.hour = 0;
-
-  var millis = Date.UTC(read.year, read.month, read.day, read.hour, read.minute, read.second);
+  var read = __readDate(this.__parts, text);
+  if (read === null) return null;
+  var local = __epochDayOf(read.year, read.month, read.day) * __MS_PER_DAY +
+    read.hour * 3600000 + read.minute * 60000 + read.second * 1000 + __fdiv(read.nano, 1000000);
+  var zone = read.zone !== null ? read.zone : __timeZoneRules(this.timeZone);
+  var millis = zone.__instantOf(local, null);
   if (!Number.isFinite(millis)) return null;
   return { time: millis, getTime: function () { return millis; } };
 };
@@ -1523,43 +1445,69 @@ SimpleDateFormat.prototype.format = function (value) {
   var millis = value === null || value === undefined
     ? 0
     : (typeof value === 'number' ? value : Number(value.time === undefined ? value.getTime() : value.time));
-  var when = new Date(millis);
-  var pad = function (number, width) { return __k.padStart(String(number), width, '0'); };
-  var self = this;
-  return self.pattern.replace(/y+|M+|d+|H+|m+|s+/g, function (token) {
-    var head = token.charAt(0);
-    if (head === 'y') return token.length <= 2 ? pad(when.getUTCFullYear() % 100, 2) : String(when.getUTCFullYear());
-    if (head === 'M') {
-      if (token.length >= 3) return __MONTHS_SHORT[when.getUTCMonth()].charAt(0).toUpperCase() + __MONTHS_SHORT[when.getUTCMonth()].slice(1);
-      return pad(when.getUTCMonth() + 1, token.length);
-    }
-    if (head === 'd') return pad(when.getUTCDate(), token.length);
-    if (head === 'H') return pad(when.getUTCHours(), token.length);
-    if (head === 'm') return pad(when.getUTCMinutes(), token.length);
-    return pad(when.getUTCSeconds(), token.length);
-  });
+  var fields = __zoned(millis, __timeZoneRules(this.timeZone)).__fields();
+  return __formatFields(__patternTokens(this.pattern), fields, this.locale);
 };
 
-/** Set by extensions that care; the parser above is UTC either way. */
-SimpleDateFormat.prototype.setTimeZone = function () {};
+/** The zone parse and format read fields in; see the constructor. */
+SimpleDateFormat.prototype.setTimeZone = function (zone) { this.timeZone = zone; };
+SimpleDateFormat.prototype.getTimeZone = function () {
+  return this.timeZone === undefined || this.timeZone === null ? TimeZone.getDefault() : this.timeZone;
+};
+
+/** A java.util.TimeZone, a java.time ZoneId, or nothing — as the rules it carries. */
+function __timeZoneRules(value) {
+  if (value === null || value === undefined) return __systemZone();
+  if (value instanceof __Zone) return value;
+  if (value.__zone instanceof __Zone) return value.__zone;
+  return __systemZone();
+}
 
 /**
- * java.util.TimeZone, as the one thing it is used for here.
+ * java.util.TimeZone, over the zone table 'kotlin-time.ts' keeps.
  *
- * 115 sources in this catalogue write
- * 'dateFormat.timeZone = TimeZone.getTimeZone("UTC")' and nothing else with
- * it. The parser above reads every field as UTC already, so the zone it
- * carries is a label the formatter never consults — which is what makes
- * answering one honest rather than a stub: the behaviour it asks for is
- * already the behaviour.
+ * 115 sources in this catalogue write 'dateFormat.timeZone =
+ * TimeZone.getTimeZone("UTC")', and a good share of the rest name the zone the
+ * site publishes in — Asia/Tokyo, Asia/Ho_Chi_Minh. That zone is honoured: a
+ * format carrying one reads its fields there, which is the difference between
+ * a chapter dated today and one dated yesterday.
+ *
+ * An id java.util cannot read answers GMT — java.util's own rule, and why it
+ * never throws. An id java.util WOULD read but this table does not carry is the
+ * one place that rule costs something; the table is where to add it.
  *
  * Named so the bundle *loads*. A capitalised receiver is passed through by the
  * emitter, so an absent name is 'TimeZone is not defined' at load, inside a
  * sandbox, rather than a refusal here with a sentence attached.
  */
+function __timeZone(id, zone) {
+  return {
+    id: id,
+    __zone: zone,
+    rawOffset: zone.__std * 1000,
+    getID: function () { return id; },
+    getRawOffset: function () { return zone.__std * 1000; },
+    getOffset: function (millis) { return zone.__offsetAt(Number(millis)) * 1000; },
+    useDaylightTime: function () { return zone.__rule !== null; },
+    inDaylightTime: function (date) { return zone.__offsetAt(__millisOf(date)) !== zone.__std; },
+    toZoneId: function () { return zone; },
+    hasSameRules: function (other) {
+      return other !== null && other !== undefined && other.__zone !== undefined &&
+        other.__zone.__std === zone.__std && other.__zone.__rule === zone.__rule;
+    },
+    toString: function () { return id; }
+  };
+}
+
 var TimeZone = {
-  getTimeZone: function (id) { return { id: __str(id), getID: function () { return __str(id); } }; },
-  getDefault: function () { return TimeZone.getTimeZone('UTC'); }
+  getTimeZone: function (value) {
+    if (value instanceof __Zone) return __timeZone(value.id, value);
+    var id = __str(value);
+    var zone = __zoneFromText(id);
+    return zone === null ? __timeZone('GMT', __systemZone()) : __timeZone(id, zone);
+  },
+  getDefault: function () { return __timeZone('UTC', __systemZone()); },
+  getAvailableIDs: function () { return Object.keys(__ZONE_TABLE); }
 };
 
 /**
@@ -1595,9 +1543,23 @@ var Regex = {
  * DAY_OF_WEEK counts from Sunday = 1. Reading MONTH as 1-based is the classic
  * off-by-one here, and it is a wrong value rather than an error.
  */
-function __KCalendar(millis) {
+function __KCalendar(millis, zone) {
   this.millis = millis;
+  this.__zone = zone === undefined || zone === null ? __systemZone() : zone;
 }
+
+/*
+ * The wall clock in this calendar's zone, as a Date whose UTC fields ARE that
+ * wall clock — the one trick every field reader below relies on — and the way
+ * back: a wall-clock reading resolved to an instant the way java.util does,
+ * keeping the offset it had where the clocks allow.
+ */
+__KCalendar.prototype.__local = function () {
+  return new Date(this.millis + this.__zone.__offsetAt(this.millis) * 1000);
+};
+__KCalendar.prototype.__resolve = function (local) {
+  this.millis = this.__zone.__instantOf(local.getTime(), this.__zone.__offsetAt(this.millis));
+};
 
 var __CALENDAR_FIELDS = {
   1: function (d) { return d.getUTCFullYear(); },
@@ -1607,6 +1569,7 @@ var __CALENDAR_FIELDS = {
     return Math.floor((d.getTime() - Date.UTC(d.getUTCFullYear(), 0, 1)) / 86400000) + 1;
   },
   7: function (d) { return d.getUTCDay() + 1; },
+  9: function (d) { return d.getUTCHours() < 12 ? 0 : 1; },
   10: function (d) { return d.getUTCHours() % 12; },
   11: function (d) { return d.getUTCHours(); },
   12: function (d) { return d.getUTCMinutes(); },
@@ -1614,19 +1577,23 @@ var __CALENDAR_FIELDS = {
   14: function (d) { return d.getUTCMilliseconds(); }
 };
 
-/** Milliseconds per unit, for the fields 'add' can move by a fixed amount. */
-var __CALENDAR_STEPS = { 5: 86400000, 6: 86400000, 7: 86400000, 10: 3600000, 11: 3600000, 12: 60000, 13: 1000, 14: 1 };
+/**
+ * Milliseconds per unit, for the fields 'add' moves along the timeline. The
+ * day fields are not here: a day is a calendar day, which across a clock
+ * change is 23 or 25 hours, so those move the wall clock instead.
+ */
+var __CALENDAR_STEPS = { 10: 3600000, 11: 3600000, 12: 60000, 13: 1000, 14: 1 };
 
 __KCalendar.prototype.get = function (field) {
   var read = __CALENDAR_FIELDS[Number(field)];
   if (read === undefined) {
     throw new Error('This converted extension read Calendar field ' + __str(field) + ', which Yorozo does not model.');
   }
-  return read(new Date(this.millis));
+  return read(this.__local());
 };
 
 __KCalendar.prototype.set = function (field, value) {
-  var when = new Date(this.millis);
+  var when = this.__local();
   var number = Number(field);
   if (number === 1) when.setUTCFullYear(Number(value));
   else if (number === 2) when.setUTCMonth(Number(value));
@@ -1638,7 +1605,7 @@ __KCalendar.prototype.set = function (field, value) {
   else {
     throw new Error('This converted extension set Calendar field ' + __str(field) + ', which Yorozo does not model.');
   }
-  this.millis = when.getTime();
+  this.__resolve(when);
 };
 
 __KCalendar.prototype.add = function (field, amount) {
@@ -1648,24 +1615,52 @@ __KCalendar.prototype.add = function (field, amount) {
     this.millis += step * Number(amount);
     return;
   }
-  // Years and months are not a fixed number of milliseconds, so they move the
-  // calendar field itself and let the Date normalise the overflow — which is
-  // what java.util.Calendar.add does.
-  var when = new Date(this.millis);
-  if (number === 1) when.setUTCFullYear(when.getUTCFullYear() + Number(amount));
-  else if (number === 2) when.setUTCMonth(when.getUTCMonth() + Number(amount));
-  else {
+  // Days, months and years are not a fixed number of milliseconds, so they move
+  // the wall clock. A month or a year CLAMPS the day — January 31st plus a
+  // month is February 29th in a leap year, as java.util.Calendar.add has it —
+  // where letting a Date normalise the overflow would answer March 2nd.
+  var when = this.__local();
+  var step = Math.trunc(Number(amount));
+  if (number === 5 || number === 6 || number === 7) {
+    when.setUTCDate(when.getUTCDate() + step);
+  } else if (number === 1 || number === 2) {
+    var moved = __addMonths(when.getUTCFullYear(), when.getUTCMonth() + 1, when.getUTCDate(),
+      number === 1 ? step * 12 : step);
+    var wall = when.getTime() - __fdiv(when.getTime(), __MS_PER_DAY) * __MS_PER_DAY;
+    when = new Date(__epochDayOf(moved[0], moved[1], moved[2]) * __MS_PER_DAY + wall);
+  } else {
     throw new Error('This converted extension moved Calendar field ' + __str(field) + ', which Yorozo does not model.');
   }
-  this.millis = when.getTime();
+  this.__resolve(when);
+};
+
+/*
+ * 'getDisplayName(Calendar.DAY_OF_WEEK, Calendar.LONG, Locale.US)' — the name
+ * of today, which a weekly-schedule source builds its url from. English, and a
+ * named refusal for another language (see __requireEnglish); null for a field
+ * with no names, as java.util answers.
+ */
+__KCalendar.prototype.getDisplayName = function (field, style, locale) {
+  var local = this.__local();
+  var form = Number(style) === 1 || Number(style) === 32769 ? 'SHORT' : 'FULL';
+  if (Number(field) === 7) return __englishName(__DAY_NAMES[(local.getUTCDay() + 6) % 7], form, locale);
+  if (Number(field) === 2) return __englishName(__MONTH_NAMES[local.getUTCMonth()], form, locale);
+  return null;
 };
 
 __KCalendar.prototype.getTime = function () { return __kDate(this.millis); };
 __KCalendar.prototype.setTime = function (value) { this.millis = __millisOf(value); };
 __KCalendar.prototype.getTimeInMillis = function () { return this.millis; };
 __KCalendar.prototype.setTimeInMillis = function (value) { this.millis = Number(value); };
-__KCalendar.prototype.clone = function () { return new __KCalendar(this.millis); };
-__KCalendar.prototype.setTimeZone = function () {};
+__KCalendar.prototype.clone = function () { return new __KCalendar(this.millis, this.__zone); };
+/* The instant stays; the fields read differently from here on — java.util's. */
+__KCalendar.prototype.setTimeZone = function (zone) { this.__zone = __timeZoneRules(zone); };
+__KCalendar.prototype.getTimeZone = function () { return __timeZone(this.__zone.id, this.__zone); };
+
+Object.defineProperty(__KCalendar.prototype, 'timeZone', {
+  get: function () { return this.getTimeZone(); },
+  set: function (value) { this.setTimeZone(value); }
+});
 
 Object.defineProperty(__KCalendar.prototype, 'time', {
   get: function () { return __kDate(this.millis); },
@@ -1684,7 +1679,15 @@ var Calendar = {
   JANUARY: 0, FEBRUARY: 1, MARCH: 2, APRIL: 3, MAY: 4, JUNE: 5,
   JULY: 6, AUGUST: 7, SEPTEMBER: 8, OCTOBER: 9, NOVEMBER: 10, DECEMBER: 11,
   SUNDAY: 1, MONDAY: 2, TUESDAY: 3, WEDNESDAY: 4, THURSDAY: 5, FRIDAY: 6, SATURDAY: 7,
-  getInstance: function () { return new __KCalendar(Date.now()); }
+  AM_PM: 9, AM: 0, PM: 1, ALL_STYLES: 0, SHORT: 1, LONG: 2, SHORT_FORMAT: 1, LONG_FORMAT: 2,
+  // 'getInstance()', '(zone)', '(locale)' or '(zone, locale)'; the locale
+  // changes nothing a field reader answers, so only a zone is looked for.
+  getInstance: function (a, b) {
+    var zone = null;
+    if (a !== null && a !== undefined && !(a instanceof Locale)) zone = __timeZoneRules(a);
+    else if (b !== null && b !== undefined && !(b instanceof Locale)) zone = __timeZoneRules(b);
+    return new __KCalendar(Date.now(), zone);
+  }
 };
 
 /**
@@ -2355,8 +2358,23 @@ var __k = {
     return sign + magnitude.toFixed(digits) + ' ' + units[unit];
   },
 
-  /** Wall-clock milliseconds, matching System.currentTimeMillis(). */
-  now: function () { return Date.now(); },
+  /**
+   * 'X.now(…)', dispatched on X.
+   *
+   * 'now' is a member of every java.time type and of kotlin.time's Clock, and
+   * each answers its own kind of value: 'LocalDate.now(zone)' is a date,
+   * 'Instant.now()' an instant, 'Clock.System.now()' an instant again. The
+   * emitter reaches this helper by name for all of them, so the receiver
+   * decides; answering a bare millisecond count for each made
+   * 'LocalDateTime.now().year' undefined and 'Instant.now().toEpochMilli()' a
+   * call on a number. Wall-clock milliseconds only for a receiver with no 'now'.
+   */
+  now: function (receiver) {
+    if (receiver !== null && receiver !== undefined && typeof receiver.now === 'function') {
+      return receiver.now.apply(receiver, Array.prototype.slice.call(arguments, 1));
+    }
+    return Date.now();
+  },
 
   /**
    * '.rateLimit(permits, period)' on an okhttp client builder.
@@ -2736,6 +2754,24 @@ var __k = {
     );
   },
 
+  /**
+   * 'toCollection(destination)': every element added, in order, to a
+   * collection the caller already holds — and that collection answered, not a
+   * copy, because the idiom is a loop appending page after page onto one list.
+   *
+   * Through '__k.add', so a Set destination keeps its own de-duplication and a
+   * Map destination takes pairs, exactly as Kotlin's MutableCollection.add
+   * would. A suspended upstream (a sequence whose 'map' was handed a suspending
+   * lambda) is awaited first.
+   */
+  toCollection: function (list, destination) {
+    return __then(list, function (items) {
+      var incoming = __arr(items);
+      for (var at = 0; at < incoming.length; at += 1) __k.add(destination, incoming[at]);
+      return destination;
+    });
+  },
+
   joinTo: function (list, buffer) {
     var rest = Array.prototype.slice.call(arguments, 2);
     var text = __k.joinToString.apply(null, [list].concat(rest));
@@ -2966,7 +3002,9 @@ var __k = {
   },
 
   /** Kotlin's list + x, where x may be a list or a single element. */
-  plus: function (list, other) {
+  plus: function (list, other, unit) {
+    // A date moved by an amount: 'zoned.plus(3, ChronoUnit.DAYS)'.
+    if (list !== null && list !== undefined && list.__kTime === true) return list.plus(other, unit);
     var items = __arr(list).slice();
     if (Array.isArray(other) || (other !== null && other !== undefined && typeof other !== 'string' &&
         typeof other[Symbol.iterator] === 'function')) {
@@ -4207,8 +4245,10 @@ var __k = {
    * emitter has no types, so the receiver decides — reading a list subtraction
    * as arithmetic would answer NaN.
    */
-  minus: function (value, other) {
+  minus: function (value, other, unit) {
     if (typeof value === 'number') return value - Number(other);
+    // And the same for a date: 'ZonedDateTime.now(zone).minus(n, unit)'.
+    if (value !== null && value !== undefined && value.__kTime === true) return value.minus(other, unit);
     if (value instanceof Set) {
       var removing = other instanceof Set || Array.isArray(other) ? __arr(other) : [other];
       var kept = new Set(value);
@@ -5471,24 +5511,8 @@ var __k = {
     }
   },
 
-  /**
-   * The name that replaced 'tryParse'.
-   *
-   * keiyoushi deprecated 'SimpleDateFormat.tryParse' in favour of
-   * 'tryParseDate' / 'tryParseDateTime' / 'tryParseZonedDateTime' on
-   * DateTimeFormatter, and the catalogue followed: MangaThemesia and Keyoapp
-   * both call it, which is 130 extensions between them.
-   *
-   * One helper for all three spellings. Upstream separates them by which
-   * fields the pattern carries — a date, a date and a time, or either plus a
-   * zone — and the reader below takes that from the pattern rather than from
-   * the method name, so the distinction is already made where it matters. All
-   * three answer epoch millis, and 0 for anything unreadable, which is what
-   * 'tryParse' already promised and what this ecosystem stores for 'no date'.
-   */
-  tryParseDate: function (format, text) {
-    return __k.tryParse(format, text);
-  },
+  /* 'tryParseDate' and its two siblings are java.time's, and live with it in
+     'kotlin-time.ts': each has its own meaning there, which is the point. */
 
   /**
    * keiyoushi's 'Element?.textOrNull()' — the element's text, with blank read
@@ -5622,46 +5646,7 @@ var Html = {
   }
 };
 
-/**
- * java.time's OffsetDateTime and Instant, for the one chain this ecosystem uses.
- *
- * 'OffsetDateTime.parse(x).toInstant().toEpochMilli()' is an upload date. An
- * unparseable value answers the epoch rather than NaN: 0 is what this ecosystem
- * stores for "no date", and the host renders it as no date at all — whereas NaN
- * reaches a date formatter and takes the episode list with it.
- */
-var Instant = {
-  ofEpochMilli: function (millis) { return __instant(Number(millis)); },
-  now: function () { return __instant(Date.now()); },
-  /*
-   * kotlinx-datetime's three readers of an ISO-8601 string, which this
-   * catalogue uses for an upload date more than any other spelling: 12 sources
-   * write 'Instant.tryParse(publishedAt)' and 6 more the 'parseOrNull' form.
-   *
-   * They differ only in what an unreadable string does. 'parse' throws — the
-   * caller wrapped it in a try or meant to — 'parseOrNull' answers null, and
-   * keiyoushi's own 'tryParse' answers 0L, because its callers assign it
-   * straight to 'date_upload' where 0 means "no date".
-   */
-  parse: function (text) {
-    var at = Date.parse(__str(text));
-    if (!Number.isFinite(at)) {
-      throw new Error('This converted extension could not read ' + __str(text) + ' as a date.');
-    }
-    return __instant(at);
-  },
-  parseOrNull: function (text) {
-    var at = Date.parse(__str(text));
-    return Number.isFinite(at) ? __instant(at) : null;
-  },
-  tryParse: function (text) {
-    var at = Date.parse(__str(text));
-    return Number.isFinite(at) ? at : 0;
-  },
-  fromEpochMilliseconds: function (millis) { return __instant(Number(millis)); },
-  fromEpochSeconds: function (seconds) { return __instant(Number(seconds) * 1000); }
-};
-
+${KOTLIN_TIME}
 /**
  * okhttp's CacheControl, which the host's transport decides for itself.
  *
@@ -5689,28 +5674,6 @@ var CacheControl = {
     return builder;
   }
 };
-
-var OffsetDateTime = {
-  parse: function (text) {
-    var at = Date.parse(__str(text));
-    return __instant(Number.isFinite(at) ? at : 0);
-  }
-};
-
-var ZonedDateTime = OffsetDateTime;
-var LocalDateTime = OffsetDateTime;
-
-function __instant(millis) {
-  var value = {
-    toInstant: function () { return value; },
-    toEpochMilli: function () { return millis; },
-    toEpochMilliseconds: function () { return millis; },
-    epochSeconds: Math.floor(millis / 1000),
-    toEpochSeconds: function () { return Math.floor(millis / 1000); },
-    toString: function () { return new Date(millis).toISOString(); }
-  };
-  return value;
-}
 
 /* --- the shapes a '@Serializable' class registers -------------------------- */
 
@@ -6221,33 +6184,168 @@ var FormBody = {
               : encodeURIComponent(pairs[i][0]) + '=' + encodeURIComponent(pairs[i][1])
           );
         }
-        return {
-          __kBody: true,
-          contentType: 'application/x-www-form-urlencoded; charset=utf-8',
-          text: parts.join('&')
-        };
+        return __requestBody('application/x-www-form-urlencoded; charset=utf-8', parts.join('&'));
       }
     };
     return builder;
   }
 };
 
+/**
+ * A request body: its content type and the text the host transport sends.
+ *
+ * A constructor rather than a literal so every body answers okhttp's
+ * 'contentLength()' — which the catalogue reads to write a Content-Length
+ * header by hand — in BYTES, as okhttp counts it, rather than in characters.
+ */
+function __RequestBody(contentType, text) {
+  this.__kBody = true;
+  this.contentType = contentType;
+  this.text = text;
+}
+__RequestBody.prototype.contentLength = function () {
+  return __host().text.encode(__str(this.text)).length;
+};
+
+function __requestBody(contentType, text) {
+  return new __RequestBody(contentType === undefined ? null : contentType, __str(text));
+}
+
 /** A body, whatever shape the extension built it in. */
 function __bodyOf(body) {
   if (body === null || body === undefined) return null;
-  if (body.__kBody === true) return body;
-  if (typeof body === 'string') return { __kBody: true, contentType: null, text: body };
-  if (typeof body.text === 'string') return { __kBody: true, contentType: body.contentType || null, text: body.text };
-  return { __kBody: true, contentType: 'application/json; charset=utf-8', text: JSON.stringify(body) };
+  if (body instanceof __RequestBody) return body;
+  if (body.__kBody === true) return __requestBody(body.contentType, body.text);
+  if (typeof body === 'string') return __requestBody(null, body);
+  if (typeof body.text === 'string') return __requestBody(body.contentType || null, body.text);
+  return __requestBody('application/json; charset=utf-8', JSON.stringify(body));
 }
 
-function __kRequest(method, url, headers, body) {
-  return {
+/**
+ * okhttp's MultipartBody, for a form an extension posts the way a browser
+ * would post a file-upload form: 'MultipartBody.Builder().setType(FORM)
+ * .addFormDataPart("page", "2").build()'.
+ *
+ * The parts are text, because the host transport carries text. A part built
+ * from bytes is taken when those bytes are UTF-8 — the same test a response
+ * body gets in 'toResponseBody' — and refused by name when they are not,
+ * rather than sent mangled.
+ */
+var MultipartBody = {
+  FORM: 'multipart/form-data',
+  MIXED: 'multipart/mixed',
+  ALTERNATIVE: 'multipart/alternative',
+  DIGEST: 'multipart/digest',
+  PARALLEL: 'multipart/parallel',
+  Builder: function (boundary) {
+    var mark = boundary === undefined || boundary === null
+      ? 'yorozo-' + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2)
+      : __str(boundary);
+    var type = 'multipart/mixed';
+    var parts = [];
+    function textOf(body) {
+      if (body === null || body === undefined) return { type: null, text: '' };
+      if (typeof body === 'string') return { type: null, text: body };
+      var made = __bodyOf(body);
+      return { type: made.contentType, text: made.text };
+    }
+    function quoted(value) { return __str(value).replace(/"/g, '%22').replace(/\\r/g, '%0D').replace(/\\n/g, '%0A'); }
+    var builder = {
+      setType: function (value) { type = __str(value); return builder; },
+      addFormDataPart: function (name, a, b) {
+        var disposition = 'form-data; name="' + quoted(name) + '"';
+        if (b === undefined) {
+          parts.push({ headers: ['Content-Disposition: ' + disposition], text: __str(a) });
+          return builder;
+        }
+        if (a !== null && a !== undefined) disposition += '; filename="' + quoted(a) + '"';
+        var body = textOf(b);
+        var headers = ['Content-Disposition: ' + disposition];
+        if (body.type !== null) headers.push('Content-Type: ' + body.type);
+        parts.push({ headers: headers, text: body.text });
+        return builder;
+      },
+      addPart: function (a, b) {
+        var body = textOf(b === undefined ? a : b);
+        var headers = [];
+        if (b !== undefined && a !== null && a !== undefined) {
+          __headerPairs(a).forEach(function (pair) { headers.push(pair[0] + ': ' + pair[1]); });
+        }
+        if (body.type !== null) headers.push('Content-Type: ' + body.type);
+        parts.push({ headers: headers, text: body.text });
+        return builder;
+      },
+      build: function () {
+        if (parts.length === 0) throw new Error('Multipart body must have at least one part.');
+        var text = '';
+        for (var i = 0; i < parts.length; i += 1) {
+          text += '--' + mark + '\\r\\n' + parts[i].headers.join('\\r\\n') + '\\r\\n\\r\\n' + parts[i].text + '\\r\\n';
+        }
+        text += '--' + mark + '--\\r\\n';
+        return __requestBody(type + '; boundary=' + mark, text);
+      }
+    };
+    return builder;
+  }
+};
+
+/**
+ * okhttp's Request.
+ *
+ * 'url' is an HttpUrl, as okhttp's is, and not the string it used to be here:
+ * the catalogue reads 'response.request.url.pathSegments', '.fragment',
+ * '.queryParameter("id")' and '.host' about six hundred times, and every one
+ * of those was undefined on a string — a wrong value, with nothing refused. It
+ * prints as exactly the text it was built from, so a template, a 'GET(…)' and
+ * the host transport all see the same url they always did.
+ *
+ * 'tag' is okhttp's per-request label, which an extension sets on the request
+ * and reads back off 'response.request' to know which of its requests this was.
+ */
+function __kRequest(method, url, headers, body, tags) {
+  var request = {
     method: method,
-    url: __str(url),
+    url: __urlOfRequest(url),
     headers: __headersObject(__headerPairs(headers)),
     body: __bodyOf(body)
   };
+  var labels = tags === undefined || tags === null ? new Map() : tags;
+  Object.defineProperty(request, '__tags', { value: labels, enumerable: false });
+  Object.defineProperty(request, 'header', {
+    value: function (name) { return request.headers.get(name); },
+    enumerable: false
+  });
+  Object.defineProperty(request, 'tag', {
+    value: function (type) { return __readTag(labels, type); },
+    enumerable: false
+  });
+  Object.defineProperty(request, 'isHttps', {
+    get: function () { return request.url.scheme === 'https'; },
+    enumerable: false
+  });
+  Object.defineProperty(request, 'newBuilder', {
+    value: function () { return __requestBuilder(request.method, request.url, request.headers, request.body, labels); },
+    enumerable: false
+  });
+  return request;
+}
+
+function __urlOfRequest(value) {
+  if (value !== null && value !== undefined && typeof value === 'object' && value.__kUrl === true) return value;
+  var text = __str(value);
+  return __httpUrlOf(text, true);
+}
+
+/*
+ * A tag's key. okhttp keys a tag by its Class; 'String::class.java' reaches
+ * here as whatever the emitter made of the class — a constructor or a name —
+ * so the key is that value's own identity, and the untyped 'tag(value)' form
+ * is keyed as Object, which is what okhttp does with it.
+ */
+var __OBJECT_TAG = { name: 'Object' };
+function __readTag(labels, type) {
+  var key = type === undefined ? __OBJECT_TAG : type;
+  return labels.has(key) ? labels.get(key) : null;
 }
 
 function GET(url, headers, cache) { return __kRequest('GET', url, headers, null); }
@@ -6256,35 +6354,67 @@ function PUT(url, headers, body) { return __kRequest('PUT', url, headers, body);
 function DELETE(url, headers, body) { return __kRequest('DELETE', url, headers, body); }
 function HEAD(url, headers) { return __kRequest('HEAD', url, headers, null); }
 
+/**
+ * okhttp's Request.Builder — for a request built from nothing, and for
+ * 'request.newBuilder()', which is how an interceptor changes the request it
+ * was handed before proceeding with it.
+ *
+ * The cache setting is the host's to decide (see CacheControl), so it is
+ * accepted and changes nothing; everything else is carried.
+ */
+function __requestBuilder(method, url, headers, body, tags) {
+  var labels = new Map(tags === undefined || tags === null ? [] : tags);
+  var builder = {
+    url: function (value) { url = value; return builder; },
+    headers: function (value) { headers = value || {}; return builder; },
+    header: function (name, value) {
+      var wanted = String(name).toLowerCase();
+      var next = __headerPairs(headers).filter(function (pair) { return pair[0].toLowerCase() !== wanted; });
+      next.push([String(name), __str(value)]);
+      headers = __headersObject(next);
+      return builder;
+    },
+    addHeader: function (name, value) {
+      var next = __headerPairs(headers);
+      next.push([String(name), __str(value)]);
+      headers = __headersObject(next);
+      return builder;
+    },
+    removeHeader: function (name) {
+      var wanted = String(name).toLowerCase();
+      headers = __headersObject(__headerPairs(headers).filter(function (pair) {
+        return pair[0].toLowerCase() !== wanted;
+      }));
+      return builder;
+    },
+    method: function (value, valueBody) {
+      method = String(value).toUpperCase();
+      body = valueBody === undefined ? null : valueBody;
+      return builder;
+    },
+    get: function () { method = 'GET'; body = null; return builder; },
+    head: function () { method = 'HEAD'; body = null; return builder; },
+    post: function (value) { method = 'POST'; body = value; return builder; },
+    put: function (value) { method = 'PUT'; body = value; return builder; },
+    patch: function (value) { method = 'PATCH'; body = value; return builder; },
+    delete: function (value) { method = 'DELETE'; body = value || null; return builder; },
+    cacheControl: function () { return builder; },
+    /* 'tag(value)', or 'tag(type, value)'; a null value removes the tag. */
+    tag: function (a, b) {
+      var key = b === undefined ? __OBJECT_TAG : a;
+      var value = b === undefined ? a : b;
+      if (value === null || value === undefined) labels.delete(key);
+      else labels.set(key, value);
+      return builder;
+    },
+    build: function () { return __kRequest(method, url, headers, body, labels); }
+  };
+  return builder;
+}
+
 /** okhttp's Request.Builder, for extensions that need a request body. */
 var Request = {
-  Builder: function () {
-    var method = 'GET';
-    var url = '';
-    var headers = {};
-    var body = null;
-    var builder = {
-      url: function (value) { url = __str(value); return builder; },
-      headers: function (value) { headers = value || {}; return builder; },
-      addHeader: function (name, value) {
-        var next = __headerPairs(headers);
-        next.push([String(name), __str(value)]);
-        headers = __headersObject(next);
-        return builder;
-      },
-      method: function (value, valueBody) {
-        method = String(value).toUpperCase();
-        body = valueBody === undefined ? null : valueBody;
-        return builder;
-      },
-      get: function () { method = 'GET'; body = null; return builder; },
-      post: function (value) { method = 'POST'; body = value; return builder; },
-      put: function (value) { method = 'PUT'; body = value; return builder; },
-      delete: function (value) { method = 'DELETE'; body = value || null; return builder; },
-      build: function () { return __kRequest(method, url, headers, body); }
-    };
-    return builder;
-  }
+  Builder: function () { return __requestBuilder('GET', '', {}, null, null); }
 };
 
 /**
@@ -6295,7 +6425,7 @@ var Request = {
  * 'await' through arbitrary expression positions in the emitted code.
  */
 function __responseOf(raw, text, request) {
-  var finalUrl = __str(raw.url).length > 0 ? __str(raw.url) : request.url;
+  var finalUrl = __str(raw.url).length > 0 ? __str(raw.url) : __str(request.url);
 
   /*
    * okhttp's response.request is the request that PRODUCED this response — the
@@ -6304,9 +6434,9 @@ function __responseOf(raw, text, request) {
    * already had, which is the one thing that expression is never asked for: it
    * is how this ecosystem resolves a redirect to its destination.
    */
-  var finalRequest = finalUrl === request.url
+  var finalRequest = finalUrl === __str(request.url)
     ? request
-    : Object.assign({}, request, { url: finalUrl });
+    : __kRequest(request.method, finalUrl, request.headers, request.body, request.__tags);
 
   /*
    * A body the host declined to read is not an empty body.
@@ -6325,6 +6455,9 @@ function __responseOf(raw, text, request) {
 
   var response = {
     code: raw.status,
+    /* okhttp's reason phrase. HTTP/2 has none and okhttp answers '' there,
+       which is also what a host that does not report one answers here. */
+    message: __str(raw.message),
     isSuccessful: raw.status >= 200 && raw.status < 300,
     request: finalRequest,
     url: finalUrl,
@@ -6332,7 +6465,8 @@ function __responseOf(raw, text, request) {
     body: {
       string: function () { return read(); },
       bytes: function () { return __host().text.encode(read()); },
-      contentLength: function () { return read().length; },
+      // In bytes, which is what okhttp counts and what 'bytes()' answers.
+      contentLength: function () { return __host().text.encode(read()).length; },
       /*
        * okhttp's ResponseBody.contentType(), which is the header verbatim.
        *
@@ -6344,6 +6478,9 @@ function __responseOf(raw, text, request) {
        * charset away would answer a question the extension did not ask.
        */
       contentType: function () {
+        // A body an interceptor built with 'toResponseBody(type)' carries its
+        // own, as okhttp's does; the header is what it falls back on.
+        if (raw.bodyType !== null && raw.bodyType !== undefined) return raw.bodyType;
         var headers = raw.headers || {};
         for (var key in headers) {
           if (Object.prototype.hasOwnProperty.call(headers, key) && key.toLowerCase() === 'content-type') {
@@ -6364,7 +6501,30 @@ function __responseOf(raw, text, request) {
       return __parseDoc(html === undefined || html === null ? read() : String(html), finalUrl);
     },
     parseAs: function (descriptor) { return __k.decode(descriptor, read()); },
-    peekBody: function () { return response.body; },
+    /*
+     * okhttp's 'peekBody(byteCount)': at most that many BYTES of the body,
+     * without consuming it. The whole body was read already, so peeking costs
+     * nothing — but the limit is honoured, because a check written as
+     * 'peekBody(15).string() == "<!DOCTYPE html>"' is asking about the first
+     * fifteen bytes and nothing past them.
+     */
+    peekBody: function (byteCount) {
+      var limit = Number(byteCount);
+      var whole = read();
+      var text = whole;
+      if (Number.isFinite(limit) && limit >= 0 && limit < whole.length * 4) {
+        var bytes = __host().text.encode(whole);
+        if (limit < bytes.length) text = __host().text.decode(bytes.slice(0, limit));
+      }
+      return {
+        string: function () { return text; },
+        bytes: function () { return __host().text.encode(text); },
+        contentLength: function () { return __host().text.encode(text).length; },
+        contentType: function () { return response.body.contentType(); },
+        close: function () {},
+        closeQuietly: function () {}
+      };
+    },
     close: function () {},
     /* okhttp's 'Response.closeQuietly()' — the same nothing as 'close', since
        the host buffered the body before this object existed. */
@@ -6381,11 +6541,13 @@ function __responseOf(raw, text, request) {
      */
     newBuilder: function () {
       var nextCode = raw.status;
+      var nextMessage = raw.message;
       var nextHeaders = raw.headers;
       var nextText = null;
+      var nextType = raw.bodyType;
       var made = {
         code: function (value) { nextCode = Number(value); return made; },
-        message: function () { return made; },
+        message: function (value) { nextMessage = __str(value); return made; },
         request: function () { return made; },
         protocol: function () { return made; },
         header: function (name, value) {
@@ -6414,12 +6576,24 @@ function __responseOf(raw, text, request) {
           return made;
         },
         headers: function (value) { nextHeaders = value || {}; return made; },
+        /* What 'toResponseBody' built, another response's 'body', or text. A
+           body object stringified would be '[object Object]' on the page. */
         body: function (value) {
-          nextText = value === null || value === undefined ? '' : __str(value);
+          if (value === null || value === undefined) nextText = '';
+          else if (value.__kBody === true) {
+            nextText = __str(value.text);
+            if (value.contentType !== null && value.contentType !== undefined) nextType = __str(value.contentType);
+          } else if (typeof value.string === 'function') nextText = __str(value.string());
+          else nextText = __str(value);
           return made;
         },
         build: function () {
-          var next = Object.assign({}, raw, { status: nextCode, headers: nextHeaders });
+          var next = Object.assign({}, raw, {
+            status: nextCode,
+            message: nextMessage,
+            headers: nextHeaders,
+            bodyType: nextType
+          });
           return __responseOf(next, nextText === null ? text : nextText, request);
         }
       };
@@ -6454,7 +6628,7 @@ async function __execute(request, follow) {
   // this runtime's business rather than the host's — see ABI.md, 'follow:
   // false — reading a redirect instead of taking it'.
   if (follow === false) options.follow = false;
-  var raw = await __host().http.send(request.url, options);
+  var raw = await __host().http.send(__str(request.url), options);
   return __responseOf(raw, await raw.text(), request);
 }
 
@@ -6541,10 +6715,33 @@ var __cookieJar = {
  * changed. The flag is therefore carried into the request, where ctx.http turns
  * it into the host's 'follow: false'.
  */
-function __clientBuilder(follow, inherited) {
+function __clientBuilder(follow, inherited, inheritedCookies) {
   var redirects = follow;
   var chain = (inherited || []).slice();
+  var cookies = (inheritedCookies || []).slice();
   var builder = {
+    /*
+     * keiyoushi's 'addCookie', which is how an age gate or a reading mode is
+     * switched on: 'addCookie("is_mature" to "true")'. Upstream installs a
+     * NETWORK interceptor that writes a Cookie header on every request to the
+     * source's host (or the domain given), merging with one already there —
+     * and also writes the cookie into Android's shared CookieManager.
+     *
+     * The header is what this does, and it is a request header the plugin
+     * sets on its own requests: nothing here reads a jar. The CookieManager
+     * write is not done and cannot be: it is the host's store, which ADR-0005
+     * keeps out of a plugin's reach in both directions, and what it bought
+     * upstream was the cookie on requests the plugin does not make — a
+     * WebView, the app's own image loader. Those are the host's here.
+     *
+     * The domain is resolved per request, as upstream resolves it, so a
+     * source whose base url is a preference follows the preference.
+     */
+    addCookie: function (a, b) {
+      if (b === undefined) cookies.push({ domain: null, cookies: a });
+      else cookies.push({ domain: a, cookies: b });
+      return builder;
+    },
     /* Kept in written order, which is the order okhttp runs them in: the first
        one added is the outermost, and it sees the request before the ones
        after it and the response after them. */
@@ -6586,8 +6783,8 @@ function __clientBuilder(follow, inherited) {
       /* The shared client only when nothing was changed: an extension that
          built one to install an interceptor must not get the one everything
          else uses. */
-      if (redirects !== false && chain.length === 0) return client;
-      return __clientWith(redirects !== false, chain);
+      if (redirects !== false && chain.length === 0 && cookies.length === 0) return client;
+      return __clientWith(redirects !== false, chain, cookies);
     }
   };
   return builder;
@@ -6612,12 +6809,16 @@ function __clientBuilder(follow, inherited) {
  *   sees it, so an interceptor that wraps the source of a body rather than its
  *   bytes has nothing to wrap.
  */
-async function __proceed(request, chain, index, follow) {
-  if (index >= chain.length) return await __execute(request, follow);
+async function __proceed(request, chain, index, follow, cookies) {
+  // A request a suspending member built — 'pageListRequest' that fetched a
+  // page to find an id first — arrives as a promise of one. Kotlin would
+  // have finished building it before the call; so does this.
+  if (__thenable(request)) request = await request;
+  if (index >= chain.length) return await __execute(__withCookies(request, cookies), follow);
   var interceptor = chain[index];
   var link = {
     request: function () { return request; },
-    proceed: function (next) { return __proceed(next, chain, index + 1, follow); },
+    proceed: function (next) { return __proceed(next, chain, index + 1, follow, cookies); },
     /* okhttp hands the chain the call and the connection. The call is the
        request this one is wrapping; there is no connection, and a source that
        asks for one is asking about a socket this build does not have. */
@@ -6644,23 +6845,79 @@ async function __proceed(request, chain, index, follow) {
   return answer;
 }
 
+/**
+ * The Cookie header 'addCookie' asks for, merged into a request the way
+ * upstream's CookieInterceptor merges it: the first rule whose domain matches
+ * the request's host (or a subdomain of it) wins; a cookie already on the
+ * request under the same name is replaced; and a request already carrying all
+ * of them is sent unchanged.
+ */
+function __withCookies(request, rules) {
+  if (rules === undefined || rules === null || rules.length === 0) return request;
+  var host = request.url.host;
+  var chosen = null;
+  for (var i = 0; i < rules.length && chosen === null; i += 1) {
+    var domain = rules[i].domain === null ? __sourceHost() : __str(rules[i].domain());
+    if (host === domain || host.endsWith('.' + domain)) chosen = __cookiePairs(rules[i].cookies);
+  }
+  if (chosen === null) return request;
+  var existing = __str(request.headers.get('Cookie'));
+  var written = existing.length === 0 ? [] : existing.split('; ');
+  var wanted = chosen.map(function (pair) { return pair[0] + '=' + pair[1]; });
+  if (wanted.every(function (one) { return written.indexOf(one) !== -1; })) return request;
+  var kept = written.filter(function (one) {
+    return !chosen.some(function (pair) { return one.indexOf(pair[0] + '=') === 0; });
+  });
+  return request.newBuilder().header('Cookie', kept.concat(wanted).join('; ')).build();
+}
+
+/** A Pair, a list of Pairs, or a function answering either — as name/value rows. */
+function __cookiePairs(value) {
+  var given = typeof value === 'function' ? value() : value;
+  if (given === null || given === undefined) return [];
+  var list = Array.isArray(given) && given.first !== undefined ? [given] : __arr(given);
+  return list.map(function (pair) {
+    return Array.isArray(pair) ? [__str(pair[0]), __str(pair[1])] : [__str(pair.first), __str(pair.second)];
+  });
+}
+
+/*
+ * The host of the source the bundle serves — upstream's 'source.baseUrl',
+ * read when a request is made rather than when the client is built, because a
+ * property initialiser runs before the entry has finished constructing it.
+ */
+function __sourceHost() {
+  var base = null;
+  try {
+    base = typeof __source === 'undefined' || __source === null ? null : __source.baseUrl;
+  } catch (error) {
+    base = null;
+  }
+  if ((base === null || base === undefined) && typeof __BASE_URL !== 'undefined') base = __BASE_URL;
+  if (base === null || base === undefined) {
+    throw new Error('This converted extension set a cookie for its own site, and has no base url to take the site from.');
+  }
+  return __httpUrlOf(__str(base)).host;
+}
+
 /** A client, and the redirect policy every call it makes carries. */
-function __clientWith(follow, interceptors) {
+function __clientWith(follow, interceptors, cookieRules) {
   var chain = interceptors || [];
+  var cookies = cookieRules || [];
   var made = {
     interceptors: chain,
     newCall: function (request) {
       return {
-        execute: function () { return __proceed(request, chain, 0, follow); },
-        await: function () { return __proceed(request, chain, 0, follow); },
+        execute: function () { return __proceed(request, chain, 0, follow, cookies); },
+        await: function () { return __proceed(request, chain, 0, follow, cookies); },
         /* The Rx-era doors onto the same two calls. 238 members in one
            catalogue are written as
            'client.newCall(r).asObservableSuccess().map { … }', so these are
            the entry point for most of this ecosystem's older half. */
-        asObservable: function () { return __observable(__proceed(request, chain, 0, follow)); },
+        asObservable: function () { return __observable(__proceed(request, chain, 0, follow, cookies)); },
         asObservableSuccess: function () { return __observable(this.awaitSuccess()); },
         awaitSuccess: async function () {
-          var response = await __proceed(request, chain, 0, follow);
+          var response = await __proceed(request, chain, 0, follow, cookies);
           if (!response.isSuccessful) {
             throw new Error('This source answered ' + response.code + ' for ' + request.url + '.');
           }
@@ -6673,7 +6930,7 @@ function __clientWith(follow, interceptors) {
         stop: function () {}
       };
     },
-    newBuilder: function () { return __clientBuilder(follow, chain); },
+    newBuilder: function () { return __clientBuilder(follow, chain, cookies); },
     cookieJar: __cookieJar
   };
   return made;
@@ -6701,7 +6958,7 @@ var network = {
  * a source signed stops verifying. Only parameters this builder adds are
  * encoded, because only those arrived as plain text.
  */
-function __httpUrlOf(value) {
+function __httpUrlOf(value, keepText) {
   var text = __str(value);
   var parts = /^([a-zA-Z][a-zA-Z0-9+.-]*:)?(\\/\\/[^/?#]*)?([^?#]*)(\\?[^#]*)?(#.*)?$/.exec(text);
   var scheme = parts[1] === undefined ? '' : parts[1];
@@ -6721,10 +6978,31 @@ function __httpUrlOf(value) {
     }
   }
 
-  return __httpUrlValue(scheme, authority, path, pairs, fragment);
+  return __httpUrlValue(scheme, authority, path, pairs, fragment, keepText === true ? text : null);
 }
 
-function __httpUrlValue(scheme, authority, path, pairs, fragment) {
+/*
+ * The parts of an authority: 'user:pass@host:port'. okhttp spells the default
+ * port for the scheme when none is written.
+ */
+function __authorityParts(scheme, authority) {
+  var bare = authority.replace(/^\\/\\//, '');
+  var at = bare.lastIndexOf('@');
+  var userinfo = at === -1 ? '' : bare.slice(0, at);
+  var hostport = at === -1 ? bare : bare.slice(at + 1);
+  var port = /:([0-9]+)$/.exec(hostport);
+  var colon = userinfo.indexOf(':');
+  var named = scheme.replace(/:$/, '').toLowerCase();
+  return {
+    user: colon === -1 ? userinfo : userinfo.slice(0, colon),
+    password: colon === -1 ? '' : userinfo.slice(colon + 1),
+    host: port === null ? hostport : hostport.slice(0, port.index),
+    port: port === null ? (named === 'https' ? 443 : (named === 'http' ? 80 : -1)) : Number(port[1]),
+    written: port !== null
+  };
+}
+
+function __httpUrlValue(scheme, authority, path, pairs, fragment, original) {
   function decode(part) {
     try {
       return decodeURIComponent(String(part).replace(/\\+/g, ' '));
@@ -6741,9 +7019,46 @@ function __httpUrlValue(scheme, authority, path, pairs, fragment) {
     // out with an empty 'cid' and the source answered 63 bytes.
     fragment: fragment.replace(/^#/, '') || null,
     encodedFragment: fragment.replace(/^#/, '') || null,
-    host: authority.replace(/^\\/\\//, '').replace(/^[^@]*@/, '').replace(/:[0-9]+$/, ''),
+    __kUrl: true,
+    host: __authorityParts(scheme, authority).host,
+    port: __authorityParts(scheme, authority).port,
+    username: decode(__authorityParts(scheme, authority).user),
+    password: decode(__authorityParts(scheme, authority).password),
+    encodedUsername: __authorityParts(scheme, authority).user,
+    encodedPassword: __authorityParts(scheme, authority).password,
+    isHttps: scheme.replace(/:$/, '').toLowerCase() === 'https',
     encodedPath: path,
+    // okhttp keeps an empty last segment ('/a/' is ['a', '']) — pathSize and
+    // removePathSegment count it — but this runtime has always answered the
+    // segments WITHOUT empties, and the catalogue reads '.last()' of them to
+    // mean the last real one. That reading is kept; pathSize follows it.
     pathSegments: path.split('/').filter(function (segment) { return segment.length > 0; }),
+    encodedPathSegments: path.split('/').filter(function (segment) { return segment.length > 0; }),
+    pathSize: path.split('/').filter(function (segment) { return segment.length > 0; }).length,
+    // android.net.Uri's readers, over the same parse: 'Uri.parse(u).path'.
+    path: decode(path.replace(/\\+/g, '%2B')),
+    lastPathSegment: (function () {
+      var segments = path.split('/').filter(function (segment) { return segment.length > 0; });
+      return segments.length === 0 ? null : decode(segments[segments.length - 1].replace(/\\+/g, '%2B'));
+    }()),
+    authority: authority.replace(/^\\/\\//, '') || null,
+    encodedQuery: pairs.length === 0 && original === null ? null : __joinQuery(pairs),
+    query: pairs.length === 0 && original === null ? null : pairs.map(function (pair) {
+      return pair[1] === null ? decode(pair[0]) : decode(pair[0]) + '=' + decode(pair[1]);
+    }).join('&'),
+    querySize: pairs.length,
+    queryParameterValues: function (name) {
+      var values = [];
+      for (var i = 0; i < pairs.length; i += 1) {
+        if (decode(pairs[i][0]) === String(name)) values.push(pairs[i][1] === null ? null : decode(pairs[i][1]));
+      }
+      return values;
+    },
+    queryParameterName: function (index) { return decode(pairs[Number(index)][0]); },
+    queryParameterValue: function (index) {
+      var value = pairs[Number(index)][1];
+      return value === null ? null : decode(value);
+    },
     queryParameter: function (name) {
       for (var i = 0; i < pairs.length; i += 1) {
         if (decode(pairs[i][0]) === String(name)) return pairs[i][1] === null ? null : decode(pairs[i][1]);
@@ -6755,22 +7070,172 @@ function __httpUrlValue(scheme, authority, path, pairs, fragment) {
       for (var i = 0; i < pairs.length; i += 1) names.push(decode(pairs[i][0]));
       return names;
     },
+    /* Exactly the text it was parsed from, when it was parsed from one: a
+       request's url prints as the url the extension wrote, byte for byte. */
     toString: function () {
-      var written = [];
-      for (var i = 0; i < pairs.length; i += 1) {
-        written.push(pairs[i][1] === null ? pairs[i][0] : pairs[i][0] + '=' + pairs[i][1]);
-      }
-      return scheme + authority + path + (written.length > 0 ? '?' + written.join('&') : '') + fragment;
+      if (original !== null && original !== undefined) return original;
+      var written = __joinQuery(pairs);
+      return scheme + authority + path + (written.length > 0 ? '?' + written : '') + fragment;
     }
   };
+  // If the query was '?' with nothing after it, the parse has no pairs but
+  // okhttp's encodedQuery is '' rather than null.
+  if (original !== null && original !== undefined && url.encodedQuery !== null && original.indexOf('?') === -1) {
+    url.encodedQuery = null;
+    url.query = null;
+  }
   url.newBuilder = function () { return __httpUrlBuilder(scheme, authority, path, pairs.slice(), fragment); };
+  // android.net.Uri's name for the same builder.
+  url.buildUpon = url.newBuilder;
+  url.getQueryParameters = url.queryParameterValues;
   return url;
+}
+
+function __joinQuery(pairs) {
+  var written = [];
+  for (var i = 0; i < pairs.length; i += 1) {
+    written.push(pairs[i][1] === null ? pairs[i][0] : pairs[i][0] + '=' + pairs[i][1]);
+  }
+  return written.join('&');
 }
 
 function __httpUrlBuilder(scheme, authority, path, pairs, fragment) {
   function encode(value) { return encodeURIComponent(__str(value)); }
+  /* A whole query written as text: '&' and '=' stay separators, and what a
+     query may not carry is escaped — '#', a space — while an escape already
+     in it is left as written. */
+  function canonical(value) {
+    return __str(value).replace(/[^A-Za-z0-9\\-._~!$&'()*+,;=:@/?%]/g, function (ch) {
+      return encodeURIComponent(ch);
+    }).replace(/%(?![0-9A-Fa-f]{2})/g, '%25');
+  }
+  function splitQuery(text) {
+    var out = [];
+    var written = __str(text).split('&');
+    for (var i = 0; i < written.length; i += 1) {
+      var at = written[i].indexOf('=');
+      if (at === -1) out.push([written[i], null]);
+      else out.push([written[i].slice(0, at), written[i].slice(at + 1)]);
+    }
+    return out;
+  }
+  function segments() { return path.split('/').filter(function (segment) { return segment.length > 0; }); }
+  function authorityOf(parts) {
+    var userinfo = parts.user.length === 0 ? '' : parts.user + (parts.password.length === 0 ? '' : ':' + parts.password) + '@';
+    var named = scheme.replace(/:$/, '').toLowerCase();
+    var standard = (named === 'https' && parts.port === 443) || (named === 'http' && parts.port === 80);
+    return '//' + userinfo + parts.host + (parts.port === -1 || standard ? '' : ':' + parts.port);
+  }
 
   var builder = {
+    /* okhttp's setters for the parts before the path. */
+    scheme: function (value) {
+      var next = __str(value).toLowerCase();
+      if (next !== 'http' && next !== 'https') throw new Error('unexpected scheme: ' + next);
+      scheme = next + ':';
+      return builder;
+    },
+    host: function (value) {
+      var parts = __authorityParts(scheme, authority);
+      parts.host = __str(value);
+      authority = authorityOf(parts);
+      return builder;
+    },
+    port: function (value) {
+      var parts = __authorityParts(scheme, authority);
+      parts.port = Number(value);
+      authority = authorityOf(parts);
+      return builder;
+    },
+    username: function (value) {
+      var parts = __authorityParts(scheme, authority);
+      parts.user = encode(value);
+      authority = authorityOf(parts);
+      return builder;
+    },
+    password: function (value) {
+      var parts = __authorityParts(scheme, authority);
+      parts.password = encode(value);
+      authority = authorityOf(parts);
+      return builder;
+    },
+    encodedUsername: function (value) {
+      var parts = __authorityParts(scheme, authority);
+      parts.user = __str(value);
+      authority = authorityOf(parts);
+      return builder;
+    },
+    encodedPassword: function (value) {
+      var parts = __authorityParts(scheme, authority);
+      parts.password = __str(value);
+      authority = authorityOf(parts);
+      return builder;
+    },
+    /* 'encodedPath("/a/b")' replaces the whole path; okhttp insists on the
+       leading slash, and so does this rather than guessing where it went. */
+    encodedPath: function (value) {
+      var next = __str(value);
+      if (next.charAt(0) !== '/') throw new Error('unexpected encodedPath: ' + next);
+      path = next;
+      return builder;
+    },
+    /* 'removePathSegment(i)': the i-th segment gone, and '/' left when it was
+       the only one — okhttp's. */
+    removePathSegment: function (index) {
+      var kept = segments();
+      var at = Number(index);
+      if (!(at >= 0 && at < kept.length)) throw new Error('This converted extension removed path segment ' + at + ' of ' + kept.length + '.');
+      kept.splice(at, 1);
+      path = '/' + kept.join('/');
+      return builder;
+    },
+    /* 'query(text)' and 'encodedQuery(text)' replace the whole query; null
+       removes it. The first escapes what a query cannot carry, the second
+       takes the text as already escaped. */
+    query: function (value) {
+      pairs = value === null || value === undefined ? [] : splitQuery(canonical(value));
+      return builder;
+    },
+    encodedQuery: function (value) {
+      pairs = value === null || value === undefined ? [] : splitQuery(value);
+      return builder;
+    },
+    setEncodedQueryParameter: function (name, value) {
+      builder.removeAllEncodedQueryParameters(name);
+      return builder.addEncodedQueryParameter(name, value);
+    },
+    removeAllEncodedQueryParameters: function (name) {
+      var wanted = __str(name);
+      pairs = pairs.filter(function (pair) { return pair[0] !== wanted; });
+      return builder;
+    },
+    encodedFragment: function (value) {
+      fragment = value === null || value === undefined ? '' : '#' + __str(value);
+      return builder;
+    },
+    /* android.net.Uri.Builder, over the same parts: 'Uri.parse(u).buildUpon()
+       .appendQueryParameter("s", q)'. Uri.encode and encodeURIComponent leave
+       the same characters alone. */
+    appendQueryParameter: function (name, value) {
+      pairs.push([encode(name), value === null || value === undefined ? 'null' : encode(value)]);
+      return builder;
+    },
+    appendPath: function (segment) {
+      path = path.replace(/\\/$/, '') + '/' + encode(segment);
+      return builder;
+    },
+    appendEncodedPath: function (segment) {
+      var written = __str(segment);
+      path = path.replace(/\\/$/, '') + '/' + written.replace(/^\\//, '');
+      return builder;
+    },
+    path: function (value) {
+      path = __str(value).split('/').map(encode).join('/');
+      return builder;
+    },
+    clearQuery: function () { pairs = []; return builder; },
+    authority: function (value) { authority = '//' + encode(value).replace(/%3A/gi, ':').replace(/%40/g, '@'); return builder; },
+    encodedAuthority: function (value) { authority = '//' + __str(value); return builder; },
     addQueryParameter: function (name, value) {
       pairs.push([encode(name), value === null || value === undefined ? null : encode(value)]);
       return builder;
@@ -6874,14 +7339,45 @@ __k.toMediaType = function (value) { return __str(value); };
 __k.toRequestBody = function (value, contentType) {
   var type = contentType === undefined || contentType === null ? null : __str(contentType);
   if (typeof value === 'string' || value === null || value === undefined) {
-    return { __kBody: true, contentType: type, text: __str(value) };
+    return __requestBody(type, __str(value));
   }
   if (typeof Uint8Array !== 'undefined' && value instanceof Uint8Array) {
-    return { __kBody: true, contentType: type, text: __host().text.decode(value) };
+    return __requestBody(type, __host().text.decode(value));
   }
   throw new Error(
     'This converted extension built a request body out of something Yorozo cannot send as text. ' +
     'The host transport carries a string, so a binary body has no faithful spelling here.'
+  );
+};
+
+/**
+ * String.toResponseBody(contentType) and ByteArray.toResponseBody(…), which is
+ * what an interceptor hands 'response.newBuilder().body(…)' when it replaces
+ * what came back — an empty page for a search that answered 404, or a payload
+ * it decrypted.
+ *
+ * A response here is text: the host read the whole body before the plugin saw
+ * it, and every reader downstream ('string()', 'asJsoup()', 'parseAs()') reads
+ * text. So bytes are decoded as UTF-8, and only when they ARE UTF-8 — checked
+ * by encoding them back. An image an interceptor descrambled is not text, and
+ * decoding it would hand 'bytes()' something that merely looks like the image;
+ * that is refused at the point it happens rather than corrupted quietly.
+ */
+__k.toResponseBody = function (value, contentType) {
+  var type = contentType === undefined || contentType === null ? null : __str(contentType);
+  if (typeof value === 'string' || value === null || value === undefined) {
+    return __requestBody(type, __str(value));
+  }
+  if (typeof Uint8Array !== 'undefined' && value instanceof Uint8Array) {
+    var text = __host().text.decode(value);
+    var back = __host().text.encode(text);
+    var same = back.length === value.length;
+    for (var at = 0; same && at < value.length; at += 1) same = back[at] === value[at];
+    if (same) return __requestBody(type, text);
+  }
+  throw new Error(
+    'This converted extension replaced a response with a body that is not text. Yorozo keeps a ' +
+    'response as the text the host read, so a binary body has no faithful spelling here.'
   );
 };
 
@@ -6907,7 +7403,7 @@ __k.toJsonRequestBody = function (value) {
   // A buildJsonObject / buildJsonArray result is safe to serialise: the
   // extension wrote its keys itself, so there is no @SerialName rename to lose.
   if (__isJson(value)) {
-    return { __kBody: true, contentType: 'application/json; charset=utf-8', text: JSON.stringify(value) };
+    return __requestBody('application/json; charset=utf-8', JSON.stringify(value));
   }
   if (typeof value !== 'string') {
     throw new Error(
@@ -6915,7 +7411,7 @@ __k.toJsonRequestBody = function (value) {
       '@Serializable field names only for decoding, so encoding one here could post the wrong keys.'
     );
   }
-  return { __kBody: true, contentType: 'application/json; charset=utf-8', text: value };
+  return __requestBody('application/json; charset=utf-8', value);
 };
 
 __k.bodyString = function (value) {
