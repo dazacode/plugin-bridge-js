@@ -8137,6 +8137,7 @@ function __requestBuilder(method, url, headers, body, tags) {
     },
     get: function () { method = 'GET'; body = null; return builder; },
     head: function () { method = 'HEAD'; body = null; return builder; },
+    method: function (m, value) { method = __str(m).toUpperCase(); body = value === undefined ? null : value; return builder; },
     post: function (value) { method = 'POST'; body = value; return builder; },
     put: function (value) { method = 'PUT'; body = value; return builder; },
     patch: function (value) { method = 'PATCH'; body = value; return builder; },
@@ -8512,7 +8513,7 @@ function __clientBuilder(follow, inherited, inheritedCookies) {
       chain.push(interceptor);
       return builder;
     },
-    addNetworkInterceptor: __noInterceptor('network interceptor'),
+    addNetworkInterceptor: function (interceptor) { return builder.addInterceptor(interceptor); },
     connectTimeout: function () { return builder; },
     readTimeout: function () { return builder; },
     writeTimeout: function () { return builder; },

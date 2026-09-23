@@ -8869,10 +8869,13 @@ class Emitter {
 		if (
 			implicit !== null &&
 			lambda !== null &&
-			name === 'addCookie' &&
+			(name === 'addCookie' || name === 'addInterceptor' || name === 'addNetworkInterceptor') &&
 			!this.isSourceMember(name)
 		) {
+			const before = this.asyncLambdas;
 			const withLambda = this.callArguments(name, args, lambda, labelled, false);
+			// GRANT: installing an async interceptor does not suspend the installer.
+			if (name !== 'addCookie') this.asyncLambdas = before;
 			return `${implicit}.${name}(${withLambda.join(', ')})`;
 		}
 		// `configureClient() = rateLimit(3)`: the builder is the implicit

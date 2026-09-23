@@ -342,7 +342,6 @@ const NAMED_OBSTACLES: readonly {
 	// installs it rather than at the runtime, because it can never run: a
 	// conversion that succeeds and then throws on the first request is the
 	// outcome this file exists to avoid.
-	{ pattern: /\baddNetworkInterceptor\b/, name: 'an okhttp network interceptor' },
 	// Narrowed rather than deleted when `ctx.crypto` arrived. What is left is
 	// the part of javax.crypto that still has no honest answer:
 	//
@@ -1248,6 +1247,7 @@ export const BUILDER_LAMBDA_METHODS: ReadonlySet<string> = new Set([
  */
 export const ARGUMENT_LAMBDA_METHODS: ReadonlySet<string> = new Set([
 	'addInterceptor',
+	'addNetworkInterceptor',
 	// keiyoushi's `addCookie { listOf("k" to v) }`: the lambda is the cookies,
 	// asked for at each request so a preference can change them.
 	'addCookie',
@@ -1615,6 +1615,7 @@ export const HOST_METHODS: ReadonlySet<string> = new Set([
 
 	// http
 	'post',
+	'method',
 	'newCall',
 	'execute',
 	// Reaches the property branch below, which drops the parentheses.
@@ -1694,6 +1695,7 @@ export const HOST_METHODS: ReadonlySet<string> = new Set([
 	// refuses it by name with a sentence about redirects — a refusal a reader
 	// can act on, rather than one about the word `Interceptor` appearing.
 	'addInterceptor',
+	'addNetworkInterceptor',
 	// The okhttp interceptor chain: `chain.request()` reads what it was handed
 	// and `chain.proceed(request)` runs the rest. `intercept` is the member an
 	// extension's own `Interceptor` class declares, called by name from the
