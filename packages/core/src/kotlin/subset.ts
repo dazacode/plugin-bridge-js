@@ -376,7 +376,9 @@ const NAMED_OBSTACLES: readonly {
 	// lookahead can tell the two apart. Dropping the name instead let
 	// `Thread.currentThread()` through as a passthrough on a capitalised
 	// receiver — `Thread is not defined` inside a sandbox, with no refusal
-	// anywhere — which is a worse answer than refusing the pause.
+	// anywhere — which is a worse answer than refusing the pause. The pause is
+	// answered one level up instead, where the call is visible: see the
+	// `Thread.sleep` exemption in `scanInto`.
 	{ pattern: /\b(?:Thread|Executors)\b/, name: 'a background thread' },
 	{ pattern: /^android$|\bandroid\./, name: 'an android.* API' },
 	{ pattern: /\bFileInputStream\b|\bjava\.io\.File\b/, name: 'the filesystem' },
@@ -2579,6 +2581,21 @@ function scanInto(node: KNode, memberName: string, found: Untranslatable[]): voi
 		node.type === 'call_expression' &&
 		APPLICATION_PREFERENCES.test(node.text.replace(/\s+/g, ''))
 	) {
+		return;
+	}
+
+	// And a fourth: `Thread.sleep(ms)`. The name table refuses `Thread` because
+	// a leaf cannot tell a pause from a thread (see the note on that entry),
+	// but a call can, and the emitter already writes this one as the
+	// runtime's real `delay` — awaited, the member made `async`. So the pause
+	// that spaces a source's retries out was refused as "a background thread"
+	// while the translation for it sat unused. Only the callee is forgiven:
+	// the argument is scanned like any other expression, and every other use
+	// of `Thread` still reaches the leaf and is refused.
+	if (node.type === 'call_expression' && /^Thread\.sleep\(/.test(node.text.replace(/\s+/g, ''))) {
+		for (const child of node.children) {
+			if (child.type === 'call_suffix') scanInto(child, memberName, found);
+		}
 		return;
 	}
 

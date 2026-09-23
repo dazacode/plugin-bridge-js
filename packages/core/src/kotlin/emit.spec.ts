@@ -3617,6 +3617,22 @@ describe('refusing by name', () => {
 		expect(refusalNames(source)).toContain(expected);
 	});
 
+	it('lets `Thread.sleep` through as the wait it is, and nothing else about `Thread`', () => {
+		// The emitter has long written `Thread.sleep(n)` as the runtime's awaited
+		// `delay`; the scanner refused it anyway, at the leaf `Thread`, as a
+		// background thread.
+		expect(refusalNames(inClass('    fun pause() { Thread.sleep(1000L) }'))).toEqual([]);
+		expect(translate(inClass('    fun pause() { Thread.sleep(1000L) }')).js).toMatch(
+			/async pause[\s\S]*await __k\.delay\(1000\)/
+		);
+		expect(refusalNames(inClass('    fun t() = Thread.currentThread()'))).toContain(
+			'a background thread'
+		);
+		expect(refusalNames(inClass('    fun p() { Thread.sleep(WebView(context).x) }'))).toContain(
+			'WebView'
+		);
+	});
+
 	it('does not refuse a string for the words in it', () => {
 		// The message a reader sees when a site wants a login is the commonest
 		// way a manga extension *mentions* WebView, and matching the prose put
