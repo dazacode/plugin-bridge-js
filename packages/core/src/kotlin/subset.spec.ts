@@ -324,6 +324,16 @@ describe('naming the obstacle rather than the category', () => {
 		expect(namedObstacle('document.select("div.card a[href]").map { it.text() }')).toBeNull();
 	});
 
+	it('reads a curve by its shape, not by a word that starts like one', () => {
+		// `sect` is a curve family and the first four letters of "section".
+		expect(cryptoObstacle('section')).toBeNull();
+		expect(cryptoObstacle('sections')).toBeNull();
+		expect(cryptoObstacle('primetime')).toBeNull();
+		expect(cryptoObstacle('sect163k1')).toBe('the `sect163k1` curve');
+		expect(cryptoObstacle('brainpoolP256r1')).toBe('the `brainpoolP256r1` curve');
+		expect(cryptoObstacle('prime256v1')).toBeNull();
+	});
+
 	it('tells a key’s algorithm from a cipher mode, which are both `"AES"`', () => {
 		// The one string this cannot answer from the leaf alone, and the reason
 		// `scanObstacles` also asks the *call*. `SecretKeySpec(key, "AES")`

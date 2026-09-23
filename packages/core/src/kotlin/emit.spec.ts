@@ -446,8 +446,19 @@ const helpers: Record<string, (...args: never[]) => unknown> = {
 	rateLimitHost: (receiver: Any, url: Any, permits: Any, periodMs: Any) => {
 		declared.push({ host: String(url), permits: permits as number, periodMs: periodMs as number });
 		return receiver;
+	},
+
+	// keiyoushi's suspend request verbs on a client, recorded as written and
+	// answered asynchronously — so a caller that forgot to await reads a field
+	// off a promise and the fixture sees undefined.
+	okhttp: (receiver: Any, verb: Any, positional: Any, named: Any) => {
+		sent.push({ receiver, verb: verb as string, positional: positional as Any[], named });
+		return Promise.resolve({ verb, url: (positional as Any[])[0] });
 	}
 };
+
+/** What the fixtures above sent through `__k.okhttp`, most recent last. */
+const sent: { receiver: Any; verb: string; positional: Any[]; named: Any }[] = [];
 
 /** What the fixtures above declared, most recent last. */
 const declared: { host: string | null; permits: number; periodMs: number }[] = [];
@@ -3556,6 +3567,44 @@ describe('declarative rate limits, translated onto the request policy', () => {
 		]);
 	});
 
+	it('resolves the period of a bare rateLimit inside configureClient()', () => {
+		// `KeiSource` hands the builder to this hook as its receiver, so the
+		// call has no receiver written. It went down the generic helper path,
+		// which passes arguments through, and the runtime was handed no period.
+		declared.length = 0;
+		const demo = instantiate(
+			inClass('    override fun OkHttpClient.Builder.configureClient() = rateLimit(3, 2.seconds)')
+		);
+		const builder = {};
+		expect(demo.configureClient(builder)).toBe(builder);
+		expect(declared).toEqual([{ host: null, permits: 3, periodMs: 2000 }]);
+	});
+
+	it('applies a rate limit scoped by a predicate to every request', () => {
+		// keiyoushi's `rateLimit(permits, period) { url -> … }`. The host cannot
+		// run the predicate, and the limit applied to everything is stricter
+		// than asked rather than looser — so the rule is declared whole.
+		expect(
+			rateLimited(
+				'    override val client = network.client.newBuilder()',
+				'        .rateLimit(1, 2.seconds) { !it.encodedPath.startsWith("/uploads/") }',
+				'        .build()'
+			)
+		).toEqual([{ host: null, permits: 1, periodMs: 2000 }]);
+	});
+
+	it('refuses a keiyoushi interval where the old TimeUnit sat', () => {
+		// The third positional argument is `interval: Duration` there and
+		// `unit: TimeUnit` in the older library. Neither reading may be guessed.
+		expect(
+			refusalNames(
+				inClass(
+					'    override val client = network.client.newBuilder().rateLimit(10, 1.seconds, 100.milliseconds).build()'
+				)
+			).some((name) => name.includes('rateLimit'))
+		).toBe(true);
+	});
+
 	it('leaves a rateLimit the extension declared itself alone', () => {
 		// A name this ecosystem reuses. An extension declaring its own
 		// `fun String.rateLimit()` means that one, and translating it as the okhttp
@@ -4795,5 +4844,150 @@ describe('use-site variance, which is a fact about types', () => {
 		expect(demo.make()).toEqual([]);
 		expect(demo.count(null)).toBe(0);
 		expect(demo.count(['a', 'b'])).toBe(2);
+	});
+});
+
+/* ── the current manga API ───────────────────────────────────────────────── */
+
+/**
+ * keiyoushi's request verbs and the `SMangaUpdate` pair, which is how the
+ * current half of the manga catalogue makes a request and answers one.
+ */
+describe('keiyoushi request verbs on a client', () => {
+	const run = async (body: string[], client: unknown = { newCall: () => null }) => {
+		sent.length = 0;
+		const demo = instantiate(inClass(...body), { client, headers: { h: 1 } });
+		return { demo, sent };
+	};
+
+	it('sends and awaits client.get(url), rather than indexing into the client', async () => {
+		// One argument is also how `list.get(i)` reads, and this spelling came
+		// out as `__k.getAt(this.client, url)` — no request, no await.
+		const { demo } = await run(['    suspend fun page(url: String): String = client.get(url).url']);
+		expect(await demo.page('https://example.invalid/a')).toBe('https://example.invalid/a');
+		expect(sent).toHaveLength(1);
+		expect(sent[0].verb).toBe('get');
+		expect(sent[0].positional).toEqual(['https://example.invalid/a']);
+		expect(sent[0].named).toEqual({});
+	});
+
+	it('hands named arguments over by name, for the runtime to place', async () => {
+		const { demo } = await run([
+			'    suspend fun page(url: String) = client.get(url, ensureSuccess = false)',
+			'    suspend fun send(url: String, body: RequestBody) = client.post(url, headers, body)'
+		]);
+		await demo.page('https://example.invalid/a');
+		await demo.send('https://example.invalid/b', 'BODY');
+		expect(sent[0].named).toEqual({ ensureSuccess: false });
+		expect(sent[1].verb).toBe('post');
+		expect(sent[1].positional).toEqual(['https://example.invalid/b', { h: 1 }, 'BODY']);
+	});
+
+	it('reaches a client the extension named for what it is', async () => {
+		const apiClient = { newCall: () => null };
+		const { demo } = await run(['    suspend fun page(url: String) = apiClient.get(url)'], {
+			newCall: () => null
+		});
+		(demo as Record<string, unknown>).apiClient = apiClient;
+		await demo.page('https://example.invalid/a');
+		expect(sent[0].receiver).toBe(apiClient);
+	});
+
+	it('refuses an argument name no overload declares', () => {
+		expect(
+			refusalNames(inClass('    suspend fun page(url: String) = client.get(url, retries = 2)'))
+		).toContain('the argument name `retries` on `get`');
+	});
+});
+
+describe('SMangaUpdate and getMangaUpdate', () => {
+	it('builds the pair from named arguments in the data class order', async () => {
+		const demo = instantiate(
+			inClass(
+				'    fun update(m: SManga, c: List<SChapter>) = SMangaUpdate(chapters = c, manga = m)'
+			),
+			{},
+			{ SMangaUpdate: (manga: unknown, chapters: unknown) => ({ manga, chapters }) }
+		);
+		expect(demo.update('M', ['c1'])).toEqual({ manga: 'M', chapters: ['c1'] });
+	});
+
+	it('awaits the base class getMangaUpdate and reads the manga off the answer', async () => {
+		// Read as `.manga` straight off the call, so an unawaited one hands back
+		// undefined as the title.
+		const calls: unknown[][] = [];
+		const demo = instantiate(
+			inClass(
+				'    suspend fun details(m: SManga): SManga =',
+				'        getMangaUpdate(m, emptyList(), fetchDetails = true, fetchChapters = false).manga'
+			),
+			{},
+			{
+				__super: {
+					getMangaUpdate: async (...args: unknown[]) => {
+						calls.push(args);
+						return { manga: 'details', chapters: [] };
+					}
+				}
+			}
+		);
+		expect(await demo.details('M')).toBe('details');
+		expect(calls).toEqual([['M', [], true, false]]);
+	});
+});
+
+/**
+ * `super.x` where `x` is a property of a template this build translated.
+ *
+ * `override val seriesStatusSelector = ".status, ${super.seriesStatusSelector}"`
+ * is how an extension extends a template's selector rather than replacing it,
+ * and it was refused outright: `__super` holds the driver's methods and no
+ * template state at all.
+ */
+describe('reading a template property through super', () => {
+	const template = [
+		'abstract class Base : Source() {',
+		'    open val sel = "div.x"',
+		'    open val count by lazy { 41 }',
+		'    open val other = "o"',
+		'}',
+		''
+	];
+
+	it('reads the base value while the override is being initialised', () => {
+		const emission = translate(
+			kt(
+				...template,
+				'class Child : Base() {',
+				'    override val sel = ".a, ${super.sel}"',
+				'    override val count = super.count + 1',
+				'    fun both() = sel + "|" + count + "|" + super.other',
+				'}'
+			)
+		);
+		expect(emission.refusals).toEqual([]);
+		const make = new Function(
+			'__k',
+			...Object.keys(defaults),
+			`${emission.js}\nreturn new Child();`
+		) as (...args: unknown[]) => Instance;
+		const child = make(runtime, ...Object.values(defaults));
+		expect(child.both()).toBe('.a, div.x|42|o');
+	});
+
+	it('still refuses a sibling property the subclass also overrides', () => {
+		// By the time `sel` is initialised, `other` holds the subclass's value,
+		// not the template's, so there is no base value left to read.
+		expect(
+			refusalNames(
+				kt(
+					...template,
+					'class Child : Base() {',
+					'    override val other = "mine"',
+					'    override val sel = super.other',
+					'}'
+				)
+			)
+		).toContain('`super.` used as a property');
 	});
 });

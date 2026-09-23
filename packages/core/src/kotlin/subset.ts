@@ -534,7 +534,13 @@ export function cryptoObstacle(text: string, asTransformation = false): string |
 	}
 	// A curve is named as a bare string too, and `secp256k1` is one character
 	// from a curve WebCrypto has and is not one it has.
-	if (/^(?:secp|prime|brainpool|sect)[a-z0-9]+$/.test(text)) {
+	//
+	// Matched on the shape a curve name actually has — a family, a bit length,
+	// then its variant — and not on the family prefix alone. `sect` followed by
+	// anything was a curve here, so every `"section"` and `"sections"` a scraper
+	// passes as a query parameter or a CSS selector refused its extension as
+	// asking for an elliptic curve: fourteen listings, over an English word.
+	if (/^(?:secp\d+[kr]\d|prime\d+v\d|brainpoolP\d+[rt]\d|sect\d+[kr]\d)$/.test(text)) {
 		return /^(?:secp256r1|prime256v1|secp384r1|secp521r1)$/.test(text)
 			? null
 			: `the \`${text}\` curve`;
@@ -1695,6 +1701,9 @@ export const GLOBAL_NAMES: ReadonlySet<string> = new Set([
 	'StandardCharsets',
 	'JsonObject',
 	'LruCache',
+	// `java.lang.ref`'s two holders, which a template caches a fetched map in.
+	'SoftReference',
+	'WeakReference',
 	'Random',
 	'MessageDigest',
 
@@ -1935,7 +1944,14 @@ const SUPER_MEMBERS_IMAGE: ReadonlySet<string> = new Set([
 	'fetchSearchManga',
 	'fetchMangaDetails',
 	'fetchChapterList',
-	'fetchPageList'
+	'fetchPageList',
+
+	// The current API's one `final` entry point, which an extension calls on
+	// itself — `getMangaUpdate(manga, emptyList(), fetchDetails = true,
+	// fetchChapters = false).manga` — to reuse its own `fetchMangaUpdate` for
+	// a detail read. The driver runs the extension's `fetchMangaUpdate` and
+	// nothing else, exactly as the base class does.
+	'getMangaUpdate'
 ]);
 
 /**
@@ -2033,7 +2049,12 @@ export const SUPER_SUSPEND_MEMBERS: ReadonlySet<string> = new Set([
 	'getVideoUrl',
 	'resolveVideo',
 	'getVideoThumbnails',
-	'getImageTile'
+	'getImageTile',
+
+	// The manga half's `suspend fun getMangaUpdate(…): SMangaUpdate`. Read as
+	// `.manga` straight off the call, so an unawaited one reads a field off a
+	// promise and hands back undefined as the title.
+	'getMangaUpdate'
 ]);
 
 /**
@@ -2075,6 +2096,22 @@ export const KNOWN_SIGNATURES: ReadonlyMap<string, readonly string[]> = new Map(
 	// `MangasPage(mangas = …, hasNextPage = …)`, the same shape as its video
 	// counterpart and named about as often as it is passed positionally.
 	['MangasPage', ['mangas', 'hasNextPage']],
+
+	// **`SMangaUpdate(manga = …, chapters = …)`**, the pair the current
+	// manga API returns details and chapters in, from one request. Every
+	// construction site in the measured catalogue names both — 92 listings
+	// were refused on that alone — and the order is the data class's own.
+	['SMangaUpdate', ['manga', 'chapters']],
+
+	// **`getMangaUpdate(manga, chapters, fetchDetails = …, fetchChapters = …)`**,
+	// the base class's `final` entry point, which an extension calls on itself
+	// to reuse its own `fetchMangaUpdate` for a detail read — always with the
+	// two flags named. It is the base's member, so no declaration in the
+	// extension supplies its parameter list; `fetchMangaUpdate` is the same
+	// list and is declared in every extension that has it, but is listed too
+	// for a template that calls it before any subclass declares it.
+	['getMangaUpdate', ['manga', 'chapters', 'fetchDetails', 'fetchChapters']],
+	['fetchMangaUpdate', ['manga', 'chapters', 'fetchDetails', 'fetchChapters']],
 
 	// `Hoster(hosterUrl = …, hosterName = …)`, which is how every extension
 	// written against the hoster API builds one — by name, and usually skipping
@@ -2322,7 +2359,11 @@ export const ABI_MEMBERS: ReadonlySet<string> = new Set([
 	'fetchLatestUpdates',
 	'fetchSearchManga',
 	'fetchChapterList',
-	'fetchPageList'
+	'fetchPageList',
+	/* Details and chapters from one request — the current API's abstract
+	   member, which `KeiSource` subclasses implement instead of any chapter
+	   list member at all. `listChapters` runs it. */
+	'fetchMangaUpdate'
 ]);
 
 /**
@@ -2354,6 +2395,14 @@ export const HOST_ENTRY_POINTS: ReadonlySet<string> = new Set([
 	'preferences',
 	'id',
 	'versionId',
+
+	// keiyoushi's `KeiSource` builds its final `client` and `headersBuilder`
+	// by calling these two on a builder, and `shims/mihon-entry.ts` does the
+	// same. Nothing in the extension calls them, so without being roots a
+	// refused one was pruned as unreachable, the driver found no such member,
+	// and the client went out without the rate limit it declares.
+	'configureClient',
+	'configureHeaders',
 
 	// requests
 	'animeDetailsRequest',

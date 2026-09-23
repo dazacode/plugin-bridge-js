@@ -689,9 +689,15 @@ function reach(graph: readonly MemberEdges[], entryMembers: ReadonlySet<string>)
 			}
 		}
 
-		// Reaching a type reaches whatever runs when it is built.
+		// Reaching a type reaches whatever runs when it is built — and, for an
+		// okhttp interceptor, the one method the client calls on it. Nothing in
+		// the extension names `intercept`; installing the object is the call.
+		// Pruned, a refused `intercept` left a class the client could not run,
+		// which the runtime answers at the first request rather than here.
 		for (const edges of byOwner.get(name) ?? []) {
-			if (edges.construction && !reached.has(edges.member)) pending.push(edges.member);
+			if ((edges.construction || edges.member === 'intercept') && !reached.has(edges.member)) {
+				pending.push(edges.member);
+			}
 		}
 	}
 

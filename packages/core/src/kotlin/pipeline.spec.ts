@@ -974,6 +974,57 @@ describe('which refusals stop a build', () => {
 		expect(result.complete).toBe(false);
 	});
 
+	it('blocks on the intercept of an interceptor the extension installs', async () => {
+		// Nothing names `intercept`: installing the object is the call. Pruned
+		// as unreachable, a descrambler drawing on `Bitmap` left a class with no
+		// `intercept` at all, the conversion reported complete, and the client
+		// failed at the first request — or, where nothing checked, the pages
+		// arrived still scrambled.
+		const result = await convertKotlin(
+			[
+				{
+					path: 'Demo.kt',
+					source: kt(
+						'class Demo : Source() {',
+						'    override val client = network.client.newBuilder().addInterceptor(Unscramble()).build()',
+						'    override fun popularMangaRequest(page: Int) = GET("https://example.invalid/")',
+						'}',
+						'',
+						'class Unscramble : Interceptor {',
+						'    override fun intercept(chain: Interceptor.Chain): Response {',
+						'        val bitmap = Injekt.get<Loader>()',
+						'        return chain.proceed(chain.request())',
+						'    }',
+						'}'
+					)
+				}
+			],
+			{ parser }
+		);
+
+		expect(result.blocking.map((one) => one.member)).toEqual(['intercept']);
+		expect(result.complete).toBe(false);
+	});
+
+	it('blocks on a configureClient, which the driver calls although nothing else does', async () => {
+		const result = await convertKotlin(
+			[
+				{
+					path: 'Demo.kt',
+					source: kt(
+						'class Demo : KeiSource() {',
+						'    override fun OkHttpClient.Builder.configureClient() = apply { Injekt.get<Loader>() }',
+						'    override fun popularMangaRequest(page: Int) = GET("https://example.invalid/")',
+						'}'
+					)
+				}
+			],
+			{ parser }
+		);
+
+		expect(result.blocking.map((one) => one.member)).toEqual(['configureClient']);
+	});
+
 	it('blocks on a private helper the extension’s own ABI member calls', async () => {
 		// The hole this closes: a refusal in the entry file that was not itself
 		// an `ABI_MEMBERS` name was exempted, so `popularAnimeParse` calling a

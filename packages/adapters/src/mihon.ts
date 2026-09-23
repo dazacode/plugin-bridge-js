@@ -165,6 +165,33 @@ function sourceDirFromIconUrl(iconUrl: string | undefined): string | null {
 }
 
 /**
+ * The source directory the package name implies, for a listing whose icon is
+ * not its own.
+ *
+ * An extension that ships no launcher icon of its own is published with the
+ * icon of whatever it inherits one from — its theme's
+ * (`lib-multisrc/<theme>/res/…`) or the repository's default
+ * (`core/src/main/res/…`) — so `sourceDirFromIconUrl` reads nothing for it,
+ * and forty-odd listings in the real catalogue were refused as not saying
+ * where they are built from although their directory is right there.
+ *
+ * The package name says it instead, and not by resemblance: the build plugin
+ * *derives* the application id from the directory, as the namespace plus
+ * `<lang>.<dir>`. The one exception is a module that declares `pkgName` to
+ * keep an old id across a rename, which is exactly the case where this
+ * reading names a directory that is not the module's — so `convert` checks the
+ * build file it then fetches against the package, and refuses rather than
+ * translate whatever else lives at that path. Only the last two segments are
+ * read, so a fork publishing under its own namespace is read the same way.
+ */
+const PACKAGE_SOURCE_DIR = /\.([a-z0-9_-]+)\.([a-z0-9_]+)$/i;
+
+function sourceDirFromPackage(packageName: string): string | null {
+	const match = PACKAGE_SOURCE_DIR.exec(packageName);
+	return match === null ? null : `src/${match[1]}/${match[2]}`;
+}
+
+/**
  * One `Source` submessage, read into the shape `origin.detail` carries.
  *
  * `id` is a decimal string, never a `bigint` and never a rounded `number` —
@@ -244,7 +271,14 @@ function readExtension(extension: ProtoMessage): RepositoryPlugin | null {
 			detail: {
 				contentRating: rating,
 				extensionLib: extension.string(4) ?? '',
-				sourceDir: sourceDirFromIconUrl(resources?.string(2)),
+				// From the icon when the icon is the module's own; from the package
+				// name when it is borrowed, which is only meaningful when the icon
+				// still says which repository to read (see `sourceDirFromPackage`).
+				sourceDir:
+					sourceDirFromIconUrl(resources?.string(2)) ??
+					(sourceRepositoryFromIconUrl(resources?.string(2)) === null
+						? null
+						: sourceDirFromPackage(packageName)),
 				// Where that directory lives, and at which ref. The index is a
 				// list of built artifacts and names no source location; the icon
 				// is served from a CDN mirroring the source repository, so the
@@ -297,6 +331,80 @@ function entryFirst(files: readonly { path: string; source: string }[]): typeof 
 	const entry = files.findIndex((file) => /(^|\n)\s*@Source\b/.test(file.source));
 	if (entry <= 0) return files;
 	return [files[entry], ...files.filter((_, at) => at !== entry)];
+}
+
+/**
+ * The supertypes each class in these files names, by simple name.
+ *
+ * Read off the declaration header — the text between `class Name` and the
+ * body's `{`, with the constructor's parentheses skipped — which is exactly
+ * where Kotlin puts them. Only the head identifier of each supertype is kept,
+ * so `KeiSource()`, `ConfigurableSource` and `Madara(…)` read as those names.
+ * A class declared twice under one name in different files keeps both lists,
+ * which can only make an answer below *more* inclusive for a name the
+ * translator would have had to resolve anyway.
+ */
+function supertypesByClass(files: readonly { source: string }[]): Map<string, string[]> {
+	const out = new Map<string, string[]>();
+	const declaration = /\bclass\s+([A-Za-z_]\w*)/g;
+	for (const { source } of files) {
+		for (const match of source.matchAll(declaration)) {
+			let depth = 0;
+			let colon = -1;
+			let end = source.length;
+			for (let at = (match.index ?? 0) + match[0].length; at < source.length; at += 1) {
+				const char = source[at];
+				if (char === '(' || char === '<') depth += 1;
+				else if (char === ')' || char === '>') depth -= 1;
+				else if (depth === 0 && char === ':' && colon === -1) colon = at;
+				else if (depth === 0 && char === '{') {
+					end = at;
+					break;
+				} else if (depth === 0 && char === '\n' && colon !== -1) {
+					// A class with no body ends at its line, unless the list of
+					// supertypes is still open — a trailing comma, or a colon with
+					// nothing after it yet.
+					const written = source.slice(colon + 1, at).trim();
+					if (written.length > 0 && !written.endsWith(',')) {
+						end = at;
+						break;
+					}
+				}
+			}
+			if (colon === -1) continue;
+			const names = [...source.slice(colon + 1, end).matchAll(/(?:^|,)\s*([A-Za-z_][\w.]*)/g)].map(
+				(one) => one[1].split('.').pop() ?? one[1]
+			);
+			out.set(match[1], [...(out.get(match[1]) ?? []), ...names]);
+		}
+	}
+	return out;
+}
+
+/**
+ * Whether the extension class descends from keiyoushi's `KeiSource`, through
+ * its template or directly.
+ *
+ * Walked over the files the conversion translated rather than guessed from a
+ * member it happens to declare, because the base class decides behaviour the
+ * extension never states — the `Referer` on every request, where its rate
+ * limit is applied — and an extension that declares no hook at all is still
+ * one. See `MihonEntrypointOptions.keiSource`.
+ */
+function descendsFromKeiSource(files: readonly { source: string }[], className: string): boolean {
+	const supertypes = supertypesByClass(files);
+	const seen = new Set<string>();
+	const pending = [className];
+	while (pending.length > 0) {
+		const name = pending.pop()!;
+		if (seen.has(name)) continue;
+		seen.add(name);
+		for (const parent of supertypes.get(name) ?? []) {
+			if (parent === 'KeiSource') return true;
+			pending.push(parent);
+		}
+	}
+	return false;
 }
 
 export const mihonAdapter: ForeignAdapter = {
@@ -489,6 +597,22 @@ export const mihonAdapter: ForeignAdapter = {
 			);
 		}
 
+		// **The directory has to be this listing's**, which the package name
+		// checks: the build plugin makes the application id from `pkgName` when
+		// a module declares one and from `<lang>.<dir>` when it does not. A
+		// directory recovered from the package name of a renamed module would
+		// otherwise be a different extension, translated and installed under
+		// this one's name — refusing is the honest answer to a path this
+		// adapter could only have guessed.
+		const declaredPackage =
+			readMihonBuildFile(source.buildGradle ?? '').pkgName ?? `${lang}.${directory}`;
+		if (!origin.foreignId.endsWith(`.${declaredPackage}`)) {
+			throw new ForeignFormatError(
+				`The source directory read for ${listing.name} (${sourceDir}) builds a different ` +
+					'extension, so where it is built from is not known.'
+			);
+		}
+
 		// The extension, then its template, then the shared modules — the order
 		// `convertKotlin` reads as "entry first, neighbours after". Sorted
 		// within each group so the same extension read twice hands the
@@ -569,6 +693,7 @@ export const mihonAdapter: ForeignAdapter = {
 			className: conversion.className,
 			baseUrl,
 			lang,
+			keiSource: descendsFromKeiSource(kotlin, conversion.className),
 			// The `.properties` files this extension's own repository keeps
 			// beside its Kotlin, which `Intl` reads through the classloader. An
 			// extension with none passes an empty map and the classpath is
