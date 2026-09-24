@@ -25,6 +25,33 @@ Loaded and three-stage counts are the broad, cheap measurements: they cover a
 whole catalogue in minutes, and they move when this software improves. Chain
 replay and verified playback are the strong ones, and they cover a subset.
 
+## Since v0.5.1 — served playback (2026-09-24, unreleased)
+
+The same two catalogues, the same harness and method as v0.5.1, measured on
+the served-playback work ([ADR-0007](adr/0007-served-playback.md)) before any
+version was cut.
+
+|                         | v0.5.1 | **now**         | change |
+| ----------------------- | ------ | --------------- | ------ |
+| manga, loaded           | 993    | **994 (71%)**   | +1     |
+| manga, all three stages | 657    | **657 (47%)**   | 0      |
+| anime, loaded           | 130    | **137 (54%)**   | +7     |
+| anime, all three stages | 115    | **122 (48%)**   | +7     |
+| **combined, loaded**    | 1,123  | **1,131 (68%)** | +8     |
+| **combined, all three** | 772    | **779 (47%)**   | +7     |
+
+**Zero listings lost in either catalogue, and no probe stage changed** on any
+listing that loaded before. Of the seven anime gains, six are members of the
+local-server family (one of which loads without taking its server path). The
+seventh is outside the family, unblocked by the exact byte path alone. The
+manga gain is one listing unblocked by the rule for trailing lambdas passed to
+constructors.
+
+**Verified playable in the reference web client, served:** three listings end
+to end (resolve, served manifest, media decoded, playback advancing, seek,
+teardown releasing the plugin instance), plus one more that plays until the
+player's own transmuxer rejects a segment. ADR-0007 §8 has the family funnel.
+
 ## Current — v0.5.1 (2026-09-23)
 
 Measured over two whole published indexes of the Kotlin extension family,

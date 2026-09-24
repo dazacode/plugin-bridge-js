@@ -1,6 +1,6 @@
 # ADR 0007 — Served playback: a plugin's local server, without the socket
 
-Status: **proposed** · 2026-09-24 · revisits ADR-0006 on new evidence without
+Status: **accepted** · 2026-09-24 · revisits ADR-0006 on new evidence without
 editing it · reads against `contract/ABI.md` §1, §2, §3 and §4.5
 
 Research answer to: "ADR-0006 refused the local-server idiom and said the
@@ -203,3 +203,72 @@ written into the client's routing rather than worked around:
   playback one, recorded for the client.
 - Adding a member of this family now means fixing ordinary translator gaps
   (§2's last row), not deciding architecture.
+
+---
+
+## 8. After the family pass (2026-09-24)
+
+§2 through §4 are kept as they were measured when this was proposed. The rest
+of the family was then taken through the same rule: identify the blocker, read
+what the corpus relies on, implement it only if it is faithful and generic,
+test it, re-run the family and both catalogues, report the blast radius.
+
+**The funnel, re-measured:**
+
+| Stage                                        |                                            Count |
+| -------------------------------------------- | -----------------------------------------------: |
+| In the family                                |                                               13 |
+| Blocked by something else first              |                                                5 |
+| Loaded                                       |                                                6 |
+| Resolves streams                             |                                                5 |
+| Resolves a served stream                     |                                                4 |
+| Serves its manifest                          |                                                4 |
+| Real media bytes reach the player            | 4 of the served, plus one direct progressive MP4 |
+| Plays end to end in the reference web client |     **3**, plus A until its transmuxer stop (§4) |
+
+The three that play: listing B; listing C, whose segments are served too; and
+listing D, which serves a decrypted playlist while its segments live on a CDN
+(below). One more loads and resolves a direct MP4 without taking its server
+path at all.
+
+**Catalogue effect, both whole catalogues, offline** (`docs/measurements.md`):
+video 130 → 137 loaded (115 → 122 through all three stages), manga 993 → 994
+(657 unchanged). **Zero listings lost, and no probe stage changed** on any
+listing that loaded before.
+
+**What the pass found was mostly wrong-but-quiet runtime behaviour**, fixed for
+every extension:
+
+- An integer radix was dropped by `toInt(16)` and its siblings (38 call sites
+  in the corpus).
+- `String.chunked` came back as a one-item list.
+- The JCE overloads that take `(bytes, offset, length)` read only their first
+  argument, so every AES-GCM tag check failed.
+- `init` blocks were set aside, along with any refusal inside them.
+- Trailing lambdas to constructors and file functions were missing.
+- Package-qualified free functions weren't recognised.
+- `String.CASE_INSENSITIVE_ORDER` wasn't supported.
+
+None of these is served-playback-specific.
+
+**URLs a served manifest names off its origin are not the plugin's** (§4.5
+rule 2). A host fetches them as it would any source URL. Listing D showed the
+consequence: its CDN checks `Origin` and `Referer`, which a page cannot send.
+The reference web client therefore relays those URLs on its ordinary signed
+media-relay ticket, carrying the source's headers, exactly as it does for any
+header-carrying source. Nothing in the ABI changed. The client's ADR-0014 is
+that decision.
+
+**Left refused, with the reason:**
+
+- **One listing wraps its HTTP client in a filter over resolved DNS
+  addresses.** It drops private, loopback, link-local, carrier-grade-NAT and
+  unique-local addresses after resolution. The reference relay checks literal
+  hosts only, so the host's guarantee is not equivalent, and the filter is not
+  lowered to it. Resolve-before-connect in the host is a separate security
+  change. No plugin-controlled DNS is offered.
+- **One listing's single typed `catch`** sits over runtime crypto errors this
+  runtime does not tag with the type it names. It stays refused until
+  runtime-thrown failures are tagged faithfully. The broader policy of emitting
+  a lone typed catch as a catch-all is a separate campaign; it is what hid
+  listing D's GCM bug.
