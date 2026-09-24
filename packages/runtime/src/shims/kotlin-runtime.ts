@@ -9624,7 +9624,12 @@ function __inputStream(bytes) {
       if (len === 0) return 0;
       if (at >= bytes.length) return -1;
       var n = Math.min(len, bytes.length - at);
-      buffer.set(bytes.subarray(at, at + n), off);
+      // A ByteArray the extension made itself ('ByteArray(8192)') is an array
+      // of signed values here, not a Uint8Array, and the caller reads it back
+      // through the same indexing as every other ByteArray — so it is filled
+      // in that form rather than refused for not having 'set'.
+      if (buffer instanceof Uint8Array) buffer.set(bytes.subarray(at, at + n), off);
+      else for (var i = 0; i < n; i += 1) buffer[off + i] = (bytes[at + i] << 24) >> 24;
       at += n;
       return n;
     },

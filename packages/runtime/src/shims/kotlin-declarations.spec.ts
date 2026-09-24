@@ -2841,3 +2841,45 @@ describe('a byte transform written as an okio ForwardingSource', () => {
 		expect(Array.from(decoded)).toEqual(Array.from(plain));
 	});
 });
+
+describe('an InputStream read into a ByteArray the extension made', () => {
+	it('fills a ByteArray(n) in place, signed, across reads, and copies it out exactly', async () => {
+		// The copy loop every Java body read is written as. 'ByteArray(8192)' is
+		// an array of signed values in this runtime, not a Uint8Array, and the
+		// read used to call 'set' on it and throw — which the extension's own
+		// catch turned into a 500 for every subtitle it served.
+		const demo = await instantiate(
+			'Demo',
+			// `.read()` is accepted only in a conversion that declares a `read`
+			// of its own — here, as in the extension this was found in, the
+			// override on its ForwardingSource. Accepting the name everywhere is
+			// a separate decision about the catalogue.
+			kt(
+				'class Passthrough(upstream: Source) : ForwardingSource(upstream) {',
+				'    override fun read(sink: Buffer, byteCount: Long): Long = super.read(sink, byteCount)',
+				'}',
+				'class Demo {',
+				'    fun copy(input: ByteArray): ByteArray = ByteArrayInputStream(input).use { stream ->',
+				'        val out = java.io.ByteArrayOutputStream()',
+				'        val buffer = ByteArray(5)',
+				'        var n: Int',
+				'        while (stream.read(buffer).also { n = it } != -1) {',
+				'            out.write(buffer, 0, n)',
+				'        }',
+				'        out.toByteArray()',
+				'    }',
+				'    fun firstSigned(input: ByteArray): Int = ByteArrayInputStream(input).use { stream ->',
+				'        val buffer = ByteArray(2)',
+				'        stream.read(buffer)',
+				'        buffer[0].toInt()',
+				'    }',
+				'}'
+			)
+		);
+		const input = Uint8Array.from([...Array.from({ length: 256 }, (_, i) => i), 0x00, 0xff]);
+		const copied = (await demo.copy(input)) as Uint8Array;
+		expect(Array.from(copied)).toEqual(Array.from(input));
+		// A Kotlin Byte of 0xFF is -1, as it is everywhere else a ByteArray is read.
+		expect(await demo.firstSigned(Uint8Array.of(0xff, 1))).toBe(-1);
+	});
+});
