@@ -3390,6 +3390,12 @@ var __k = {
     // followed searched that text, found nothing, and returned the whole of it
     // as a video url.
     if (typeof value.outerHtml === 'function') return value.outerHtml();
+    // kotlinx's JsonElement.toString() is the element as compact JSON, and a
+    // JsonObject built here ('JsonObject(map)', 'buildJsonObject') carries the
+    // mark that says so. Rendered by String() it was '[object Object]', and a
+    // source posting '{"data":' + that + '}' to an API was told its payload
+    // was malformed.
+    if (__isJson(value)) return JSON.stringify(value);
     if (value instanceof Map) {
       var entries = [];
       value.forEach(function (item, key) { entries.push(__k.toStringOf(key) + '=' + __k.toStringOf(item)); });
@@ -5288,6 +5294,21 @@ var __k = {
       throw new Error('This converted extension assigned into a value that was null.');
     }
     if (value instanceof Map) value.set(key, next);
+    // A ByteArray, before the operator-set branch below: a Uint8Array HAS a
+    // 'set', and it is TypedArray.set(array, offset) — so 'bytes[i] = b' called
+    // bytes.set(i, b), which copies nothing and throws "offset is out of
+    // bounds" for a negative byte. Assigned, the slot wraps a signed Kotlin
+    // Byte to the unsigned value this runtime holds, which is the same bits.
+    else if (typeof Uint8Array !== 'undefined' && value instanceof Uint8Array) {
+      var slot = Number(key);
+      if (!Number.isInteger(slot) || slot < 0 || slot >= value.length) {
+        throw new Error(
+          'This converted extension wrote index ' + String(key) + ' of a byte array of length ' +
+          value.length + '.'
+        );
+      }
+      value[slot] = Number(next);
+    }
     // The mirror of index: a[k] = v is a.set(k, v) on a type declaring operator
     // set — Headers.Builder, a Calendar, a translated class.
     else if (!Array.isArray(value) && typeof value.set === 'function') value.set(key, next);
@@ -9473,7 +9494,7 @@ async function __nanoBody(answer) {
  * transforms what it relays reads a chunk into a scratch Buffer, rewrites
  * it, and writes it on.
  */
-class Buffer {
+class __KBuffer {
   constructor() { this.__bytes = new Uint8Array(0); }
   get size() { return this.__bytes.length; }
   __append(bytes) {
@@ -9489,7 +9510,7 @@ class Buffer {
     return head;
   }
   write(source, byteCount) {
-    if (source instanceof Buffer) {
+    if (source instanceof __KBuffer) {
       this.__append(source.__take(byteCount === undefined ? source.size : byteCount));
     } else {
       var bytes = __bytesOf(source);
@@ -9519,6 +9540,12 @@ class Buffer {
   }
   close() {}
 }
+
+/*
+ * Callable with or without 'new': the emitter writes a runtime constructor the
+ * way Kotlin does, 'Buffer()', and a class refuses to be called like that.
+ */
+function Buffer() { return new __KBuffer(); }
 
 /**
  * okio's ForwardingSource: a Source that delegates to another, extended by a

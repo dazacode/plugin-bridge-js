@@ -2768,3 +2768,76 @@ describe('a try with several catch clauses, told apart by the type the error car
 		).toEqual(['more than one `catch` clause']);
 	});
 });
+
+describe('a JsonObject turned into text', () => {
+	it('is compact JSON, as kotlinx writes it, not the object as JavaScript prints one', async () => {
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    fun f(raw: String): String {',
+				'        val obj = raw.parseAs<JsonObject>().toMutableMap()',
+				'        obj.remove("drop")',
+				'        return """{"data":${JsonObject(obj).toString()}}"""',
+				'    }',
+				'    fun built(): String = buildJsonObject { put("a", 1); put("b", "c") }.toString()',
+				'}'
+			)
+		);
+		expect(demo.f('{"keep":{"n":[1,2]},"drop":true}')).toBe('{"data":{"keep":{"n":[1,2]}}}');
+		expect(demo.built()).toBe('{"a":1,"b":"c"}');
+	});
+});
+
+describe('a byte transform written as an okio ForwardingSource', () => {
+	it('skips a fake header and XORs the rest, with the key index running across reads', async () => {
+		// The shape a relay uses on a disguised segment. Read here in chunks of
+		// 7, so a key index reset per read would decode the first chunk and
+		// turn every one after it into noise — the bug ABI.md section 4.4
+		// replays its vectors in 7-byte chunks to catch.
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class Masked(upstream: Source, private val mask: ByteArray, private val skip: Int) : ForwardingSource(upstream) {',
+				'    private var skipped = 0',
+				'    private var at = 0',
+				'    override fun read(sink: Buffer, byteCount: Long): Long {',
+				'        while (skipped < skip) {',
+				'            val temp = Buffer()',
+				'            val n = super.read(temp, (skip - skipped).toLong())',
+				'            if (n == -1L) return -1L',
+				'            skipped += n.toInt()',
+				'        }',
+				'        val temp = Buffer()',
+				'        val n = super.read(temp, byteCount)',
+				'        if (n == -1L) return -1L',
+				'        val bytes = temp.readByteArray()',
+				'        for (i in bytes.indices) {',
+				'            bytes[i] = (bytes[i].toInt() xor mask[at and 3].toInt()).toByte()',
+				'            at++',
+				'        }',
+				'        sink.write(bytes)',
+				'        return n',
+				'    }',
+				'}',
+				'class Demo {',
+				'    fun decode(input: ByteArray, mask: ByteArray, skip: Int): ByteArray {',
+				'        val source = Masked(Buffer().write(input), mask, skip)',
+				'        val out = Buffer()',
+				'        while (source.read(out, 7L) != -1L) { }',
+				'        return out.readByteArray()',
+				'    }',
+				'}'
+			)
+		);
+		const mask = Uint8Array.of(0x9d, 0x2a, 0xf1, 0x47);
+		const plain = Uint8Array.from({ length: 40 }, (_, i) => (i * 37) & 255);
+		const header = Uint8Array.of(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a);
+		const masked = Uint8Array.from(plain, (b, i) => b ^ mask[i & 3]);
+		const input = new Uint8Array([...header, ...masked]);
+
+		const decoded = (await demo.decode(input, mask, header.length)) as Uint8Array;
+
+		expect(Array.from(decoded)).toEqual(Array.from(plain));
+	});
+});
