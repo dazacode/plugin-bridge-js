@@ -47,6 +47,9 @@ export default defineSource({
   // level 2, and only for a plugin that serves manga (§8)
   async listChapters(sourceMediaId, ctx): Promise<SourceChapter[]> { … },
   async readChapter(sourceMediaId, chapter, ctx): Promise<ChapterPages> { … },
+
+  // only with permission "segment-transform-js" (§4.5)
+  async serve(request, ctx): Promise<ServedResponse> { … },
 });
 ```
 
@@ -105,7 +108,11 @@ source. Neither field may be assumed present.
 - **No storage of URLs.** Rule 4. `resolve()` runs at play time and its output
   is never persisted.
 - **No lifecycle hooks.** No `onInstall`, no background work. A plugin is a pure
-  function of its inputs plus `ctx`.
+  function of its inputs plus `ctx` — with **one exception, stated where it
+  applies (§4.5):** a plugin that returns a served stream holds state from
+  `resolve` that its `serve` calls read, and the host keeps that same instance
+  alive until the playback is released. Nothing else about a plugin outlives a
+  call.
 - **No second spelling of an episode.** A chapter is not an episode with a
   different word on it, and §8 adds its own methods rather than overloading
   `listEpisodes`. What that buys, and what it costs, is argued there.
@@ -153,6 +160,26 @@ before a packet leaves. That check is the host's, not the SDK's — a plugin
 cannot opt out of it by not calling the SDK.
 
 ### 2.1 `ctx.http.policy()` — the declarative request policy
+
+```ts
+interface HttpResponse {
+	status: number;
+	url: string; // where the request landed, after redirects
+	headers: Record<string, string>;
+	text(): Promise<string>;
+	json(): Promise<unknown>;
+	bytes(): Promise<Uint8Array>; // ← defined at served playback (§4.5)
+}
+```
+
+**One body.** A response holds exactly one body, as the bytes the source sent.
+`bytes()` answers those bytes; `text()` decodes them as UTF-8; `json()` parses
+that text. None of the three is derived from another's result — in particular
+`bytes()` is never `text()` encoded back, which is exact for a page and a
+plausible, corrupted segment for anything else. Reads repeat: the body is read
+into memory once, before the plugin sees the response, and every call answers
+from it; `bytes()` answers a fresh copy, so a plugin writing into one read
+cannot change the next.
 
 ```ts
 interface HttpClient {
@@ -381,7 +408,11 @@ with six platforms. §4 is what replaces it.
 ## 3. Values crossing the boundary
 
 Structurally cloneable JSON only — no functions, no class instances, no
-`ArrayBuffer` in either direction. `SourceCatalogEntry`, `Episode`,
+`ArrayBuffer` in either direction — **with exactly two exceptions**, both
+`Uint8Array`: what `HttpResponse.bytes()` answers (§2) and
+`ServedResponse.body` (§4.5). A byte body is the one value that cannot be JSON
+without being encoded into something else, and encoding it is how bytes were
+lost; everything else stays JSON. `SourceCatalogEntry`, `Episode`,
 `SubtitleTrack` and `PlaybackSource` are the shapes already declared in
 `lib/domain/models/` and `client-web/src/lib/domain/`, and `contract/fixtures/`
 already holds vectors for them.
@@ -398,6 +429,7 @@ interface PlaybackSource {
 	headers?: Record<string, string>;
 	subtitles?: SubtitleTrack[];
 	pipeline?: StreamPipeline; // ← new
+	served?: ServedPlayback; // ← served playback (§4.5)
 }
 ```
 
@@ -512,9 +544,74 @@ Dart FFI boundary whose documented weakness is large buffer transfer, and an
 episode is hundreds of multi-megabyte segments. The transform would be
 imperceptible on a developer's laptop and unusable on a phone. ADR-0002 §2.3.
 
-An escape hatch is specified — `permissions: ["segment-transform-js"]` — and is
-**not implemented** at API level 1. A host encountering it must refuse to load
-the plugin with a named reason, never silently ignore it.
+An escape hatch is specified — `permissions: ["segment-transform-js"]`. It is
+**implemented as served playback (§4.5)**, not as a callback inside this op
+list: a plugin that needs its own code on the byte path serves the stream
+itself, and a host that does not know the permission refuses the plugin under
+§7, which is the same named refusal this paragraph used to require of every
+host. The vocabulary above is unchanged and remains the path for anything it
+can express.
+
+### 4.5 Served playback — `serve` and `served`
+
+Gated on `permissions: ["segment-transform-js"]`. `docs/adr/0007-served-playback.md`
+is the decision and its evidence.
+
+```ts
+interface ServedPlayback {
+	origin: string; // "http://127.0.0.1:49152" — loopback, http, explicit port
+}
+
+interface ServedRequest {
+	url: string; // always on the source's served.origin
+	method: string;
+	headers: Record<string, string>;
+}
+
+interface ServedResponse {
+	status: number; // 100–599
+	headers: Record<string, string>;
+	body: string | Uint8Array;
+}
+```
+
+A `PlaybackSource` with `served` is played by the host handing **every request
+the player makes to `served.origin`** — the manifest, each URL the manifest
+names on that origin, keys and subtitles — to the plugin's `serve`, and giving
+the player what it answers. The origin is named rather than inferred from
+`url` because the plugin writes it into the manifests it serves, and it is its
+own field so it can grow without overloading what a URL means.
+
+Normative:
+
+1. **Nothing on `served.origin` reaches the network.** No host binds a port or
+   opens a listener for it; the origin is a name the plugin's own responses use,
+   and every request for it is answered by `serve` or refused.
+2. **Only that origin.** A request whose origin differs is not routed to
+   `serve`, and a `served.origin` that is not `http`, a loopback name and an
+   explicit port is refused at `resolve` — a plugin does not get to put a real
+   address's traffic through itself.
+3. **The same instance.** `resolve` built the state `serve` reads. The host keeps
+   that plugin instance alive from the moment a served source is played until
+   the playback is released, and sends every `serve` for it there. A host that
+   cannot hold an instance open **must refuse the served source** by name rather
+   than start playback it cannot finish.
+4. **Release ends it.** Releasing the playback rejects what it had in flight and
+   accepts nothing more for it. Stopping the instance releases every playback it
+   was serving.
+5. **The permission gates it.** A plugin that did not declare
+   `segment-transform-js` gets no served playback, whatever it returns. A host
+   that does not know the permission refuses the plugin at load (§7).
+6. **Bounded.** A host caps the size of one answer, how many `serve` calls run
+   at once, and how long one may take, and a call past its deadline is treated
+   as a stuck plugin is. The reference host's numbers are 32 MiB, six, and 30
+   seconds.
+
+**What this gives up**, said here because it is the trade: a `StreamPipeline`
+is a transform a reviewer can read before it runs. A served stream runs the
+plugin's own code on every request, which a reviewer cannot. The permission
+makes that visible to a viewer before installing; it does not make the code
+readable.
 
 ---
 
