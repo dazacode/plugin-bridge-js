@@ -12,6 +12,106 @@ to exhaustion and deliberately closed it. `v0.1.x` is for fixes to what has
 already been promised; a minor bump whose case is "the number went up" is not a
 minor bump.
 
+## Unreleased — served playback: a plugin's own local server, without the socket
+
+Thirteen video extensions run a local HTTP server of their own to feed their
+player. ADR-0006 refused that idiom. [ADR-0007](docs/adr/0007-served-playback.md)
+revisits it on measured evidence: **binding a port stays refused, and a
+plugin-owned server is now represented in-realm as served playback.** Measured
+over the same two whole catalogues as v0.5.1: **anime 130 → 137 loaded (115 →
+122 through all three stages), manga 993 → 994 (657 unchanged). Zero listings
+lost, and no probe stage changed** on any listing that loaded before.
+`CONVERTER_VERSION` is unchanged.
+
+### Capabilities
+
+- **`serve()` and `served: { origin }`** (`contract/ABI.md` §4.5). `resolve`
+  may return a source on a stand-in loopback origin. Every request the player
+  makes to that origin goes to the plugin's own `serve(request)`, on the
+  instance that resolved it, and comes back with its status, headers and exact
+  body.
+  - Nothing on the origin reaches the network.
+  - Only the declared origin is routed.
+  - The feature is gated on `segment-transform-js`, which moves from reserved
+    to implemented.
+  - Bounded at 32 MiB per answer, six calls in flight and 30 seconds each.
+- **A NanoHTTPD subclass runs in-realm with no port.** The runtime's stand-in
+  server registers a port number and nothing else, and the extension's own
+  handler answers each request.
+- **Response bodies are carried as bytes end to end,** over the framed
+  transport, so a segment or a key is never passed through text.
+- **Leases pin an instance for a playback.** `sandbox.lease(origin)` holds the
+  instance that resolved a stream. `whenUnpinned()` lets an owner retire a
+  replaced instance once its last playback ends, instead of stopping it
+  mid-episode.
+
+### Correctness — silent bugs the pass exposed, fixed for every extension
+
+- `toInt(16)` and its siblings dropped their radix (38 call sites in the
+  corpus).
+- `String.chunked` returned a one-item list.
+- The JCE overloads taking `(bytes, offset, length)` read only their first
+  argument, so every AES-GCM tag check failed.
+- `init` blocks were set aside, along with any refusal inside them. They now
+  count as construction.
+- `InputStream.read` into a `ByteArray` the extension made itself threw.
+- A suspending block passed through an inline helper wasn't awaited.
+- `bytes[i] = b` called `TypedArray.set`, so an index write into any
+  `ByteArray` copied nothing. okio's `Buffer()` refused to be called without
+  `new`. `JsonObject.toString()` printed `[object Object]`.
+- `org.jsoup.Jsoup.parse(…)` was read as a variable called `org`. It converted,
+  loaded, and threw the first time an episode list parsed a fragment.
+- The Aniyomi driver made every source id absolute on the way out and reduced
+  it to a leading `/` on the way in, so a source storing a bare handle got
+  `series//abc123` and a 404. Ids now go back to the extension exactly as it
+  minted them. Ids stored in the old form are still read the old way.
+
+### Errors
+
+- **Errors carry the Kotlin type they were raised as**, and a `try` with
+  several clauses is dispatched on it, but only where that is faithful:
+  - a catch-all
+  - an extension's own exception class
+  - `IllegalStateException`, which every `error()`, `check()` and
+    `checkNotNull()` raises
+
+  An error no clause names is rethrown. A clause naming `IOException` or its
+  kin still refuses, because the runtime's own failures aren't tagged with
+  those types.
+
+- **An extension compiled against a library outside 12–16 is refused by
+  name.** Every listing measured is inside that range, so this moves nothing
+  today.
+
+### Translation
+
+- Trailing lambdas bind to the last parameter for own members, constructors
+  and file functions.
+- Package-qualified free functions are recognised.
+- `String.CASE_INSENSITIVE_ORDER`, `Character.MIN_RADIX` and `MAX_RADIX`, and
+  `SOCKET_READ_TIMEOUT` are supported.
+
+### Classification
+
+- A plugin's own local server is no longer filed as a native boundary. The
+  markers left `NATIVE_CAPABILITIES`; binding a real socket is still refused.
+
+### Evidence
+
+- **Three listings play end to end in the reference web client's production
+  build:** served manifest, media decoded, playback advancing, seek, and
+  teardown releasing the instance. A fourth plays until the player's own TS
+  transmuxer rejects a segment, and it fails the same way as plain HLS with no
+  routing. The family funnel is in ADR-0007 §8.
+
+### Left refused, on purpose
+
+- **One listing filters resolved DNS addresses.** A host that checks only
+  literal addresses doesn't give an equivalent guarantee, and no
+  plugin-controlled DNS is offered.
+- **One listing's single typed `catch`** sits over runtime crypto errors that
+  aren't tagged with the type it names.
+
 ## v0.5.1 — the v0.5.0 pass, continued: interceptors and a named deobfuscator run, and a boundary's cost is measurable
 
 A continuation of the v0.5.0 pass rather than a new direction: the same two
