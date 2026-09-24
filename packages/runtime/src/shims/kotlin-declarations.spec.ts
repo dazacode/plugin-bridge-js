@@ -148,10 +148,12 @@ describe('the collection members a catalogue pass named, run', () => {
 			)
 		);
 		expect(demo.names({ body: { string: () => '["a","b"]' } })).toEqual(['a', 'b']);
-		// Anywhere else it is a stream of bytes this runtime does not keep.
+		// Anywhere else it is a stream over the body's bytes, which this runtime
+		// now holds as the source sent them (ABI.md section 2), so it converts
+		// rather than refusing; the runtime half is aniyomi-conversion.spec.ts.
 		expect(
 			refusalNames(kt('class Demo {', '    fun raw(r: Response) = r.body.byteStream()', '}'))
-		).toEqual(['`.byteStream()`']);
+		).toEqual([]);
 	});
 });
 

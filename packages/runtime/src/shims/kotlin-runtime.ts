@@ -3220,6 +3220,18 @@ var __k = {
     return out;
   },
 
+  /**
+   * ByteArray.inputStream(), and the same name on a BufferedSource or an okio
+   * Buffer: a stream over the bytes, for a server to hand over as a body.
+   */
+  inputStream: function (value) {
+    if (typeof Uint8Array !== 'undefined' && value instanceof Uint8Array) return __inputStream(value);
+    if (value !== null && value !== undefined && typeof value.inputStream === 'function') {
+      return value.inputStream();
+    }
+    throw new Error('This converted extension asked for an input stream over something that has none.');
+  },
+
   /** okio's ByteArray.toByteString(): the same bytes with ByteString's readers. */
   toByteString: function (bytes) {
     return __byteString(__bytesOf(bytes).slice());
@@ -5195,6 +5207,21 @@ var __k = {
       throw new Error('This converted extension indexed into a value that was null.');
     }
     if (value instanceof Map) return value.has(key) ? value.get(key) : null;
+    // A Kotlin ByteArray is signed and this runtime holds one as a Uint8Array,
+    // so 'bytes[i]' answers the signed value Kotlin reads. Unsigned, a check
+    // written 'data[0] == 0x89.toByte()' compared 137 with -119 and was false
+    // for every PNG signature there is; 'b.toInt() and 0xFF', the other way
+    // this ecosystem writes it, is the same either way.
+    if (typeof Uint8Array !== 'undefined' && value instanceof Uint8Array) {
+      var slot = Number(key);
+      if (!Number.isInteger(slot) || slot < 0 || slot >= value.length) {
+        throw new Error(
+          'This converted extension read index ' + String(key) + ' of a byte array of length ' +
+          value.length + '.'
+        );
+      }
+      return value[slot] >= 128 ? value[slot] - 256 : value[slot];
+    }
     if (typeof value === 'string' || Array.isArray(value)) {
       var at = Number(key);
       if (!Number.isFinite(at) || at < 0 || at >= value.length) {
@@ -5698,6 +5725,11 @@ var __k = {
    */
   toByteArray: function (value, charset) {
     if (value !== null && typeof value === 'object' && value.__bigInteger === true) {
+      return value.toByteArray();
+    }
+    // ByteArrayOutputStream.toByteArray(), which the emitter routes here with
+    // String.toByteArray() because the two share a name.
+    if (value !== null && typeof value === 'object' && value.__kByteSink === true) {
       return value.toByteArray();
     }
     var kind = __charsetOf(charset);
@@ -8870,7 +8902,7 @@ var Request = {
  * synchronous in Kotlin, and making any of it asynchronous here would spread
  * 'await' through arbitrary expression positions in the emitted code.
  */
-function __responseOf(raw, text, request) {
+function __responseOf(raw, text, request, bytes) {
   var finalUrl = __str(raw.url).length > 0 ? __str(raw.url) : __str(request.url);
 
   /*
@@ -8898,6 +8930,26 @@ function __responseOf(raw, text, request) {
     }
     return text;
   }
+  /*
+   * The body as bytes. Exact when the host handed bytes over (every host that
+   * implements ABI.md section 2's HttpResponse.bytes()); otherwise the text
+   * encoded back, which is exact only for text - so a reader of bytes that is
+   * not reading text is refused by name below, rather than handed a segment
+   * that went through UTF-8 and came back looking right.
+   */
+  var exact = bytes !== undefined && bytes !== null;
+  function readBytes() {
+    read();
+    return exact ? bytes : __host().text.encode(text);
+  }
+  function binaryRefused(what) {
+    var type = response.body.contentType();
+    if (exact || type === null || type === undefined || __TEXT_TYPE.test(__str(type))) return;
+    throw new Error(
+      'This converted extension reads a ' + __str(type) + ' body ' + what + ', and this host ' +
+      'handed it text rather than bytes, so the body cannot be read as written.'
+    );
+  }
 
   var response = {
     code: raw.status,
@@ -8923,27 +8975,18 @@ function __responseOf(raw, text, request) {
     },
     body: {
       string: function () { return read(); },
-      bytes: function () { return __host().text.encode(read()); },
+      /* A copy, so an extension writing into what it read cannot change the next read. */
+      bytes: function () { binaryRefused('as bytes'); return readBytes().slice(); },
       /*
        * okio's view of the body: 'readUtf8Line()' over a progress stream, a
-       * 'peek()' at the first bytes, 'buffer()' to relay it. Its bytes are the
-       * text's, which is only the body when the body IS text — this runtime is
-       * handed text, not bytes. So a body the server said is binary refuses
-       * here, by name, rather than handing a relay a segment decoded as UTF-8
-       * and encoded back: bytes that look right and are not.
+       * 'peek()' at a fake image header before relaying, 'buffer()' to relay
+       * it. Over the exact bytes, so a segment reads as the segment it is.
        */
-      source: function () {
-        var type = response.body.contentType();
-        if (type !== null && type !== undefined && !__TEXT_TYPE.test(__str(type))) {
-          throw new Error(
-            'This converted extension reads a ' + __str(type) + ' body as bytes. Plugin code ' +
-            'here is handed text, not bytes, so a binary body cannot be relayed as written.'
-          );
-        }
-        return __byteSource(__host().text.encode(read()));
-      },
+      source: function () { binaryRefused('through source()'); return __byteSource(readBytes()); },
+      /* java.io's view of the same bytes, which a relay hands its server as a body. */
+      byteStream: function () { binaryRefused('as a stream'); return __inputStream(readBytes()); },
       // In bytes, which is what okhttp counts and what 'bytes()' answers.
-      contentLength: function () { return __host().text.encode(read()).length; },
+      contentLength: function () { return readBytes().length; },
       /*
        * okhttp's ResponseBody.contentType(), which is the header verbatim.
        *
@@ -9110,10 +9153,18 @@ async function __execute(request, follow) {
   var local = __virtualServerFor(request.url);
   if (local !== null) {
     var served = await __serveVirtual(local, request);
-    return __responseOf(served, served.text, request);
+    return __responseOf(served, served.text, request, served.bytes);
   }
   var raw = await __host().http.send(__str(request.url), options);
-  return __responseOf(raw, await raw.text(), request);
+  // The exact bytes where the host has them (HttpResponse.bytes(), ABI.md
+  // section 2), and the text read from those same bytes - one body, two views.
+  // A host with only text() is still answered, as text.
+  var declined = raw.unread !== undefined && raw.unread !== null && raw.unread !== '';
+  if (typeof raw.bytes === 'function' && !declined) {
+    var body = await raw.bytes();
+    return __responseOf(raw, __host().text.decode(body), request, body);
+  }
+  return __responseOf(raw, declined ? '' : await raw.text(), request);
 }
 
 /**
@@ -9144,6 +9195,32 @@ async function __execute(request, follow) {
 var MIME_PLAINTEXT = 'text/plain';
 var __virtualServers = {};
 var __nextVirtualPort = 49152;
+
+/** The origin a stand-in server's url is on, as served playback names it. */
+function __virtualOriginOf(url) {
+  var match = /^(http:\\/\\/(?:127\\.0\\.0\\.1|localhost|\\[::1\\]):\\d+)(?:\\/|\\?|$)/i.exec(__str(url));
+  return match === null ? null : match[1];
+}
+
+/**
+ * A player's request, answered by the server's handler: ABI.md's ServedRequest
+ * in, ServedResponse out. The same session and body reading a request the
+ * plugin makes to itself goes through ('__serveVirtual').
+ */
+async function __serveRequest(server, request) {
+  var session = __nanoSession(__str(request.url), request.method || 'GET', request.headers || {}, null);
+  var answer = await server.handle(session);
+  if (answer === null || answer === undefined || answer.__kNanoResponse !== true) {
+    throw new Error('This converted extension\\'s local server answered with something that is not a response.');
+  }
+  var headers = {};
+  for (var i = 0; i < answer.headers.length; i += 1) headers[answer.headers[i][0]] = answer.headers[i][1];
+  if (answer.mimeType !== null) headers['Content-Type'] = answer.mimeType;
+  var status = answer.status && typeof answer.status.getRequestStatus === 'function'
+    ? answer.status.getRequestStatus()
+    : Number(answer.status);
+  return { status: status, headers: headers, body: await __nanoBody(answer) };
+}
 
 function __virtualServerFor(url) {
   var match = /^http:\\/\\/(127\\.0\\.0\\.1|localhost|\\[::1\\]):(\\d+)(\\/|\\?|$)/i.exec(__str(url));
@@ -9312,6 +9389,7 @@ var __TEXT_TYPE = /^(text\\/|application\\/(json|xml|javascript|x-mpegurl|vnd\\.
 async function __drainStream(stream) {
   if (stream instanceof Uint8Array) return stream;
   if (stream && typeof stream.__kDrain === 'function') return await stream.__kDrain();
+  if (stream && typeof stream.readBytes === 'function') return stream.readBytes();
   throw new Error('This converted extension answered with a stream this runtime cannot read.');
 }
 
@@ -9337,18 +9415,30 @@ async function __serveVirtual(server, request) {
   var code = answer.status && typeof answer.status.getRequestStatus === 'function'
     ? answer.status.getRequestStatus()
     : Number(answer.status);
-  var text = '';
-  var unread = '';
-  if (typeof answer.data === 'string') {
-    text = answer.data;
-  } else if (answer.data !== null) {
-    if (answer.mimeType !== null && __TEXT_TYPE.test(answer.mimeType)) {
-      text = __host().text.decode(await __drainStream(answer.data));
-    } else {
-      unread = 'a binary body from the extension\\'s own local server, which needs a byte path this runtime does not have';
-    }
+  var body = await __nanoBody(answer);
+  return {
+    status: code,
+    url: __str(request.url),
+    headers: out,
+    text: typeof body === 'string' ? body : __host().text.decode(body),
+    bytes: typeof body === 'string' ? undefined : body
+  };
+}
+
+/**
+ * A handler's body as what it is: the string it gave, or every byte of the
+ * ByteArray or InputStream it gave. Capped, because a handler is plugin code
+ * and a stream it hands over is one it controls the end of.
+ */
+var __MAX_SERVED_BYTES = 32 * 1024 * 1024;
+async function __nanoBody(answer) {
+  if (answer.data === null || answer.data === undefined) return '';
+  if (typeof answer.data === 'string') return answer.data;
+  var bytes = await __drainStream(answer.data);
+  if (bytes.length > __MAX_SERVED_BYTES) {
+    throw new Error('This converted extension\\'s local server answered with more than ' + __MAX_SERVED_BYTES + ' bytes.');
   }
-  return { status: code, url: __str(request.url), headers: out, unread: unread, text: text };
+  return bytes;
 }
 
 /**
@@ -9394,6 +9484,7 @@ class Buffer {
   }
   exhausted() { return this.__bytes.length === 0; }
   clear() { this.__bytes = new Uint8Array(0); }
+  inputStream() { return __inputStream(this.readByteArray()); }
   /* As a Source: hand over up to byteCount bytes, -1 when there are none. */
   read(sink, byteCount) {
     if (this.__bytes.length === 0) return -1;
@@ -9413,6 +9504,8 @@ class ForwardingSource {
   get delegate() { return this.__delegate; }
   read(sink, byteCount) { return this.__delegate.read(sink, byteCount); }
   close() { if (typeof this.__delegate.close === 'function') this.__delegate.close(); }
+  /* okio's 'source.buffer()', which reads through this class's own 'read'. */
+  buffer() { return __bufferedSource(this); }
 }
 
 /**
@@ -9444,6 +9537,9 @@ function __byteSource(bytes) {
       return __host().text.decode(line);
     },
     exhausted: function () { return at >= bytes.length; },
+    /* Already buffered: okio's 'source.buffer()' on one of these is itself. */
+    buffer: function () { return made; },
+    inputStream: function () { var rest = bytes.slice(at); at = bytes.length; return __inputStream(rest); },
     read: function (sink, byteCount) {
       if (at >= bytes.length) return -1;
       var n = Math.min(Number(byteCount), bytes.length - at);
@@ -9454,6 +9550,69 @@ function __byteSource(bytes) {
     close: function () {}
   };
   return made;
+}
+
+/**
+ * java.io's InputStream over bytes in hand: what 'body.byteStream()',
+ * 'ByteArrayInputStream(bytes)' and 'bytes.inputStream()' answer.
+ *
+ * Synchronous, like the Kotlin it stands for, and exact: 'read()' is one byte
+ * as 0..255 or -1 at the end, 'read(buffer, offset, length)' fills the
+ * caller's ByteArray in place and answers how many it wrote. A server that
+ * hands one of these to 'newFixedLengthResponse' has its unread remainder
+ * taken whole ('readBytes'), which is what NanoHTTPD sends.
+ */
+function __inputStream(bytes) {
+  var at = 0;
+  var made = {
+    read: function (buffer, offset, length) {
+      if (buffer === undefined) return at < bytes.length ? bytes[at++] : -1;
+      var off = offset === undefined ? 0 : Number(offset);
+      var len = length === undefined ? buffer.length - off : Number(length);
+      if (len === 0) return 0;
+      if (at >= bytes.length) return -1;
+      var n = Math.min(len, bytes.length - at);
+      buffer.set(bytes.subarray(at, at + n), off);
+      at += n;
+      return n;
+    },
+    readBytes: function () { var rest = bytes.slice(at); at = bytes.length; return rest; },
+    readAllBytes: function () { return made.readBytes(); },
+    available: function () { return bytes.length - at; },
+    skip: function (count) {
+      var n = Math.max(0, Math.min(Number(count), bytes.length - at));
+      at += n;
+      return n;
+    },
+    close: function () {}
+  };
+  return made;
+}
+
+function ByteArrayInputStream(bytes, offset, length) {
+  var all = __bytesOf(bytes);
+  if (offset === undefined) return __inputStream(all);
+  return __inputStream(all.subarray(Number(offset), Number(offset) + Number(length)));
+}
+
+/** java.io's ByteArrayOutputStream: bytes appended, read back whole. */
+function ByteArrayOutputStream() {
+  var held = new Buffer();
+  return {
+    __kByteSink: true,
+    write: function (value, offset, length) {
+      if (typeof value === 'number') { held.writeByte(value); return; }
+      var all = __bytesOf(value);
+      held.write(offset === undefined ? all : all.subarray(Number(offset), Number(offset) + Number(length)));
+    },
+    toByteArray: function () { return held.__bytes.slice(); },
+    size: function () { return held.size; },
+    reset: function () { held.clear(); },
+    toString: function () { return __host().text.decode(held.__bytes); },
+    writeTo: function (out) { out.write(held.__bytes.slice()); },
+    flush: function () {},
+    close: function () {}
+  };
 }
 
 /**

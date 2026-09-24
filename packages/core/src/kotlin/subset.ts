@@ -967,6 +967,7 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 	['equals', 'equalsTo'],
 	['compareTo', 'compareTo'],
 	['toByteArray', 'toByteArray'],
+	['inputStream', 'inputStream'],
 	['encodeToByteArray', 'toByteArray'],
 	// `ByteArray.decodeToString()`, which is `String(bytes)` under Kotlin's
 	// other name — including the range form, which tells a playlist from a
@@ -1741,6 +1742,17 @@ export const HOST_METHODS: ReadonlySet<string> = new Set([
 	// header before relaying. Text bodies only; see the runtime's 'source'.
 	'source',
 	'readUtf8Line',
+	// The byte path, over bodies this runtime now holds as the bytes the source
+	// sent (ABI.md section 2): a relay's peek at a fake header, the chunks it
+	// reads and rewrites, the stream it hands its server as a body.
+	'byteStream',
+	'peek',
+	'readByteArray',
+	'exhausted',
+	'buffer',
+	'readBytes',
+	'available',
+	'writeTo',
 	'cacheControl',
 	// okhttp's MultipartBody.Builder.
 	'setType',
@@ -2281,6 +2293,8 @@ export const GLOBAL_NAMES: ReadonlySet<string> = new Set([
 	'ForwardingSource',
 	'Buffer',
 	'OkHttpClient',
+	'ByteArrayInputStream',
+	'ByteArrayOutputStream',
 	// `object : Interceptor { … }` and `class X : Interceptor` — the type an
 	// extension names when it writes one out rather than passing a lambda. The
 	// runtime calls `intercept` by name, so the interface itself carries no

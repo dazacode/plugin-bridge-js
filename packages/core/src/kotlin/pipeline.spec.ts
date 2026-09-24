@@ -1854,8 +1854,8 @@ describe('a local server, which the runtime runs without a port', () => {
 					'    fun proxyUrl(url: String) = "http://127.0.0.1:$listeningPort/p?url=$url"',
 					'    override fun serve(session: IHTTPSession): Response = relay(session.uri)',
 					'    private fun relay(url: String): Response {',
-					'        val body = client.newCall(GET(url)).execute().body',
-					'        return newChunkedResponse(Status.OK, "video/mp2t", body.byteStream())',
+					'        val cores = Runtime.getRuntime().availableProcessors()',
+					'        return newFixedLengthResponse(Status.OK, MIME_PLAINTEXT, "$url $cores")',
 					'    }',
 					'}'
 				)
@@ -1877,8 +1877,8 @@ describe('a local server, which the runtime runs without a port', () => {
 				'    fun proxyUrl(url: String) = "http://127.0.0.1:$listeningPort/p?url=$url"',
 				'    override fun serve(session: IHTTPSession): Response = relay(session.uri)',
 				'    private fun relay(url: String): Response {',
-				'        val body = client.newCall(GET(url)).execute().body',
-				'        return newChunkedResponse(Status.OK, "video/mp2t", body.byteStream())',
+				'        val cores = Runtime.getRuntime().availableProcessors()',
+				'        return newFixedLengthResponse(Status.OK, MIME_PLAINTEXT, "$url $cores")',
 				'    }',
 				'    companion object {',
 				'        @Volatile private var shared: Proxy? = null',

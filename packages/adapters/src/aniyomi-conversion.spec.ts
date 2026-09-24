@@ -978,7 +978,7 @@ class Proxy extends NanoHTTPD {
   async handle(session) {
     const url = __k.firstOrNull(__k.index(session.parameters, 'url'));
     if (url == null) return newFixedLengthResponse(Status.BAD_REQUEST, MIME_PLAINTEXT, 'Missing url');
-    if (session.uri === '/binary') return newChunkedResponse(Status.OK, 'video/mp2t', new Uint8Array([71, 0, 1]));
+    if (session.uri === '/binary') return newChunkedResponse(Status.OK, 'video/mp2t', new Uint8Array([71, 0, 255]));
     const text = (await client.newCall(GET(url, {})).execute()).body.string();
     const probe = session.headers.get('x-probe') ?? 'none';
     return newFixedLengthResponse(Status.OK, 'application/vnd.apple.mpegurl',
@@ -1025,34 +1025,125 @@ ${body}
 		expect(requested.some((url) => url.includes('127.0.0.1'))).toBe(false);
 	});
 
-	it('reports a stream on its own server as plugin-served, not as a url to play', async () => {
-		const module = await load(
+	it('returns a stream on its own server as served, and serves it through its handler', async () => {
+		// ABI.md, served playback: the source names the origin every request for
+		// it is on, and the host hands those requests to `serve` rather than to
+		// the network. `serve` runs the extension's own handler, in this realm.
+		const module = (await load(
 			extension(`
     const local = this.proxy().proxyUrl('https://cdn.example.invalid/master.m3u8');
     return [Video(local, '1080p', local, {})];`)
-		);
+		)) as Loaded & {
+			serve(
+				request: { url: string; method: string; headers: Record<string, string> },
+				ctx: unknown
+			): Promise<{ status: number; headers: Record<string, string>; body: string | Uint8Array }>;
+		};
 		const { ctx, requested } = context();
 
-		await expect(module.resolve(`${BASE_URL}/anime/one/1`, undefined, ctx)).rejects.toThrow(
-			/its own request handler.*no port.*1 of them/s
+		const [source] = (await module.resolve(
+			`${BASE_URL}/anime/one/1`,
+			undefined,
+			ctx
+		)) as (Stream & {
+			served?: { origin: string };
+		})[];
+		expect(source.served?.origin).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+		expect(source.url.startsWith(`${source.served!.origin}/proxy?url=`)).toBe(true);
+		expect(source.container).toBe('hls');
+
+		const manifest = await module.serve(
+			{ url: source.url, method: 'GET', headers: { 'X-Probe': 'player' } },
+			ctx
 		);
+		expect(manifest.status).toBe(200);
+		expect(manifest.headers['Content-Type']).toBe('application/vnd.apple.mpegurl');
+		expect(manifest.body).toBe('#EXTM3U GET player');
+
+		const segment = await module.serve(
+			{ url: `${source.served!.origin}/binary?url=x`, method: 'GET', headers: {} },
+			ctx
+		);
+		expect(segment.body).toBeInstanceOf(Uint8Array);
+		expect(Array.from(segment.body as Uint8Array)).toEqual([71, 0, 255]);
+
+		await expect(
+			module.serve({ url: 'http://127.0.0.1:1/elsewhere', method: 'GET', headers: {} }, ctx)
+		).rejects.toThrow(/not on a server it has running/);
+		// The loopback urls never went to the network; the upstream fetch did.
 		expect(requested.some((url) => url.includes('127.0.0.1'))).toBe(false);
+		expect(requested).toContain('https://cdn.example.invalid/master.m3u8');
 	});
 
-	it('marks a binary body from the handler unread, rather than decoding it as text', async () => {
-		// Plugin code here is handed text. A segment decoded as UTF-8 and
-		// encoded back is bytes that look right and are not.
+	it('carries a binary body from the handler exactly, and reads its bytes signed', async () => {
+		// The handler's bytes never become text on the way: 0x47 (a TS sync
+		// byte), 0x00 and 0xFF arrive as themselves, and Kotlin's signed Byte
+		// reads 0xFF as -1.
 		const module = await load(
 			extension(`
     const local = 'http://127.0.0.1:' + this.proxy().listeningPort + '/binary?url=x';
-    (await client.newCall(GET(local, {})).execute()).body.string();
-    return [];`)
+    const bytes = (await client.newCall(GET(local, {})).execute()).body.bytes();
+    const read = [__k.index(bytes, 0), __k.index(bytes, 1), __k.index(bytes, 2)].join(',');
+    return [Video('https://cdn.example.invalid/a.mp4', read, 'https://cdn.example.invalid/a.mp4', {})];`)
 		);
 		const { ctx } = context();
 
-		await expect(module.resolve(`${BASE_URL}/anime/one/1`, undefined, ctx)).rejects.toThrow(
-			/binary body from the extension's own local server/
+		const sources = await module.resolve(`${BASE_URL}/anime/one/1`, undefined, ctx);
+
+		expect(sources[0].quality).toBe('71,0,-1');
+	});
+
+	it('refuses by name to read a binary body as bytes from a host that handed over only text', async () => {
+		// A host with text() and no bytes() has already lost what is not UTF-8;
+		// reading the text back as a segment would be bytes that look right.
+		PAGES['https://cdn.example.invalid/seg.ts'] = 'G\u0000';
+		const module = await load(
+			extension(`
+    const response = await client.newCall(GET('https://cdn.example.invalid/seg.ts', {})).execute();
+    response.body.source();
+    return [];`)
 		);
+		const { ctx } = context();
+		(ctx as { http: { send: (url: string) => Promise<unknown> } }).http.send = async (
+			url: string
+		) => ({
+			status: 200,
+			url,
+			headers: { 'content-type': 'video/mp2t' },
+			text: async () => PAGES[url] ?? '',
+			json: async () => ({})
+		});
+
+		await expect(module.resolve(`${BASE_URL}/anime/one/1`, undefined, ctx)).rejects.toThrow(
+			/video\/mp2t body through source\(\), and this host handed it text/
+		);
+	});
+
+	it('reads the exact bytes a host hands over, not the text encoded back', async () => {
+		const binary = Uint8Array.of(0x47, 0x00, 0xc0, 0xaf, 0xff);
+		const module = await load(
+			extension(`
+    const response = await client.newCall(GET('https://cdn.example.invalid/seg.ts', {})).execute();
+    const source = response.body.source();
+    const head = source.peek().readByteArray(2);
+    const all = response.body.bytes();
+    return [Video('https://cdn.example.invalid/a.mp4', Array.from(head).join(',') + '|' + Array.from(all).join(','), 'https://cdn.example.invalid/a.mp4', {})];`)
+		);
+		const { ctx } = context();
+		(ctx as { http: { send: (url: string) => Promise<unknown> } }).http.send = async (
+			url: string
+		) => ({
+			status: 200,
+			url,
+			headers: { 'content-type': 'video/mp2t' },
+			text: async () => new TextDecoder().decode(binary),
+			json: async () => ({}),
+			bytes: async () => binary.slice()
+		});
+
+		const sources = await module.resolve(`${BASE_URL}/anime/one/1`, undefined, ctx);
+
+		expect(sources[0].quality).toBe('71,0|71,0,192,175,255');
 	});
 
 	it('sends a request to the network once the server is stopped', async () => {

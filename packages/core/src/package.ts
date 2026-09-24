@@ -261,6 +261,15 @@ export interface BundleInput {
 	 * The same reasoning, and the same trap, as the host list two fields up.
 	 */
 	readonly usesCookies?: boolean;
+
+	/**
+	 * Whether the translated module serves its own streams (`servesStreams`),
+	 * which is the `segment-transform-js` permission: plugin code running on
+	 * every request a player makes for that stream. Shown to a viewer before
+	 * installing, like `cookies`, and derived from the translated module for
+	 * the same reason.
+	 */
+	readonly servesStreams?: boolean;
 }
 
 /**
@@ -280,6 +289,20 @@ export interface BundleInput {
  */
 export function namesCookieJar(translatedSource: string): boolean {
 	return /\.(?:cookieJar|saveFromResponse)\s*\(/.test(translatedSource);
+}
+
+/**
+ * Whether a translated module stands up a server of its own to play through.
+ *
+ * The runtime answers such a server in-realm with no port, and a stream on it
+ * is played by the host handing the player's requests to the plugin's handler
+ * (`ABI.md`, served playback). That is arbitrary code in the playback path, so
+ * it is a permission a viewer sees, not something a converted bundle acquires
+ * silently. Read off the emitted class header, which is the one line every
+ * such module has and nothing else produces.
+ */
+export function servesStreams(translatedSource: string): boolean {
+	return /\bextends NanoHTTPD\b/.test(translatedSource);
 }
 
 export class PackagingError extends Error {
@@ -387,7 +410,11 @@ export function convertedManifest(input: BundleInput): Record<string, unknown> {
 		// rather than a default because it is state the host keeps on this
 		// plugin's behalf, and a viewer is entitled to see that named before
 		// they install. A plugin that does not ask does not get one.
-		permissions: input.usesCookies === true ? ['network', 'cookies'] : ['network'],
+		permissions: [
+			'network',
+			...(input.usesCookies === true ? ['cookies'] : []),
+			...(input.servesStreams === true ? ['segment-transform-js'] : [])
+		],
 		entrypoint: ENTRYPOINT,
 		network: { hosts },
 		// Run back through the manifest reader rather than trusted as built:

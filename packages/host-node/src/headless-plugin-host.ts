@@ -66,6 +66,7 @@ import {
 	type WasmLoader,
 	type WorkerFactory
 } from '@plugin-bridge/host/host';
+import { encodeFrame, FrameReader } from '@plugin-bridge/host/net/frames';
 import { relay } from '@plugin-bridge/host/net/relay';
 import { nodeChainRepair } from './net/aia';
 import type { SandboxReady } from './sandbox-bootstrap';
@@ -323,7 +324,8 @@ class ProcessWorker {
 	readonly ready: Promise<SandboxReady>;
 
 	private announce: ((value: SandboxReady) => void) | null = null;
-	private buffer = '';
+	/** Frames, not lines: a message may carry raw bytes after its line (`frames.ts`). */
+	private readonly frames = new FrameReader(true);
 	private stopped = false;
 	/** The tail of what the isolate wrote to stderr, for when it dies. */
 	private noise = '';
@@ -339,8 +341,9 @@ class ProcessWorker {
 		// through `onerror`.
 		this.ready.catch(() => {});
 
-		child.stdout.setEncoding('utf8');
-		child.stdout.on('data', (chunk: string) => this.receive(chunk));
+		// Bytes, not utf8: a served segment arrives here raw, and decoding the
+		// stream as text would corrupt it before the reader ever saw a frame.
+		child.stdout.on('data', (chunk: Uint8Array) => this.receive(chunk));
 		child.stderr.setEncoding('utf8');
 		child.stderr.on('data', (chunk: string) => {
 			// Through to stderr unchanged — a failure in the isolate stays visible
@@ -384,25 +387,18 @@ class ProcessWorker {
 		return chosen.length > STDERR_LINE ? `${chosen.slice(0, STDERR_LINE - 1)}…` : chosen;
 	}
 
-	private receive(chunk: string): void {
-		this.buffer += chunk;
-		for (;;) {
-			const newline = this.buffer.indexOf('\n');
-			if (newline === -1) return;
-			const line = this.buffer.slice(0, newline);
-			this.buffer = this.buffer.slice(newline + 1);
-			if (line.length === 0) continue;
-
-			let message: unknown;
-			try {
-				message = JSON.parse(line);
-			} catch {
-				// Anything on this stream that is not ours is a runtime notice
-				// that escaped stderr. Dropping it beats handing the runtime a
-				// message it cannot read.
-				continue;
-			}
-
+	private receive(chunk: Uint8Array): void {
+		// Anything on this stream that is not ours is a runtime notice that
+		// escaped stderr; the reader drops it (`skipMalformed`) rather than hand
+		// the runtime a message it cannot read.
+		let messages: unknown[];
+		try {
+			messages = this.frames.push(chunk);
+		} catch (error) {
+			this.onerror?.(error);
+			return;
+		}
+		for (const message of messages) {
 			// The bootstrap notice belongs to the host, not to the runtime.
 			// Forwarding it would hand `sandbox-host.ts` a reply to a call it
 			// never made.
@@ -417,7 +413,7 @@ class ProcessWorker {
 
 	postMessage(value: unknown): void {
 		if (this.stopped) return;
-		this.child.stdin.write(`${JSON.stringify(value)}\n`);
+		this.child.stdin.write(encodeFrame(value));
 	}
 
 	terminate(): void {

@@ -29,7 +29,8 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { relay } from './relay';
+import { FRAME_CONTENT_TYPE, relay } from './relay';
+import { FrameReader } from './frames';
 import { isPrivateAddress } from './addresses';
 import type { ChainRepair } from './chain-repair';
 
@@ -643,5 +644,53 @@ describe('a redirect to http on the same host', () => {
 		// MAX_REDIRECTS is 4, so the first request plus four followed hops.
 		expect(asked).toHaveLength(5);
 		expect(asked.every((one) => one.startsWith('https:'))).toBe(true);
+	});
+});
+
+describe('a caller that asks for the body as bytes', () => {
+	/** Every byte value, then bytes that are not UTF-8 at all. */
+	const BINARY = Uint8Array.from([...Array.from({ length: 256 }, (_, i) => i), 0xc0, 0xaf, 0xff]);
+
+	async function framed(body: Record<string, unknown>, served: () => Response) {
+		const response = await relay(
+			new Request('https://local.invalid/api/plugin-fetch', {
+				method: 'POST',
+				body: JSON.stringify({ ...body, reply: 'frame' })
+			}),
+			(async () => served()) as unknown as typeof fetch,
+			repair
+		);
+		expect(response.headers.get('content-type')).toBe(FRAME_CONTENT_TYPE);
+		const [message] = new FrameReader().push(new Uint8Array(await response.arrayBuffer()));
+		return message as Record<string, unknown> & { body: Uint8Array };
+	}
+
+	it('hands back the exact bytes, including 0x00 and bytes that are not UTF-8', async () => {
+		const message = await framed(
+			{ url: 'https://cdn.example.com/seg.ts' },
+			() => new Response(BINARY, { status: 200, headers: { 'content-type': 'video/mp2t' } })
+		);
+		expect(message.status).toBe(200);
+		expect(message.url).toBe('https://cdn.example.com/seg.ts');
+		expect((message.headers as Record<string, string>)['content-type']).toBe('video/mp2t');
+		expect(Array.from(message.body)).toEqual(Array.from(BINARY));
+	});
+
+	it('keeps a non-2xx as data, with its status, exactly as the JSON reply does', async () => {
+		const message = await framed(
+			{ url: 'https://cdn.example.com/gone.ts' },
+			() => new Response('gone', { status: 404 })
+		);
+		expect(message.status).toBe(404);
+		expect(new TextDecoder().decode(message.body)).toBe('gone');
+	});
+
+	it('still answers the JSON reply, with the body as text, to a caller that did not ask', async () => {
+		const { payload } = await call(
+			{ url: 'https://example.com/page' },
+			() =>
+				new Response('<p>caf\u00e9</p>', { status: 200, headers: { 'content-type': 'text/html' } })
+		);
+		expect(payload.body).toBe('<p>caf\u00e9</p>');
 	});
 });

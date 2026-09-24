@@ -703,7 +703,15 @@ const RUNTIME_BASE_MEMBERS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
 	['ForwardingSource', new Set(['read', 'close'])]
 ]);
 const RUNTIME_BASE_CALLS: ReadonlyMap<string, readonly string[]> = new Map([
-	['NanoHTTPD', ['start', 'stop', 'getListeningPort', 'wasStarted', 'closeAllConnections']]
+	// `write` rides along with both: a server fills a ByteArrayOutputStream and a
+	// Source writes its rewritten chunk into the sink it was handed. The name is
+	// far too common to allow everywhere, so it is allowed where one of these
+	// classes is, which is where the byte types it lands on are defined.
+	[
+		'NanoHTTPD',
+		['start', 'stop', 'getListeningPort', 'wasStarted', 'closeAllConnections', 'write']
+	],
+	['ForwardingSource', ['write']]
 ]);
 
 const ANIME_FILTER_KINDS: ReadonlySet<string> = new Set([

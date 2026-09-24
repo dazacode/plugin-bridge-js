@@ -47,7 +47,8 @@ interface HostRequest {
 		| 'resolve'
 		| 'browse'
 		| 'listChapters'
-		| 'readChapter';
+		| 'readChapter'
+		| 'serve';
 	readonly payload: unknown;
 }
 
@@ -77,6 +78,10 @@ interface PluginModule {
 	listChapters?(sourceMediaId: string, ctx: unknown): Promise<unknown>;
 	readChapter?(sourceMediaId: string, chapter: unknown, ctx: unknown): Promise<unknown>;
 	browse?(shelf: string, page: number, ctx: unknown, cursor?: string): Promise<unknown>;
+	// ABI.md, served playback: one request for a stream this plugin serves
+	// itself. Answered with a body that may be bytes — the one place, with
+	// HttpResponse.bytes(), where a value crossing this boundary is not JSON.
+	serve?(request: unknown, ctx: unknown): Promise<unknown>;
 }
 
 let plugin: PluginModule | null = null;
@@ -260,19 +265,40 @@ const BYTES = {
 	}
 };
 
+/**
+ * `HttpResponse` (`ABI.md` §2): one body, held as the bytes the source sent.
+ *
+ * `bytes()` used to be `text()` encoded back, which is exact for a page and
+ * corrupts anything else — the text had already replaced every byte that is not
+ * UTF-8, so the round trip handed a plugin a plausible, wrong segment. Now the
+ * bytes are the one representation and the other two are read from them:
+ * `text()` decodes them once, `json()` parses that text.
+ *
+ * Repeated reads are defined, and the same: the body is read into memory once,
+ * by the host, before this object exists. `bytes()` answers a copy each time,
+ * so a plugin that writes into what it was given cannot change what the next
+ * read sees. `unread` is the host saying it declined the body (too large); it
+ * is carried so the converted runtime can say so by name rather than hand an
+ * extension an empty page.
+ */
 function makeResponse(raw: {
 	status: number;
 	url: string;
 	headers: Record<string, string>;
-	body: string;
+	body: Uint8Array | string;
+	unread?: string;
 }) {
+	const body = typeof raw.body === 'string' ? TEXT.encode(raw.body) : raw.body;
+	let text: string | null = null;
+	const decoded = () => (text ??= TEXT.decode(body));
 	return {
 		status: raw.status,
 		url: raw.url,
 		headers: raw.headers,
-		text: async () => raw.body,
-		json: async () => JSON.parse(raw.body) as unknown,
-		bytes: async () => TEXT.encode(raw.body)
+		...(raw.unread === undefined ? {} : { unread: raw.unread }),
+		text: async () => decoded(),
+		json: async () => JSON.parse(decoded()) as unknown,
+		bytes: async () => body.slice()
 	};
 }
 
@@ -283,7 +309,8 @@ function makeContext() {
 			status: number;
 			url: string;
 			headers: Record<string, string>;
-			body: string;
+			body: Uint8Array | string;
+			unread?: string;
 		};
 		return makeResponse(raw);
 	};
@@ -445,7 +472,8 @@ self.onmessage = async (event: MessageEvent) => {
 						'listEpisodes',
 						'resolve',
 						'listChapters',
-						'readChapter'
+						'readChapter',
+						'serve'
 					] as const
 				).filter(
 					(name) => typeof (plugin as Record<string, unknown> | null)?.[name] === 'function'
@@ -490,6 +518,14 @@ self.onmessage = async (event: MessageEvent) => {
 					chapter: unknown;
 				};
 				const value = await required().readChapter?.(sourceMediaId, chapter, makeContext());
+				reply({ id: data.id, ok: true, value });
+				return;
+			}
+			case 'serve': {
+				const { request } = data.payload as { request: unknown };
+				const value = await required().serve?.(request, makeContext());
+				// Posted as it is: a browser Worker clones a Uint8Array body as the
+				// bytes it is, and the headless isolate frames it (`frames.ts`).
 				reply({ id: data.id, ok: true, value });
 				return;
 			}

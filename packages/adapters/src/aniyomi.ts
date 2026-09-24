@@ -53,7 +53,7 @@ import {
 import { TreeError } from '@plugin-bridge/core/git-trees';
 import { obstacleSites } from '@plugin-bridge/core/obstacles';
 import { attributionFrom } from '@plugin-bridge/core/attribution';
-import { namesCookieJar, packageBundle } from '@plugin-bridge/core/package';
+import { namesCookieJar, servesStreams, packageBundle } from '@plugin-bridge/core/package';
 import { settingKeyMap } from '@plugin-bridge/core/preferences';
 import { aniyomiPreferences } from './aniyomi-preferences';
 import { libraryFileSource, synchronyScriptOf } from './library-shims';
@@ -472,6 +472,7 @@ export const aniyomiAdapter: ForeignAdapter = {
 			// cookie *API* — it gets the request continuity its own platform
 			// would have given it, and nothing else.
 			usesCookies: formatProfile('aniyomi').implicitCookies || namesCookieJar(conversion.js),
+			servesStreams: servesStreams(conversion.js),
 			license: credit.license,
 			licenseText: source.licenseText ?? undefined,
 			embedded: synchrony === undefined ? [] : [synchrony.path],

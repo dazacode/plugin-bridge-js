@@ -5178,8 +5178,9 @@ describe("okio's source, which is only ever the same body under another type", (
 		// The Madara interceptors that fix a host serving pages as
 		// `application/octet-stream`. A response here is text, so the same
 		// bytes are its `string()`; the runtime half is proved in
-		// kotlin-runtime.spec.ts. Reading the source as a stream is not
-		// something a text body can answer, and stays refused.
+		// kotlin-runtime.spec.ts. Reading the source as bytes converts now that
+		// a body is held as its bytes (ABI.md section 2); rewrapping it with an
+		// explicit length is still not a shape this reads.
 		const emission = translate(
 			inClass(
 				'    fun fix(response: Response): Response {',
@@ -5193,7 +5194,7 @@ describe("okio's source, which is only ever the same body under another type", (
 		expect(emission.js).toContain(
 			"__k.toResponseBody(response.body.string(), __k.toMediaType('image/jpeg'))"
 		);
-		expect(emission.refusals.map((one) => one.member).sort()).toEqual(['sized', 'stream']);
+		expect(emission.refusals.map((one) => one.member).sort()).toEqual(['sized']);
 	});
 });
 

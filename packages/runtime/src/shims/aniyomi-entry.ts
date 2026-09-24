@@ -1124,20 +1124,16 @@ export default {
 
     const found = await __videosFor(item);
     const sources = [];
-    let pluginServed = 0;
     for (const entry of found) {
       const made = await __playable(entry.video);
       if (made === null) continue;
       const url = made.url;
       // A stream addressing a server this bundle started (see NanoHTTPD in the
-      // runtime) is served by the extension's own handler, in this realm, and
-      // by nothing a player could reach. Handing it over would be handing the
-      // player a url on a port nobody is listening on. Counted, not skipped
-      // silently: if every stream is one, that is the answer to give.
-      if (__virtualServerFor(url) !== null) {
-        pluginServed += 1;
-        continue;
-      }
+      // runtime) is served by the extension's own handler, in this realm. It
+      // goes to the host marked as served, with the origin every request for
+      // it will be on, and the host hands those requests back to 'serve' below
+      // rather than to the network (ABI.md, served playback).
+      const served = __virtualServerFor(url) === null ? null : __virtualOriginOf(url);
       // 'videoTitle' is the current spelling and 'quality' the deprecated one
       // that still reads it. Both are checked because a translated class may
       // have been written against either.
@@ -1151,17 +1147,32 @@ export default {
         headers: made.video.headers && typeof made.video.headers === 'object'
           ? made.video.headers
           : undefined,
-        subtitles: __subtitlesOf(made.video)
+        subtitles: __subtitlesOf(made.video),
+        ...(served === null ? {} : { served: { origin: served } })
       });
     }
-    if (sources.length === 0 && pluginServed > 0) {
+    return sources;
+  },
+
+  /**
+   * One request a player made for a stream this extension serves itself.
+   *
+   * Answered by the server the extension started during 'resolve', which is
+   * why the host keeps this instance alive for the playback: nothing else
+   * holds that server or the state it was built with. The body comes back as
+   * the handler gave it — a string, or the exact bytes of the ByteArray or
+   * stream it returned.
+   */
+  async serve(request, ctx) {
+    __enter(ctx);
+    const server = __virtualServerFor(request && request.url);
+    if (server === null) {
       throw __unsupported(
-        'This extension serves its streams from its own request handler, which runs here with ' +
-        'no port: it resolved ' + pluginServed + ' of them. Playing one needs the player\\'s ' +
-        'requests handed to that handler, which this build does not do yet.'
+        'This extension was asked to serve ' + String(request && request.url) + ', which is not ' +
+        'on a server it has running.'
       );
     }
-    return sources;
+    return await __serveRequest(server, request);
   }
 };
 

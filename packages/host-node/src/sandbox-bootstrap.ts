@@ -78,6 +78,11 @@
  * one self-contained module.
  */
 
+// Static, and relative for the reason the worker body's import below is: this
+// file is a bare node entry point with nothing mapped. Resolved before step 3
+// seals module resolution, which is what lets the transport use it at all.
+import { encodeFrame, FrameReader } from '../../host/src/net/frames.ts';
+
 /**
  * Everything needed from the environment, captured before any of it is removed.
  *
@@ -117,24 +122,21 @@ function deliver(data: unknown): void {
 	handler({ data });
 }
 
-/** One JSON value per line, in. Partial lines are held until they finish. */
-let pending = '';
-input.setEncoding('utf8');
-input.on('data', (chunk: string) => {
-	pending += chunk;
-	for (;;) {
-		const newline = pending.indexOf('\n');
-		if (newline === -1) return;
-		const line = pending.slice(0, newline);
-		pending = pending.slice(newline + 1);
-		if (line.length === 0) continue;
-		deliver(JSON.parse(line));
-	}
+/**
+ * Frames in (`host/src/net/frames.ts`): one JSON value per line, and the raw
+ * bytes it carries after it — an http body from the host arrives this way, as
+ * the source sent it. Read as bytes, never as utf8, because a chunk may end in
+ * the middle of those bytes. Partial frames are held until they finish.
+ */
+const frames = new FrameReader();
+input.on('data', (chunk: Uint8Array) => {
+	for (const message of frames.push(chunk)) deliver(message);
 });
 
 scope['self'] = scope;
+/* Frames out, for the same reason: a served response carries bytes. */
 scope['postMessage'] = (value: unknown): void => {
-	output.write(`${JSON.stringify(value)}\n`);
+	output.write(encodeFrame(value));
 };
 // Created up front so `self.onmessage = …` is an ordinary assignment; the
 // dispatcher reads the property fresh on every message.

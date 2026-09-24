@@ -72,9 +72,21 @@ function json(data: unknown, init?: { status?: number }): Response {
 import { isPrivateAddress } from './addresses';
 import type { ChainRepair } from './chain-repair';
 import { setCookiesOf } from './cookie-jar';
+import { encodeFrame } from './frames';
 
 /** Response body cap. A catalogue page or an embed page, not a video. */
 const MAX_BYTES = 4 * 1024 * 1024;
+
+/**
+ * The cap for a caller that asked for the body as bytes (`reply: 'frame'`).
+ *
+ * That caller is a plugin serving its own stream (`ABI.md`, served playback),
+ * and what it fetches is a media segment, which at 1080p runs past 4 MiB for
+ * ten seconds of video. The cap still exists for the reason `MAX_BYTES` does —
+ * this process's memory — and still reports "too large" as an answer rather
+ * than an error; it is only set against the thing actually being fetched.
+ */
+const MAX_FRAMED_BYTES = 16 * 1024 * 1024;
 
 /**
  * How long one relayed call may take, from the first hop to the last.
@@ -187,6 +199,14 @@ export const relay = async (
 		headers?: Record<string, string>;
 		body?: string | null;
 		follow?: boolean;
+		/**
+		 * How the caller wants the answer. Absent is the JSON reply this route
+		 * has always given, with the body as text. `'frame'` is the same fields
+		 * with the body as the upstream's **exact bytes** after them (`frames.ts`),
+		 * which is the only way a body that is not text survives: one read with
+		 * `text()` has already replaced every byte that is not UTF-8.
+		 */
+		reply?: 'frame';
 		/**
 		 * Present when the caller holds a cookie jar on a plugin's behalf.
 		 *
@@ -360,22 +380,31 @@ export const relay = async (
 	// headers are all known by then and all cost nothing, so they are answered
 	// and the body is marked unread. A plugin that does want the body is told
 	// why it cannot have it (`__responseOf`), rather than handed an empty page.
-	let text = '';
+	// Read once, as bytes, whichever reply was asked for: the text reply is
+	// those bytes decoded, which is exactly what `response.text()` did, and the
+	// framed reply is those bytes as they are. One read, so the two replies
+	// cannot disagree about what the source sent.
+	const framed = body.reply === 'frame';
+	const cap = framed ? MAX_FRAMED_BYTES : MAX_BYTES;
+	let bytes: Uint8Array = new Uint8Array(0);
 	let unread: string | null = null;
 	if (method !== 'HEAD') {
 		const ranged = headers.has('range');
 		const declared = Number(response.headers.get('content-length') ?? '0');
-		if (declared > MAX_BYTES && !ranged) {
+		if (declared > cap && !ranged) {
 			unread = 'too large';
 			await response.body?.cancel();
 		} else {
-			text = ranged ? await readCapped(response, MAX_BYTES) : await response.text();
-			if (text.length > MAX_BYTES && !ranged) {
-				text = '';
+			bytes = await readCappedBytes(response, ranged ? cap : cap + 1);
+			if (bytes.length > cap && !ranged) {
+				bytes = new Uint8Array(0);
 				unread = 'too large';
+			} else if (bytes.length > cap) {
+				bytes = bytes.subarray(0, cap);
 			}
 		}
 	}
+	const text = new TextDecoder().decode(bytes);
 
 	// Only the headers a plugin has any business reading. A `Set-Cookie` is
 	// still not among them, and the jar did not change that: it is reported on
@@ -391,16 +420,25 @@ export const relay = async (
 	// A non-2xx is returned as data, not as an HTTP error: sources use 404 and
 	// 403 as ordinary answers, and the plugin decides what they mean.
 	const challenge = challengeKind(response, text);
-	return json({
+	const answer = {
 		status: response.status,
 		url: target.toString(),
 		headers: returned,
-		body: text,
 		...(unread === null ? {} : { unread }),
 		...(challenge === null ? {} : { challenge }),
 		...(setCookie.length === 0 ? {} : { setCookie })
-	});
+	};
+	if (framed) {
+		return new Response(encodeFrame({ ...answer, body: bytes }) as BodyInit, {
+			status: 200,
+			headers: { 'content-type': FRAME_CONTENT_TYPE }
+		});
+	}
+	return json({ ...answer, body: text });
 };
+
+/** What a framed reply is labelled, so a caller can tell it from a JSON error. */
+export const FRAME_CONTENT_TYPE = 'application/vnd.plugin-bridge.frame';
 
 /**
  * Whether a refusal was a bot check rather than the source saying no.
@@ -447,9 +485,9 @@ function challengeKind(response: Response, body: string): string | null {
  * Reading through the stream rather than `text()` is what makes the ceiling
  * real: `text()` would buffer the whole video first and check afterwards.
  */
-async function readCapped(response: Response, limit: number): Promise<string> {
+async function readCappedBytes(response: Response, limit: number): Promise<Uint8Array> {
 	const body = response.body;
-	if (body === null) return '';
+	if (body === null) return new Uint8Array(0);
 
 	const reader = body.getReader();
 	const chunks: Uint8Array[] = [];
@@ -474,7 +512,7 @@ async function readCapped(response: Response, limit: number): Promise<string> {
 		joined.set(chunk, at);
 		at += chunk.length;
 	}
-	return new TextDecoder().decode(joined.subarray(0, limit));
+	return joined.subarray(0, limit);
 }
 
 /**

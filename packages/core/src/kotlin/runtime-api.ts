@@ -35,6 +35,8 @@
 export const RUNTIME_HELPERS = [
 	/* Null handling. Kotlin's `!!` and `?.` do not survive as JavaScript's `?.`
 	   alone: `!!` must *throw*, and it must say which expression was null. */
+	/* ByteArray.inputStream() and a source's inputStream(): see the runtime. */
+	'inputStream',
 	'nn',
 
 	/* Numbers. Kotlin `Int` division truncates and `"abc".toInt()` throws where
@@ -1144,6 +1146,9 @@ export const RUNTIME_GLOBALS = [
 	   and its Buffer, the scratch space one reads a chunk into. */
 	'ForwardingSource',
 	'Buffer',
+	/* java.io's two byte streams, which a server builds a body out of. */
+	'ByteArrayInputStream',
+	'ByteArrayOutputStream',
 	/* `OkHttpClient()` and `OkHttpClient.Builder()`: a client made from
 	   nothing, which here is the same client as `network.client`. */
 	'OkHttpClient'

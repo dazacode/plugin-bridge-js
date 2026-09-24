@@ -45,6 +45,8 @@ import {
 	type WorkerFactory
 } from './host';
 import { RequestGate, readPolicy } from './net/request-policy';
+import { FrameReader } from './net/frames';
+import { FRAME_CONTENT_TYPE } from './net/relay';
 import type { ConversionRecord } from '@plugin-bridge/core/formats';
 
 /**
@@ -78,6 +80,79 @@ const CALL_TIMEOUT_MS = 90_000;
 
 /** How long the initial module evaluation may take. */
 const LOAD_TIMEOUT_MS = 10_000;
+
+/**
+ * Served playback (`ABI.md`, `served`): the permission that gates it, and the
+ * hard limits on it.
+ *
+ * `serve()` runs plugin code once per request a player makes — every segment of
+ * every episode — so each bound here is on something a player can drive:
+ *
+ * - **Size.** One answer at most `MAX_SERVED_BYTES`. A 1080p segment is a few
+ *   megabytes; this is room for a slow codec at a high bitrate, not a file.
+ * - **Concurrency.** At most `MAX_CONCURRENT_SERVES` in the isolate at once; the
+ *   rest wait their turn rather than fail, because a player fetching ahead is
+ *   normal and a refusal would read as a broken stream.
+ * - **Deadline.** `SERVE_TIMEOUT_MS` per request, and past it the isolate is
+ *   destroyed exactly as a stuck call is (`CALL_TIMEOUT_MS`): a handler that
+ *   does not return is a plugin that does not return.
+ * - **Lifetime.** A lease pins the instance; releasing it rejects what that
+ *   lease still has in flight and accepts nothing more.
+ */
+export const SERVED_PERMISSION = 'segment-transform-js';
+const MAX_SERVED_BYTES = 32 * 1024 * 1024;
+const MAX_CONCURRENT_SERVES = 6;
+const SERVE_TIMEOUT_MS = 30_000;
+
+/** One request a player made to a served origin (`ABI.md`, `ServedRequest`). */
+export interface ServedRequest {
+	readonly url: string;
+	readonly method: string;
+	readonly headers: Readonly<Record<string, string>>;
+}
+
+/** The plugin's answer (`ABI.md`, `ServedResponse`): a string or the exact bytes. */
+export interface ServedResponse {
+	readonly status: number;
+	readonly headers: Readonly<Record<string, string>>;
+	readonly body: string | Uint8Array;
+}
+
+/**
+ * A served playback, held open.
+ *
+ * Taken for a source whose `served.origin` a player is about to read, and
+ * released when that playback ends. While any lease is held the instance is
+ * pinned — `pinned` says so, so the caller that owns the sandbox's lifetime
+ * does not dispose it under a playing stream — and every `serve` goes to this
+ * same instance, which is the only one holding the state `resolve` built.
+ */
+export interface ServedLease {
+	readonly origin: string;
+	readonly released: boolean;
+	serve(request: ServedRequest): Promise<ServedResponse>;
+	release(): void;
+}
+
+/**
+ * Whether an origin is one a served source may name: http, a loopback name, and
+ * an explicit port — the shape a converted extension's stand-in server writes.
+ * Anything else is a real address, and a plugin does not get to route a
+ * player's requests for one of those through itself.
+ */
+function servedOriginOf(value: unknown): string | null {
+	if (typeof value !== 'string') return null;
+	let parsed: URL;
+	try {
+		parsed = new URL(value);
+	} catch {
+		return null;
+	}
+	const loopback = ['127.0.0.1', 'localhost', '[::1]'].includes(parsed.hostname);
+	if (parsed.protocol !== 'http:' || !loopback || parsed.port === '') return null;
+	if (parsed.origin !== value.replace(/\/$/, '')) return null;
+	return parsed.origin;
+}
 
 export { hostMatches };
 
@@ -390,8 +465,151 @@ export class PluginSandbox {
 		return this.call('listEpisodes', { sourceMediaId });
 	}
 
-	resolve(sourceMediaId: string, episode: unknown): Promise<unknown> {
-		return this.call('resolve', { sourceMediaId, episode });
+	async resolve(sourceMediaId: string, episode: unknown): Promise<unknown> {
+		const value = await this.call('resolve', { sourceMediaId, episode });
+		this.checkServed(value);
+		return value;
+	}
+
+	/**
+	 * Refuses a served source this host will not serve, before anyone plays it.
+	 *
+	 * A plugin that did not declare `segment-transform-js` gets no served
+	 * playback, however it answers; an origin that is not a loopback stand-in is
+	 * not one a plugin may route a player's requests for; a url outside its own
+	 * origin would be a player request that escaped to the network.
+	 */
+	private checkServed(value: unknown): void {
+		if (!Array.isArray(value)) return;
+		for (const source of value as { url?: unknown; served?: { origin?: unknown } }[]) {
+			if (source === null || typeof source !== 'object' || source.served === undefined) continue;
+			if (!(this.plugin.permissions ?? []).includes(SERVED_PERMISSION)) {
+				throw new ValidationFailure(
+					`${this.plugin.name} returned a stream it serves itself without declaring ` +
+						`"${SERVED_PERMISSION}", which served playback requires. It was not played.`
+				);
+			}
+			const origin = servedOriginOf(source.served?.origin);
+			if (
+				origin === null ||
+				typeof source.url !== 'string' ||
+				!source.url.startsWith(`${origin}/`)
+			) {
+				throw new ValidationFailure(
+					`${this.plugin.name} returned a served stream whose origin is not one this host serves.`
+				);
+			}
+		}
+	}
+
+	/** Whether a served playback is holding this instance open. */
+	get pinned(): boolean {
+		return this.leases.size > 0;
+	}
+
+	private readonly leases = new Set<{ released: boolean; inFlight: Set<(error: Error) => void> }>();
+	private serving = 0;
+	private readonly waiting: (() => void)[] = [];
+
+	/**
+	 * Holds this instance open for a served origin a player is about to read.
+	 *
+	 * Refused unless the plugin declared the permission and serves at all: a
+	 * host that cannot keep the served state alive must say so here rather than
+	 * let playback fail at the first segment.
+	 */
+	lease(origin: string): ServedLease {
+		if (!(this.plugin.permissions ?? []).includes(SERVED_PERMISSION)) {
+			throw new ValidationFailure(`${this.plugin.name} did not declare "${SERVED_PERMISSION}".`);
+		}
+		if (!this.declares.includes('serve')) {
+			throw new ValidationFailure(`${this.plugin.name} does not serve streams.`);
+		}
+		const own = servedOriginOf(origin);
+		if (own === null) throw new ValidationFailure(`Not a served origin: ${origin}`);
+		if (this.disposed) throw new NetworkFailure('This plugin is not running.');
+
+		const state = { released: false, inFlight: new Set<(error: Error) => void>() };
+		this.leases.add(state);
+		const sandbox = this;
+		return {
+			origin: own,
+			get released() {
+				return state.released || sandbox.disposed;
+			},
+			serve(request: ServedRequest): Promise<ServedResponse> {
+				return sandbox.serveOne(state, own, request);
+			},
+			release(): void {
+				if (state.released) return;
+				state.released = true;
+				sandbox.leases.delete(state);
+				const stopped = new NetworkFailure('This playback was released.');
+				for (const reject of state.inFlight) reject(stopped);
+				state.inFlight.clear();
+				sandbox.log('released a served playback', {
+					plugin: sandbox.plugin.id,
+					origin: own,
+					stillPinned: sandbox.leases.size
+				});
+			}
+		};
+	}
+
+	private async serveOne(
+		state: { released: boolean; inFlight: Set<(error: Error) => void> },
+		origin: string,
+		request: ServedRequest
+	): Promise<ServedResponse> {
+		if (state.released || this.disposed) throw new NetworkFailure('This playback was released.');
+		let target: URL;
+		try {
+			target = new URL(request.url);
+		} catch {
+			throw new ValidationFailure(`Not a URL: ${request.url}`);
+		}
+		// Only the origin this lease was taken for. A request anywhere else is
+		// not the plugin's to answer, and routing it here would make the served
+		// path a proxy for arbitrary urls.
+		if (target.origin !== origin) {
+			throw new ValidationFailure(`${request.url} is not on the served origin ${origin}.`);
+		}
+
+		// A slot, waited for rather than refused: see MAX_CONCURRENT_SERVES.
+		if (this.serving >= MAX_CONCURRENT_SERVES) {
+			await new Promise<void>((resolve) => this.waiting.push(resolve));
+		}
+		this.serving += 1;
+		try {
+			const answer = await new Promise<unknown>((resolve, reject) => {
+				state.inFlight.add(reject);
+				this.call(
+					'serve',
+					{
+						request: {
+							url: request.url,
+							method: (request.method || 'GET').toUpperCase(),
+							headers: { ...request.headers }
+						}
+					},
+					SERVE_TIMEOUT_MS
+				).then(
+					(value) => {
+						state.inFlight.delete(reject);
+						resolve(value);
+					},
+					(error: unknown) => {
+						state.inFlight.delete(reject);
+						reject(error);
+					}
+				);
+			});
+			if (state.released) throw new NetworkFailure('This playback was released.');
+			return readServedResponse(answer, this.plugin.name);
+		} finally {
+			this.serving -= 1;
+			this.waiting.shift()?.();
+		}
 	}
 
 	browse(shelf: string, page: number, cursor?: string): Promise<unknown> {
@@ -467,6 +685,16 @@ export class PluginSandbox {
 		// the lifetime — this is the line that makes "the jar does not survive
 		// an unload" a fact about the code rather than about the runtime.
 		this.cookies?.clear();
+		// A released lease accepts nothing more, and a dead instance has no
+		// served state left to answer from.
+		for (const lease of this.leases) {
+			lease.released = true;
+			const stopped = new NetworkFailure('This plugin was stopped.');
+			for (const reject of lease.inFlight) reject(stopped);
+			lease.inFlight.clear();
+		}
+		this.leases.clear();
+		for (const resume of this.waiting.splice(0)) resume();
 		this.failAll(new NetworkFailure('This plugin was stopped.'));
 	}
 
@@ -695,7 +923,12 @@ export class PluginSandbox {
 					// Only sent when the caller said no, so the route's default stays
 					// the route's own business rather than something every request
 					// restates.
-					...(options.follow === false ? { follow: false } : {})
+					...(options.follow === false ? { follow: false } : {}),
+					// The body as bytes, always. A plugin's HttpResponse has one
+					// exact byte body that text() and json() are read from
+					// (ABI.md §2), and a body that crossed as text has already
+					// lost every byte that is not UTF-8.
+					reply: 'frame'
 					// No `allowedHosts` here, and the field that used to be is gone
 					// rather than ignored. It claimed the route applied the plugin's
 					// allowlist a second time; the route never read it, and its own
@@ -741,7 +974,7 @@ export class PluginSandbox {
 						: `The plugin proxy returned ${response.status}: ${detail}`
 				);
 			}
-			const answered = (await response.json()) as ProxyPayload;
+			const answered = await readRelayReply(response);
 
 			// The jar takes what each hop set, and the field is then **deleted**.
 			//
@@ -818,7 +1051,12 @@ export class PluginSandbox {
 		}
 		// And what the document names, because that is where a scraper finds
 		// its provider. See `learned` for why this is not gated more tightly.
-		if (typeof payload.body === 'string') this.learnNamedIn(payload.body);
+		// Decoded for reading only, and only a body that is a document: the
+		// bytes the plugin gets are untouched, and a segment is not somewhere a
+		// provider is named.
+		if (payload.body instanceof Uint8Array && isDocument(payload.headers)) {
+			this.learnNamedIn(new TextDecoder().decode(payload.body));
+		}
 		return payload;
 	}
 
@@ -896,6 +1134,64 @@ export class PluginSandbox {
  */
 function unescapeSlashes(body: string): string {
 	return body.replace(/\\\//g, '/').replace(/&#(?:47|x2[Ff]);/g, '/');
+}
+
+/**
+ * The relay's answer, with the body as the bytes the source sent.
+ *
+ * A framed reply is the current route (`relay.ts`, `reply: 'frame'`). A JSON
+ * one is a relay deployed before frames existed, which ignores the field and
+ * answers as it always did; its body is text already, so it is encoded back —
+ * the same bytes a plugin got from that deployment before, and no worse.
+ */
+async function readRelayReply(response: Response): Promise<ProxyPayload> {
+	if (response.headers.get('content-type') === FRAME_CONTENT_TYPE) {
+		const messages = new FrameReader().push(new Uint8Array(await response.arrayBuffer()));
+		if (messages.length !== 1) throw new NetworkFailure('The plugin proxy sent a malformed reply.');
+		return messages[0] as ProxyPayload;
+	}
+	const answered = (await response.json()) as ProxyPayload;
+	if (typeof answered.body === 'string') answered.body = new TextEncoder().encode(answered.body);
+	return answered;
+}
+
+/** Whether a response's type says it is a page rather than media. */
+function isDocument(headers: Record<string, unknown> | undefined): boolean {
+	const type = headers?.['content-type'];
+	return typeof type !== 'string' || !/^(video|audio|image|font)\/|octet-stream|mp2t/i.test(type);
+}
+
+/**
+ * A served answer, re-checked host-side as everything from the isolate is.
+ *
+ * The status is an HTTP status, the headers are strings, the body is a string
+ * or the exact bytes and no larger than MAX_SERVED_BYTES. Nothing is coerced:
+ * a body that arrived as something else is refused, because a player handed a
+ * guess at a segment is the failure this whole path exists to avoid.
+ */
+function readServedResponse(value: unknown, pluginName: string): ServedResponse {
+	const answer = value as { status?: unknown; headers?: unknown; body?: unknown } | null;
+	const status = answer?.status;
+	if (typeof status !== 'number' || !Number.isInteger(status) || status < 100 || status > 599) {
+		throw new ValidationFailure(`${pluginName} served an answer with no valid status.`);
+	}
+	const headers: Record<string, string> = {};
+	if (answer?.headers !== null && typeof answer?.headers === 'object') {
+		for (const [name, one] of Object.entries(answer.headers as Record<string, unknown>)) {
+			if (typeof one === 'string') headers[name] = one;
+		}
+	}
+	const body = answer?.body ?? '';
+	if (typeof body !== 'string' && !(body instanceof Uint8Array)) {
+		throw new ValidationFailure(`${pluginName} served a body that is neither text nor bytes.`);
+	}
+	const size = typeof body === 'string' ? new TextEncoder().encode(body).length : body.length;
+	if (size > MAX_SERVED_BYTES) {
+		throw new ValidationFailure(
+			`${pluginName} served ${size} bytes, over the ${MAX_SERVED_BYTES}-byte limit.`
+		);
+	}
+	return { status, headers, body };
 }
 
 /** The hostname of a url, lowercased, or null when it is not an https one. */
