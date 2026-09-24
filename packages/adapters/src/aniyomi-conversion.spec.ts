@@ -297,7 +297,8 @@ describe('the driver this build supplies in place of the base class', () => {
 		expect(page.entries[0].title).toBe('One & Only');
 		// Stored, so absolute — a relative media id stops resolving the moment
 		// it leaves this process.
-		expect(page.entries[0].sourceMediaId).toBe(`${BASE_URL}/anime/one`);
+		// The id is the extension's own value, verbatim — not made absolute.
+		expect(page.entries[0].sourceMediaId).toBe('/anime/one');
 		expect(page.entries[0].posterImageUrl).toBe(`${BASE_URL}/p1.jpg`);
 	});
 
@@ -330,7 +331,9 @@ describe('the driver this build supplies in place of the base class', () => {
 		const episodes = await module.listEpisodes(`${BASE_URL}/anime/one`, ctx);
 		expect(episodes.map((episode) => episode.number)).toEqual([1, 2]);
 		expect(episodes[0].title).toBe('Episode 1');
-		expect(episodes[0].sourceEpisodeId).toBe(`${BASE_URL}/anime/one/1`);
+		// Asked with an id in the old absolute form (a host may have cached
+		// one), and answered with the extension's own value.
+		expect(episodes[0].sourceEpisodeId).toBe('/anime/one/1');
 	});
 
 	it('hands an extension its own id back in the form it emitted', async () => {
@@ -1195,5 +1198,86 @@ ${body}
 		expect(sources[0].quality).toBe(
 			'data|data: {"status": "building"}|data: {"status": "ready"}|null'
 		);
+	});
+});
+
+describe('a source id, which comes back to the extension exactly as it left', () => {
+	// ABI.md section 1: a sourceMediaId is the source's own id. Whatever the
+	// extension put in `url`, it must get back — string for string — however
+	// it is shaped. Each case below is one the old absolute-then-reduce round
+	// trip changed, or could have.
+	const SHAPES = [
+		'abc123',
+		'/abc123',
+		`${BASE_URL}/x`,
+		'https://other.example.invalid/x',
+		'/watch?id=7&lang=en#t=30',
+		'set-9f8e~7d6c',
+		'yorozo-id:looks-like-a-mark'
+	];
+
+	function echoing(): string {
+		// Lists one title per shape; each title's episode id is the title's id
+		// with `/ep` added, and resolve reports the episode url it was handed.
+		return `
+class Extension {
+  constructor() { this.baseUrl = '${BASE_URL}'; }
+  popularAnimeRequest(page) { return GET(this.baseUrl + '/popular?page=' + page, {}); }
+  popularAnimeParse(response) {
+    return AnimesPage(${JSON.stringify(SHAPES)}.map((url) => { const a = SAnime.create(); a.url = url; a.title = 'T ' + url; return a; }), false);
+  }
+  async getEpisodeList(anime) {
+    const ep = SEpisode.create();
+    ep.url = anime.url + '/ep';
+    ep.name = 'Episode 1';
+    ep.episode_number = 1;
+    return [ep];
+  }
+  async getVideoList(episode) {
+    return [Video('https://cdn.example.invalid/a.mp4', episode.url, 'https://cdn.example.invalid/a.mp4', {})];
+  }
+}
+`;
+	}
+
+	it('lists every shape, lists its episodes, and resolves each with the id it emitted', async () => {
+		const module = await load(echoing());
+		const { ctx } = context();
+
+		const page = await module.browse('popular', 1, ctx);
+		expect(page.entries.map((one) => one.title)).toEqual(SHAPES.map((url) => `T ${url}`));
+
+		for (const [index, entry] of page.entries.entries()) {
+			const [episode] = await module.listEpisodes(entry.sourceMediaId, ctx);
+			const [stream] = await module.resolve(entry.sourceMediaId, episode, ctx);
+			// The episode url the extension minted is the one it was handed back.
+			expect(stream.quality).toBe(`${SHAPES[index]}/ep`);
+		}
+	});
+
+	it('hands an id over as the raw value, marking only one that would read as the old form', async () => {
+		const module = await load(echoing());
+		const { ctx } = context();
+
+		const ids = (await module.browse('popular', 1, ctx)).entries.map((one) => one.sourceMediaId);
+		expect(ids).toEqual([
+			'abc123',
+			'/abc123',
+			`yorozo-id:${BASE_URL}/x`,
+			'https://other.example.invalid/x',
+			'/watch?id=7&lang=en#t=30',
+			'set-9f8e~7d6c',
+			'yorozo-id:yorozo-id:looks-like-a-mark'
+		]);
+	});
+
+	it('still reads an id in the old absolute form the way it always did', async () => {
+		// What a bundle built before this change handed a host, and what the web
+		// client's binding cache may still hold.
+		const module = await load(echoing());
+		const { ctx } = context();
+
+		const [episode] = await module.listEpisodes(`${BASE_URL}/abc123`, ctx);
+		expect(episode.sourceEpisodeId).toBe('/abc123/ep');
 	});
 });

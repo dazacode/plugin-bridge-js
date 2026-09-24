@@ -574,11 +574,11 @@ function __normalisePage(value) {
 
 function __entryOf(anime) {
   if (!anime || typeof anime !== 'object') return null;
-  const url = __absolute(String(anime.url || ''), __BASE_URL);
+  const url = String(anime.url || '');
   const title = String(anime.title || '').trim();
   if (url.length === 0 || title.length === 0) return null;
   return {
-    sourceMediaId: url,
+    sourceMediaId: __idOf(url),
     title: title,
     alternativeTitles: [],
     posterImageUrl: __absolute(String(anime.thumbnail_url || ''), __BASE_URL) || undefined
@@ -586,21 +586,57 @@ function __entryOf(anime) {
 }
 
 /**
- * The form an extension expects one of its own ids back in.
+ * A source's own id, and the extension's value it came from.
  *
- * These sources call 'setUrlWithoutDomain' and then concatenate their own base
- * url when handed one back, so a stored absolute id has to be reduced again on
- * the way in — otherwise every request is built with a doubled origin and can
- * only 404.
+ * **The invariant: what the extension minted is what it gets back.** An
+ * 'anime.url' or 'episode.url' is the source's opaque identifier ('ABI.md'
+ * section 1), and this driver hands it back to the same extension later — so
+ * it must arrive exactly as it left, string for string. This driver used to
+ * make every id absolute on the way out and reduce it on the way in, always
+ * to a leading '/'. That is right for a source storing '/path', and wrong for
+ * one storing a bare handle: 'abc123' came back as '/abc123', and a source
+ * building 'series/' + id asked for 'series//abc123' and got a 404. The
+ * sibling manga driver keeps its ids verbatim for the same reason.
+ *
+ * Three things are strings here and must not share rules because of it:
+ *
+ * - **A source's identity** — this pair. Verbatim.
+ * - **A url to request** — '__absolute', which resolves an id against the
+ *   base when a request is built from it. That is building a request, and it
+ *   never feeds back into an id.
+ * - **Ids bundles minted before this change**, which a host may have cached
+ *   (the web client's binding cache). Those are absolute urls on the base, and
+ *   they are still read the old way, so a cached binding keeps working.
+ *
+ * The one collision between the last two: a new id whose raw value itself
+ * starts with the base url would read as an old one. Only that case is
+ * marked, and the mark comes off exactly — every other id is the raw value.
  */
+const __ID_MARK = 'yorozo-id:';
+
+function __idOf(raw) {
+  const value = String(raw === null || raw === undefined ? '' : raw);
+  return __legacyShaped(value) || value.indexOf(__ID_MARK) === 0 ? __ID_MARK + value : value;
+}
+
 function __foreign(id) {
   const value = String(id === null || id === undefined ? '' : id);
-  if (__BASE_URL.length === 0) return value;
-  const base = __BASE_URL.replace(/\\/+$/, '');
-  if (value.indexOf(base) !== 0) return value;
-  const rest = value.slice(base.length);
+  if (value.indexOf(__ID_MARK) === 0) return value.slice(__ID_MARK.length);
+  if (!__legacyShaped(value)) return value;
+  // An id minted before this change: reduced as it always was, so an entry a
+  // host cached then still reaches the same page.
+  const rest = value.slice(__BASE_URL.replace(/\\/+$/, '').length);
   if (rest.length === 0) return '/';
   return rest.charAt(0) === '/' ? rest : '/' + rest;
+}
+
+/** Whether a value has the shape this driver's old ids had: the base url, and what followed it. */
+function __legacyShaped(value) {
+  if (__BASE_URL.length === 0) return false;
+  const base = __BASE_URL.replace(/\\/+$/, '');
+  if (value.indexOf(base) !== 0) return false;
+  const next = value.charAt(base.length);
+  return next === '' || next === '/' || next === '?' || next === '#';
 }
 
 /** The default request shapes, used when the extension declares none. */
@@ -1081,7 +1117,7 @@ export default {
     for (let index = 0; index < rows.length; index += 1) {
       const row = rows[index];
       if (!row || typeof row !== 'object') continue;
-      const url = __absolute(String(row.url || ''), __BASE_URL);
+      const url = String(row.url || '');
       if (url.length === 0) continue;
       const declared = Number(row.episode_number);
       episodes.push({
@@ -1089,7 +1125,7 @@ export default {
         // and counted from the end, because these sites list newest first and
         // the numbering has to agree with the order the source gave.
         number: Number.isFinite(declared) && declared > 0 ? declared : rows.length - index,
-        sourceEpisodeId: url,
+        sourceEpisodeId: __idOf(url),
         title: typeof row.name === 'string' && row.name.length > 0 ? row.name : undefined
       });
     }
