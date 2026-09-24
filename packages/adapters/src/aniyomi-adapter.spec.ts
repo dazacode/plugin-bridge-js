@@ -39,7 +39,11 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { openPluginArchive } from '@plugin-bridge/core/archive';
-import { aniyomiAdapter, forgetCachedLicences } from '@plugin-bridge/adapters/aniyomi';
+import {
+	aniyomiAdapter,
+	extensionLibraryVersion,
+	forgetCachedLicences
+} from '@plugin-bridge/adapters/aniyomi';
 import type { ConversionServices } from '@plugin-bridge/core/adapter';
 import type { RepositoryPlugin } from '@plugin-bridge/core/repository-index';
 
@@ -731,6 +735,22 @@ class ExampleAnime : ParsedAnimeHttpSource() {
 });
 
 describe('what is refused, and in which words', () => {
+	it('refuses an extension written for a library version outside 12 to 16, by name', async () => {
+		// The first part of an extension's version is the extension library
+		// it was compiled against; outside the range the driver was written
+		// for, it is refused here rather than converted against members it may
+		// not have. The rest of this file's listings are inside it.
+		const one = await listing();
+		const old = { ...one, origin: { ...one.origin!, foreignVersion: '11.4' } };
+		await expect(aniyomiAdapter.convert(old, services(repositoryFiles(SHELL_KT)))).rejects.toThrow(
+			/version 11 of Aniyomi's extension library, and this build reads versions 12 to 16/
+		);
+		expect(extensionLibraryVersion('16.7')).toBe(16);
+		expect(extensionLibraryVersion('14.12')).toBe(14);
+		// An unreadable version is a repository's formatting, and not refused.
+		expect(extensionLibraryVersion('v2')).toBeNull();
+	}, 60_000);
+
 	it('refuses a shell, naming the base class it could not read', async () => {
 		// Everything this file declares translates. A converter that asked only
 		// "did anything fail" would package it, and the result would install,

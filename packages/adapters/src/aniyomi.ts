@@ -126,6 +126,26 @@ function withSourceRepository(
 	};
 }
 
+/**
+ * The extension-library versions this build reads, and how to read one.
+ *
+ * An Aniyomi extension's version is `<library>.<build>` — the first part is
+ * the extension library it was compiled against, which is what decides the
+ * base-class surface it expects. Twelve to sixteen is the range the Aniyomi
+ * app itself loads, and the range the base-class driver was written against;
+ * an extension outside it is refused here, by name, rather than converted
+ * against members it may not have and failing somewhere less legible. An
+ * unreadable version is not refused: that is a repository's formatting, not
+ * the extension's library.
+ */
+export const MIN_EXTENSION_LIBRARY = 12;
+export const MAX_EXTENSION_LIBRARY = 16;
+
+export function extensionLibraryVersion(version: string | undefined): number | null {
+	const match = /^(\d+)\.\d+/.exec(String(version ?? ''));
+	return match === null ? null : Number(match[1]);
+}
+
 export const aniyomiAdapter: ForeignAdapter = {
 	format: 'aniyomi',
 
@@ -320,6 +340,14 @@ export const aniyomiAdapter: ForeignAdapter = {
 		const origin = listing.origin;
 		if (origin === undefined || origin.format !== 'aniyomi') {
 			throw new ForeignFormatError('That listing did not come from an Aniyomi repository.');
+		}
+
+		const library = extensionLibraryVersion(origin.foreignVersion);
+		if (library !== null && (library < MIN_EXTENSION_LIBRARY || library > MAX_EXTENSION_LIBRARY)) {
+			throw new ForeignFormatError(
+				`${listing.name} is written for version ${library} of Aniyomi's extension library, and ` +
+					`this build reads versions ${MIN_EXTENSION_LIBRARY} to ${MAX_EXTENSION_LIBRARY}.`
+			);
 		}
 
 		const detail = origin.detail ?? {};
