@@ -736,6 +736,8 @@ export const RUNTIME_HELPERS = [
 	   `CLASS_LOADER` in `subset.ts` for the two spellings that reach it, and
 	   `__RESOURCES` in the entry point for where the files come from. */
 	'classLoader',
+	/* java.lang.String.CASE_INSENSITIVE_ORDER, a Comparator — see the runtime. */
+	'caseInsensitiveOrder',
 	'filterNotNull',
 	'maxOf',
 	'minOf',

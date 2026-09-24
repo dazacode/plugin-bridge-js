@@ -434,7 +434,8 @@ const QUALIFIED_GLOBAL =
 const SORT_SELECTION = /^(?:Anime)?Filter\.Sort\.Selection$/;
 
 /** A package path and nothing else: `java.net`, `java.text`, `rx` — lowercase segments. */
-const PACKAGE_PATH = /^(?:java|javax|kotlin|android|okhttp3|okio|rx)(?:\.[a-z_][a-z0-9_]*)*$/;
+const PACKAGE_PATH =
+	/^(?:java|javax|kotlin|kotlinx|android|okhttp3|okio|rx)(?:\.[a-z_][a-z0-9_]*)*$/;
 
 /**
  * `Injekt.get<T>()`, whitespace already squeezed out of the text.
@@ -8609,10 +8610,12 @@ class Emitter {
 		// written with its package, which is the bare constructor the imported
 		// spelling already reaches. Only a package path in front and only a
 		// name the bare path knows (`FREE_FUNCTIONS`, or a runtime global), so
-		// an unknown qualified class still refuses.
+		// an unknown qualified class still refuses. A free function written the
+		// same way — `kotlinx.serialization.json.buildJsonObject { … }` — is the
+		// same call, and reaches the same place.
 		if (
 			!safe &&
-			/^[A-Z]/.test(name) &&
+			(/^[A-Z]/.test(name) || FREE_FUNCTIONS.has(name)) &&
 			PACKAGE_PATH.test(receiver.text.replace(/\s+/g, '')) &&
 			(FREE_FUNCTIONS.has(name) || GLOBAL_NAMES.has(name))
 		) {
@@ -9592,7 +9595,14 @@ class Emitter {
 		const declared = this.aliased(name);
 		const hoisted = this.localTypes.get(declared);
 		if (GLOBAL_NAMES.has(declared) || this.moduleNames.has(declared) || hoisted !== undefined) {
-			if (lambda !== null) this.refuse(lambda, `a lambda passed to \`${name}\``);
+			// A class (or file-scope function) the source declares takes a
+			// trailing block as its last parameter — `Em3u8KeyStore(prefs,
+			// client, headers) { baseUrl }` for `class Em3u8KeyStore(…, baseUrl:
+			// () -> String)` — by the rule `lastParameterBlock` applies to a
+			// call. A runtime type, or a name whose signature is unknown or
+			// ambiguous here, has nothing to place it by and stays refused.
+			const placeable = !GLOBAL_NAMES.has(declared) && this.signatures.get(declared) !== undefined;
+			if (lambda !== null && !placeable) this.refuse(lambda, `a lambda passed to \`${name}\``);
 			const callee = hoisted ?? declared;
 			// Kotlin spells construction and invocation the same way. A class
 			// emitted as an ES6 class throws when called without `new`, and it
@@ -9602,7 +9612,16 @@ class Emitter {
 			// returns takes the extra pair: `f()` in Kotlin reads `f` and then
 			// invokes what it read.
 			const named = this.moduleGetters.has(declared) ? `${this.safe(callee)}()` : this.safe(callee);
-			const made = `${build}${named}(${this.plainArguments(callee, args).join(', ')})`;
+			const passed =
+				lambda === null
+					? this.plainArguments(callee, args)
+					: this.lastParameterBlock(
+							declared,
+							args,
+							this.callArguments(declared, args, lambda, labelled, false),
+							lambda
+						);
+			const made = `${build}${named}(${passed.join(', ')})`;
 			// A file-scope `suspend fun` is an `async function` here, and its
 			// call site says nothing about that in either language.
 			return this.moduleSuspends.has(declared) ? this.awaited(made) : made;
@@ -10645,6 +10664,12 @@ class Emitter {
 		// spells as JavaScript's.
 		const spelled = node.text.replace(/\s+/g, '');
 		if (spelled === 'java.lang.String' || spelled === 'kotlin.String') return 'String';
+		// `String.CASE_INSENSITIVE_ORDER` — a static on Kotlin's String that
+		// JavaScript's has no namesake for, so reading it off `String` would be
+		// undefined. The runtime's comparator is Java's, character for character.
+		if (/^(?:(?:java\.lang|kotlin)\.)?String\.CASE_INSENSITIVE_ORDER$/.test(spelled)) {
+			return this.helper('caseInsensitiveOrder');
+		}
 
 		// The one thing this ecosystem asks the JVM class object for, and the
 		// only reflection in the catalogue that has an answer here.

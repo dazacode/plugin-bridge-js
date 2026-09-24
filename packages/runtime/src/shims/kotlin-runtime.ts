@@ -696,6 +696,33 @@ function __char(value) {
  * is also a list helper — so a comparator carries a mark rather than being
  * guessed at by arity.
  */
+/**
+ * String.toInt(radix) and its siblings: an optional sign, then only digits
+ * valid in that radix, either case, nothing else — no whitespace, no "0x".
+ * The radix used to be dropped, so "10".toInt(16) answered 10 and
+ * "ff".toIntOrNull(16) answered null, and nothing said so. Null when it is
+ * not a number in that radix; the callers check the range.
+ */
+function __parseRadix(value, radix) {
+  var base = Math.trunc(Number(radix));
+  if (!(base >= 2 && base <= 36)) throw new Error('This converted extension asked for radix ' + radix + '.');
+  var text = __str(value);
+  var sign = 1;
+  var at = 0;
+  if (text.charAt(0) === '-' || text.charAt(0) === '+') {
+    sign = text.charAt(0) === '-' ? -1 : 1;
+    at = 1;
+  }
+  if (at >= text.length) return null;
+  var total = 0;
+  for (; at < text.length; at += 1) {
+    var digit = parseInt(text.charAt(at), 36);
+    if (Number.isNaN(digit) || digit >= base) return null;
+    total = total * base + digit;
+  }
+  return sign * total;
+}
+
 function __comparator(compare) {
   compare.__isComparator = true;
   return compare;
@@ -2735,7 +2762,11 @@ var __k = {
 
   /* -- numbers ------------------------------------------------------------ */
 
-  toIntOrNull: function (value) {
+  toIntOrNull: function (value, radix) {
+    if (radix !== undefined && Number(radix) !== 10) {
+      var n = __parseRadix(value, radix);
+      return n !== null && n >= -2147483648 && n <= 2147483647 ? n : null;
+    }
     if (typeof value === 'number') return Number.isFinite(value) ? Math.trunc(value) : null;
     if (value instanceof __BigDecimal) return value.intValue();
     var text = __str(value).trim();
@@ -2758,8 +2789,8 @@ var __k = {
   },
 
   /** Kotlin throws here where Number('abc') is a silent NaN. */
-  toInt: function (value) {
-    var parsed = __k.toIntOrNull(value);
+  toInt: function (value, radix) {
+    var parsed = __k.toIntOrNull(value, radix);
     if (parsed === null) {
       throw new Error('This converted extension read "' + __str(value) + '" as a number, and it is not one.');
     }
@@ -2810,15 +2841,19 @@ var __k = {
    * Every Long a scraper reads is a timestamp or an id, both well inside the
    * safe range; a value beyond it is refused rather than silently rounded.
    */
-  toLongOrNull: function (value) {
+  toLongOrNull: function (value, radix) {
+    if (radix !== undefined && Number(radix) !== 10) {
+      var n = __parseRadix(value, radix);
+      return n !== null && Number.isSafeInteger(n) ? n : null;
+    }
     var parsed = __k.toIntOrNull(value);
     if (parsed === null) return null;
     return Number.isSafeInteger(parsed) ? parsed : null;
   },
 
   /** Throwing Long conversion, parallel to Kotlin's toInt/toFloat helpers. */
-  toLong: function (value) {
-    var parsed = __k.toLongOrNull(value);
+  toLong: function (value, radix) {
+    var parsed = __k.toLongOrNull(value, radix);
     if (parsed === null) {
       throw new Error('This converted extension read "' + __str(value) + '" as a Long, and it is not one.');
     }
@@ -4338,9 +4373,17 @@ var __k = {
   },
 
   chunked: function (list, size, transform) {
-    var items = __arr(list);
     var width = Math.max(1, Number(size));
     var chunks = [];
+    // CharSequence.chunked answers substrings — "a1b2".chunked(2) is
+    // ["a1", "b2"], the start of every hex decode in this ecosystem. Read as
+    // a list, a string was one item, and the whole key reached toInt(16).
+    if (typeof list === 'string') {
+      for (var at = 0; at < list.length; at += width) chunks.push(list.slice(at, at + width));
+      if (typeof transform !== 'function') return chunks;
+      return __each(chunks, function (chunk) { return transform(chunk); });
+    }
+    var items = __arr(list);
     for (var i = 0; i < items.length; i += width) chunks.push(items.slice(i, i + width));
     if (typeof transform !== 'function') return chunks;
     return __each(chunks, function (chunk) { return transform(chunk); });
@@ -7316,6 +7359,36 @@ var __k = {
    * chain and rewrites, and nothing spells the loader itself.
    */
   classLoader: function () { return __theClassLoader; },
+
+  /**
+   * java.lang.String.CASE_INSENSITIVE_ORDER, exactly: UTF-16 unit by unit, each
+   * pair compared upper-cased and then lower-cased, never by locale, and a unit
+   * whose case mapping is longer than one unit ('ß' upper-cases to "SS") left
+   * as it is — Java's Character.toUpperCase(char) cannot grow a string either.
+   * A shorter string that is a prefix of the other sorts first.
+   */
+  caseInsensitiveOrder: __comparator(function (a, b) {
+    var x = __str(a);
+    var y = __str(b);
+    function mapped(code, upper) {
+      var one = String.fromCharCode(code);
+      var out = upper ? one.toUpperCase() : one.toLowerCase();
+      return out.length === 1 ? out.charCodeAt(0) : code;
+    }
+    var n = Math.min(x.length, y.length);
+    for (var i = 0; i < n; i += 1) {
+      var c1 = x.charCodeAt(i);
+      var c2 = y.charCodeAt(i);
+      if (c1 === c2) continue;
+      c1 = mapped(c1, true);
+      c2 = mapped(c2, true);
+      if (c1 === c2) continue;
+      c1 = mapped(c1, false);
+      c2 = mapped(c2, false);
+      if (c1 !== c2) return c1 - c2;
+    }
+    return x.length - y.length;
+  }),
 
   /**
    * A class's simple name, for the two uses the emitter lets reach here.
@@ -13077,8 +13150,27 @@ function SecretKeySpec(key, algorithm) {
 }
 
 /** javax.crypto.spec.IvParameterSpec. */
-function IvParameterSpec(iv) {
-  return { __iv: __bytesOf(iv), __tagBits: null, getIV: function () { return __cryptoArray(__bytesOf(iv)); } };
+/**
+ * The part of a byte array a JCE (src, offset, len) overload names. Those
+ * overloads used to be read as their first argument alone, so
+ * 'GCMParameterSpec(128, data, 0, 12)' took the whole payload as its IV and
+ * 'doFinal(data, 12, n)' decrypted the IV along with the ciphertext — every
+ * GCM message failed its tag check, and the extension read that as a wrong key.
+ */
+function __cryptoRange(bytes, offset, length) {
+  var all = __bytesOf(bytes);
+  if (offset === undefined) return all;
+  var from = Number(offset);
+  var count = length === undefined ? all.length - from : Number(length);
+  if (!(from >= 0 && count >= 0 && from + count <= all.length)) {
+    throw new Error('This converted extension asked for bytes ' + from + '..' + (from + count) + ' of ' + all.length + '.');
+  }
+  return all.slice(from, from + count);
+}
+
+function IvParameterSpec(iv, offset, length) {
+  var bytes = __cryptoRange(iv, offset, length);
+  return { __iv: bytes, __tagBits: null, getIV: function () { return __cryptoArray(bytes); } };
 }
 
 /**
@@ -13088,11 +13180,12 @@ function IvParameterSpec(iv) {
  * with a 128-bit tag produce different ciphertext lengths, and a peer that
  * expects one and is sent the other rejects the message.
  */
-function GCMParameterSpec(tagBits, iv) {
+function GCMParameterSpec(tagBits, iv, offset, length) {
+  var bytes = __cryptoRange(iv, offset, length);
   return {
-    __iv: __bytesOf(iv),
+    __iv: bytes,
     __tagBits: Number(tagBits),
-    getIV: function () { return __cryptoArray(__bytesOf(iv)); },
+    getIV: function () { return __cryptoArray(bytes); },
     getTLen: function () { return Number(tagBits); }
   };
 }
@@ -13224,17 +13317,18 @@ var Cipher = {
         // refuses. Mac and Signature buffer because their update returns void.
         __cryptoRefuse('a streaming Cipher.update()');
       },
-      doFinal: async function (data) {
+      doFinal: async function (data, offset, length) {
         if (direction === null) __cryptoRefuse('a cipher used before init()');
+        var input = __cryptoRange(data, offset, length);
         // Each doFinal starts from the key's initial state, as the JCE resets a
         // cipher to its last init; encryption and decryption are one XOR.
-        if (spec.mode === 'RC4') return __cryptoArray(__rc4(key, __bytesOf(data)));
+        if (spec.mode === 'RC4') return __cryptoArray(__rc4(key, input));
         var out = await __host().crypto.aes(
           direction,
           spec.mode,
           key,
           iv,
-          __bytesOf(data),
+          input,
           tagBits === null ? undefined : tagBits
         );
         return __cryptoArray(out);

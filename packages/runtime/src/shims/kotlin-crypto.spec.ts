@@ -207,6 +207,49 @@ describe('javax.crypto.Cipher', () => {
 		expect(await demo.open(sealed)).toBe('attested');
 	});
 
+	it('reads the (src, offset, len) overloads as the JCE does: IV off the front, ciphertext after', async () => {
+		// The payload shape an extension decrypts: a 12-byte nonce, then the
+		// ciphertext and tag. Sealed here by node's own AES-GCM, so the answer is
+		// not this runtime agreeing with itself. The offsets were read as the
+		// first argument alone — the whole payload as IV, the IV decrypted with
+		// the rest — and every message failed its tag check.
+		const { createCipheriv, randomBytes } = await import('node:crypto');
+		const key = new Uint8Array(32).fill(7);
+		const nonce = randomBytes(12);
+		const cipher = createCipheriv('aes-256-gcm', key, nonce);
+		const body = Buffer.concat([
+			cipher.update('a playlist, sealed'),
+			cipher.final(),
+			cipher.getAuthTag()
+		]);
+		const payload = new Uint8Array(Buffer.concat([nonce, body]));
+
+		const cbcKey = new Uint8Array(16).fill(3);
+		const cbcIv = randomBytes(16);
+		const cbc = createCipheriv('aes-128-cbc', cbcKey, cbcIv);
+		const cbcPayload = new Uint8Array(
+			Buffer.concat([cbcIv, cbc.update('cbc, iv in front'), cbc.final()])
+		);
+
+		const demo = await instantiate(
+			inClass(
+				'    fun open(data: ByteArray, key: ByteArray): String {',
+				'        val cipher = Cipher.getInstance("AES/GCM/NoPadding")',
+				'        cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, data, 0, 12))',
+				'        return String(cipher.doFinal(data, 12, data.size - 12), Charsets.UTF_8)',
+				'    }',
+				'    fun openCbc(data: ByteArray, key: ByteArray): String {',
+				'        val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")',
+				'        cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(data, 0, 16))',
+				'        return String(cipher.doFinal(data, 16, data.size - 16), Charsets.UTF_8)',
+				'    }'
+			)
+		);
+
+		expect(await demo.open(payload, key)).toBe('a playlist, sealed');
+		expect(await demo.openCbc(cbcPayload, cbcKey)).toBe('cbc, iv in front');
+	});
+
 	it('refuses a tampered GCM message rather than answering its plaintext', async () => {
 		const demo = await instantiate(
 			inClass(

@@ -2937,3 +2937,121 @@ describe('an inline helper handed a block that suspends', () => {
 		expect(await demo.once()).toBeNull();
 	});
 });
+
+describe('String.CASE_INSENSITIVE_ORDER', () => {
+	it('sorts as Java does: by case-folded unit, not by locale, shorter prefix first', async () => {
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    fun sorted(xs: List<String>): List<String> = xs.sortedWith(String.CASE_INSENSITIVE_ORDER)',
+				'    fun cmp(a: String, b: String): Int = listOf(a, b).sortedWith(String.CASE_INSENSITIVE_ORDER).indexOf(a) * 2 - 1',
+				'    fun same(a: String, b: String): Boolean = listOf(b, a).sortedWith(String.CASE_INSENSITIVE_ORDER).first() == b',
+				'}'
+			)
+		);
+		expect(await demo.sorted(['banana', 'Apple', 'apple pie', 'cherry', 'Äpfel', '_x'])).toEqual([
+			'_x',
+			'Apple',
+			'apple pie',
+			'banana',
+			'cherry',
+			// Not beside "Apple": Java does not collate, and Ä is past z.
+			'Äpfel'
+		]);
+		// Equal under the order, so the sort is stable and keeps the given order.
+		expect(await demo.same('HELLO', 'hello')).toBe(true);
+		expect(await demo.cmp('ab', 'ABC')).toBe(-1);
+		// ß has a two-letter upper case; Java leaves it as one character.
+		expect(await demo.cmp('ß', 'ss')).toBe(1);
+	});
+});
+
+describe('a trailing block passed to a class the source declares', () => {
+	it('is the last constructor parameter, with defaults before it kept', async () => {
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class UrlBook(private val prefix: String, private val sep: String = "/", private val baseUrl: () -> String) {',
+				'    fun url(key: String): String = baseUrl() + sep + prefix + key',
+				'}',
+				'class Demo {',
+				'    private var host = "https://a.example"',
+				'    private val store = UrlBook("k-") { host }',
+				'    fun first(): String = store.url("1")',
+				'    fun moved(): String {',
+				'        host = "https://b.example"',
+				'        return store.url("2")',
+				'    }',
+				'}'
+			)
+		);
+		expect(await demo.first()).toBe('https://a.example/k-1');
+		// The block is read on each call, as the Kotlin lambda is.
+		expect(await demo.moved()).toBe('https://b.example/k-2');
+	});
+});
+
+describe('a free function written with its package', () => {
+	it('is the bare function: kotlinx.serialization.json.buildJsonObject { }', async () => {
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    fun body(q: String): String = kotlinx.serialization.json.buildJsonObject {',
+				'        put("query", q)',
+				'        put("tags", kotlinx.serialization.json.buildJsonArray { add("a") })',
+				'    }.toString()',
+				'}'
+			)
+		);
+		expect(JSON.parse(await demo.body('x'))).toEqual({ query: 'x', tags: ['a'] });
+	});
+});
+
+describe('String.chunked', () => {
+	it('answers substrings, so a hex key decodes to its bytes', async () => {
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    private val key = "6EE27213FF".chunked(2).map { it.toInt(16).toByte() }.toByteArray()',
+				'    fun first(): Int = key[0].toInt()',
+				'    fun last(): Int = key[4].toInt()',
+				'    fun size(): Int = key.size',
+				'    fun parts(): List<String> = "abcde".chunked(2)',
+				'}'
+			)
+		);
+		expect(await demo.size()).toBe(5);
+		expect(await demo.first()).toBe(0x6e);
+		expect(await demo.last()).toBe(-1);
+		expect(await demo.parts()).toEqual(['ab', 'cd', 'e']);
+	});
+});
+
+describe('toInt and toLong with a radix', () => {
+	it('reads the digits in that radix, and refuses what is not a number in it', async () => {
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    fun hex(s: String): Int = s.toInt(16)',
+				'    fun hexOrNull(s: String): Int? = s.toIntOrNull(16)',
+				'    fun base36(s: String): Long = s.toLong(36)',
+				'    fun dec(s: String): Int? = s.toIntOrNull()',
+				'}'
+			)
+		);
+		// "10" in base 16 is sixteen, not ten.
+		expect(await demo.hex('10')).toBe(16);
+		expect(await demo.hex('ff')).toBe(255);
+		expect(await demo.hex('-7F')).toBe(-127);
+		expect(await demo.hexOrNull('fg')).toBeNull();
+		expect(await demo.hexOrNull('0x1f')).toBeNull();
+		// Past Int's range is not an Int.
+		expect(await demo.hexOrNull('100000000')).toBeNull();
+		expect(await demo.base36('zz')).toBe(1295);
+		expect(await demo.dec('42')).toBe(42);
+	});
+});
