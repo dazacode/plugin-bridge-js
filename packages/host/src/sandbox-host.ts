@@ -508,7 +508,26 @@ export class PluginSandbox {
 	}
 
 	private readonly leases = new Set<{ released: boolean; inFlight: Set<(error: Error) => void> }>();
+	private unpinned: (() => void)[] = [];
 	private serving = 0;
+
+	/**
+	 * Settles once no served playback holds this instance, at once if none does.
+	 *
+	 * For the owner of the sandbox's lifetime, retiring an instance a newer one
+	 * has replaced: a setting changed or the bundle updated, so nothing new may
+	 * start here, but a stream already playing still reads the state its
+	 * `resolve` built and has to be let finish before the instance goes.
+	 */
+	whenUnpinned(): Promise<void> {
+		if (this.leases.size === 0) return Promise.resolve();
+		return new Promise((resolve) => this.unpinned.push(resolve));
+	}
+
+	private settleUnpinned(): void {
+		if (this.leases.size > 0) return;
+		for (const resolve of this.unpinned.splice(0)) resolve();
+	}
 	private readonly waiting: (() => void)[] = [];
 
 	/**
@@ -552,6 +571,7 @@ export class PluginSandbox {
 					origin: own,
 					stillPinned: sandbox.leases.size
 				});
+				sandbox.settleUnpinned();
 			}
 		};
 	}
@@ -694,6 +714,7 @@ export class PluginSandbox {
 			lease.inFlight.clear();
 		}
 		this.leases.clear();
+		this.settleUnpinned();
 		for (const resume of this.waiting.splice(0)) resume();
 		this.failAll(new NetworkFailure('This plugin was stopped.'));
 	}

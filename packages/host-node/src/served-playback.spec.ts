@@ -224,6 +224,27 @@ describe('served playback through the headless isolate', () => {
 		}
 	}, 30_000);
 
+	it('tells the owner when the last playback lets go, and not before', async () => {
+		const sandbox = await start();
+		try {
+			await sandbox.resolve('one', { number: 1 });
+			await sandbox.whenUnpinned();
+			const first = sandbox.lease(ORIGIN);
+			const second = sandbox.lease(ORIGIN);
+			let settled = false;
+			const unpinned = sandbox.whenUnpinned().then(() => (settled = true));
+			first.release();
+			await new Promise((resolve) => setTimeout(resolve, 10));
+			// One playback still holds it: a retiring owner must keep waiting.
+			expect(settled).toBe(false);
+			second.release();
+			await unpinned;
+			expect(settled).toBe(true);
+		} finally {
+			sandbox.dispose();
+		}
+	}, 30_000);
+
 	it('releases every playback when the instance is stopped', async () => {
 		const sandbox = await start();
 		await sandbox.resolve('one', { number: 1 });
