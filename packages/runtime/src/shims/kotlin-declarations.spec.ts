@@ -1943,10 +1943,13 @@ describe('a filter class that names its framework base’s arguments', () => {
 				'    state = values.map { Option(it.first, it.second) },',
 				'    name = name,',
 				')',
-				'class Status : MultiValue("Status", listOf("On" to "0", "Done" to "1"))',
+				// Not `class Status`: the runtime defines NanoHTTPD's `Status`, and
+				// `instantiate` emits files without the pipeline's rename step
+				// that moves a declaration shadowing a runtime name aside.
+				'class StatusFilter : MultiValue("Status", listOf("On" to "0", "Done" to "1"))',
 				'class Order : Filter.Sort(values = arrayOf("a", "b"), name = "Order", state = Selection(1, false))',
 				'class Demo {',
-				'    fun status(): String { val f = Status(); return f.name + ":" + f.state.joinToString { it.name + "=" + it.value } }',
+				'    fun status(): String { val f = StatusFilter(); return f.name + ":" + f.state.joinToString { it.name + "=" + it.value } }',
 				'    fun order(): String { val f = Order(); return f.name + ":" + f.values.joinToString() + ":" + f.state!!.index }',
 				'}'
 			)

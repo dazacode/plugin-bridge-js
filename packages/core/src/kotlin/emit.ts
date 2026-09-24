@@ -664,6 +664,48 @@ const TYPED_HELPERS: ReadonlySet<string> = new Set([
 	'firstInstanceOrNull'
 ]);
 
+/**
+ * Base classes the runtime supplies as classes, for `resolvedBase`.
+ *
+ * NanoHTTPD is the local-server idiom: 10 of the 12 server classes measured
+ * across the video catalogue extend it directly and override `handle` or
+ * `serve`. The runtime's version never binds a port; see its definition.
+ * ForwardingSource is okio's, extended by a server that transforms the bytes
+ * it relays.
+ */
+const RUNTIME_BASES: ReadonlySet<string> = new Set(['NanoHTTPD', 'ForwardingSource']);
+
+/**
+ * What each runtime base defines, and so what `super.x()` inside a subclass
+ * may reach and what a call on an instance may name.
+ *
+ * The survey records these as the base's members, so `super.start()` takes
+ * the path a translated base class takes — plain JavaScript `super` — rather
+ * than the driver's `__super`, which has never heard of a server. NanoHTTPD's
+ * instance calls (`server.start(timeout, false)`, `stop()`) join
+ * `declaredMethods` only in a conversion that contains a subclass: a bare
+ * `.start()` is not allowed everywhere because one class here has one.
+ */
+const RUNTIME_BASE_MEMBERS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+	[
+		'NanoHTTPD',
+		new Set([
+			'start',
+			'stop',
+			'getListeningPort',
+			'wasStarted',
+			'closeAllConnections',
+			'getHostname',
+			'handle',
+			'serve'
+		])
+	],
+	['ForwardingSource', new Set(['read', 'close'])]
+]);
+const RUNTIME_BASE_CALLS: ReadonlyMap<string, readonly string[]> = new Map([
+	['NanoHTTPD', ['start', 'stop', 'getListeningPort', 'wasStarted', 'closeAllConnections']]
+]);
+
 const ANIME_FILTER_KINDS: ReadonlySet<string> = new Set([
 	'Header',
 	'Separator',
@@ -1490,6 +1532,8 @@ class Emitter {
 		}
 		for (const name of neighbours.entrySuspends) this.entrySuspends.add(name);
 		for (const [owner, base] of neighbours.classBases) this.classBaseIndex.set(owner, base);
+		for (const [base, members] of RUNTIME_BASE_MEMBERS)
+			this.classMemberIndex.set(base, new Set(members));
 		// A file's own alias still wins over a neighbour's: `registerAlias` runs
 		// after this and overwrites.
 		for (const [name, head] of neighbours.aliases) this.typeAliases.set(name, head);
@@ -2058,6 +2102,8 @@ class Emitter {
 			if (name !== null) {
 				const base = this.baseInvocation(child)?.type ?? null;
 				if (base !== null) this.classBaseIndex.set(name, base);
+				const runtimeCalls = base === null ? undefined : RUNTIME_BASE_CALLS.get(base);
+				for (const call of runtimeCalls ?? []) this.declaredMethods.add(call);
 				const members = this.classMemberIndex.get(name) ?? new Set<string>();
 				const fields = this.classFieldIndex.get(name) ?? new Set<string>();
 				const functions = this.classFunctionIndex.get(name) ?? new Set<string>();
@@ -11911,6 +11957,11 @@ class Emitter {
 		// a bundle that loaded and reported nothing refused. A source declaring
 		// a type of its own by that name is caught above, as it must be.
 		if (ANIME_FILTER_KINDS.has(declared)) return `AnimeFilter.${declared}`;
+		// A base the runtime defines as a real class, extended as one. Only
+		// these two: each is here because its subclass's own members are the
+		// behaviour — a server's `handle`, a Source's `read` — and the runtime
+		// supplies exactly the surface those members call through `super`.
+		if (RUNTIME_BASES.has(declared)) return declared;
 		return null;
 	}
 

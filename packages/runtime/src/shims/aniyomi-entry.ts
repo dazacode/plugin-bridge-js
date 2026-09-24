@@ -1124,10 +1124,20 @@ export default {
 
     const found = await __videosFor(item);
     const sources = [];
+    let pluginServed = 0;
     for (const entry of found) {
       const made = await __playable(entry.video);
       if (made === null) continue;
       const url = made.url;
+      // A stream addressing a server this bundle started (see NanoHTTPD in the
+      // runtime) is served by the extension's own handler, in this realm, and
+      // by nothing a player could reach. Handing it over would be handing the
+      // player a url on a port nobody is listening on. Counted, not skipped
+      // silently: if every stream is one, that is the answer to give.
+      if (__virtualServerFor(url) !== null) {
+        pluginServed += 1;
+        continue;
+      }
       // 'videoTitle' is the current spelling and 'quality' the deprecated one
       // that still reads it. Both are checked because a translated class may
       // have been written against either.
@@ -1143,6 +1153,13 @@ export default {
           : undefined,
         subtitles: __subtitlesOf(made.video)
       });
+    }
+    if (sources.length === 0 && pluginServed > 0) {
+      throw __unsupported(
+        'This extension serves its streams from its own request handler, which runs here with ' +
+        'no port: it resolved ' + pluginServed + ' of them. Playing one needs the player\\'s ' +
+        'requests handed to that handler, which this build does not do yet.'
+      );
     }
     return sources;
   }

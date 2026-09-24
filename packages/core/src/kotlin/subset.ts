@@ -1737,6 +1737,10 @@ export const HOST_METHODS: ReadonlySet<string> = new Set([
 	'tag',
 	'contentLength',
 	'peekBody',
+	// okio's view of a body: a progress stream read line by line, a peek at a
+	// header before relaying. Text bodies only; see the runtime's 'source'.
+	'source',
+	'readUtf8Line',
 	'cacheControl',
 	// okhttp's MultipartBody.Builder.
 	'setType',
@@ -2268,6 +2272,15 @@ export const JSOUP_STATICS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
  */
 export const GLOBAL_NAMES: ReadonlySet<string> = new Set([
 	'Arrays',
+	// A NanoHTTPD server answered in-realm, with no port — see `RUNTIME_GLOBALS`.
+	'NanoHTTPD',
+	'newFixedLengthResponse',
+	'newChunkedResponse',
+	'Status',
+	'MIME_PLAINTEXT',
+	'ForwardingSource',
+	'Buffer',
+	'OkHttpClient',
 	// `object : Interceptor { … }` and `class X : Interceptor` — the type an
 	// extension names when it writes one out rather than passing a lambda. The
 	// runtime calls `intercept` by name, so the interface itself carries no

@@ -965,3 +965,144 @@ class Extension {
 		expect(sources).toHaveLength(1);
 	});
 });
+
+describe('a local server, answered in-realm with no port', () => {
+	// What `emit.ts` writes for a NanoHTTPD subclass: a real `extends`, the
+	// handler `async` because it makes a request. The shapes are the ones the
+	// measured servers use — `parameters` as a multimap, lower-cased headers,
+	// the two response factories.
+	const SERVER = `
+class Proxy extends NanoHTTPD {
+  constructor() { super('127.0.0.1', 0); }
+  proxyUrl(url) { return 'http://127.0.0.1:' + this.listeningPort + '/proxy?url=' + encodeURIComponent(url); }
+  async handle(session) {
+    const url = __k.firstOrNull(__k.index(session.parameters, 'url'));
+    if (url == null) return newFixedLengthResponse(Status.BAD_REQUEST, MIME_PLAINTEXT, 'Missing url');
+    if (session.uri === '/binary') return newChunkedResponse(Status.OK, 'video/mp2t', new Uint8Array([71, 0, 1]));
+    const text = (await client.newCall(GET(url, {})).execute()).body.string();
+    const probe = session.headers.get('x-probe') ?? 'none';
+    return newFixedLengthResponse(Status.OK, 'application/vnd.apple.mpegurl',
+      text.split('\\n')[0] + ' ' + session.method + ' ' + probe);
+  }
+}
+`;
+
+	PAGES['https://cdn.example.invalid/master.m3u8'] = '#EXTM3U\nseg-1.ts\n';
+	PAGES['https://cdn.example.invalid/progress'] =
+		'data: {"status": "building"}\r\ndata: {"status": "ready"}';
+
+	function extension(body: string): string {
+		return `${SERVER}
+class Extension {
+  constructor() { this.baseUrl = '${BASE_URL}'; this.server = null; }
+  proxy() {
+    if (this.server === null) { this.server = new Proxy(); this.server.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false); }
+    return this.server;
+  }
+  async getVideoList(episode) {
+${body}
+  }
+}
+`;
+	}
+
+	it('runs the extension’s own handler for a request the extension makes to it', async () => {
+		// A playlist parser handed the local manifest url fetches it; the port
+		// was how that reached the handler upstream, and here the runtime is.
+		const module = await load(
+			extension(`
+    const local = this.proxy().proxyUrl('https://cdn.example.invalid/master.m3u8');
+    const served = (await client.newCall(GET(local, { 'X-Probe': 'seen' })).execute()).body.string();
+    return [Video('https://cdn.example.invalid/a.mp4', served, 'https://cdn.example.invalid/a.mp4', {})];`)
+		);
+		const { ctx, requested } = context();
+
+		const sources = await module.resolve(`${BASE_URL}/anime/one/1`, undefined, ctx);
+
+		expect(sources.map((one) => one.quality)).toEqual(['#EXTM3U GET seen']);
+		// The upstream fetch went out; the loopback one never did.
+		expect(requested).toContain('https://cdn.example.invalid/master.m3u8');
+		expect(requested.some((url) => url.includes('127.0.0.1'))).toBe(false);
+	});
+
+	it('reports a stream on its own server as plugin-served, not as a url to play', async () => {
+		const module = await load(
+			extension(`
+    const local = this.proxy().proxyUrl('https://cdn.example.invalid/master.m3u8');
+    return [Video(local, '1080p', local, {})];`)
+		);
+		const { ctx, requested } = context();
+
+		await expect(module.resolve(`${BASE_URL}/anime/one/1`, undefined, ctx)).rejects.toThrow(
+			/its own request handler.*no port.*1 of them/s
+		);
+		expect(requested.some((url) => url.includes('127.0.0.1'))).toBe(false);
+	});
+
+	it('marks a binary body from the handler unread, rather than decoding it as text', async () => {
+		// Plugin code here is handed text. A segment decoded as UTF-8 and
+		// encoded back is bytes that look right and are not.
+		const module = await load(
+			extension(`
+    const local = 'http://127.0.0.1:' + this.proxy().listeningPort + '/binary?url=x';
+    (await client.newCall(GET(local, {})).execute()).body.string();
+    return [];`)
+		);
+		const { ctx } = context();
+
+		await expect(module.resolve(`${BASE_URL}/anime/one/1`, undefined, ctx)).rejects.toThrow(
+			/binary body from the extension's own local server/
+		);
+	});
+
+	it('sends a request to the network once the server is stopped', async () => {
+		const module = await load(
+			extension(`
+    const server = this.proxy();
+    const local = server.proxyUrl('https://cdn.example.invalid/master.m3u8');
+    server.stop();
+    const alive = String(server.isAlive) + ' ' + server.listeningPort;
+    await client.newCall(GET(local, {})).execute();
+    return [Video('https://cdn.example.invalid/a.mp4', alive, 'https://cdn.example.invalid/a.mp4', {})];`)
+		);
+		const { ctx, requested } = context();
+
+		const sources = await module.resolve(`${BASE_URL}/anime/one/1`, undefined, ctx);
+
+		expect(sources[0].quality).toBe('false -1');
+		expect(requested.some((url) => url.startsWith('http://127.0.0.1:'))).toBe(true);
+	});
+
+	it('looks a status up by code, and answers null for one the enum has not', async () => {
+		const module = await load(
+			extension(`
+    const known = Status.lookup(404).getRequestStatus() + ' ' + Status.lookup(404).name;
+    const unknown = String(Status.lookup(418));
+    return [Video('https://cdn.example.invalid/a.mp4', known + ' ' + unknown, 'https://cdn.example.invalid/a.mp4', {})];`)
+		);
+		const { ctx } = context();
+
+		const sources = await module.resolve(`${BASE_URL}/anime/one/1`, undefined, ctx);
+
+		expect(sources[0].quality).toBe('404 NOT_FOUND null');
+	});
+
+	it('reads a text body line by line through source(), and peeks without consuming', async () => {
+		// A progress stream: CRLF between lines, none after the last — which is
+		// still a line — and null once it is spent.
+		const module = await load(
+			extension(`
+    const source = (await client.newCall(GET('https://cdn.example.invalid/progress', {})).execute()).body.source();
+    const peeked = __host().text.decode(source.peek().readByteArray(4));
+    const lines = [source.readUtf8Line(), source.readUtf8Line(), String(source.readUtf8Line())];
+    return [Video('https://cdn.example.invalid/a.mp4', peeked + '|' + lines.join('|'), 'https://cdn.example.invalid/a.mp4', {})];`)
+		);
+		const { ctx } = context();
+
+		const sources = await module.resolve(`${BASE_URL}/anime/one/1`, undefined, ctx);
+
+		expect(sources[0].quality).toBe(
+			'data|data: {"status": "building"}|data: {"status": "ready"}|null'
+		);
+	});
+});

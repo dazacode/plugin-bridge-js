@@ -8924,6 +8924,24 @@ function __responseOf(raw, text, request) {
     body: {
       string: function () { return read(); },
       bytes: function () { return __host().text.encode(read()); },
+      /*
+       * okio's view of the body: 'readUtf8Line()' over a progress stream, a
+       * 'peek()' at the first bytes, 'buffer()' to relay it. Its bytes are the
+       * text's, which is only the body when the body IS text — this runtime is
+       * handed text, not bytes. So a body the server said is binary refuses
+       * here, by name, rather than handing a relay a segment decoded as UTF-8
+       * and encoded back: bytes that look right and are not.
+       */
+      source: function () {
+        var type = response.body.contentType();
+        if (type !== null && type !== undefined && !__TEXT_TYPE.test(__str(type))) {
+          throw new Error(
+            'This converted extension reads a ' + __str(type) + ' body as bytes. Plugin code ' +
+            'here is handed text, not bytes, so a binary body cannot be relayed as written.'
+          );
+        }
+        return __byteSource(__host().text.encode(read()));
+      },
       // In bytes, which is what okhttp counts and what 'bytes()' answers.
       contentLength: function () { return __host().text.encode(read()).length; },
       /*
@@ -9087,8 +9105,376 @@ async function __execute(request, follow) {
   // this runtime's business rather than the host's — see ABI.md, 'follow:
   // false — reading a redirect instead of taking it'.
   if (follow === false) options.follow = false;
+  // A url addressing a server this bundle started is answered by that
+  // server's handler, never sent: see NanoHTTPD below.
+  var local = __virtualServerFor(request.url);
+  if (local !== null) {
+    var served = await __serveVirtual(local, request);
+    return __responseOf(served, served.text, request);
+  }
   var raw = await __host().http.send(__str(request.url), options);
   return __responseOf(raw, await raw.text(), request);
+}
+
+/**
+ * NanoHTTPD, with no port.
+ *
+ * The local-server idiom, measured: ten of the twelve server classes in the
+ * video catalogue extend NanoHTTPD('127.0.0.1', 0), override 'handle' or
+ * 'serve', read the same four things off the session (uri, method, parameters,
+ * the range header) and answer through the same two factories. What the port
+ * buys them upstream is a url a media player can be pointed at. A plugin here
+ * can never listen (ADR-0006), and nothing in this class does: 'start()'
+ * registers the server in this bundle under a stand-in port, and a url
+ * addressing that origin is answered by calling the extension's own handler,
+ * in-realm. Two consumers:
+ *
+ * - A request the plugin makes itself. An extension commonly hands its local
+ *   manifest url to a playlist parser that fetches it; '__execute' routes that
+ *   request here instead of to the network, which is the same thing the port
+ *   did, minus the port.
+ * - A stream url handed back from 'resolve'. The driver reports it as
+ *   plugin-served and does not give it to a player, because nothing outside
+ *   this realm can reach it: serving the player's requests is a host
+ *   capability that does not exist yet.
+ *
+ * The stand-in port is a counter, not a socket, and it is only ever compared
+ * with the port in a url this bundle built itself.
+ */
+var MIME_PLAINTEXT = 'text/plain';
+var __virtualServers = {};
+var __nextVirtualPort = 49152;
+
+function __virtualServerFor(url) {
+  var match = /^http:\\/\\/(127\\.0\\.0\\.1|localhost|\\[::1\\]):(\\d+)(\\/|\\?|$)/i.exec(__str(url));
+  if (match === null) return null;
+  var server = __virtualServers[match[2]];
+  return server === undefined ? null : server;
+}
+
+class NanoHTTPD {
+  constructor(hostname, port) {
+    this.__hostname = hostname === null || hostname === undefined ? null : __str(hostname);
+    this.__requestedPort = port === null || port === undefined ? 0 : Number(port);
+    this.__port = -1;
+  }
+  start() {
+    if (this.__port !== -1) return;
+    var port = this.__requestedPort > 0 ? this.__requestedPort : __nextVirtualPort++;
+    this.__port = port;
+    __virtualServers[String(port)] = this;
+  }
+  stop() {
+    if (this.__port === -1) return;
+    if (__virtualServers[String(this.__port)] === this) delete __virtualServers[String(this.__port)];
+    this.__port = -1;
+  }
+  closeAllConnections() { this.stop(); }
+  get listeningPort() { return this.__port; }
+  getListeningPort() { return this.__port; }
+  get hostname() { return this.__hostname; }
+  getHostname() { return this.__hostname; }
+  get isAlive() { return this.__port !== -1; }
+  wasStarted() { return this.__port !== -1; }
+  /* The fork these extensions build against calls 'handle', whose default is
+     'serve', whose default is a 404. An extension overrides one of the two. */
+  handle(session) { return this.serve(session); }
+  serve() { return newFixedLengthResponse(Status.NOT_FOUND, MIME_PLAINTEXT, 'Not Found'); }
+}
+NanoHTTPD.SOCKET_READ_TIMEOUT = 5000;
+NanoHTTPD.MIME_PLAINTEXT = MIME_PLAINTEXT;
+NanoHTTPD.MIME_HTML = 'text/html';
+
+/** org.nanohttpd's Status: the codes, their reason phrases, and 'lookup'. */
+var Status = (function () {
+  var table = [
+    ['SWITCH_PROTOCOL', 101, 'Switching Protocols'], ['OK', 200, 'OK'], ['CREATED', 201, 'Created'],
+    ['ACCEPTED', 202, 'Accepted'], ['NO_CONTENT', 204, 'No Content'],
+    ['PARTIAL_CONTENT', 206, 'Partial Content'], ['MULTI_STATUS', 207, 'Multi-Status'],
+    ['REDIRECT', 301, 'Moved Permanently'], ['FOUND', 302, 'Found'],
+    ['REDIRECT_SEE_OTHER', 303, 'See Other'], ['NOT_MODIFIED', 304, 'Not Modified'],
+    ['TEMPORARY_REDIRECT', 307, 'Temporary Redirect'], ['BAD_REQUEST', 400, 'Bad Request'],
+    ['UNAUTHORIZED', 401, 'Unauthorized'], ['FORBIDDEN', 403, 'Forbidden'],
+    ['NOT_FOUND', 404, 'Not Found'], ['METHOD_NOT_ALLOWED', 405, 'Method Not Allowed'],
+    ['NOT_ACCEPTABLE', 406, 'Not Acceptable'], ['REQUEST_TIMEOUT', 408, 'Request Timeout'],
+    ['CONFLICT', 409, 'Conflict'], ['GONE', 410, 'Gone'], ['LENGTH_REQUIRED', 411, 'Length Required'],
+    ['PRECONDITION_FAILED', 412, 'Precondition Failed'], ['PAYLOAD_TOO_LARGE', 413, 'Payload Too Large'],
+    ['UNSUPPORTED_MEDIA_TYPE', 415, 'Unsupported Media Type'],
+    ['RANGE_NOT_SATISFIABLE', 416, 'Requested Range Not Satisfiable'],
+    ['EXPECTATION_FAILED', 417, 'Expectation Failed'], ['TOO_MANY_REQUESTS', 429, 'Too Many Requests'],
+    ['INTERNAL_ERROR', 500, 'Internal Server Error'], ['NOT_IMPLEMENTED', 501, 'Not Implemented'],
+    ['SERVICE_UNAVAILABLE', 503, 'Service Unavailable'],
+    ['UNSUPPORTED_HTTP_VERSION', 505, 'HTTP Version Not Supported']
+  ];
+  var out = {};
+  var byCode = {};
+  table.forEach(function (row) {
+    var entry = {
+      name: row[0],
+      requestStatus: row[1],
+      description: row[1] + ' ' + row[2],
+      getRequestStatus: function () { return row[1]; },
+      getDescription: function () { return row[1] + ' ' + row[2]; },
+      toString: function () { return row[0]; }
+    };
+    out[row[0]] = entry;
+    byCode[row[1]] = entry;
+  });
+  /* null for a code the enum has no entry for, which is why every caller
+     measured writes 'Status.lookup(code) ?: Status.INTERNAL_ERROR'. */
+  out.lookup = function (code) {
+    var entry = byCode[Number(code)];
+    return entry === undefined ? null : entry;
+  };
+  return out;
+})();
+
+/**
+ * The response a handler returns. The body is kept as given — a string, a
+ * ByteArray, or an InputStream — and read only when something consumes it,
+ * because reading an InputStream here may mean awaiting a translated Source.
+ */
+function __nanoResponse(status, mimeType, data, length) {
+  var headers = [];
+  return {
+    __kNanoResponse: true,
+    status: status,
+    mimeType: mimeType === null || mimeType === undefined ? null : __str(mimeType),
+    data: data === undefined ? null : data,
+    length: length === undefined ? -1 : Number(length),
+    headers: headers,
+    addHeader: function (name, value) { headers.push([__str(name), __str(value)]); },
+    getStatus: function () { return status; },
+    getMimeType: function () { return mimeType; },
+    setChunkedTransfer: function () {},
+    setGzipEncoding: function () {},
+    closeConnection: function () {}
+  };
+}
+
+/* newFixedLengthResponse(msg) answers text/html 200, as the library does;
+   the three- and four-argument forms carry their own status and type. */
+function newFixedLengthResponse(status, mimeType, data, length) {
+  if (arguments.length === 1) return __nanoResponse(Status.OK, 'text/html', __str(status), -1);
+  return __nanoResponse(status, mimeType, data, length);
+}
+
+function newChunkedResponse(status, mimeType, data) {
+  return __nanoResponse(status, mimeType, data, -1);
+}
+
+/**
+ * The session a handler reads: what the url and request carry, spelled the
+ * way IHTTPSession spells it. 'parameters' is the multimap (every value of a
+ * repeated name, in order); 'parms' is the deprecated single-valued view that
+ * still exists upstream. Header names are lower-cased, as NanoHTTPD does.
+ */
+function __nanoSession(url, method, headers, body) {
+  var parsed = __k.httpUrl(url);
+  var parameters = new Map();
+  var parms = new Map();
+  var names = parsed.queryParameterNames();
+  __arr(names).forEach(function (name) {
+    var values = __arr(parsed.queryParameterValues(name)).map(function (v) { return v === null ? '' : __str(v); });
+    parameters.set(name, values);
+    parms.set(name, values.length > 0 ? values[0] : '');
+  });
+  var lowered = new Map();
+  var pairs = __headerPairs(headers || {});
+  for (var i = 0; i < pairs.length; i += 1) lowered.set(String(pairs[i][0]).toLowerCase(), __str(pairs[i][1]));
+  var query = parsed.encodedQuery;
+  return {
+    uri: parsed.encodedPath,
+    method: String(method || 'GET').toUpperCase(),
+    parameters: parameters,
+    parms: parms,
+    headers: lowered,
+    queryParameterString: query === null || query === undefined ? null : __str(query),
+    remoteIpAddress: '127.0.0.1',
+    remoteHostName: 'localhost',
+    getUri: function () { return this.uri; },
+    getMethod: function () { return this.method; },
+    getParameters: function () { return parameters; },
+    getParms: function () { return parms; },
+    getHeaders: function () { return lowered; },
+    getQueryParameterString: function () { return this.queryParameterString; },
+    parseBody: function (files) {
+      if (files !== null && files !== undefined && typeof files.set === 'function' && body !== null) {
+        files.set('postData', __str(body));
+      }
+    }
+  };
+}
+
+var __TEXT_TYPE = /^(text\\/|application\\/(json|xml|javascript|x-mpegurl|vnd\\.apple\\.mpegurl|dash\\+xml|x-subrip|ttml\\+xml)|image\\/svg)/i;
+
+/** Every byte an InputStream will give, awaiting a translated Source's reads. */
+async function __drainStream(stream) {
+  if (stream instanceof Uint8Array) return stream;
+  if (stream && typeof stream.__kDrain === 'function') return await stream.__kDrain();
+  throw new Error('This converted extension answered with a stream this runtime cannot read.');
+}
+
+/**
+ * A request to a registered server, answered by its handler.
+ *
+ * The answer takes the host's response shape, so '__responseOf' treats it as
+ * it treats any other. A text body is carried as text. A binary one is marked
+ * unread rather than decoded: this runtime hands plugin code text, not bytes,
+ * and a segment decoded as UTF-8 is a segment silently corrupted.
+ */
+async function __serveVirtual(server, request) {
+  var headers = typeof request.headers.toMap === 'function' ? request.headers.toMap() : request.headers;
+  var body = request.body === null ? null : request.body.text;
+  var session = __nanoSession(__str(request.url), request.method, headers, body);
+  var answer = await server.handle(session);
+  if (answer === null || answer === undefined || answer.__kNanoResponse !== true) {
+    throw new Error('This converted extension\\'s local server answered with something that is not a response.');
+  }
+  var out = {};
+  for (var i = 0; i < answer.headers.length; i += 1) out[answer.headers[i][0]] = answer.headers[i][1];
+  if (answer.mimeType !== null) out['Content-Type'] = answer.mimeType;
+  var code = answer.status && typeof answer.status.getRequestStatus === 'function'
+    ? answer.status.getRequestStatus()
+    : Number(answer.status);
+  var text = '';
+  var unread = '';
+  if (typeof answer.data === 'string') {
+    text = answer.data;
+  } else if (answer.data !== null) {
+    if (answer.mimeType !== null && __TEXT_TYPE.test(answer.mimeType)) {
+      text = __host().text.decode(await __drainStream(answer.data));
+    } else {
+      unread = 'a binary body from the extension\\'s own local server, which needs a byte path this runtime does not have';
+    }
+  }
+  return { status: code, url: __str(request.url), headers: out, unread: unread, text: text };
+}
+
+/**
+ * okio's Buffer: bytes appended at one end, read from the other.
+ *
+ * Whole-buffer, which is what every Source measured needs: a server that
+ * transforms what it relays reads a chunk into a scratch Buffer, rewrites
+ * it, and writes it on.
+ */
+class Buffer {
+  constructor() { this.__bytes = new Uint8Array(0); }
+  get size() { return this.__bytes.length; }
+  __append(bytes) {
+    var joined = new Uint8Array(this.__bytes.length + bytes.length);
+    joined.set(this.__bytes, 0);
+    joined.set(bytes, this.__bytes.length);
+    this.__bytes = joined;
+  }
+  __take(count) {
+    var n = Math.max(0, Math.min(this.__bytes.length, Number(count)));
+    var head = this.__bytes.slice(0, n);
+    this.__bytes = this.__bytes.slice(n);
+    return head;
+  }
+  write(source, byteCount) {
+    if (source instanceof Buffer) {
+      this.__append(source.__take(byteCount === undefined ? source.size : byteCount));
+    } else {
+      var bytes = __bytesOf(source);
+      this.__append(byteCount === undefined ? bytes : bytes.slice(0, Number(byteCount)));
+    }
+    return this;
+  }
+  writeUtf8(text) { this.__append(__host().text.encode(__str(text))); return this; }
+  writeByte(value) { this.__append(Uint8Array.of(Number(value) & 255)); return this; }
+  readByteArray(byteCount) {
+    if (byteCount === undefined) return this.__take(this.__bytes.length);
+    if (Number(byteCount) > this.__bytes.length) throw new Error('java.io.EOFException');
+    return this.__take(byteCount);
+  }
+  readUtf8(byteCount) {
+    return __host().text.decode(this.readByteArray(byteCount));
+  }
+  exhausted() { return this.__bytes.length === 0; }
+  clear() { this.__bytes = new Uint8Array(0); }
+  /* As a Source: hand over up to byteCount bytes, -1 when there are none. */
+  read(sink, byteCount) {
+    if (this.__bytes.length === 0) return -1;
+    var chunk = this.__take(byteCount);
+    sink.__append(chunk);
+    return chunk.length;
+  }
+  close() {}
+}
+
+/**
+ * okio's ForwardingSource: a Source that delegates to another, extended by a
+ * class that rewrites what passes through its 'read'.
+ */
+class ForwardingSource {
+  constructor(delegate) { this.__delegate = delegate; }
+  get delegate() { return this.__delegate; }
+  read(sink, byteCount) { return this.__delegate.read(sink, byteCount); }
+  close() { if (typeof this.__delegate.close === 'function') this.__delegate.close(); }
+}
+
+/**
+ * A BufferedSource over bytes already in hand: a response body's 'source()'.
+ * Synchronous, because nothing behind it has to be awaited — and 'peek()'
+ * reads ahead without consuming, which is what okio promises and what a
+ * relay that inspects a header before streaming depends on.
+ */
+function __byteSource(bytes) {
+  var at = 0;
+  var made = {
+    peek: function () { return __byteSource(bytes.slice(at)); },
+    readByteArray: function (byteCount) {
+      if (byteCount === undefined) { var rest = bytes.slice(at); at = bytes.length; return rest; }
+      var n = Number(byteCount);
+      if (at + n > bytes.length) throw new Error('java.io.EOFException');
+      var out = bytes.slice(at, at + n);
+      at += n;
+      return out;
+    },
+    readUtf8: function () { return __host().text.decode(made.readByteArray()); },
+    /* null at the end, and a last line without a newline is still a line. */
+    readUtf8Line: function () {
+      if (at >= bytes.length) return null;
+      var end = at;
+      while (end < bytes.length && bytes[end] !== 10) end += 1;
+      var line = bytes.slice(at, end > at && bytes[end - 1] === 13 ? end - 1 : end);
+      at = end < bytes.length ? end + 1 : end;
+      return __host().text.decode(line);
+    },
+    exhausted: function () { return at >= bytes.length; },
+    read: function (sink, byteCount) {
+      if (at >= bytes.length) return -1;
+      var n = Math.min(Number(byteCount), bytes.length - at);
+      sink.__append(bytes.slice(at, at + n));
+      at += n;
+      return n;
+    },
+    close: function () {}
+  };
+  return made;
+}
+
+/**
+ * A Source's 'buffer()': the reading surface over any Source, including a
+ * translated one whose 'read' is async. So everything that reads through a
+ * Source here is async, and the one consumer that must be — a response body
+ * handed to 'newFixedLengthResponse' — is drained by '__drainStream'.
+ */
+function __bufferedSource(source) {
+  return {
+    inputStream: function () {
+      return {
+        __kDrain: async function () {
+          var sink = new Buffer();
+          while ((await source.read(sink, 8192)) !== -1) { /* until the source ends */ }
+          return sink.readByteArray();
+        }
+      };
+    },
+    close: function () { if (typeof source.close === 'function') source.close(); }
+  };
 }
 
 /**
@@ -9407,6 +9793,16 @@ function __clientWith(follow, interceptors, cookieRules, networkInterceptors) {
 }
 
 var client = __clientWith(true);
+
+/**
+ * okhttp's own constructor and builder, for a client an extension makes from
+ * nothing rather than from 'network.client'. Upstream that loses the app's
+ * interceptors; here 'network.client' has none to lose, so a fresh client is
+ * the same client, and its builder honours the one setting that is not a
+ * transport detail — the redirect policy — exactly as 'newBuilder()' does.
+ */
+function OkHttpClient() { return __clientWith(true); }
+OkHttpClient.Builder = function () { return __clientBuilder(true, [], [], []); };
 
 /** What an extension reaches through in Kotlin, pointing at the same client. */
 var network = {

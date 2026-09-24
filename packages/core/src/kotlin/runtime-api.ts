@@ -1125,7 +1125,28 @@ export const RUNTIME_GLOBALS = [
 	'RoundingMode',
 
 	/* java.io.File, as far as `File.createTempFile` goes: see `JSOUP_STATICS`. */
-	'File'
+	'File',
+
+	/* A local HTTP server with no port. An extension that extends NanoHTTPD
+	   gets a server the runtime registers under a stand-in port and answers
+	   in-realm: a request the plugin itself makes to that origin runs the
+	   extension's own `handle`/`serve`, and a stream url addressing it is
+	   reported as plugin-served rather than handed to a player that could not
+	   reach it. The response factories are imported bare
+	   (`import …Response.newFixedLengthResponse`), `Status` is its enum, and
+	   `MIME_PLAINTEXT` is a static a subclass reads without qualifying. */
+	'NanoHTTPD',
+	'newFixedLengthResponse',
+	'newChunkedResponse',
+	'Status',
+	'MIME_PLAINTEXT',
+	/* okio's ForwardingSource, the base a byte-transforming Source extends,
+	   and its Buffer, the scratch space one reads a chunk into. */
+	'ForwardingSource',
+	'Buffer',
+	/* `OkHttpClient()` and `OkHttpClient.Builder()`: a client made from
+	   nothing, which here is the same client as `network.client`. */
+	'OkHttpClient'
 ] as const;
 
 /** Everything the runtime source must define, for the spec that checks it. */

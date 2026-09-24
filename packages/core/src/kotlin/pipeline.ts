@@ -846,6 +846,32 @@ function reach(
 			}
 		}
 
+		// The same, for a class extending a base the runtime supplies and calls
+		// into. A NanoHTTPD subclass's `handle`/`serve` is what the runtime
+		// runs when a request reaches the server; a ForwardingSource's `read`
+		// is what the stream drains through. Nothing in the extension calls
+		// them, so without this they were unreachable — and their refusals
+		// (`.peek()`, `.readByteArray()`) set aside rather than blocking: the
+		// bundle loaded with a server whose `serveSegment` did not exist and a
+		// Source with no `read`, which fails at the first segment and not here.
+		//
+		// Asked of the class a reached *member* belongs to as well as of a
+		// reached type. A server built inside `synchronized(this) { … }` in a
+		// companion draws no type edge, so the class itself was never reached
+		// while its `register` and `segmentProxyUrl` were — and its
+		// `serveSegment` went out undefined behind a `serve` that called it.
+		const owners = [name, ...(byName.get(name) ?? []).map((edges) => edges.owner)];
+		for (const owner of owners) {
+			if (owner === null) continue;
+			const calledByRuntime = RUNTIME_CALLED.get(classBases.get(owner) ?? '');
+			if (calledByRuntime === undefined) continue;
+			for (const edges of byOwner.get(owner) ?? []) {
+				if (calledByRuntime.includes(edges.member) && !reached.has(edges.member)) {
+					pending.push(edges.member);
+				}
+			}
+		}
+
 		// And building a class builds every class above it. A template's
 		// properties are constructor code of the extension that extends it, and
 		// a getter-bodied one is read as `this.apiUrl`, which is a property read
@@ -861,6 +887,15 @@ function reach(
 
 	return reached;
 }
+
+/**
+ * Members the runtime calls on a subclass of one of its own base classes —
+ * see `RUNTIME_BASES` in `emit.ts` — and so reachable whenever the class is.
+ */
+const RUNTIME_CALLED: ReadonlyMap<string, readonly string[]> = new Map([
+	['NanoHTTPD', ['handle', 'serve']],
+	['ForwardingSource', ['read', 'close']]
+]);
 
 /** The refusals a file that could not be read as a whole can carry. */
 /**

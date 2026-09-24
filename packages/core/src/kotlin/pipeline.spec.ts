@@ -1791,3 +1791,145 @@ describe('a refusal that constructor code names', () => {
 		expect(conversion.blocking.map((one) => one.member)).toContain('helper');
 	});
 });
+
+describe('a local server, which the runtime runs without a port', () => {
+	/** An extension that starts its server and hands the player a url on it. */
+	function serving(server: string, start = 'it.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false)') {
+		return [
+			{
+				path: 'Demo.kt',
+				source: kt(
+					'class Demo : ParsedAnimeHttpSource() {',
+					'    override val name = "Demo"',
+					'    override val baseUrl = "https://example.invalid"',
+					'    override val lang = "en"',
+					'    override val supportsLatest = false',
+					`    private val proxy by lazy { Proxy(client).also { ${start} } }`,
+					'    override fun popularAnimeRequest(page: Int) = GET(baseUrl)',
+					'    override suspend fun getVideoList(episode: SEpisode): List<Video> {',
+					'        val url = proxy.proxyUrl("https://cdn.example.invalid/index.m3u8")',
+					'        return listOf(Video(url, "Local", url))',
+					'    }',
+					'}'
+				)
+			},
+			{ path: 'Proxy.kt', source: server }
+		];
+	}
+
+	it('extends the runtime’s NanoHTTPD, and reaches it through super', async () => {
+		const conversion = await convertKotlin(
+			serving(
+				kt(
+					'class Proxy(private val client: OkHttpClient) : NanoHTTPD("127.0.0.1", 0) {',
+					'    override fun start() { super.start() }',
+					'    fun proxyUrl(url: String) = "http://127.0.0.1:$listeningPort/p?url=$url"',
+					'    override fun handle(session: IHTTPSession): Response {',
+					'        val url = session.parameters["url"]?.firstOrNull()',
+					'            ?: return newFixedLengthResponse(Status.BAD_REQUEST, MIME_PLAINTEXT, "Missing url")',
+					'        val text = client.newCall(GET(url)).execute().body.string()',
+					'        return newFixedLengthResponse(Status.OK, "application/vnd.apple.mpegurl", text)',
+					'    }',
+					'}'
+				)
+			),
+			{ parser }
+		);
+
+		expect(conversion.blocking).toEqual([]);
+		expect(conversion.js).toContain('class Proxy extends NanoHTTPD');
+		expect(conversion.js).toContain('super.start(');
+	});
+
+	it('blocks on a refusal only the server’s handler reaches', async () => {
+		// Nothing in an extension calls `handle`; the runtime does, when a
+		// request reaches the server. Left to ordinary reachability it was dead
+		// code, so a refused `relay` behind it was set aside rather than
+		// blocking — and the bundle loaded with a `handle` calling a `relay`
+		// that did not exist, which fails at the first segment, not here.
+		const conversion = await convertKotlin(
+			serving(
+				kt(
+					'class Proxy(private val client: OkHttpClient) : NanoHTTPD("127.0.0.1", 0) {',
+					'    fun proxyUrl(url: String) = "http://127.0.0.1:$listeningPort/p?url=$url"',
+					'    override fun serve(session: IHTTPSession): Response = relay(session.uri)',
+					'    private fun relay(url: String): Response {',
+					'        val body = client.newCall(GET(url)).execute().body',
+					'        return newChunkedResponse(Status.OK, "video/mp2t", body.byteStream())',
+					'    }',
+					'}'
+				)
+			),
+			{ parser }
+		);
+
+		expect(conversion.complete).toBe(false);
+		expect(conversion.blocking.map((one) => one.member)).toContain('relay');
+	});
+
+	it('blocks the same way when the server is built where no type edge is drawn', async () => {
+		// Built inside `synchronized(this) { … }` in a companion, the class is
+		// never reached as a type — only its `proxyUrl` is. Reaching a member
+		// reaches the handler the runtime will call on the same instance.
+		const files = serving(
+			kt(
+				'class Proxy(private val client: OkHttpClient) : NanoHTTPD("127.0.0.1", 0) {',
+				'    fun proxyUrl(url: String) = "http://127.0.0.1:$listeningPort/p?url=$url"',
+				'    override fun serve(session: IHTTPSession): Response = relay(session.uri)',
+				'    private fun relay(url: String): Response {',
+				'        val body = client.newCall(GET(url)).execute().body',
+				'        return newChunkedResponse(Status.OK, "video/mp2t", body.byteStream())',
+				'    }',
+				'    companion object {',
+				'        @Volatile private var shared: Proxy? = null',
+				'        fun of(client: OkHttpClient): Proxy = shared ?: synchronized(this) {',
+				'            shared ?: Proxy(client).also { shared = it }',
+				'        }',
+				'    }',
+				'}'
+			)
+		);
+		files[0].source = files[0].source.replace(
+			'Proxy(client).also { it.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false) }',
+			'Proxy.of(client)'
+		);
+		const conversion = await convertKotlin(files, { parser });
+
+		expect(conversion.complete).toBe(false);
+		expect(conversion.blocking.map((one) => one.member)).toContain('relay');
+	});
+
+	it('blocks on a refusal inside a ForwardingSource’s read', async () => {
+		// `read` is what a stream drains through, and the runtime is what calls
+		// it. A relay that rewrites bytes and refused doing so would otherwise
+		// go out as a Source with no `read` of its own, passing bytes through
+		// untouched — plausible, and wrong.
+		const conversion = await convertKotlin(
+			serving(
+				kt(
+					'class Proxy(private val client: OkHttpClient) : NanoHTTPD("127.0.0.1", 0) {',
+					'    fun proxyUrl(url: String) = "http://127.0.0.1:$listeningPort/p?url=$url"',
+					'    override fun serve(session: IHTTPSession): Response {',
+					'        val upstream = client.newCall(GET(session.uri)).execute().body.source()',
+					'        val source = Masked(upstream)',
+					'        source.close()',
+					'        return newFixedLengthResponse(Status.OK, MIME_PLAINTEXT, "relayed")',
+					'    }',
+					'}',
+					'private class Masked(upstream: Source) : ForwardingSource(upstream) {',
+					'    override fun read(sink: Buffer, byteCount: Long): Long {',
+					'        val temp = Buffer()',
+					'        val n = super.read(temp, byteCount)',
+					'        sink.write(temp.readByteArray().reversedArray())',
+					'        return n',
+					'    }',
+					'}'
+				)
+			),
+			{ parser }
+		);
+
+		expect(conversion.complete).toBe(false);
+		expect(conversion.blocking.map((one) => one.member)).toContain('read');
+	});
+});
