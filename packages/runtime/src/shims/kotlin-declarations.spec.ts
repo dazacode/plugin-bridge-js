@@ -2702,3 +2702,69 @@ describe('an annotation on an expression', () => {
 		expect(d.both('ab')).toBe('AB');
 	});
 });
+
+describe('a try with several catch clauses, told apart by the type the error carries', () => {
+	// Faithful only where the runtime tags every error of the type a clause
+	// names: a catch-all, an exception class the extension declared, or
+	// IllegalStateException (Kotlin's error(), check() and checkNotNull()).
+	const source = kt(
+		'class Upstream(val code: Int) : java.io.IOException("upstream $code")',
+		'class Demo {',
+		'    fun pick(kind: String): String = try {',
+		'        when (kind) {',
+		'            "state" -> throw IllegalStateException("too large")',
+		'            "check" -> { check(false) { "checked" }; "no" }',
+		'            "upstream" -> throw Upstream(503)',
+		'            "io" -> throw java.io.IOException("io")',
+		'            else -> kind.toInt().toString()',
+		'        }',
+		'    } catch (e: kotlinx.coroutines.CancellationException) {',
+		'        throw e',
+		'    } catch (e: IllegalStateException) {',
+		'        "state:" + e.message',
+		'    } catch (e: Upstream) {',
+		'        "upstream:" + e.code + ":" + e.message',
+		'    } catch (_: Exception) {',
+		'        "other"',
+		'    }',
+		'    fun narrow(kind: String): String = try {',
+		'        if (kind == "upstream") throw Upstream(1) else "x".toInt().toString()',
+		'    } catch (e: Upstream) {',
+		'        "upstream"',
+		'    } catch (e: IllegalStateException) {',
+		'        "state"',
+		'    }',
+		'}'
+	);
+
+	it('runs the clause whose type the error has, and the catch-all for anything else', async () => {
+		const demo = await instantiate('Demo', source);
+		expect(demo.pick('state')).toBe('state:too large');
+		expect(demo.pick('check')).toBe('state:checked');
+		expect(demo.pick('upstream')).toBe('upstream:503:upstream 503');
+		// An IOException the extension threw is not an IllegalStateException.
+		expect(demo.pick('io')).toBe('other');
+		// Nor is an error the runtime raised itself, which carries no type.
+		expect(demo.pick('abc')).toBe('other');
+	});
+
+	it('lets an error no clause names go on, as Kotlin does', async () => {
+		const demo = await instantiate('Demo', source);
+		expect(demo.narrow('upstream')).toBe('upstream');
+		expect(() => demo.narrow('abc')).toThrow();
+	});
+
+	it('still refuses a clause for a type the runtime raises untagged', () => {
+		// A failed request is an IOException in Kotlin and an untagged Error
+		// here; dispatching on IOException would silently take the wrong branch.
+		expect(
+			refusalNames(
+				kt(
+					'class Demo {',
+					'    fun f(): String = try { "a" } catch (e: java.io.IOException) { "io" } catch (e: Exception) { "x" }',
+					'}'
+				)
+			)
+		).toEqual(['more than one `catch` clause']);
+	});
+});

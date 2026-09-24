@@ -6136,3 +6136,12 @@ describe('a Sort filter’s Selection, however it is spelled', () => {
 		expect(js).toContain('__k.selection(4, true)');
 	});
 });
+
+describe('a class written with its package', () => {
+	it('reads `org.jsoup.Jsoup` as the `Jsoup` an import would have named', () => {
+		const emission = translate(inClass('    fun doc(html: String) = org.jsoup.Jsoup.parse(html)'));
+		expect(emission.refusals).toEqual([]);
+		expect(emission.js).toContain('Jsoup.parse(html)');
+		expect(emission.js).not.toContain('org.jsoup');
+	});
+});

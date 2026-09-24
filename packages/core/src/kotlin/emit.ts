@@ -418,8 +418,17 @@ const RECEIVER_BUILDERS: ReadonlySet<string> = new Set([
 /** The first segment of a package path, never a name a source declares. */
 const PACKAGE_ROOTS: ReadonlySet<string> = new Set(['java', 'javax', 'android', 'okhttp3', 'okio']);
 
-/** `java.net.URLEncoder`, and the other packages written out in full. */
-const QUALIFIED_GLOBAL = /^(?:java|javax|kotlin|android|okhttp3|okio|rx)\.[\w.]*?\.?(\w+)$/;
+/**
+ * `java.net.URLEncoder`, and the other packages written out in full.
+ *
+ * `org.jsoup` is a root by its two segments rather than by `org`, which is
+ * every Java package there is. It was missing, and `org.jsoup.Jsoup.parse(html)`
+ * — the same `Jsoup` the imported spelling reaches — was emitted as a read of a
+ * variable called `org`: the bundle converted, loaded, and threw "reading
+ * 'jsoup'" of undefined the first time an episode list parsed a fragment.
+ */
+const QUALIFIED_GLOBAL =
+	/^(?:java|javax|kotlin|kotlinx|android|okhttp3|okio|rx|org\.jsoup)\.[\w.]*?\.?(\w+)$/;
 
 /** `Filter.Sort.Selection` and the video fork's `AnimeFilter.Sort.Selection`. */
 const SORT_SELECTION = /^(?:Anime)?Filter\.Sort\.Selection$/;
@@ -7194,14 +7203,21 @@ class Emitter {
 		const isCall = node.type === 'call_expression';
 		const callee = isCall ? kids(node)[0] : node;
 		const typeName = callee?.text ?? '';
+		// An exception class the extension declared is thrown as itself — an
+		// instance of that class, which a clause naming it catches by type.
+		if (isCall && this.declaredException(typeName)) return this.expr(node);
 		const helper = thrownHelper(typeName);
 		if (helper === null) this.refuse(node, `\`throw ${typeName}\``);
 
 		const args = isCall
 			? kids(kids(kids(node)[1]).find((child) => child.type === 'value_arguments'))
 			: [];
-		const message = args.length === 0 ? '' : this.expr(this.argumentValue(args[0]));
-		return `${this.helper(helper)}(${message})`;
+		const message = args.length === 0 ? "''" : this.expr(this.argumentValue(args[0]));
+		// The type travels with the error, so a clause can ask about it.
+		const bare = typeName.split('.').pop() ?? typeName;
+		return helper === 'error'
+			? `${this.helper(helper)}(${message}, ${JSON.stringify(bare)})`
+			: `${this.helper(helper)}(${message})`;
 	}
 
 	private ifStatement(node: KNode, sink: Sink = null): string {
@@ -7324,7 +7340,43 @@ class Emitter {
 		const catches = this.reachableCatches(written);
 
 		let text = `try ${block(body === undefined ? [] : this.statementList(body, sink))}`;
-		if (catches.length === 1) {
+		if (
+			catches.length > 1 ||
+			(catches.length === 1 && !CATCH_ALL.has(this.catchType(catches[0])) && written.length > 1)
+		) {
+			// Several clauses that can each run, told apart by the type the
+			// error carries — see `reachableCatches` for which types that is
+			// allowed for. Each clause binds its own name to the one error, in
+			// its own block, and an error no clause names goes on unhandled,
+			// as Kotlin's does.
+			const caught = this.temporary();
+			const branches = catches.map((clause) => {
+				const name = kids(clause).find((child) => child.type === 'simple_identifier')?.text ?? 'e';
+				const inner = kids(clause).find((child) => child.type === 'statements');
+				this.pushScope();
+				this.declare(name);
+				const lines = inner === undefined ? [] : this.statementList(inner, sink);
+				this.popScope();
+				const bound = [`const ${this.safe(name)} = ${caught};`, ...lines];
+				const type = this.catchType(clause);
+				if (CATCH_ALL.has(type)) return { test: null, body: block(bound) };
+				return {
+					test: `${this.helper('caught')}(${caught}, ${this.catchReference(type)})`,
+					body: block(bound)
+				};
+			});
+			let chain = '';
+			for (const branch of branches) {
+				if (branch.test === null) {
+					chain = chain.length === 0 ? branch.body : `${chain} else ${branch.body}`;
+					break;
+				}
+				chain = `${chain.length === 0 ? '' : `${chain} else `}if (${branch.test}) ${branch.body}`;
+			}
+			if (branches[branches.length - 1].test !== null) chain = `${chain} else throw ${caught};`;
+			const guard = `if (${this.helper('isJump')}(${caught})) throw ${caught};`;
+			text += ` catch (${caught}) ${block([guard, chain])}`;
+		} else if (catches.length === 1) {
 			const clause = catches[0];
 			const name = kids(clause).find((child) => child.type === 'simple_identifier')?.text ?? 'e';
 			const inner = kids(clause).find((child) => child.type === 'statements');
@@ -7367,16 +7419,64 @@ class Emitter {
 	 */
 	private reachableCatches(clauses: readonly KNode[]): readonly KNode[] {
 		if (clauses.length <= 1) return clauses;
-		const typeOf = (clause: KNode): string =>
-			typeName(kids(clause).find((child) => child.type.endsWith('type')))
-				.split('.')
-				.pop() ?? '';
-		const last = clauses[clauses.length - 1];
-		const unreachable = clauses.slice(0, -1).every((one) => NEVER_THROWN.has(typeOf(one)));
-		if (!unreachable || !CATCH_ALL.has(typeOf(last))) {
+		// Nothing here cancels a coroutine, so a clause for a cancellation
+		// can never run and is dropped (`NEVER_THROWN`).
+		const live = clauses.filter((one) => !NEVER_THROWN.has(this.catchType(one)));
+		if (live.length === 1 && CATCH_ALL.has(this.catchType(live[0]))) return live;
+		// Otherwise each clause is told apart by the error's type, which is
+		// faithful only for a type this runtime always carries when it raises
+		// one: a catch-all (last), an exception class the extension declared —
+		// only its own code can throw that — or one of `TAGGED_EXCEPTIONS`,
+		// whose every source in the runtime is tagged. `IOException` and its
+		// kin are raised by the runtime's own operations untagged (a failed
+		// request, a decode), so a clause naming one would silently take the
+		// wrong branch; those still refuse.
+		const dispatchable = (clause: KNode, index: number): boolean => {
+			const type = this.catchType(clause);
+			if (CATCH_ALL.has(type)) return index === live.length - 1;
+			return TAGGED_EXCEPTIONS.has(type) || this.declaredException(type);
+		};
+		if (live.length === 0 || !live.every(dispatchable)) {
 			this.refuse(clauses[1], 'more than one `catch` clause');
 		}
-		return [last];
+		return live;
+	}
+
+	/** A clause's exception type, by its last segment. */
+	private catchType(clause: KNode): string {
+		return (
+			typeName(kids(clause).find((child) => child.type.endsWith('type')))
+				.split('.')
+				.pop() ?? ''
+		);
+	}
+
+	/** What `__k.caught` is handed for a type: the class itself, or the standard name. */
+	private catchReference(type: string): string {
+		return this.declaredException(type)
+			? this.safe(this.localTypes.get(type) ?? type)
+			: JSON.stringify(type);
+	}
+
+	/**
+	 * Whether a type is an exception class this conversion declares — one whose
+	 * base chain reaches a Kotlin exception type the runtime supplies. Only the
+	 * extension's own code can construct one, so `instanceof` decides a clause
+	 * for it exactly.
+	 */
+	private declaredException(type: string): boolean {
+		if (!this.declaredTypes.has(type)) return false;
+		const seen = new Set<string>();
+		let at: string | undefined = type;
+		while (at !== undefined && !seen.has(at)) {
+			seen.add(at);
+			const base = this.classBaseIndex.get(at);
+			if (base === undefined) return false;
+			const bare = base.replace(/<.*$/, '').split('.').pop() ?? base;
+			if (KOTLIN_EXCEPTIONS.has(bare)) return true;
+			at = bare;
+		}
+		return false;
 	}
 
 	private bodyLines(node: KNode | null): string[] {
@@ -9461,7 +9561,10 @@ class Emitter {
 			!this.declaredTypes.has(name) &&
 			!this.moduleNames.has(name)
 		) {
-			return `${this.helper('exception')}(${this.plainArguments(name, args).join(', ')})`;
+			// The type rides along, so a clause asking about it can be answered.
+			const passed = this.plainArguments(name, args);
+			while (passed.length < 2) passed.push('undefined');
+			return `${this.helper('exception')}(${[...passed, JSON.stringify(name.split('.').pop() ?? name)].join(', ')})`;
 		}
 
 		// A capitalised bare call is a constructor of a class this build has not
@@ -11970,6 +12073,13 @@ class Emitter {
 		// behaviour — a server's `handle`, a Source's `read` — and the runtime
 		// supplies exactly the surface those members call through `super`.
 		if (RUNTIME_BASES.has(declared)) return declared;
+		// `class LoginRequired : Exception("…")`, `: java.io.IOException(…)`:
+		// a real subclass of the runtime's class for that Kotlin type, so it
+		// is an Error, carries its message, and is caught by type.
+		const exception = declared.split('.').pop() ?? declared;
+		if (KOTLIN_EXCEPTIONS.has(exception) && (exception === declared || /^[a-z]/.test(declared))) {
+			return `__KExc.${exception}`;
+		}
 		return null;
 	}
 
@@ -12139,6 +12249,31 @@ const NEVER_THROWN: ReadonlySet<string> = new Set([
 
 /** Clause types that catch whatever a translated extension can throw. */
 const CATCH_ALL: ReadonlySet<string> = new Set(['Exception', 'Throwable']);
+
+/**
+ * The Kotlin exception types the runtime supplies as classes (`__KExc` in the
+ * runtime), which an extension's own exception class may extend.
+ */
+const KOTLIN_EXCEPTIONS: ReadonlySet<string> = new Set([
+	'Throwable',
+	'Exception',
+	'Error',
+	'RuntimeException',
+	'IllegalStateException',
+	'IllegalArgumentException',
+	'UnsupportedOperationException',
+	'IOException'
+]);
+
+/**
+ * Standard types a catch clause may be dispatched on, because every place the
+ * runtime raises one tags it: Kotlin's `error()`, `check()` and
+ * `checkNotNull()` are all `IllegalStateException`, and so is an explicit
+ * `throw IllegalStateException(…)`. Deliberately one entry. A type the
+ * runtime also raises from its own operations untagged — `IOException` for a
+ * failed request, `NumberFormatException` for `toInt()` — is not here.
+ */
+const TAGGED_EXCEPTIONS: ReadonlySet<string> = new Set(['IllegalStateException']);
 
 /** The framework's model types, whose fields `MODEL_FIELDS` lists. */
 const MODEL_TYPES: ReadonlySet<string> = new Set(MODEL_FIELDS.keys());

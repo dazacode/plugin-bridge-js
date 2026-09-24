@@ -37,6 +37,8 @@ export const RUNTIME_HELPERS = [
 	   alone: `!!` must *throw*, and it must say which expression was null. */
 	/* ByteArray.inputStream() and a source's inputStream(): see the runtime. */
 	'inputStream',
+	/* A catch clause's type test over the Kotlin type an error carries. */
+	'caught',
 	'nn',
 
 	/* Numbers. Kotlin `Int` division truncates and `"abc".toInt()` throws where

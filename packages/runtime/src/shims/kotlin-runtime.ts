@@ -3540,11 +3540,11 @@ var __k = {
    * had nothing, rather than one that never offered the shelf.
    */
   unsupported: function (message) {
-    throw new Error(
+    throw __kTagged(new Error(
       __present(message) && __str(message).length > 0
         ? __str(message)
         : 'This converted extension does not implement the member that was called.'
-    );
+    ), 'UnsupportedOperationException');
   },
 
   /**
@@ -5417,8 +5417,14 @@ var __k = {
    * It reaches the host as an ordinary plugin failure, which is what the
    * extension meant: the shape it expected is gone.
    */
-  error: function (message) {
-    throw new Error(__str(message).length > 0 ? __str(message) : 'This converted extension failed.');
+  /*
+   * Also what 'throw SomeException(message)' becomes, with the type written
+   * passed along and carried on the error, so a catch clause can ask about it.
+   * Kotlin's own error() is an IllegalStateException, which is the default.
+   */
+  error: function (message, type) {
+    var made = new Error(__str(message).length > 0 ? __str(message) : 'This converted extension failed.');
+    throw __kTagged(made, typeof type === 'string' && type.length > 0 ? type : 'IllegalStateException');
   },
 
   /**
@@ -5427,11 +5433,30 @@ var __k = {
    * where they stand, which is 'error' above. The error is made, not thrown;
    * whoever it is handed to decides. A cause is kept as the standard one.
    */
-  exception: function (message, cause) {
+  exception: function (message, cause, type) {
     var text = message === undefined || message === null ? '' : __str(message);
     var made = new Error(text.length > 0 ? text : 'This converted extension failed.');
     if (cause !== undefined && cause !== null) made.cause = cause;
-    return made;
+    return __kTagged(made, typeof type === 'string' && type.length > 0 ? type : 'Exception');
+  },
+
+  /**
+   * Whether a caught error is of a Kotlin exception type: a class the
+   * extension declared (asked by instanceof), or a standard type name (asked
+   * of the type the error carries, and every type above it). An error that
+   * carries none was raised by something that does not know its Kotlin type,
+   * and matches only a catch-all — which is why the emitter dispatches only on
+   * types whose every source here is tagged.
+   */
+  caught: function (error, type) {
+    if (error === null || error === undefined) return false;
+    if (typeof type === 'function') return error instanceof type;
+    var at = typeof error.__kType === 'string' ? error.__kType : null;
+    while (at !== null && at !== undefined) {
+      if (at === type) return true;
+      at = __KOTLIN_EXCEPTIONS[at];
+    }
+    return false;
   },
 
   /**
@@ -6897,9 +6922,9 @@ var __k = {
    */
   require: function (value, lazyMessage) {
     if (value) return undefined;
-    throw new Error(
+    throw __kTagged(new Error(
       __requireMessage(lazyMessage, 'This converted extension required something that was not true.')
-    );
+    ), 'IllegalArgumentException');
   },
 
   requireNotNull: function (value, lazyMessage) {
@@ -6912,16 +6937,16 @@ var __k = {
   /** check() and checkNotNull(): require's twins for state rather than arguments. */
   check: function (value, lazyMessage) {
     if (value) return undefined;
-    throw new Error(
+    throw __kTagged(new Error(
       __requireMessage(lazyMessage, 'This converted extension checked something that was not true.')
-    );
+    ), 'IllegalStateException');
   },
 
   checkNotNull: function (value, lazyMessage) {
     if (__present(value)) return value;
-    throw new Error(
+    throw __kTagged(new Error(
       __requireMessage(lazyMessage, 'This converted extension checked a value that was null.')
-    );
+    ), 'IllegalStateException');
   },
 
   /* -- the last of the long tail ------------------------------------------- */
@@ -9635,6 +9660,61 @@ function __bufferedSource(source) {
     close: function () { if (typeof source.close === 'function') source.close(); }
   };
 }
+
+/**
+ * Kotlin's exception types, each naming the one above it, as far as a catch
+ * clause in this ecosystem asks. A name not here is carried but has nothing
+ * above it, so only a clause for exactly that name matches it.
+ */
+var __KOTLIN_EXCEPTIONS = {
+  Throwable: null,
+  Exception: 'Throwable',
+  Error: 'Throwable',
+  RuntimeException: 'Exception',
+  IllegalStateException: 'RuntimeException',
+  IllegalArgumentException: 'RuntimeException',
+  NumberFormatException: 'IllegalArgumentException',
+  UnsupportedOperationException: 'RuntimeException',
+  NullPointerException: 'RuntimeException',
+  IndexOutOfBoundsException: 'RuntimeException',
+  NoSuchElementException: 'RuntimeException',
+  IOException: 'Exception',
+  SocketTimeoutException: 'IOException',
+  InterruptedIOException: 'IOException',
+  EOFException: 'IOException'
+};
+
+/** An error, carrying the Kotlin type it was raised as. Non-enumerable. */
+function __kTagged(error, type) {
+  Object.defineProperty(error, '__kType', { value: type, enumerable: false, configurable: true });
+  return error;
+}
+
+/**
+ * The classes an extension's own exception extends: 'class LoginRequired :
+ * Exception("...")' is 'class LoginRequired extends __KExc.Exception'. Real
+ * Errors, each carrying its type, so the subclass is caught by 'instanceof'
+ * and a standard clause above it still matches through the chain.
+ */
+var __KExc = (function () {
+  var made = {};
+  var order = ['Throwable', 'Exception', 'Error', 'RuntimeException', 'IllegalStateException',
+    'IllegalArgumentException', 'UnsupportedOperationException', 'IOException'];
+  order.forEach(function (name) {
+    var parent = __KOTLIN_EXCEPTIONS[name];
+    var Base = parent === null ? Error : made[parent];
+    var Made = class extends Base {
+      constructor(message, cause) {
+        super(message === undefined || message === null ? '' : __str(message));
+        if (cause !== undefined && cause !== null) this.cause = cause;
+      }
+    };
+    Object.defineProperty(Made.prototype, '__kType', { value: name, enumerable: false, configurable: true });
+    Object.defineProperty(Made, 'name', { value: name });
+    made[name] = Made;
+  });
+  return made;
+})();
 
 /**
  * The marker '__k.jump' throws; see it for why this is not an Error.
