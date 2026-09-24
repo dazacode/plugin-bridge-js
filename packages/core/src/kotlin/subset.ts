@@ -2290,6 +2290,7 @@ export const GLOBAL_NAMES: ReadonlySet<string> = new Set([
 	'newChunkedResponse',
 	'Status',
 	'MIME_PLAINTEXT',
+	'SOCKET_READ_TIMEOUT',
 	'ForwardingSource',
 	'Buffer',
 	'OkHttpClient',

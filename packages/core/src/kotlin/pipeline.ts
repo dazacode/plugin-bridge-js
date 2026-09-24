@@ -866,9 +866,10 @@ function reach(
 			const calledByRuntime = RUNTIME_CALLED.get(classBases.get(owner) ?? '');
 			if (calledByRuntime === undefined) continue;
 			for (const edges of byOwner.get(owner) ?? []) {
-				if (calledByRuntime.includes(edges.member) && !reached.has(edges.member)) {
-					pending.push(edges.member);
-				}
+				// Its construction too: a server whose `register` was reached was
+				// built, and building it ran its `init { start(…) }`.
+				const runs = calledByRuntime.includes(edges.member) || edges.construction;
+				if (runs && !reached.has(edges.member)) pending.push(edges.member);
 			}
 		}
 

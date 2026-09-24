@@ -2883,3 +2883,57 @@ describe('an InputStream read into a ByteArray the extension made', () => {
 		expect(await demo.firstSigned(Uint8Array.of(0xff, 1))).toBe(-1);
 	});
 });
+
+describe("java.lang.Character's radix bounds", () => {
+	it('mints an id in base 36 the way a local server does', async () => {
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    fun id(n: Int): String = n.toString(Character.MAX_RADIX)',
+				'    fun low(n: Int): String = n.toString(Character.MIN_RADIX)',
+				'}'
+			)
+		);
+		expect(await demo.id(71)).toBe('1z');
+		expect(await demo.low(5)).toBe('101');
+	});
+});
+
+describe('an inline helper handed a block that suspends', () => {
+	// `retry(attempts: Int = 2, block: () -> T)` called as `retry { … }`. The
+	// block went into `attempts`, and because the helper's own text blocks on
+	// nothing it was neither async nor awaited: it returned a promise it never
+	// looked at, and a failure inside the block escaped the helper's catch.
+	const source = kt(
+		'class Demo {',
+		'    private var calls = 0',
+		'    suspend fun flaky(): String {',
+		'        calls++',
+		'        if (calls < 2) throw Exception("first try fails")',
+		'        return "ok on try $calls"',
+		'    }',
+		'    private inline fun <T> retry(attempts: Int = 2, block: () -> T): T? {',
+		'        repeat(attempts) {',
+		'            try {',
+		'                return block()',
+		'            } catch (e: Exception) {',
+		'            }',
+		'        }',
+		'        return null',
+		'    }',
+		'    suspend fun twice(): String? = retry { flaky() }',
+		'    suspend fun once(): String? = retry(1) { flaky() }',
+		'}'
+	);
+
+	it('puts the block in the last parameter and keeps the default before it', async () => {
+		const demo = await instantiate('Demo', source);
+		expect(await demo.twice()).toBe('ok on try 2');
+	});
+
+	it('awaits the block, so its failure reaches the helper’s catch', async () => {
+		const demo = await instantiate('Demo', source);
+		expect(await demo.once()).toBeNull();
+	});
+});

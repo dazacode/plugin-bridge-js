@@ -1841,6 +1841,55 @@ describe('a local server, which the runtime runs without a port', () => {
 		expect(conversion.js).toContain('super.start(');
 	});
 
+	it('starts a server from its `init` block, reading NanoHTTPD’s timeout bare', async () => {
+		const conversion = await convertKotlin(
+			serving(
+				kt(
+					'class Proxy(private val client: OkHttpClient) : NanoHTTPD("127.0.0.1", 0) {',
+					'    val port: Int',
+					'        get() = super.getListeningPort()',
+					'    init {',
+					'        start(SOCKET_READ_TIMEOUT, true)',
+					'    }',
+					'    fun proxyUrl(url: String) = "http://127.0.0.1:$port/p?url=$url"',
+					'    override fun serve(session: IHTTPSession): Response =',
+					'        newFixedLengthResponse(Status.OK, MIME_PLAINTEXT, "x")',
+					'}'
+				),
+				'it.port'
+			),
+			{ parser }
+		);
+		expect(conversion.blocking).toEqual([]);
+		expect(conversion.js).toMatch(
+			/constructor\(client\) \{[^}]*this\.start\(SOCKET_READ_TIMEOUT, true\);/
+		);
+	});
+
+	it('blocks on a refusal inside an `init` block rather than dropping the block', async () => {
+		// An `init` block is constructor code. It was not counted as such, so a
+		// refusal in one was set aside as unreachable and the class loaded with
+		// the block silently gone — a server that never started, handing out
+		// urls on port -1, from a bundle that reported nothing refused.
+		const conversion = await convertKotlin(
+			serving(
+				kt(
+					'class Proxy(private val client: OkHttpClient) : NanoHTTPD("127.0.0.1", 0) {',
+					'    init {',
+					'        val cores = Runtime.getRuntime().availableProcessors()',
+					'        start(cores, true)',
+					'    }',
+					'    fun proxyUrl(url: String) = "http://127.0.0.1:$listeningPort/p?url=$url"',
+					'    override fun serve(session: IHTTPSession): Response =',
+					'        newFixedLengthResponse(Status.OK, MIME_PLAINTEXT, "x")',
+					'}'
+				)
+			),
+			{ parser }
+		);
+		expect(conversion.blocking.map((one) => one.member)).toContain('Proxy.anonymous_initializer');
+	});
+
 	it('blocks on a refusal only the server’s handler reaches', async () => {
 		// Nothing in an extension calls `handle`; the runtime does, when a
 		// request reaches the server. Left to ordinary reachability it was dead

@@ -2426,6 +2426,11 @@ var Protocol = {
  * to refuse extensions over it.
  */
 var Character = {
+  // java.lang.Character's radix bounds, which a local server mints its ids
+  // with: 'counter.incrementAndGet().toString(Character.MAX_RADIX)'. Absent,
+  // the argument arrived undefined and toString refused it.
+  MIN_RADIX: 2,
+  MAX_RADIX: 36,
   isDigit: function (value) { return /^[0-9]$/.test(__str(value).charAt(0)); },
   isLetter: function (value) { return /^\\p{L}$/u.test(__str(value).charAt(0)); },
   isLetterOrDigit: function (value) { return /^[\\p{L}0-9]$/u.test(__str(value).charAt(0)); },
@@ -9239,6 +9244,9 @@ async function __execute(request, follow) {
  * with the port in a url this bundle built itself.
  */
 var MIME_PLAINTEXT = 'text/plain';
+/* NanoHTTPD's read timeout, read bare by a subclass. Nothing here has a socket
+   to time out; the value is kept so code that passes it along gets a number. */
+var SOCKET_READ_TIMEOUT = 5000;
 var __virtualServers = {};
 var __nextVirtualPort = 49152;
 
@@ -9304,7 +9312,7 @@ class NanoHTTPD {
   handle(session) { return this.serve(session); }
   serve() { return newFixedLengthResponse(Status.NOT_FOUND, MIME_PLAINTEXT, 'Not Found'); }
 }
-NanoHTTPD.SOCKET_READ_TIMEOUT = 5000;
+NanoHTTPD.SOCKET_READ_TIMEOUT = SOCKET_READ_TIMEOUT;
 NanoHTTPD.MIME_PLAINTEXT = MIME_PLAINTEXT;
 NanoHTTPD.MIME_HTML = 'text/html';
 

@@ -1138,12 +1138,14 @@ export const RUNTIME_GLOBALS = [
 	   reported as plugin-served rather than handed to a player that could not
 	   reach it. The response factories are imported bare
 	   (`import …Response.newFixedLengthResponse`), `Status` is its enum, and
-	   `MIME_PLAINTEXT` is a static a subclass reads without qualifying. */
+	   `MIME_PLAINTEXT` and `SOCKET_READ_TIMEOUT` are statics a subclass reads
+	   without qualifying — `init { start(SOCKET_READ_TIMEOUT, true) }`. */
 	'NanoHTTPD',
 	'newFixedLengthResponse',
 	'newChunkedResponse',
 	'Status',
 	'MIME_PLAINTEXT',
+	'SOCKET_READ_TIMEOUT',
 	/* okio's ForwardingSource, the base a byte-transforming Source extends,
 	   and its Buffer, the scratch space one reads a chunk into. */
 	'ForwardingSource',

@@ -161,7 +161,7 @@ export interface MemberEdges {
 	readonly member: string;
 	/** The class or object that declared it, if any. */
 	readonly owner: string | null;
-	/** True for a property: it runs whenever its owner is constructed. */
+	/** True for a property or an `init` block: it runs whenever its owner is constructed. */
 	readonly construction: boolean;
 	/**
 	 * True for a `by lazy` property that overrides nothing.
@@ -3373,19 +3373,75 @@ class Emitter {
 			if (pattern.test(text)) blocking.add(name);
 		}
 
+		// An `inline` member taking a block runs that block in its caller's
+		// context, so a caller may hand it one that suspends — `retry {
+		// client.newCall(…).awaitSuccess() }` through `inline fun <T> retry(
+		// attempts: Int = 2, block: () -> T)`. Nothing in the member's own text
+		// says so; the block does. Such a member suspends when a block passed to
+		// it at any call site does, and then awaits the block (`functionDeclaration`).
+		const lambdasOf = this.inlineBlockArguments(members);
+
+		// Called as `name(…)` or, with only a trailing block, as `name { … }`;
+		// the second spelling used to go unseen, so a caller of a blocking
+		// member that took a block did not block.
+		const calls = (text: string, other: string) => new RegExp(`\\b${other}\\s*[({]`).test(text);
+		// A block suspends if it blocks, calls a member that does, or calls a
+		// member declared `suspend` — Kotlin lets an inlined block do that.
+		const blocks = (text: string) =>
+			pattern.test(text) ||
+			[...blocking, ...this.suspendMembers].some((other) => calls(text, other));
 		for (let grew = true; grew;) {
 			grew = false;
 			for (const [name, text] of bodies) {
 				if (blocking.has(name)) continue;
-				for (const other of blocking) {
-					if (!new RegExp(`\\b${other}\\s*\\(`).test(text)) continue;
-					blocking.add(name);
-					grew = true;
-					break;
-				}
+				const lambdas = lambdasOf.get(name) ?? [];
+				const viaCall = [...blocking].some((other) => calls(text, other));
+				if (!viaCall && !lambdas.some(blocks)) continue;
+				blocking.add(name);
+				grew = true;
 			}
 		}
 		return blocking;
+	}
+
+	/**
+	 * For each `inline` member that takes a block, the text of every block
+	 * passed to it by name among `members` — trailing, or as an argument.
+	 */
+	private inlineBlockArguments(members: readonly KNode[]): Map<string, string[]> {
+		const inline = new Set<string>();
+		for (const child of members) {
+			if (child.type !== 'function_declaration' || !this.hasModifier(child, 'inline')) continue;
+			const list = kids(child).find((part) => part.type === 'function_value_parameters');
+			const takesBlock = kids(list).some(
+				(param) => param.type === 'parameter' && isFunctionTyped(param)
+			);
+			const name = this.nameOf(child);
+			if (takesBlock && name !== null) inline.add(name);
+		}
+		const found = new Map<string, string[]>();
+		if (inline.size === 0) return found;
+		const visit = (node: KNode): void => {
+			if (node.type === 'call_expression') {
+				const [callee, suffix] = kids(node);
+				if (
+					callee?.type === 'simple_identifier' &&
+					inline.has(callee.text) &&
+					suffix !== undefined
+				) {
+					const blocks: string[] = [];
+					const collect = (part: KNode): void => {
+						if (part.type === 'lambda_literal') blocks.push(part.text);
+						else for (const inner of part.allChildren) collect(inner);
+					};
+					collect(suffix);
+					found.set(callee.text, [...(found.get(callee.text) ?? []), ...blocks]);
+				}
+			}
+			for (const inner of node.allChildren) visit(inner);
+		};
+		for (const child of members) visit(child);
+		return found;
 	}
 
 	/**
@@ -4118,7 +4174,12 @@ class Emitter {
 		this.graph.push({
 			member: name,
 			owner: this.owner,
-			construction: node.type === 'property_declaration',
+			// An `init` block is constructor code exactly as a property
+			// initialiser is. Left out, a refusal inside one was set aside as
+			// unreachable and the class loaded with the block silently gone — a
+			// local server whose `init { start(…) }` never ran, handing out
+			// urls on port -1.
+			construction: node.type === 'property_declaration' || node.type === 'anonymous_initializer',
 			lazy:
 				node.type === 'property_declaration' &&
 				!this.hasModifier(node, 'override') &&
@@ -5807,6 +5868,16 @@ class Emitter {
 			})
 			.map((child) => this.nameOf(child))
 			.filter((one): one is string => one !== null);
+		// Blocks the body must await when it calls them: a parameter typed
+		// `suspend () -> T`, and every block of an `inline` member that
+		// `blockingMembers` found being handed one that suspends.
+		const inlineSuspends =
+			this.hasModifier(node, 'inline') && shape === 'method' && this.suspendMembers.has(name);
+		const awaitedBlocks = kids(list)
+			.filter((child) => child.type === 'parameter' && isFunctionTyped(child))
+			.filter((child) => inlineSuspends || /\bsuspend\b/.test(child.text))
+			.map((child) => this.nameOf(child))
+			.filter((one): one is string => one !== null && !receiverParams.some((r) => r.name === one));
 		let emitted;
 		try {
 			emitted = this.functionScope('function', null, names, () => {
@@ -5814,7 +5885,12 @@ class Emitter {
 					this.declareReceiverLocal(one.name, one.arity, one.suspends);
 				}
 				for (const one of valueParams) this.markValueOnly(one);
-				return this.functionBody(body);
+				for (const one of awaitedBlocks) this.localSuspends.add(one);
+				try {
+					return this.functionBody(body);
+				} finally {
+					for (const one of awaitedBlocks) this.localSuspends.delete(one);
+				}
 			});
 		} finally {
 			this.receiverParam = previousReceiver;
@@ -9832,8 +9908,14 @@ class Emitter {
 		// carry one.
 		const inherited = this.ownerBase !== null && this.baseDeclares(this.ownerBase, name);
 		if (lambda !== null && (this.isSourceMember(name) || inherited)) {
-			const withLambda = `${this.callArguments(name, args, lambda, labelled, false).join(', ')}`;
-			return `${self}.${name}(${withLambda})`;
+			const withLambda = this.lastParameterBlock(
+				name,
+				args,
+				this.callArguments(name, args, lambda, labelled, false),
+				lambda
+			);
+			const blockCall = `${self}.${name}(${withLambda.join(', ')})`;
+			return this.suspendMembers.has(name) ? this.awaited(blockCall) : blockCall;
 		}
 		if (lambda !== null) this.refuse(lambda, `a lambda passed to \`${name}\``);
 		return this.suspendMembers.has(name) ? this.awaited(call) : call;
@@ -9939,6 +10021,34 @@ class Emitter {
 		const given = out.slice(0, -1);
 		if (given.length !== args.length || given.some((one) => one.startsWith('...'))) {
 			this.refuse(lambda, `a lambda passed to \`.${name}()\` after a spread`);
+		}
+		const skipped = signature.length - 1 - given.length;
+		return [...given, ...Array.from({ length: skipped }, () => 'undefined'), out[out.length - 1]];
+	}
+
+	/**
+	 * A trailing block moved to the last declared parameter of a member this
+	 * unit declares, every slot skipped on the way `undefined` so the emitted
+	 * declaration's own default applies — the rule `trailingLambdaArguments`
+	 * applies to a typed receiver, for a bare call. `retry(attempts = 2,
+	 * block)` called as `retry { … }` used to pass the block as `attempts`.
+	 *
+	 * Left as it was when the signature is unknown or ambiguous across the
+	 * unit, or the call names an argument.
+	 */
+	private lastParameterBlock(
+		name: string,
+		args: KNode[],
+		out: readonly string[],
+		lambda: KNode
+	): string[] {
+		if (args.some((arg) => arg.allChildren.some((child) => child.type === '='))) return [...out];
+		const signature = this.signatures.get(name);
+		if (signature === undefined || signature.length === 0) return [...out];
+		const given = out.slice(0, -1);
+		if (given.length >= signature.length - 1) return [...out];
+		if (given.some((one) => one.startsWith('...'))) {
+			this.refuse(lambda, `a lambda passed to \`${name}\` after a spread`);
 		}
 		const skipped = signature.length - 1 - given.length;
 		return [...given, ...Array.from({ length: skipped }, () => 'undefined'), out[out.length - 1]];
@@ -12360,6 +12470,11 @@ function parameterFunctionType(parameter: KNode): KNode | null {
 		type = kids(inner).find((child) => child.type === 'function_type');
 	}
 	return type ?? null;
+}
+
+/** Whether a parameter is typed as a function — `() -> T`, `suspend (A) -> T`, `R.() -> T`. */
+function isFunctionTyped(parameter: KNode): boolean {
+	return parameterFunctionType(parameter) !== null;
 }
 
 /**
