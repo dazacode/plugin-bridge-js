@@ -343,20 +343,20 @@ describe('what stands in the way, as against how far it got', () => {
 		expect(reachOf(row({ status: 'broken', obstacles: ['`.flatMapIndexed()`'] }))).toBe('widen');
 	});
 
-	// ADR-0006. Every one of these was already landing in `native` — on a
-	// *different* obstacle the same listing happened to also carry, because an
-	// extension elaborate enough to run a server usually also decrypts
-	// something. Take the cipher away and it read as `widen`, which promises a
-	// translator improvement that cannot arrive: the host has no port to bind.
-	it('files a plugin that runs its own HTTP server as a boundary', () => {
+	// ADR-0006 filed these as a boundary: the host had no port to bind. ADR-0007
+	// replaced the port with served playback, so a refusal naming one of them is
+	// now a translation this build did not finish, and must read as one.
+	it('files a plugin that runs its own HTTP server as a translator gap, not a boundary', () => {
 		for (const obstacle of [
+			'a base class `ForwardingSource` this build has not',
+			'`NanoHTTPD`',
 			'`super.getListeningPort()`',
 			'`.createLocalUrl()`',
 			'`.createProxyUrl()`',
 			'`.segmentProxyUrl()`',
 			'`.alwaysNeedsProxy()`'
 		]) {
-			expect(reachOf(row({ status: 'broken', obstacles: [obstacle] }))).toBe('native');
+			expect(reachOf(row({ status: 'broken', obstacles: [obstacle] }))).toBe('widen');
 		}
 	});
 

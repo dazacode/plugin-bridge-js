@@ -310,26 +310,13 @@ const NATIVE_CAPABILITIES: readonly RegExp[] = [
 	/Handler\(/,
 	/a background thread/,
 	/Thread\(/,
-	// A plugin that stands up its own HTTP server on localhost — ADR-0006.
-	//
-	// The foreign idiom serves `/m3u8` and `/segment` from a loopback port so
-	// that per-request headers survive to every segment and an AES key can be
-	// fetched under them. A plugin that *listens* outlives its call, holds a
-	// port and is reachable by anything else on the machine, and the browser
-	// host could not offer one at any price. `StreamPipeline` supplies the same
-	// behaviour declaratively, so this is a boundary and not a backlog item.
-	//
-	// `ForwardingSource` and `PlaylistServer` were here first, spotted as two
-	// unrelated names before the cluster was read as one thing.
-	/ForwardingSource/,
-	/PlaylistServer/,
-	/NanoHTTPD/,
-	/startServer/,
-	/getListeningPort\(\)/,
-	/\.createLocalUrl\(\)/,
-	/\.createProxyUrl\(\)/,
-	/\.segmentProxyUrl\(\)/,
-	/\.alwaysNeedsProxy\(\)/,
+	// Not here any more: the local-server markers (`ForwardingSource`,
+	// `NanoHTTPD`, `startServer`, `.createProxyUrl()` and the rest). ADR-0006
+	// filed a plugin that runs its own HTTP server as a boundary; ADR-0007
+	// replaced the socket with served playback (`ABI.md` §4.5), and two such
+	// listings now play. One of those names in a refusal is a translation this
+	// build did not finish, which is `widen`. The socket itself stays refused,
+	// and a raw one is refused under its own name, not one of these.
 	/an android\.\* API/
 ];
 
