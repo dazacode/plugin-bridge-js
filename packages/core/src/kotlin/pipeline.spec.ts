@@ -234,6 +234,36 @@ describe('a file that declares a name the runtime already defines', () => {
 		expect(entry?.js).not.toContain('Video_(');
 	});
 
+	it('renames a reference through a star import of the declaring package', async () => {
+		// `import ireader.core.source.model.*` then `Text(paragraph)`: Kotlin
+		// resolves the star-imported class ahead of the runtime's namesake. Only
+		// a name imported by its own spelling followed the rename, so a whole
+		// chapter's pages were built as the runtime's `Text` and none was read.
+		const starred = kt(
+			'package com.example.demo',
+			'',
+			'import com.example.demo.dto.*',
+			'',
+			'class Demo : ParsedAnimeHttpSource() {',
+			'    override val name = "Demo"',
+			'    override val baseUrl = "https://example.invalid"',
+			'    override val lang = "en"',
+			'',
+			'    fun meta(id: String): Video = Video(id, "t")',
+			'}'
+		);
+		const result = await convertKotlin(
+			[
+				{ path: 'Demo.kt', source: starred },
+				{ path: 'Dto.kt', source: DTO }
+			],
+			{ parser }
+		);
+
+		const entry = result.perFile.find((one) => one.path === 'Demo.kt');
+		expect(entry?.js).toContain('Video_(id,');
+	});
+
 	it('renames the references in the file that declared it, and in its package', async () => {
 		const result = await convertKotlin(
 			[
