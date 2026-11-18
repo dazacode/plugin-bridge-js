@@ -4059,7 +4059,10 @@ var __k = {
         return typeof transform === 'function' ? transform(item) : item;
       }),
       function (values) {
-        for (var at = 0; at < values.length; at += 1) destination.push(values[at]);
+        // Through 'add', as 'mapNotNullTo' below does: the destination is any
+        // MutableCollection, and 'mapTo(mutableSetOf())' is how this ecosystem
+        // collects the urls it has already seen — a Set, which has no 'push'.
+        for (var at = 0; at < values.length; at += 1) __k.add(destination, values[at]);
         return destination;
       }
     );
@@ -10252,7 +10255,7 @@ var network = {
  * encoded, because only those arrived as plain text.
  */
 function __httpUrlOf(value, keepText) {
-  var text = __str(value);
+  var text = __okhttpSlashes(__str(value));
   var parts = /^([a-zA-Z][a-zA-Z0-9+.-]*:)?(\\/\\/[^/?#]*)?([^?#]*)(\\?[^#]*)?(#.*)?$/.exec(text);
   var scheme = parts[1] === undefined ? '' : parts[1];
   var authority = parts[2] === undefined ? '' : parts[2];
@@ -10272,6 +10275,29 @@ function __httpUrlOf(value, keepText) {
   }
 
   return __httpUrlValue(scheme, authority, path, pairs, fragment, keepText === true ? text : null);
+}
+
+/*
+ * okhttp's reading of the slashes in an http or https url: a backslash is a
+ * slash wherever a slash separates (the run after the scheme, and the path),
+ * and any run of two or more after the scheme introduces the authority. So an
+ * address copied out of a JSON string whose slashes were escaped — every '/'
+ * written as a backslash and a slash — has a host and a path to okhttp, and
+ * here had no host at all, so every relative resolution against it kept the
+ * backslashes. Each backslash-slash pair is two separators to okhttp, and the
+ * empty segment between them is kept as okhttp keeps it. The query and
+ * fragment are left as written, as okhttp leaves them.
+ */
+function __okhttpSlashes(text) {
+  var scheme = /^(https?):/i.exec(text);
+  if (scheme === null || text.indexOf('\\\\') === -1) return text;
+  var end = text.search(/[?#]/);
+  var head = end === -1 ? text : text.slice(0, end);
+  var tail = end === -1 ? '' : text.slice(end);
+  var rest = head.slice(scheme[0].length).replace(/\\\\/g, '/');
+  var lead = /^\\/{2,}/.exec(rest);
+  if (lead !== null) rest = '//' + rest.slice(lead[0].length);
+  return scheme[0] + rest + tail;
 }
 
 /*

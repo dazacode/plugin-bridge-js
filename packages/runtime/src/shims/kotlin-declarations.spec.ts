@@ -916,6 +916,45 @@ describe('a member with a reified type parameter, called bare', () => {
 	});
 });
 
+describe('two collection and url behaviours a listing depended on', () => {
+	it('maps into a set, not only into a list', async () => {
+		// `episodes.mapTo(mutableSetOf()) { it.url }` — the urls already seen.
+		const d = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    fun seen(): Int = listOf("a", "b", "a").mapTo(mutableSetOf()) { it }.size',
+				'}'
+			)
+		);
+		expect(d.seen()).toBe(2);
+	});
+
+	it('reads backslashes in an http url as okhttp does', async () => {
+		// An address copied out of a JSON string whose slashes were escaped.
+		// okhttp reads `https:\/\/host\/a/b` as `https://host/a/b`; read here
+		// with no host, every relative resolution against it kept the
+		// backslashes and the stream it named was not a url at all.
+		const d = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    fun resolved(base: String): String = base.toHttpUrl().resolve("v/720.m3u8").toString()',
+				'    fun host(base: String): String = base.toHttpUrl().host',
+				'}'
+			)
+		);
+		const escaped = 'https:\\/\\/cdn.example.invalid\\/id\\/master.m3u8';
+		expect(d.host(escaped)).toBe('cdn.example.invalid');
+		// Each backslash-slash pair is two separators to okhttp, so the empty
+		// segments between them are kept, exactly as okhttp keeps them.
+		expect(d.resolved(escaped)).toBe('https://cdn.example.invalid//id//v/720.m3u8');
+		expect(d.resolved('https://cdn.example.invalid/id/master.m3u8?a=\\b')).toBe(
+			'https://cdn.example.invalid/id/v/720.m3u8'
+		);
+	});
+});
+
 describe('a reference to a member the template declares', () => {
 	it('binds it to the inherited value, not to the argument', async () => {
 		// DooPlay's `protected open val episodeNumberRegex`, read by a subclass
