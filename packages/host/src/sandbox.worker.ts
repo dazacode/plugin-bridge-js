@@ -56,7 +56,7 @@ interface HostReply {
 	readonly id: number;
 	readonly ok: boolean;
 	readonly value?: unknown;
-	readonly error?: { readonly name: string; readonly message: string };
+	readonly error?: { readonly name: string; readonly message: string; readonly status?: number };
 }
 
 /** A call *out* of the sandbox — the only way a plugin reaches anything. */
@@ -402,7 +402,7 @@ if (typeof listens.addEventListener === 'function') {
 		const reason = (event as { reason?: unknown }).reason;
 		const error =
 			reason instanceof Error
-				? { name: reason.name, message: reason.message }
+				? { name: reason.name, message: reason.message, ...statusOf(reason) }
 				: { name: 'Error', message: String(reason) };
 		(self as unknown as Worker).postMessage({ fatal: true, error });
 	});
@@ -417,6 +417,8 @@ self.onmessage = async (event: MessageEvent) => {
 				ok: boolean;
 				value?: unknown;
 				error?: string;
+				errorName?: string;
+				status?: number;
 		  };
 
 	// An answer to something the sandbox asked the host for.
@@ -425,7 +427,7 @@ self.onmessage = async (event: MessageEvent) => {
 		if (pending === undefined) return;
 		outbound.delete(data.id);
 		if (data.ok) pending.resolve(data.value);
-		else pending.reject(new Error(data.error ?? 'host call failed'));
+		else pending.reject(hostCallError(data));
 		return;
 	}
 
@@ -551,11 +553,33 @@ self.onmessage = async (event: MessageEvent) => {
 			// "plugin failed" here would throw exactly that away.
 			error: {
 				name: failure?.name ?? 'Error',
-				message: failure?.message ?? String(error)
+				message: failure?.message ?? String(error),
+				// A failed request's status, so a 429 the plugin let through is
+				// still a 429 on the far side. See `hostCallError`.
+				...statusOf(failure)
 			}
 		});
 	}
 };
+
+/**
+ * The error a plugin sees when a host call failed: the host's message, and —
+ * for a request the relay refused — the ABI's name for it and the status, so
+ * an uncaught one crosses back as what it was.
+ */
+function hostCallError(data: { error?: string; errorName?: string; status?: number }): Error {
+	const failure = new Error(data.error ?? 'host call failed') as Error & { status?: number };
+	if (typeof data.errorName === 'string' && data.errorName.length > 0)
+		failure.name = data.errorName;
+	if (typeof data.status === 'number') failure.status = data.status;
+	return failure;
+}
+
+/** A numeric `status` on an error, when it carries one. */
+function statusOf(error: unknown): { status?: number } {
+	const status = (error as { status?: unknown } | null)?.status;
+	return typeof status === 'number' && Number.isInteger(status) ? { status } : {};
+}
 
 function required(): PluginModule {
 	if (plugin === null) throw new Error('This plugin has not been loaded.');

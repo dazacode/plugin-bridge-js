@@ -431,3 +431,33 @@ function extractStreamUrl() { return ''; }`);
 		expect(await empty.listEpisodes('https://example.invalid/a/1', ctx)).toEqual([]);
 	});
 });
+
+describe('a sentinel that stands for a refused request', () => {
+	it('keeps the refusal’s name and status, so a 429 still reads as rate-limited', async () => {
+		// The live case: the relay answered 429, `fetchv2` rejected with a
+		// `RateLimitedError` carrying the status, and the module's catch block
+		// returned a sentence instead — the status nowhere in it.
+		const module = (await load(`
+function searchResults() { return '[]'; }
+function extractEpisodes() { return '[]'; }
+async function extractStreamUrl(url) {
+  try { await fetchv2(url); return 'https://cdn.example.invalid/v/1.m3u8'; }
+  catch (e) { return 'Error: fetchv2 unavailable'; }
+}`)) as { default: { resolve: (id: string, e: unknown, ctx: unknown) => Promise<unknown> } };
+		const refused = Object.assign(new Error('The plugin proxy returned 429: too many requests'), {
+			name: 'RateLimitedError',
+			status: 429
+		});
+		const ctx = {
+			http: { send: async () => Promise.reject(refused) },
+			crypto: HOST_CRYPTO,
+			log: { debug() {}, warn() {} }
+		};
+		const failure = (await module.default
+			.resolve('https://example.invalid/e/1', null, ctx)
+			.catch((error: unknown) => error)) as Error & { status?: number };
+		expect(failure.message).toMatch(/fetchv2 unavailable/);
+		expect(failure.name).toBe('RateLimitedError');
+		expect(failure.status).toBe(429);
+	});
+});

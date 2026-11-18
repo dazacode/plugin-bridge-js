@@ -199,9 +199,23 @@ function __notAUrl(value) {
   return /\\s/.test(text);
 }
 
-/** The module's own sentence, as the failure it is. */
+/**
+ * The module's own sentence, as the failure it is.
+ *
+ * When a request this call made was refused, the sentence is that refusal
+ * with its name and status taken away by the module's catch block. Both are
+ * put back, so a relay's 429 still reads as rate-limited on the far side
+ * rather than as a generic failure.
+ */
 function __answeredWith(text, where) {
-  return new Error('The module answered "' + String(text).trim() + '" where ' + where + ' belongs.');
+  const failure = new Error('The module answered "' + String(text).trim() + '" where ' + where + ' belongs.');
+  const cause = __lastHostFailure;
+  if (cause && typeof cause.status === 'number') {
+    failure.name = typeof cause.name === 'string' && cause.name.length > 0 ? cause.name : 'NetworkError';
+    failure.status = cause.status;
+    failure.message += ' A request before it failed: ' + String(cause.message || cause.status);
+  }
+  return failure;
 }
 
 /**
@@ -394,6 +408,7 @@ export default {
 
   async searchCatalog(query, page, ctx) {
     __enter(ctx);
+    __lastHostFailure = null;
     // Sora modules are single-page by construction; see this file's header.
     if (Number(page) > 1) return { entries: [] };
 
@@ -413,6 +428,7 @@ export default {
 
   async listEpisodes(sourceMediaId, ctx) {
     __enter(ctx);
+    __lastHostFailure = null;
     const rows = __rows(await __need('extractEpisodes')(String(sourceMediaId)), 'a list of episodes');
     const episodes = [];
     let refused = null;
@@ -430,6 +446,7 @@ export default {
 
   async resolve(sourceMediaId, episode, ctx) {
     __enter(ctx);
+    __lastHostFailure = null;
     const target = episode && episode.sourceEpisodeId ? episode.sourceEpisodeId : sourceMediaId;
     const found = __streams(await __need('extractStreamUrl')(String(target)));
 
