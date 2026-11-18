@@ -206,8 +206,19 @@ const ENTRYPOINT = 'source';
  *     is reached with the class that extends it, so six bundles that loaded
  *     and sent every request to `undefined/…` are now refused by name.
  *     Reconvert every bundle made at 59 or earlier.
+ * 61: a generated `@Source` class gets its build file's name, language and
+ *     base URL; an Aniyomi driver request goes through the extension's own
+ *     client; java.io.File answers as a filesystem that is not there; a
+ *     helper object's own properties and suspending members, file-scope
+ *     overloads, a bare call to a reified member, an unbound
+ *     `Track::url`, a lazy reading a constructor parameter and a call the
+ *     grammar hands to a whole infix or `if` all translate faithfully; and
+ *     `mapTo` into a set, okhttp's reading of backslashes in a url, minBy,
+ *     Result, withTimeoutOrNull and a main-Looper Handler are supplied. Bundles
+ *     that refused, loaded and failed, or resolved nothing at 60 convert
+ *     differently. Reconvert every bundle made at 60 or earlier.
  */
-export const CONVERTER_VERSION = 60;
+export const CONVERTER_VERSION = 61;
 
 export interface BundleInput {
 	readonly id: string;
