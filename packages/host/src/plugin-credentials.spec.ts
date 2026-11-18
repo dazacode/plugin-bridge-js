@@ -213,3 +213,49 @@ describe('a plugin-authored Authorization (ADR-0005 §3c)', () => {
 		expect(asked[0].authorization).toBeNull();
 	});
 });
+
+describe('a plugin reading its own cookies (ADR-0005 §3d)', () => {
+	it('sees the cookies its own requests were given, for a host it declared', async () => {
+		const served: Served = () =>
+			new Response('ok', { status: 200, headers: { 'set-cookie': 'sid=own; Path=/' } });
+		const { value } = await run(served, async (call) => {
+			await call('http', 'https://api.example.invalid/page');
+			return { entries: [], seen: await call('httpCookies', 'https://api.example.invalid/next') };
+		});
+		expect((value as { seen: unknown }).seen).toEqual([{ name: 'sid', value: 'own' }]);
+	});
+
+	it('sees nothing for a host it did not declare, though its jar holds one there', async () => {
+		// The embed host was learned from a page, so a request to it is allowed
+		// and its cookie is carried on the next one — but reading it is not.
+		const served: Served = (url) =>
+			url.hostname === 'www.example.invalid'
+				? new Response('<iframe src="https://embed.example.invalid/e/1"></iframe>', {
+						status: 200,
+						headers: { 'content-type': 'text/html' }
+					})
+				: new Response('ok', { status: 200, headers: { 'set-cookie': 'embed=1; Path=/' } });
+		const { asked, value } = await run(served, async (call) => {
+			await call('http', 'https://www.example.invalid/page');
+			await call('http', 'https://embed.example.invalid/e/1');
+			await call('http', 'https://embed.example.invalid/e/2');
+			return { entries: [], seen: await call('httpCookies', 'https://embed.example.invalid/e/3') };
+		});
+		expect(asked[2].cookie).toBe('embed=1');
+		expect((value as { seen: unknown }).seen).toEqual([]);
+	});
+
+	it('sees nothing when the plugin holds no jar', async () => {
+		const served: Served = () =>
+			new Response('ok', { status: 200, headers: { 'set-cookie': 'sid=own; Path=/' } });
+		const { value } = await run(
+			served,
+			async (call) => {
+				await call('http', 'https://api.example.invalid/page');
+				return { entries: [], seen: await call('httpCookies', 'https://api.example.invalid/next') };
+			},
+			{ ...PLUGIN, permissions: ['network'] }
+		);
+		expect((value as { seen: unknown }).seen).toEqual([]);
+	});
+});

@@ -176,3 +176,33 @@ describe('reading Set-Cookie off a response', () => {
 		expect(setCookiesOf(new Headers())).toEqual([]);
 	});
 });
+
+describe('what a plugin may read back (ADR-0005 §3d)', () => {
+	const url = 'https://a.example.invalid/page';
+
+	it('is only the cookies its own requests were given', () => {
+		const jar = new CookieJar();
+		jar.absorb(url, ['own=1'], 'com.example.plugins.one');
+		// Another plugin's, and one absorbed with no plugin provenance at all —
+		// an interactive login's, say — on the same host and path.
+		jar.absorb(url, ['theirs=2'], 'com.example.plugins.two');
+		jar.absorb(url, ['login=3']);
+
+		expect(jar.readable(url, 'com.example.plugins.one')).toEqual([{ name: 'own', value: '1' }]);
+		expect(jar.readable(url, 'com.example.plugins.two')).toEqual([{ name: 'theirs', value: '2' }]);
+		// Attaching is unchanged: a request carries what applies to it.
+		expect(jar.header(url)).toBe('own=1; theirs=2; login=3');
+	});
+
+	it('follows the same host, path and expiry rules that attach a cookie', () => {
+		const jar = new CookieJar();
+		jar.absorb(
+			url,
+			['scoped=1; Path=/deep', 'gone=1; Max-Age=0', 'plain=1'],
+			'com.example.plugins.one'
+		);
+		expect(jar.readable(url, 'com.example.plugins.one')).toEqual([{ name: 'plain', value: '1' }]);
+		expect(jar.readable('https://b.example.invalid/page', 'com.example.plugins.one')).toEqual([]);
+		expect(jar.readable('http://a.example.invalid/page', 'com.example.plugins.one')).toEqual([]);
+	});
+});

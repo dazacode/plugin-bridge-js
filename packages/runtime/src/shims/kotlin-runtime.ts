@@ -9993,12 +9993,35 @@ function __hasHeader(headers, name) {
  */
 var __cookieJar = {
   saveFromResponse: function () {},
-  loadForRequest: function () {
-    throw new Error(
-      'This converted extension reads its own cookie jar. Yorozo holds the cookies host-side ' +
-      'and attaches them itself, and does not hand them to plugin code, so the extension can ' +
-      'be converted but not run as written.'
-    );
+  /*
+   * okhttp's 'loadForRequest(url)': the cookies that apply to a request for
+   * that url. The host holds the jar; what it answers here is this plugin's
+   * own — cookies set on responses to its own requests, for a host it
+   * declared — read-only (ABI.md section 2.2, ADR-0005 section 3d). Each is a
+   * record with okhttp's 'name' and 'value'. A host that predates the read
+   * says so by name rather than answering an empty jar it cannot vouch for.
+   */
+  loadForRequest: async function (url) {
+    var http = __host().http;
+    if (!http || typeof http.cookies !== 'function') {
+      throw new Error(
+        'This converted extension reads its own cookie jar, and this host does not let a plugin ' +
+        'read its own cookies.'
+      );
+    }
+    var found = await http.cookies(__str(url));
+    var out = [];
+    var list = Array.isArray(found) ? found : [];
+    for (var i = 0; i < list.length; i += 1) {
+      var one = list[i];
+      if (!one || typeof one.name !== 'string' || typeof one.value !== 'string') continue;
+      out.push({
+        name: one.name,
+        value: one.value,
+        toString: function () { return this.name + '=' + this.value; }
+      });
+    }
+    return __mutableList(out);
   }
 };
 

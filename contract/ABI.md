@@ -280,6 +280,26 @@ a redirect _landing_ does. An allowed host answering "go here" is the same
 hand-off whether the walk was taken or read, and treating the read one as
 weaker would refuse the plugin's very next request.
 
+### 2.2 `ctx.http.cookies()` — a plugin's own cookies, read-only
+
+```ts
+interface HttpClient {
+	cookies(url: string): Promise<readonly { name: string; value: string }[]>; // permission: "cookies"
+}
+```
+
+For a plugin the host keeps a cookie jar for (`cookies`), the names and values
+of the cookies that **responses to that plugin's own requests** set and that
+apply to `url` — the same host, path, `Secure` and expiry rules as the ones
+that attach them to a request. Read-only: there is no enumeration and no write.
+
+It never contains a cookie the plugin's own requests did not receive — not one
+from an interactive or WebView login, another plugin's, or the host's or the
+viewer's — and it is empty for a host the plugin did not declare in
+`manifest.network.hosts`, for a URL that is not https, and for a plugin without
+a jar. Empty, never an error: the answer does not say whether a cookie exists
+anywhere else. `docs/adr/0005-network-boundaries.md` §3d is the decision.
+
 ### `ctx.crypto` — WebCrypto, one named operation at a time
 
 ```ts

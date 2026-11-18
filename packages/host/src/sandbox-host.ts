@@ -827,6 +827,9 @@ export class PluginSandbox {
 				case 'http':
 					respond(true, await this.fetchForPlugin(call.args[0] as string, call.args[1]));
 					return;
+				case 'httpCookies':
+					respond(true, this.cookiesForPlugin(call.args[0]));
+					return;
 				case 'httpPolicy':
 					// Re-read rather than trusted. The isolate validated it too, so
 					// a plugin's own mistake throws at the line that made it — but
@@ -865,6 +868,27 @@ export class PluginSandbox {
 		} catch (error) {
 			respond(false, undefined, (error as Error).message);
 		}
+	}
+
+	/**
+	 * The cookies this plugin may read for one URL (ADR-0005 §3d).
+	 *
+	 * Read-only, and only its own: a cookie a response to this plugin's own
+	 * request set, for a host it declared, by the same rules that would attach
+	 * it to a request for that URL. A plugin without the jar, a URL that is not
+	 * https, and a host it did not declare all answer nothing — never an error
+	 * that would tell it whether a cookie exists.
+	 */
+	private cookiesForPlugin(url: unknown): { name: string; value: string }[] {
+		if (this.cookies === null || typeof url !== 'string') return [];
+		let target: URL;
+		try {
+			target = new URL(url);
+		} catch {
+			return [];
+		}
+		if (target.protocol !== 'https:' || !this.declaredHost(target.hostname)) return [];
+		return this.cookies.readable(target, this.plugin.id);
 	}
 
 	/** Whether a host is one the plugin declared — not one learned at run time. */
@@ -1042,9 +1066,13 @@ export class PluginSandbox {
 			if (this.cookies !== null && Array.isArray(events) && events.length > 0) {
 				for (const event of events as { url?: unknown; headers?: unknown }[]) {
 					if (typeof event?.url !== 'string' || !Array.isArray(event.headers)) continue;
+					// Filed with this plugin's provenance: these arrived on its own
+					// request, which is the only way a cookie becomes readable to
+					// it (ADR-0005 §3d).
 					this.cookies.absorb(
 						event.url,
-						event.headers.filter((one): one is string => typeof one === 'string')
+						event.headers.filter((one): one is string => typeof one === 'string'),
+						this.plugin.id
 					);
 				}
 				this.log('took cookies from a response', {

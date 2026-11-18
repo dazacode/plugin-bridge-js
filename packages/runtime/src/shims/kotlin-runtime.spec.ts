@@ -64,6 +64,7 @@ function context(pages: Record<string, Page> = {}, settings: Record<string, stri
 	const requests: Record<string, unknown>[] = [];
 	const logged: string[] = [];
 	const policies: Record<string, unknown>[] = [];
+	const cookieReads: string[] = [];
 	const ctx = {
 		http: {
 			/**
@@ -76,6 +77,16 @@ function context(pages: Record<string, Page> = {}, settings: Record<string, stri
 			 */
 			async policy(declared: Record<string, unknown>) {
 				policies.push(declared);
+			},
+			/** `ABI.md` §2.2: this plugin's own cookies for a url, as the host answers them. */
+			async cookies(url: string) {
+				cookieReads.push(url);
+				return url.startsWith('https://example.invalid/')
+					? [
+							{ name: 'PHPSESSID', value: 'abc' },
+							{ name: 'XSRF-TOKEN', value: 'x%3D' }
+						]
+					: [];
 			},
 			async send(
 				url: string,
@@ -2170,6 +2181,24 @@ describe('okhttp, over the host', () => {
 		expect(headers['X-Auth']).toBeUndefined();
 		expect(headers['X-Other']).toBe('1');
 		expect(full.interceptors).toHaveLength(2);
+	});
+
+	it('reads a plugin’s own cookies through the host', async () => {
+		// `client.cookieJar.loadForRequest(url)` answers what the host's
+		// `ctx.http.cookies` answers for that url (ADR-0005 §3d), as records
+		// with okhttp's `name` and `value`.
+		const { ctx } = context();
+		runtime.enter(ctx);
+		const found = (await runtime.client.cookieJar.loadForRequest(
+			runtime.globals.GET('https://example.invalid/page').url
+		)) as { name: string; value: string }[];
+		expect(found.map((one) => `${one.name}=${one.value}`)).toEqual([
+			'PHPSESSID=abc',
+			'XSRF-TOKEN=x%3D'
+		]);
+		expect(await runtime.client.cookieJar.loadForRequest('https://other.example.invalid/')).toEqual(
+			[]
+		);
 	});
 
 	it('reads one response header by name, as okhttp does', async () => {

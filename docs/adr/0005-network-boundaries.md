@@ -157,6 +157,38 @@ The plugin gains nothing it could not already do: it could already reach the
 host, and it already holds the token, because it fetched it. What it gains is
 that the token arrives.
 
+## 3d. Amended 2026-11-17 — a plugin may read its own cookies, read-only
+
+Decided by the owner. §3 and §3b say a plugin can never read the jar, and that
+`loadForRequest` stays refused. One listing's stream request carries the
+cookies its page request set — a session id and an XSRF token, which it reads
+by name and sends back as headers — and with the jar unreadable it could not be
+converted at all.
+
+The jar's attaching behaviour is unchanged. What is added is a **read-only view
+of one plugin's own cookies**, bounded so that it hands the plugin nothing it
+did not receive itself:
+
+- **Own provenance only.** A cookie is readable only if a response to _that
+  plugin's own request_ set it. Each stored cookie records which plugin's
+  request set it, and the readable view is partitioned by plugin id — a jar
+  shared by two plugins, or one that absorbed a cookie from anywhere else, still
+  shows each plugin only its own.
+- **Never another source's credentials.** No cookie from an interactive or
+  WebView login, no cookie of another plugin, and no host or viewer cookie is
+  ever in the view; none of those is absorbed with a plugin's provenance.
+- **Granted hosts only.** A read for a host the plugin did not declare answers
+  nothing, whatever the jar holds.
+- **Read-only, and per request URL.** The view answers `loadForRequest(url)`
+  with the cookies the jar would attach to that URL — the same host, path,
+  secure and expiry rules — and nothing else: no enumeration, no export, no
+  write path. In the runtime it backs okhttp's `client.cookieJar
+.loadForRequest(url)`.
+
+What this changes in §3's guarantee is exactly one line: the jar's values are no
+longer secret from the plugin whose own requests produced them. They were never
+the viewer's, and that plugin had them in hand once already, on the response.
+
 ---
 
 ## 4. Site-side JavaScript execution
