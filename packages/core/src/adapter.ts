@@ -659,9 +659,9 @@ export function hostsInSource(source: string, limit = 24): string[] {
  * - **Written with a capital.** A hostname in source is written lower-case,
  *   by convention so universal that nothing in the measured corpus breaks it;
  *   a member path almost never is — `"MUClient.search"`, `"G.Drive"`,
- *   `"nhentai.searchFilter.date"`. Lower-cased, each of those ends in a real
+ *   `"someSource.searchFilter.date"`. Lower-cased, each of those ends in a real
  *   TLD (`.search`, `.drive`, `.date`).
- * - **A reverse-domain package id.** `"com.batcave.android"` is an Android
+ * - **A reverse-domain package id.** `"com.example.android"` is an Android
  *   application id sent as `X-Requested-With`, and `.android` is a TLD. A
  *   host does not begin with `com.` or `org.`; a package id always does, as
  *   does every Java and Kotlin namespace.

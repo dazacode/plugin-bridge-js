@@ -670,7 +670,7 @@ describe('the hosts a module’s source text names', () => {
 		// root zone, so the TLD test alone keeps these.
 		const source = [
 			'describe("MUClient.search", () => {});',
-			'const label = "G.Drive"; const key = "nhentai.searchFilter.date";',
+			'const label = "G.Drive"; const key = "someSource.searchFilter.date";',
 			'const headers = { "x-requested-with": "com.example.android" };',
 			'const author = $("span", "div.author").text();',
 			"const link = $(el).find('a.next').attr('href');"
