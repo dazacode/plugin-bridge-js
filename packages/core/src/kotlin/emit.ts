@@ -9618,6 +9618,21 @@ class Emitter {
 			);
 			return this.awaited(`(async () => ${body.text})()`);
 		}
+		// `withTimeoutOrNull(ms) { … }`: the block's value, or null when it has
+		// not finished in time — awaited, like `withContext` above. Labelled the
+		// same way, so `return@withTimeoutOrNull` leaves the block.
+		if (name === 'withTimeoutOrNull' && !this.isSourceMember(name) && this.lookup(name) === null) {
+			if (lambda === null || args.length !== 1) {
+				this.refuse(callee, 'a `withTimeoutOrNull` of an unusual shape');
+			}
+			const limit = this.expr(this.argumentValue(args[0]));
+			const body = this.functionScope('lambda', labelled ?? name, [], () =>
+				block(this.lambdaLines(lambda))
+			);
+			return this.awaited(
+				`${this.helper('withTimeoutOrNull')}(${limit}, async () => ${body.text})`
+			);
+		}
 		if (name === 'with') {
 			if (lambda === null || args.length !== 1) this.refuse(callee, 'a `with` of an unusual shape');
 			const before = this.asyncLambdas;

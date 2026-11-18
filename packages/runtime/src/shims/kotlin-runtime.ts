@@ -6451,6 +6451,53 @@ var __k = {
     });
   },
 
+  /** minBy and maxBy, which throw on an empty collection where the OrNull forms answer null. */
+  minBy: function (list, selector) {
+    return __then(__k.minByOrNull(list, selector), function (found) {
+      if (__arr(list).length === 0) throw __kTagged(new Error('This converted extension asked for the smallest of an empty collection.'), 'NoSuchElementException');
+      return found;
+    });
+  },
+
+  maxBy: function (list, selector) {
+    return __then(__k.maxByOrNull(list, selector), function (found) {
+      if (__arr(list).length === 0) throw __kTagged(new Error('This converted extension asked for the largest of an empty collection.'), 'NoSuchElementException');
+      return found;
+    });
+  },
+
+  /**
+   * kotlinx's 'withTimeoutOrNull(ms) { … }': the block's value, or null when
+   * it has not finished in time. Kotlin cancels the block cooperatively at its
+   * next suspension point; a promise cannot be cancelled, so here the block
+   * runs on and its answer is discarded — the caller sees exactly what Kotlin's
+   * caller sees, null, at the same moment.
+   */
+  withTimeoutOrNull: function (ms, block) {
+    var limit = Number(ms);
+    return new Promise(function (resolve, reject) {
+      var done = false;
+      var timer = setTimeout(function () {
+        if (done) return;
+        done = true;
+        resolve(null);
+      }, Number.isFinite(limit) && limit > 0 ? limit : 0);
+      Promise.resolve()
+        .then(function () { return block(); })
+        .then(function (value) {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          resolve(value === undefined ? null : value);
+        }, function (error) {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          reject(error);
+        });
+    });
+  },
+
   maxByOrNull: function (list, selector) {
     var items = __arr(list);
     return __then(__each(items, function (item) { return selector(item); }), function (keys) {
@@ -11350,6 +11397,53 @@ __KFile.prototype.writeText = function () { throw __noFilesystem(this.path, 'wri
 __KFile.prototype.appendText = function () { throw __noFilesystem(this.path, 'write it', 'FileNotFoundException'); };
 /* kotlin.io's copyTo checks its source first: one that is not there throws. */
 __KFile.prototype.copyTo = function () { throw __noFilesystem(this.path, 'copy it', 'NoSuchFileException'); };
+
+/** kotlin.Result's constructors, building the Result 'runCatching' builds. */
+var Result = {
+  success: function (value) { return __success(value); },
+  failure: function (error) { return __failure(error); }
+};
+
+/**
+ * android.os.Handler on the main Looper: a block posted to run after the
+ * current work, or after a delay. One thread here, so "the main thread" is
+ * the only one, and a posted block is a timer. A block that throws is logged
+ * rather than left as a rejection nobody holds, which would end the isolate
+ * over what an app reports as a crash in a toast.
+ */
+var Looper = {
+  getMainLooper: function () { return Looper; },
+  myLooper: function () { return Looper; }
+};
+function Handler() {
+  var pending = [];
+  function report(error) {
+    var host = __ctx;
+    if (host !== null && host.log && typeof host.log.warn === 'function') {
+      host.log.warn('a block posted to a Handler failed: ' + (error && error.message ? String(error.message) : __str(error)));
+    }
+  }
+  function run(block) {
+    try {
+      var produced = block();
+      if (__thenable(produced)) produced.then(undefined, report);
+    } catch (error) {
+      report(error);
+    }
+  }
+  return {
+    post: function (block) { pending.push(setTimeout(function () { run(block); }, 0)); return true; },
+    postDelayed: function (block, delay) {
+      pending.push(setTimeout(function () { run(block); }, Math.max(0, Number(delay) || 0)));
+      return true;
+    },
+    removeCallbacksAndMessages: function () {
+      for (var i = 0; i < pending.length; i += 1) clearTimeout(pending[i]);
+      pending.length = 0;
+    },
+    getLooper: function () { return Looper; }
+  };
+}
 
 /** 'File(path)' and 'File(parent, child)', with or without 'new'. */
 function File(first, second) {

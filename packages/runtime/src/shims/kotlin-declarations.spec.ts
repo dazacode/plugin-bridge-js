@@ -1019,6 +1019,62 @@ describe('a lazy property that reads a constructor parameter', () => {
 	});
 });
 
+describe('four pieces of the standard library a WebView resolver is built from', () => {
+	// None of these needs a WebView, and each refused its member by name.
+	const source = kt(
+		'class Demo {',
+		'    var log = mutableListOf<String>()',
+		'    fun cheapest(items: List<Pair<String, Int>>): String = items.minBy { it.second }.first',
+		'    fun dearest(items: List<Pair<String, Int>>): String = items.maxBy { it.second }.first',
+		'    fun emptyMin(): String = emptyList<Pair<String, Int>>().minBy { it.second }.first',
+		'    fun outcome(ok: Boolean): String {',
+		'        val result: Result<String> = if (ok) Result.success("yes") else Result.failure(IllegalStateException("no"))',
+		'        return result.getOrNull() ?: ("failed: " + result.exceptionOrNull()?.message)',
+		'    }',
+		'    suspend fun quick(): String? = withTimeoutOrNull(1000) { delay(1); "done" }',
+		'    suspend fun slow(): String? = withTimeoutOrNull(5) { delay(200); "late" }',
+		'    suspend fun posted(): String {',
+		'        val handler = Handler(Looper.getMainLooper())',
+		'        log.clear()',
+		'        handler.post { log.add("posted") }',
+		'        log.add("first")',
+		'        delay(10)',
+		'        return log.joinToString(",")',
+		'    }',
+		'}'
+	);
+
+	it('picks the first extreme, and throws on an empty collection', async () => {
+		const d = await instantiate('Demo', source);
+		const items = [
+			{ first: 'a', second: 3 },
+			{ first: 'b', second: 1 },
+			{ first: 'c', second: 1 },
+			{ first: 'd', second: 9 }
+		];
+		expect(d.cheapest(items)).toBe('b');
+		expect(d.dearest(items)).toBe('d');
+		expect(() => d.emptyMin()).toThrow(/empty collection/);
+	});
+
+	it('builds a Result either way', async () => {
+		const d = await instantiate('Demo', source);
+		expect(d.outcome(true)).toBe('yes');
+		expect(d.outcome(false)).toBe('failed: no');
+	});
+
+	it('answers the block, or null when it is too slow', async () => {
+		const d = await instantiate('Demo', source);
+		expect(await d.quick()).toBe('done');
+		expect(await d.slow()).toBeNull();
+	});
+
+	it('runs a posted block after the work that posted it', async () => {
+		const d = await instantiate('Demo', source);
+		expect(await d.posted()).toBe('first,posted');
+	});
+});
+
 describe('a reference to a member the template declares', () => {
 	it('binds it to the inherited value, not to the argument', async () => {
 		// DooPlay's `protected open val episodeNumberRegex`, read by a subclass

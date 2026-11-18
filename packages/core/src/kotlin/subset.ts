@@ -1017,6 +1017,8 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 	['maxOfOrNull', 'maxOfOrNull'],
 	['minByOrNull', 'minByOrNull'],
 	['maxByOrNull', 'maxByOrNull'],
+	['minBy', 'minBy'],
+	['maxBy', 'maxBy'],
 	['reduce', 'reduce'],
 	// `fold` is a list fold and a Result fold under one name; the receiver
 	// decides, because the emitter has no types to decide with.
@@ -1290,7 +1292,9 @@ export const ARGUMENT_LAMBDA_METHODS: ReadonlySet<string> = new Set([
 	'addCookie',
 	// Observable takes each block as a function of the value or error.
 	'doOnNext',
-	'onErrorReturn'
+	'onErrorReturn',
+	// android.os.Handler's `post { … }`: the block is the task, run later.
+	'post'
 ]);
 
 /**
@@ -2505,7 +2509,14 @@ export const GLOBAL_NAMES: ReadonlySet<string> = new Set([
 	'JsonNull',
 
 	/* java.io.File: `File(path)` and `File.createTempFile`. See `JSOUP_STATICS`. */
-	'File'
+	'File',
+
+	/* kotlin.Result's two constructors, over the Result `runCatching` builds. */
+	'Result',
+
+	/* android.os.Handler on the main Looper: a block posted to run later. */
+	'Handler',
+	'Looper'
 ]);
 
 /**
