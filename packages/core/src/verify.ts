@@ -578,7 +578,7 @@ export async function verifyConvertedPlugin(
 						return {
 							ok: false,
 							failedAt: 'pages',
-							detail: `The first page did not load: ${hostOf(url)} ${outcome.detail}.${dropped}`,
+							detail: `The first page did not load: ${pageFailure(hostOf(url), outcome.detail)}${dropped}`,
 							...counts
 						};
 					}
@@ -586,7 +586,7 @@ export async function verifyConvertedPlugin(
 					return {
 						ok: false,
 						failedAt: 'pages',
-						detail: `The first page did not load: ${hostOf(url)}: ${messageOf(error)}.${dropped}`,
+						detail: `The first page did not load: ${pageFailure(hostOf(url), messageOf(error))}${dropped}`,
 						...counts
 					};
 				}
@@ -917,6 +917,12 @@ function droppedHeaders(own: unknown, sent: Readonly<Record<string, string>>): s
 		.filter((name) => !(name in sent));
 	if (names.length === 0) return '';
 	return ` The source set ${names.join(', ')} for it, which this host does not send there.`;
+}
+
+/** "host answered 403 …." from a probe's own words, or "host: why." from anyone else's. */
+function pageFailure(host: string, detail: string): string {
+	const said = detail.replace(/\.+$/, '');
+	return said.startsWith('answered ') ? `${host} ${said}.` : `${host}: ${said}.`;
 }
 
 function hostsOf(url: unknown): string[] {

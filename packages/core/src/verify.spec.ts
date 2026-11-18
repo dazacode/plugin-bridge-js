@@ -740,6 +740,36 @@ describe('a book source’s first page, loaded as a reader would load it', () =>
 		expect(probed[0].headers['cookie']).toBeUndefined();
 	});
 
+	it('says when the image server answered with a bot check, and when the relay could not reach it', async () => {
+		// Measured: one source's second CDN puts every image behind a Cloudflare
+		// challenge, Referer or not. No header a source sets fixes that, and the
+		// verdict should not read as one that would.
+		const challenged = relay(
+			() =>
+				new Response(
+					encodeFrame({
+						status: 403,
+						url: 'https://img.example.invalid/c/1.jpg',
+						headers: { 'content-type': 'text/html' },
+						challenge: 'cloudflare',
+						body: HTML
+					}) as BodyInit,
+					{ headers: { 'content-type': FRAME_CONTENT_TYPE } }
+				)
+		);
+		const unreachable = relay(() =>
+			Response.json({ error: 'The operation timed out.' }, { status: 502 })
+		);
+		const page = [{ index: 0, url: 'https://img.example.invalid/c/1.jpg', headers: REFERER }];
+
+		expect((await readWith(page, challenged.fetcher)).detail).toBe(
+			'The first page did not load: img.example.invalid answered 403 (text/html) from behind a Cloudflare check, not an image.'
+		);
+		expect((await readWith(page, unreachable.fetcher)).detail).toBe(
+			'The first page did not load: img.example.invalid: The operation timed out.'
+		);
+	});
+
 	it('sends no header the host would not, and says which the source set', async () => {
 		// The page's host is outside the declared grant: the reader loads it
 		// bare, so the check does too, and its verdict names what was left off.

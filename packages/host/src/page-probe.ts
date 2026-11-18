@@ -77,6 +77,7 @@ export function pageImageProbe(fetcher: HostFetch): PageProbe {
 			headers?: Record<string, unknown>;
 			body?: unknown;
 			unread?: unknown;
+			challenge?: unknown;
 		};
 		try {
 			answer = await readAnswer(response);
@@ -89,8 +90,12 @@ export function pageImageProbe(fetcher: HostFetch): PageProbe {
 			.trim()
 			.toLowerCase();
 		const typed = type.length > 0 ? ` (${type})` : '';
-		if (status < 200 || status > 299)
-			return { ok: false, detail: `answered ${status}${typed}, not an image` };
+		if (status < 200 || status > 299) {
+			// Said, because it changes whose problem this is: no header a source
+			// sets gets an image past a bot check.
+			const behind = answer.challenge === 'cloudflare' ? ' from behind a Cloudflare check' : '';
+			return { ok: false, detail: `answered ${status}${typed}${behind}, not an image` };
+		}
 
 		const body = answer.body instanceof Uint8Array ? answer.body : new Uint8Array(0);
 		// Over the relay's cap, so unread: the status and type are all there is,
