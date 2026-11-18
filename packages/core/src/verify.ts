@@ -314,7 +314,10 @@ export async function verifyConvertedPlugin(
 	// bundle declares; for a book listing the two agree, and where a row
 	// predates the field this answers `video`, which is what every caller of
 	// this meant before books existed.
-	const medium: 'video' | 'book' = plugin.converted?.mediaKind === 'manga' ? 'book' : 'video';
+	// A novel is a book too: it is read in chapters, and its pages are text.
+	// Counted as video, a novel listing's report spoke of episodes and streams.
+	const kind = plugin.converted?.mediaKind;
+	const medium: 'video' | 'book' = kind === 'manga' || kind === 'novel' ? 'book' : 'video';
 	const nothing = { medium, searchHits: 0, episodeCount: 0, streamCount: 0, torrentCount: 0 };
 	let sandbox: PluginSandbox | null = null;
 	const deadline = Date.now() + budgetMs;
@@ -444,8 +447,14 @@ export async function verifyConvertedPlugin(
 				};
 			}
 
+			// A remote page must be https. A text chapter has no remote page at
+			// all: the novel half of every Kotlin family, and a Paperback HTML
+			// chapter, hand the text over as a `data:text/…` url, because there
+			// is no address to give. That is the content itself, in hand, and
+			// it counts when it says something — an empty one does not.
 			const readable = pages.filter(
-				(page) => typeof page.url === 'string' && page.url.startsWith('https://')
+				(page) =>
+					typeof page.url === 'string' && (page.url.startsWith('https://') || textPage(page.url))
 			);
 			const counts = {
 				medium,
@@ -462,7 +471,7 @@ export async function verifyConvertedPlugin(
 					detail:
 						(pages.length === 0
 							? 'That source returned no pages for its first chapter.'
-							: 'The pages it returned are not https.') + alsoRefused(sandbox),
+							: 'The pages it returned are neither https nor text.') + alsoRefused(sandbox),
 					...counts
 				};
 			}
@@ -472,8 +481,11 @@ export async function verifyConvertedPlugin(
 			// source asked for — `ABI.md` §8.3 is the whole reason those travel
 			// beside the url, and a probe that dropped them would report 403 on
 			// every source that protects its images and call it broken.
-			if (reach !== undefined && !outOfTime()) {
-				const first = readable[0];
+			// Probed where it is remote. A text page has no host to ask; that it
+			// carries text was settled above.
+			const remote = readable.filter((page) => String(page.url).startsWith('https://'));
+			if (reach !== undefined && remote.length > 0 && !outOfTime()) {
+				const first = remote[0];
 				const headers = (first.headers ?? {}) as Record<string, string>;
 				try {
 					const outcome = await reach(String(first.url), headers, [
@@ -775,6 +787,26 @@ function alsoRefused(sandbox: PluginSandbox | null): string {
 }
 
 /** The https host of a resolved url, as a one-item list, or none. */
+/**
+ * Whether a page is a text chapter carried inline, with something in it.
+ *
+ * `data:` with a `text/` type only — an inline image is not what this is for —
+ * and decoded, because `data:text/plain,` with nothing after the comma is a
+ * chapter that came back empty, which is a failure and not content.
+ */
+function textPage(url: string): boolean {
+	const match = /^data:text\/[a-z0-9.+-]+(?:;[^,]*)?,(.*)$/is.exec(url);
+	if (match === null) return false;
+	const head = url.slice(0, url.indexOf(','));
+	let body: string;
+	try {
+		body = /;base64$/i.test(head) ? atob(match[1]) : decodeURIComponent(match[1]);
+	} catch {
+		return false;
+	}
+	return body.replace(/<[^>]*>/g, '').trim().length > 0;
+}
+
 function hostsOf(url: unknown): string[] {
 	try {
 		const parsed = new URL(String(url));

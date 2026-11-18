@@ -503,3 +503,56 @@ describe('a run that came to nothing at hosts the proxy could not reach', () => 
 		expect(result.detail).not.toMatch(/Along the way/);
 	});
 });
+
+describe('a book whose chapter is text', () => {
+	const NOVEL: RunnablePlugin = {
+		...PLUGIN,
+		converted: {
+			format: 'tsundoku',
+			foreignId: 'demo',
+			foreignVersion: '1',
+			convertedAt: '2026-01-01T00:00:00.000Z',
+			converterVersion: 1,
+			verified: false,
+			mediaKind: 'novel'
+		}
+	};
+
+	function readWith(pages: { index: number; url: string }[]) {
+		return verifyConvertedPlugin(NOVEL, 'export default {};', {
+			createWorker: () =>
+				new FakeWorker({
+					load: { id: PLUGIN.id, declares: ['searchCatalog', 'listChapters', 'readChapter'] },
+					searchCatalog: { entries: [{ sourceMediaId: 'https://watch.example.invalid/b/1' }] },
+					listChapters: [{ number: 1, sourceChapterId: 'https://watch.example.invalid/b/1/1' }],
+					readChapter: { pages }
+				}) as unknown as Worker
+		});
+	}
+
+	it('counts an inline text page as the content it is', async () => {
+		// A novel chapter has no address: the Kotlin families and Paperback
+		// hand its text over as `data:text/…`. Only `https://` was counted, so
+		// every text chapter that arrived was reported as "not https".
+		const result = await readWith([
+			{ index: 0, url: 'data:text/plain;charset=utf-8,' + encodeURIComponent('Chapter one.') },
+			{ index: 1, url: 'data:text/html;charset=utf-8,' + encodeURIComponent('<p>More.</p>') }
+		]);
+		expect(result.ok).toBe(true);
+		expect(result.medium).toBe('book');
+		expect(result.streamCount).toBe(2);
+	});
+
+	it('still refuses an empty text page, a cleartext page and an inline image', async () => {
+		for (const url of [
+			'data:text/plain;charset=utf-8,',
+			'data:text/html,' + encodeURIComponent('<p> </p>'),
+			'http://watch.example.invalid/page.jpg',
+			'data:image/png;base64,iVBORw0KGgo='
+		]) {
+			const result = await readWith([{ index: 0, url }]);
+			expect(result.ok, url).toBe(false);
+			expect(result.failedAt, url).toBe('pages');
+		}
+	});
+});
