@@ -619,14 +619,25 @@ import ireader.core.source.model.Text
 
 class Headers
 
+/*
+ * A request as Ktor builds one: its url, the headers its blocks append, and a
+ * body. Every request this shim sends is built from one of these, so a
+ * \`headers { … }\` or \`headersBuilder { … }\` block is what the site sees.
+ */
 class HttpRequestBuilder(var url: String) {
     var body: String = ""
-    fun header(name: String, value: String): HttpRequestBuilder = this
-    fun headers(block: HeadersBuilder.() -> Unit): HttpRequestBuilder = this
-    // The base class's \`HttpRequestBuilder.headersBuilder { … }\`, which a
-    // request block calls on the builder it is given. Headers are not carried
-    // by this client yet (\`Ktor.get\` sends the url), so the block is not run.
-    fun headersBuilder(block: HeadersBuilder.() -> Unit = {}): HttpRequestBuilder = this
+    var contentType: String = "text/plain; charset=utf-8"
+    val headerValues: MutableMap<String, String> = mutableMapOf()
+    fun header(name: String, value: String): HttpRequestBuilder {
+        headerValues[name] = value
+        return this
+    }
+    fun headers(block: HeadersBuilder.() -> Unit): HttpRequestBuilder {
+        val builder = HeadersBuilder()
+        builder.block()
+        for ((name, value) in builder.values) headerValues[name] = value
+        return this
+    }
     fun url(value: String): HttpRequestBuilder {
         url = value
         return this
@@ -635,6 +646,16 @@ class HttpRequestBuilder(var url: String) {
         body = value
         return this
     }
+}
+
+fun ireaderDefaultHeaders(request: HttpRequestBuilder, agent: String) {
+    if (agent.isNotEmpty()) request.header(HttpHeaders.UserAgent, agent)
+    request.header(HttpHeaders.CacheControl, "max-age=0")
+}
+
+fun ireaderBuilder(target: Any): HttpRequestBuilder {
+    if (target is HttpRequestBuilder) return target
+    return HttpRequestBuilder(target.toString())
 }
 
 class KtorResponse(val text: String) {
@@ -649,17 +670,35 @@ class KtorResponse(val text: String) {
  * nothing reached a site at all.
  */
 class Ktor(val http: OkHttpClient) {
+    // Ktor's \`submitForm\`: the parameters url-encoded into the body of a
+    // POST, or into the query of a GET when \`encodeInQuery\`. It sent an empty
+    // POST before, so every search a site takes as a form found nothing.
     suspend fun submitForm(
         url: String,
         formParameters: Parameters,
+        encodeInQuery: Boolean = false,
         block: HttpRequestBuilder.() -> Unit = {}
     ): KtorResponse {
         val builder = HttpRequestBuilder(url)
         builder.block()
-        return KtorResponse(ireaderSend(http, POST(url, null, null)))
+        val form = formParameters.formUrlEncode()
+        if (encodeInQuery) {
+            val joiner = if (builder.url.contains("?")) "&" else "?"
+            return KtorResponse(ireaderSend(http, GET(builder.url + joiner + form, builder.headerValues)))
+        }
+        val body = form.toRequestBody("application/x-www-form-urlencoded".toMediaType())
+        return KtorResponse(ireaderSend(http, POST(builder.url, builder.headerValues, body)))
     }
-    suspend fun get(builder: HttpRequestBuilder): KtorResponse {
-        return KtorResponse(ireaderSend(http, GET(builder.url, null)))
+    suspend fun get(target: Any, block: HttpRequestBuilder.() -> Unit = {}): KtorResponse {
+        val builder = ireaderBuilder(target)
+        builder.block()
+        return KtorResponse(ireaderSend(http, GET(builder.url, builder.headerValues)))
+    }
+    suspend fun post(target: Any, block: HttpRequestBuilder.() -> Unit = {}): KtorResponse {
+        val builder = ireaderBuilder(target)
+        builder.block()
+        val body = builder.body.toRequestBody(builder.contentType.toMediaType())
+        return KtorResponse(ireaderSend(http, POST(builder.url, builder.headerValues, body)))
     }
 }
 
@@ -695,7 +734,7 @@ inline fun <reified T> List<*>.findInstance(): T? {
 fun ireaderParameters(block: FormBuilder.() -> Unit): Parameters {
     val builder = FormBuilder()
     builder.block()
-    return Parameters()
+    return Parameters(builder.pairs)
 }
 
 fun ireaderFilters(query: String): FilterList {
@@ -770,6 +809,16 @@ abstract class SourceFactory(val deps: Dependencies = Dependencies()) {
     open fun getCustomBaseUrl(): String = baseUrl
 
     fun requestBuilder(url: String): HttpRequestBuilder = HttpRequestBuilder(url)
+
+    // The base class's header block, called on the request a block is given.
+    // With no block, the ecosystem's default: its user agent, and no cache.
+    // The original appends these two only when it is given no block; here
+    // they go first and a block's own appends replace them, which differs
+    // only in an extra \`Cache-Control\` the block did not ask for.
+    open fun HttpRequestBuilder.headersBuilder(block: HeadersBuilder.() -> Unit = {}) {
+        ireaderDefaultHeaders(this, getUserAgent())
+        this.headers(block)
+    }
 
     /* --- lists ------------------------------------------------------------ */
 
@@ -1325,18 +1374,28 @@ object Ksoup {
 			path: 'ireader-shim/http.kt',
 			source: `package io.ktor.http
 
-class Parameters {
+import java.net.URLEncoder
+
+// Ktor's form parameters: the pairs a \`Parameters.build { append(…) }\` block
+// wrote, in order, url-encoded the way a browser posts a form.
+class Parameters(val pairs: List<Pair<String, String>> = emptyList()) {
+    fun formUrlEncode(): String =
+        pairs.joinToString("&") { URLEncoder.encode(it.first, "UTF-8") + "=" + URLEncoder.encode(it.second, "UTF-8") }
+
     companion object {
         fun build(block: FormBuilder.() -> Unit): Parameters {
             val builder = FormBuilder()
             builder.block()
-            return Parameters()
+            return Parameters(builder.pairs)
         }
     }
 }
 
 class FormBuilder {
-    fun append(name: String, value: String) {}
+    val pairs: MutableList<Pair<String, String>> = mutableListOf()
+    fun append(name: String, value: String) {
+        pairs.add(Pair(name, value))
+    }
 }
 
 object HttpHeaders {
@@ -1349,7 +1408,10 @@ object HttpHeaders {
 }
 
 class HeadersBuilder {
-    fun append(name: String, value: String) {}
+    val values: MutableMap<String, String> = mutableMapOf()
+    fun append(name: String, value: String) {
+        values[name] = value
+    }
     fun build(): Headers = Headers()
 }
 

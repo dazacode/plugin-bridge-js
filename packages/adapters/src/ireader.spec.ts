@@ -458,6 +458,68 @@ abstract class Demo(private val deps: Dependencies) : SourceFactory(deps = deps)
 		).toEqual(['one', 'two', 'three']);
 	});
 
+	it('posts a form with its parameters and the headers its block appends', async () => {
+		// `client.submitForm(url, Parameters.build { … }) { headersBuilder { … } }`
+		// is how a template posts its search. The shim sent an empty POST with
+		// no headers, so every such search found nothing — and the block itself
+		// was refused, which took eight listings of one template.
+		const posting = KOTLIN.replace(
+			'import ireader.core.source.model.FilterList',
+			'import ireader.core.source.model.Filter\nimport ireader.core.source.model.FilterList\nimport io.ktor.http.Parameters'
+		).replace(
+			'MangasPageInfo(listOf(MangaInfo(key = "$baseUrl/m/1", title = "One")), false)',
+			'MangasPageInfo(client.submitForm(url = "$baseUrl/search", formParameters = Parameters.build { ' +
+				'append("q", filters.findInstance<Filter.Title>()?.value ?: ""); append("kind", "a b") }) { ' +
+				'headersBuilder { append("Referer", "$baseUrl/") } }.asJsoup().select("a").map { ' +
+				'MangaInfo(key = it.attr("href"), title = it.text()) }, false)'
+		);
+		expect(posting).toContain('submitForm(');
+		const files = new Map([[`${DIRECTORY}/main/src/ireader/demo/Demo.kt`, posting]]);
+		const bundle = await openPluginArchive(
+			await ireaderAdapter.convert(listing(), services(files))
+		);
+		const { writeFileSync, mkdtempSync } = await import('node:fs');
+		const { tmpdir } = await import('node:os');
+		const { join } = await import('node:path');
+		const file = join(mkdtempSync(join(tmpdir(), 'yorozo-')), 'bundle.mjs');
+		writeFileSync(file, bundle.entrypointSource, 'utf8');
+		const module = (await import(/* @vite-ignore */ `file:///${file.replace(/\\/g, '/')}`))
+			.default as {
+			searchCatalog(q: string, p: number, ctx: unknown): Promise<{ entries: { title: string }[] }>;
+		};
+		const sent: { url: string; method: string; headers: Record<string, string>; body: string }[] =
+			[];
+		const ctx = {
+			http: {
+				async send(url: string, request: { method: string; headers?: unknown; body?: unknown }) {
+					const headers: Record<string, string> = {};
+					const raw = request.headers as Record<string, string> | [string, string][] | undefined;
+					if (Array.isArray(raw)) for (const [k, v] of raw) headers[k.toLowerCase()] = v;
+					else for (const [k, v] of Object.entries(raw ?? {})) headers[k.toLowerCase()] = String(v);
+					const body =
+						typeof request.body === 'string'
+							? request.body
+							: request.body instanceof Uint8Array
+								? new TextDecoder().decode(request.body)
+								: String((request.body as { text?: string } | null)?.text ?? '');
+					sent.push({ url, method: request.method, headers, body });
+					const page = '<a href="/m/7">Found</a>';
+					return { status: 200, url, headers: {}, text: async () => page, json: async () => ({}) };
+				}
+			},
+			log: { debug() {}, warn() {} }
+		};
+
+		const found = await module.searchCatalog('needle', 1, ctx);
+		expect(found.entries.map((entry) => entry.title)).toEqual(['Found']);
+		expect(sent).toHaveLength(1);
+		expect(sent[0].method).toBe('POST');
+		expect(sent[0].url).toBe('https://read.example.invalid/search');
+		expect(sent[0].body).toBe('q=needle&kind=a+b');
+		expect(sent[0].headers['referer']).toBe('https://read.example.invalid/');
+		expect(sent[0].headers['content-type'] ?? '').toContain('application/x-www-form-urlencoded');
+	});
+
 	it('leaves a module’s test sources out of the bundle', async () => {
 		// A module's `src/test` sits beside its source set, and its
 		// backtick-named test functions are not JavaScript names: one such file

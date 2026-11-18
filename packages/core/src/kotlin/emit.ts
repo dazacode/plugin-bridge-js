@@ -5519,6 +5519,17 @@ class Emitter {
 		return held;
 	}
 
+	/** 'method' when a base class next door declares `name` as a member extension. */
+	private inheritedExtension(name: string): 'method' | undefined {
+		const seen = new Set<string>();
+		for (let at = this.ownerBase ?? undefined; at !== undefined && !seen.has(at);) {
+			seen.add(at);
+			if (this.neighbourExtensions.has(`${at}.${name}`)) return 'method';
+			at = this.classBaseIndex.get(at);
+		}
+		return undefined;
+	}
+
 	/** Notes which of these declarations are extension functions, before use. */
 	private registerExtensions(
 		declarations: readonly KNode[],
@@ -9789,12 +9800,26 @@ class Emitter {
 		// emits `this.isValidUrl('data-src')` — dropping the receiver, so
 		// `__recv` took the first argument's value and the argument took
 		// undefined. Nothing threw; the wrong attribute was read.
-		const declaredExtension = lambda === null ? this.extensionFunctions.get(name) : undefined;
+		// A block is let through for one shape: an extension the class itself
+		// declares, whose declaration has a slot for it — `headersBuilder { … }`
+		// inside a request block is the base class's `HttpRequestBuilder
+		// .headersBuilder(block)`, and on the member path it lost its receiver.
+		//
+		// And one declared on a base class in the file next door — the same
+		// method on the prototype chain, reached the same way: in a request
+		// block, `headersBuilder()` went to the driver's own namesake instead.
+		const knownExtension = this.extensionFunctions.get(name) ?? this.inheritedExtension(name);
+		const blockArity = this.extensionArity.get(name);
+		const blockSlot =
+			lambda !== null &&
+			knownExtension === 'method' &&
+			(typeof blockArity === 'number' ? args.length < blockArity : args.length === 0);
+		const declaredExtension = lambda === null || blockSlot ? knownExtension : undefined;
 		// More arguments than the one declaration in reach takes: Kotlin chose
 		// another overload, and the only other place one can be is the base the
-		// driver supplies. \`private fun SManga.setSlugUrl(href) =
-		// setSlugUrl(mangaPath, href)\` calls keiyoushi's two-argument
-		// \`setSlugUrl\`; emitted on \`this\` it called itself until the stack ran
+		// driver supplies. `private fun SManga.setSlugUrl(href) =
+		// setSlugUrl(mangaPath, href)` calls keiyoushi's two-argument
+		// `setSlugUrl`; emitted on `this` it called itself until the stack ran
 		// out, at the first search. The driver's base answers it, or says by
 		// name that it does not.
 		const declaredArity = this.extensionArity.get(name) ?? undefined;
@@ -9817,7 +9842,9 @@ class Emitter {
 						? this.safe(name)
 						: `${this.safe(owner)}.${name}`;
 			const types = this.reifiedArguments(callee, name, typeArgument, expected);
-			const call = `${target}(${[...types, implicit, ...tail].join(', ')})`;
+			const passed =
+				lambda === null ? tail : this.callArguments(name, args, lambda, labelled, false);
+			const call = `${target}(${[...types, implicit, ...passed].join(', ')})`;
 			return this.suspendMembers.has(name) ? this.awaited(call) : call;
 		}
 

@@ -3710,6 +3710,10 @@ var __k = {
    * element legitimately IS null is answered rather than reported as empty.
    */
   first: function (list, predicate) {
+    // jsoup's 'Elements.first()' is a member, and Kotlin calls a member before
+    // the stdlib extension of the same name: null on an empty selection, not
+    // a throw. 'select(…).first()?.text()' is written for exactly that.
+    if (typeof predicate !== 'function' && list instanceof __KElements) return list.first();
     var items = __arr(list);
     if (typeof predicate !== 'function') {
       if (items.length === 0) {
