@@ -226,7 +226,8 @@
 					"maxLength": 128
 				},
 				"type": {
-					"enum": ["select", "multiselect", "switch", "text"]
+					"description": "`number` is API level 3 (ABI.md section 9.2): a manifest declaring one declares `yorozoPluginApi` 3 or above.",
+					"enum": ["select", "multiselect", "switch", "text", "number"]
 				},
 				"label": { "type": "string", "minLength": 1, "maxLength": 64 },
 				"help": { "type": "string", "minLength": 1, "maxLength": 240 },
@@ -244,6 +245,23 @@
 							"label": { "type": "string", "minLength": 1, "maxLength": 64 }
 						}
 					}
+				},
+				"min": { "description": "A `number` setting's lowest value.", "type": "number" },
+				"max": { "description": "A `number` setting's highest value.", "type": "number" },
+				"step": {
+					"description": "A `number` setting's step, counted from `min`.",
+					"type": "number",
+					"exclusiveMinimum": 0
+				}
+			},
+			"if": { "properties": { "type": { "const": "number" } } },
+			"then": {
+				"required": ["min", "max", "step"],
+				"properties": { "default": { "type": "number" } }
+			},
+			"else": {
+				"not": {
+					"anyOf": [{ "required": ["min"] }, { "required": ["max"] }, { "required": ["step"] }]
 				}
 			}
 		}

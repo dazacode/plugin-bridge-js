@@ -9,9 +9,10 @@ runtime, and that says what a **host** owes it.
 Rule 9 applies. No source is named here, and none may be added.
 
 Versioned by `yorozoPluginApi` in the manifest. This document describes **API
-level 2**. Level 1 is every section below except §8, and a level-1 plugin is
-unchanged and still loads — §8 only _adds_ two optional methods and the values
-they return.
+level 3**. Level 1 is every section below except §8 and §9, and a level-1 plugin
+is unchanged and still loads — §8 only _adds_ two optional methods and the
+values they return. Level 3 (§9) adds image headers a host applies itself and a
+numeric setting; a level-2 plugin is unchanged by it.
 
 ---
 
@@ -369,6 +370,7 @@ interface SettingsView {
 	string(id: string): string; // '' when unset
 	boolean(id: string): boolean; // false when unset
 	list(id: string): string[]; // [] when unset
+	number(id: string): number; // level 3 (§9.2): the declared default when unset
 }
 ```
 
@@ -753,6 +755,7 @@ interface ChapterTarget {
 interface ChapterPages {
 	readonly pages: readonly PageImage[];
 	readonly direction?: 'ltr' | 'rtl' | 'vertical';
+	readonly headersByHost?: Record<string, Record<string, string>>; // level 3, §9.1
 }
 
 interface PageImage {
@@ -834,3 +837,117 @@ A plugin that declares `listChapters` but not `readChapter`, or the reverse, is
 **refused at load**. Half of a medium is a plugin that lists a book nobody can
 open, and rule 9's sibling principle applies: a conservative refusal beats
 silent wrong behaviour.
+
+---
+
+## 9. API level 3 — image headers, and a number
+
+Two additions, decided together because both arrived from the same measured
+pass over converted manga sources, and both are things a host does rather than
+things a plugin does.
+
+### 9.1 Image headers the host applies
+
+§8.3 made `headers` on a page the load-bearing field, and it was right: the
+commonest image failure is a CDN that answers 403 without a `Referer`. Two gaps
+were measured after it:
+
+- **A chapter's pages share their headers by host, not by page.** A source's
+  image client adds one `Referer` for its CDN and another for its own host, and
+  a page list of two hundred pages repeated the same map two hundred times.
+- **Covers have no headers at all.** A cover is a `posterImageUrl` on a
+  catalogue entry, and the CDN behind it applies the same check. 109 of 139
+  measured sources of one ecosystem route covers through the same client as
+  their pages.
+
+```ts
+interface SourceCatalogEntry {
+	// …the fields it already has…
+	readonly posterImageUrl?: string;
+	readonly posterImageHeaders?: Record<string, string>; // ← level 3
+}
+
+interface CatalogPage {
+	readonly entries: readonly SourceCatalogEntry[];
+	readonly hasMore?: boolean;
+	readonly imageHeadersByHost?: Record<string, Record<string, string>>; // ← level 3
+}
+
+interface ChapterPages {
+	// …§8.2…
+	readonly headersByHost?: Record<string, Record<string, string>>; // ← level 3
+}
+```
+
+**The model is `StreamPipeline` §4.1, and so are the rules.** A plugin declares
+intent and the host decides how: set directly where the platform allows it,
+through the host's own relay where a browser forbids the header (`Referer`,
+`Origin`, `User-Agent`, `Cookie`, `Sec-*`). A plugin must not know which
+happened.
+
+- **Host patterns are `network.hosts` patterns**, an exact host or one leading
+  `*.` wildcard, matched most specific first. A pattern naming a host outside
+  the grant is inert, not wrong: the image request itself is still refused by
+  the grant, exactly as a request policy's is (§2.1).
+- **An image's own headers win.** A page's `headers`, or an entry's
+  `posterImageHeaders`, beat any `…ByHost` map for the request they belong to,
+  which is §2.1 rule 7 applied to images.
+- **https only.** Headers are applied to `https:` image URLs and nothing else,
+  so a header can never ride a downgrade.
+- **Names are RFC 7230 tokens; values carry no `\r`, `\n` or `\0`**, at most
+  32 headers per map and 32 hosts per `…ByHost`. Hop-by-hop and
+  transport-owned names — `host`, `content-length`, `connection`,
+  `keep-alive`, `transfer-encoding`, `te`, `trailer`, `upgrade`, and anything
+  beginning `proxy-` — are refused: they describe a connection the host owns,
+  not the image a plugin asked for.
+
+A host **validates** these values, as it validates a request policy, and a value
+that breaks a rule is refused with the field named rather than partly applied —
+a header silently dropped is an image that fails with nobody able to say why.
+
+**Level-3 image fields are optional outputs, and a plugin may emit them at any
+level.** A host below level 3 ignores a field it does not know — §3's values are
+JSON, and an unknown optional field is ignored, never fatal — which leaves that
+host exactly where it was before this section: the image fetched plainly. That
+is why emitting them does not, by itself, oblige a plugin to declare
+`yorozoPluginApi: 3`; refusing a whole plugin on a host that could still show
+its text would be the worse outcome. A host **at** level 3 must apply them.
+
+### 9.2 A numeric setting
+
+```ts
+interface NumberSettingDescriptor {
+	readonly id: string;
+	readonly type: 'number';
+	readonly label: string;
+	readonly help?: string;
+	readonly min: number;
+	readonly max: number;
+	readonly step: number;
+	readonly default?: number; // min when absent
+}
+```
+
+Measured: a converted source declared a stepper — a bounded count, in steps —
+and there was no setting that could carry it. A `select` over every value works
+only while the values fit `options`' 64, and the measured one had 201; a `text`
+field takes anything and leaves the plugin to discover a typo at request time.
+
+- **Valid means:** every bound finite, `min ≤ default ≤ max`, `step > 0`, and the
+  number of values, `floor((max − min) / step) + 1`, at most 100,000 — a bound
+  on what a host is asked to draw, not a policy.
+- **`ctx.settings.number(id)` answers the viewer's value, snapped to the step
+  from `min` and clamped to the bounds**, or the declared default when unset.
+  A value the host stored under an older declaration is brought inside the new
+  one rather than handed over out of range.
+- **A plugin declaring a `number` setting declares `yorozoPluginApi: 3`.** Unlike
+  §9.1 this one is not optional output: it is in the manifest, the host has to
+  draw it, and a host that cannot must refuse the plugin at §7 check 1 with the
+  reason it already gives, rather than install a plugin with a missing control.
+
+### 9.3 Compatibility
+
+§7 is unchanged. A **level-2 host** meeting a level-3 plugin refuses it at check
+1 — which only happens for a plugin with a `number` setting. A **level-3 host**
+meeting a lower-level plugin is unchanged: nothing in §9 is required of a
+plugin, and a plugin that emits none of it is read exactly as before.
