@@ -216,6 +216,19 @@ export function readCatalogImages(value: unknown): CatalogImages {
 export interface ImageGrant {
 	/** The plugin's `network.hosts` patterns. */
 	readonly declared: readonly string[];
+	/**
+	 * Exact hosts the running sandbox learned (`PluginSandbox.imageGrant`).
+	 *
+	 * A converted source's image CDN is chosen by the site and named in the
+	 * chapter document it reads — `k99.<cdn>`, `q73.<cdn>` — never in its code,
+	 * so no conversion can declare it. The sandbox already lets the plugin
+	 * fetch such a host, with any header, through the same relay; a reader
+	 * that then refused to send that page's `Referer` there loaded every page
+	 * bare and showed none of them. A credential still goes only to a host the
+	 * plugin declared, as the sandbox's own `Authorization` and cookie rules
+	 * have it (ADR-0005 §3c).
+	 */
+	readonly learned?: readonly string[];
 }
 
 /** Header names that carry a credential, which a wildcard never hands out. */
@@ -251,7 +264,8 @@ export function grantedImageHeaders(
 	} catch {
 		return null;
 	}
-	if (!grant.declared.some((pattern) => hostMatches(host, pattern))) return null;
+	const declared = grant.declared.some((pattern) => hostMatches(host, pattern));
+	if (!declared && !(grant.learned ?? []).includes(host)) return null;
 	const scoped =
 		byHost === undefined
 			? undefined
@@ -261,6 +275,7 @@ export function grantedImageHeaders(
 						pattern.startsWith('*.') ? withoutCredentials(headers) : headers
 					])
 				);
-	const headers = imageHeadersFor(url, own, scoped);
+	const all = imageHeadersFor(url, own, scoped);
+	const headers = declared ? all : withoutCredentials(all);
 	return Object.keys(headers).length === 0 ? null : headers;
 }

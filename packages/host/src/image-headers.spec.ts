@@ -89,4 +89,17 @@ describe('the headers a host sends with one plugin image', () => {
 			grantedImageHeaders('https://a.cdn.example.invalid/1.jpg', { cookie: 'mine' }, byHost, grant)
 		).toEqual({ referer: 'https://read.example.invalid/', cookie: 'mine' });
 	});
+
+	it('applies them on a host the run learned, without a credential', () => {
+		const learned = { ...grant, learned: ['k99.media.example.invalid'] };
+		const own = { referer: 'https://read.example.invalid/', authorization: 'Bearer x' };
+
+		expect(
+			grantedImageHeaders('https://k99.media.example.invalid/1.jpg', own, undefined, learned)
+		).toEqual({ referer: 'https://read.example.invalid/' });
+		// Exact, never a sibling.
+		expect(
+			grantedImageHeaders('https://q73.media.example.invalid/1.jpg', own, undefined, learned)
+		).toBeNull();
+	});
 });

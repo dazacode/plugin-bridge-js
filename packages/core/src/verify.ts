@@ -558,7 +558,7 @@ export async function verifyConvertedPlugin(
 							headersByHost === undefined
 								? undefined
 								: readImageHeadersByHost(headersByHost, 'headersByHost'),
-							{ declared: plugin.hosts }
+							live.imageGrant
 						) ?? {};
 				} catch (error) {
 					// The reader refuses the whole chapter for a header it may not

@@ -715,6 +715,31 @@ describe('a book source’s first page, loaded as a reader would load it', () =>
 		expect(result.detail).toMatch(/answered 200 \(image\/jpeg\) with an HTML page, not an image/);
 	});
 
+	it('reads a page on the CDN its own chapter document named, with its Referer', async () => {
+		// The live case. The source's image client sets a Referer; its CDN host is
+		// chosen by the site and named only in the chapter JSON the run read, so
+		// no conversion declares it. The sandbox learned it and let the plugin
+		// reach it, and a host that then refused to send that page's Referer
+		// there loaded every page bare into a 403.
+		const { fetcher, probed } = relay();
+		const result = await readWith(
+			[
+				{
+					index: 0,
+					url: 'https://cdn7.media.example.invalid/c/1.jpg',
+					headers: { ...REFERER, cookie: 'session=1' }
+				}
+			],
+			fetcher
+		);
+
+		expect(result).toMatchObject({ ok: true, failedAt: null });
+		expect(probed[0].headers['referer']).toBe(REFERER.referer);
+		// A credential still goes only where the plugin declared, never to a
+		// host a page named.
+		expect(probed[0].headers['cookie']).toBeUndefined();
+	});
+
 	it('sends no header the host would not, and says which the source set', async () => {
 		// The page's host is outside the declared grant: the reader loads it
 		// bare, so the check does too, and its verdict names what was left off.

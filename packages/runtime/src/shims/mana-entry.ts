@@ -25,11 +25,13 @@
  * ## What a built bundle still cannot do, stated rather than hidden
  *
  * `getCoverTransport` and `getPageTransport` hand the app a *client* for image
- * bytes. The ABI has no image-fetching plugin hook, so a source that gates an
- * image URL behind `this.covers.has(...)` is honoured for the URL and the host
- * fetches it plainly. Where an image needs a per-request header the source
- * declared on that transport, this build does not carry it yet, and the page
- * fails at the image rather than at the chapter.
+ * bytes. The ABI has no image-fetching plugin hook, so the client is run here
+ * with its image send recorded (`__throughTransport`): what it would have sent
+ * becomes the page's url and headers, which a host applies (§8.3, §9.1). Those
+ * headers usually name a CDN the run learned rather than one the bundle
+ * declared, so a host applies them by the sandbox's `imageGrant`, not by the
+ * manifest's hosts. What still cannot run is a response interceptor that reads
+ * the image's own bytes, and that page is refused by name.
  *
  * ## The source path
  *

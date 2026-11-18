@@ -36,6 +36,7 @@ import { NetworkFailure, NotFoundFailure, ValidationFailure } from '@plugin-brid
 import { CookieJar } from './net/cookie-jar';
 import { hostMatches } from './host-match';
 import { plausibleTld } from './host-names';
+import type { ImageGrant } from './image-headers';
 import {
 	NO_LOG,
 	NO_NETWORK,
@@ -690,6 +691,20 @@ export class PluginSandbox {
 	 */
 	get reachableHosts(): readonly string[] {
 		return [...this.plugin.hosts, ...this.learned];
+	}
+
+	/**
+	 * Where a host may send the headers this plugin sets on its images.
+	 *
+	 * The same set the sandbox lets the plugin reach — declared, plus what this
+	 * run learned — read at the moment the images are, since a chapter's CDN
+	 * is usually learned from the very document that lists its pages. Learned
+	 * hosts are exact and die with the run, as `learned` explains; a host
+	 * applying this must take it from the sandbox that produced the images, not
+	 * from the installed plugin's `hosts`, which never holds them.
+	 */
+	get imageGrant(): ImageGrant {
+		return { declared: this.plugin.hosts, learned: [...this.learned] };
 	}
 
 	/**
