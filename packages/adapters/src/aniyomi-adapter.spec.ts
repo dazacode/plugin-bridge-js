@@ -760,6 +760,25 @@ describe('a publisher whose metadata names a homepage', () => {
 		expect(index.name).toBe('Aniyomi extensions');
 		expect(index.signingKey).toBeNull();
 	});
+
+	it('reads the newer build layout end to end: the class it generates, and its base URL', async () => {
+		const files = siblingFiles(newLayoutBuildFile(3));
+		const index = await aniyomiAdapter.loadIndex!(
+			HOMEPAGE_INDEX_BODY,
+			HOMEPAGE_INDEX_URL,
+			homepageFetcher(files)
+		);
+		const bundle = await openPluginArchive(
+			await aniyomiAdapter.convert(index.plugins[0], services(files, [], SIBLING_RAW))
+		);
+
+		// The base URL is the build file's: the Kotlin declares none and the
+		// index, with two sources, offers no single one.
+		expect(bundle.hosts).toContain('build.example.invalid');
+		// And what the generated subclass would have carried is put where the
+		// abstract class's own initialisers will find it.
+		expect(bundle.entrypointSource).toContain('lang: "en", name: "Example Anime"');
+	}, 60_000);
 });
 
 describe('an extension that translates', () => {

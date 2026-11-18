@@ -127,6 +127,50 @@ export interface AniyomiEntrypointOptions {
 	 * the bundle is then byte-identical to one built before it existed.
 	 */
 	readonly synchronyScript?: string;
+	/**
+	 * What a build-time generated subclass would have supplied, when the
+	 * translated class is only that generator's abstract input.
+	 *
+	 * The newer build layout loads a class its build step generates from the
+	 * one annotated `@Source`, carrying `name`, `lang` and `baseUrl`; the class
+	 * in the source tree declares none of them, and a source that builds every
+	 * request from `baseUrl` asks for `undefined/…` without them. Absent for
+	 * every extension that is the class it loads, and the bundle is then
+	 * byte-identical to one built before this existed.
+	 */
+	readonly generated?: { readonly name: string; readonly lang: string };
+}
+
+/**
+ * The members a generated subclass supplies, attached before the constructor
+ * runs — see `AniyomiEntrypointOptions.generated`.
+ *
+ * On the prototype and only where nothing in the chain answers the name
+ * already, which is the order Kotlin resolves an override in: a class that
+ * declares one itself still wins. Before \`new\` rather than after, because the
+ * generated class is the most-derived one, so what it supplies is already there
+ * while every class above it initialises — a property initialiser that reads
+ * \`baseUrl\` reads the real one. The same arrangement as \`mihon-entry.ts\`'s,
+ * for the same generator.
+ */
+function generatedPrelude(
+	className: string,
+	generated: AniyomiEntrypointOptions['generated']
+): string {
+	if (generated === undefined) return '';
+	return `(function (proto) {
+  var supplied = { baseUrl: __BASE_URL, lang: ${JSON.stringify(generated.lang)}, name: ${JSON.stringify(generated.name)} };
+  for (var key in supplied) {
+    if (supplied[key].length === 0 || key in proto) continue;
+    Object.defineProperty(proto, key, {
+      value: supplied[key],
+      writable: true,
+      enumerable: false,
+      configurable: true
+    });
+  }
+})(${className}.prototype);
+`;
 }
 
 /**
@@ -1057,7 +1101,7 @@ function __firstSource(made) {
   return all[0];
 }
 
-const __source = __firstSource(new ${options.className}());
+${generatedPrelude(options.className, options.generated)}const __source = __firstSource(new ${options.className}());
 ${ANIYOMI_DRIVER}
 
 /* --- the adapter ----------------------------------------------------------- */
