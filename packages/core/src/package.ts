@@ -212,8 +212,10 @@ const ENTRYPOINT = 'source';
  *     A file-scope reified function called from another file is given its
  *     type, and a nested `object` read by its qualified name resolves, so an
  *     IReader search no longer dies on `findInstance` or `Type.Search`; the
- *     IReader shim's page rows are `mangas`. Reconvert every bundle made at
- *     60 or earlier.
+ *     IReader shim's page rows are `mangas`. A Sora module's failure
+ *     returned as a value (`"Error: …"` where a URL belongs) is a failure
+ *     carrying its text rather than an episode id. Reconvert every bundle
+ *     made at 60 or earlier.
  */
 export const CONVERTER_VERSION = 61;
 

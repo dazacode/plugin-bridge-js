@@ -175,6 +175,53 @@ function __need(name) {
   return fn;
 }
 
+/**
+ * Whether a value a module put where a URL belongs is plainly not a URL.
+ *
+ * These modules wrap their requests in try/catch and, when one fails, return
+ * the failure *as the value*: \`"Error: fetchv2 unavailable"\` as the stream,
+ * or as an episode's href. That reads as \`scheme:\` followed by text, which
+ * \`__absolute\` takes for an absolute address and keeps — so it travelled on as
+ * an episode id, was handed back to the module, and resolved to nothing, with
+ * the reason gone.
+ *
+ * Decided by structure, not by phrase: a value that names a scheme claims to
+ * be absolute, and an absolute URL never contains whitespace, where a
+ * sentence after a colon always does. (\`URL\` is no judge of it: it accepts
+ * that sentence as an opaque URL.) A value with no scheme is relative and
+ * still resolves against the base, because many modules use bare paths and
+ * ids as their hrefs.
+ */
+function __notAUrl(value) {
+  if (typeof value !== 'string') return false;
+  const text = value.trim();
+  if (!/^[a-z][a-z0-9+.-]*:/i.test(text)) return false;
+  return /\\s/.test(text);
+}
+
+/** The module's own sentence, as the failure it is. */
+function __answeredWith(text, where) {
+  return new Error('The module answered "' + String(text).trim() + '" where ' + where + ' belongs.');
+}
+
+/**
+ * A list the module returned, or the failure it returned instead.
+ *
+ * A non-empty string that is not JSON is not an empty list: it is the
+ * module's catch block talking, and reading it as \`[]\` reported "returned
+ * nothing" for a request that failed.
+ */
+function __rows(value, where) {
+  const decoded = __decode(value);
+  if (typeof decoded === 'string' && decoded.trim().length > 0) throw __answeredWith(decoded, where);
+  return __array(decoded);
+}
+
+/** The href a row carries, before resolution. */
+function __hrefOf(row) {
+  return row && typeof row === 'object' ? row.href || row.url || '' : '';
+}
+
 /** A Sora search row, as a catalogue entry. */
 function __entry(row) {
   if (!row || typeof row !== 'object') return null;
@@ -350,23 +397,31 @@ export default {
     // Sora modules are single-page by construction; see this file's header.
     if (Number(page) > 1) return { entries: [] };
 
-    const rows = __array(await __need('searchResults')(String(query)));
+    const rows = __rows(await __need('searchResults')(String(query)), 'a list of results');
     const entries = [];
+    let refused = null;
     for (const row of rows) {
+      // A row whose href is the module's failure is not a result; if nothing
+      // else is, that failure is the answer.
+      if (__notAUrl(__hrefOf(row))) { refused = refused || __hrefOf(row); continue; }
       const entry = __entry(row);
       if (entry !== null) entries.push(entry);
     }
+    if (entries.length === 0 && refused !== null) throw __answeredWith(refused, "a result's URL");
     return { entries: entries };
   },
 
   async listEpisodes(sourceMediaId, ctx) {
     __enter(ctx);
-    const rows = __array(await __need('extractEpisodes')(String(sourceMediaId)));
+    const rows = __rows(await __need('extractEpisodes')(String(sourceMediaId)), 'a list of episodes');
     const episodes = [];
+    let refused = null;
     for (let index = 0; index < rows.length; index += 1) {
+      if (__notAUrl(__hrefOf(rows[index]))) { refused = refused || __hrefOf(rows[index]); continue; }
       const episode = __episode(rows[index], index);
       if (episode !== null) episodes.push(episode);
     }
+    if (episodes.length === 0 && refused !== null) throw __answeredWith(refused, "an episode's URL");
     // Ascending, because a source listing newest first is common and an
     // episode grid that counts down is not what anyone means by episode one.
     episodes.sort(function (a, b) { return a.number - b.number; });
@@ -379,7 +434,9 @@ export default {
     const found = __streams(await __need('extractStreamUrl')(String(target)));
 
     const sources = [];
+    let refused = null;
     for (const item of found) {
+      if (__notAUrl(item.url)) { refused = refused || item.url; continue; }
       const url = __absolute(item.url, __BASE_URL);
       if (!__isPlayable(url)) continue;
       sources.push({
@@ -394,6 +451,7 @@ export default {
         subtitles: __subtitles(item.subtitles)
       });
     }
+    if (sources.length === 0 && refused !== null) throw __answeredWith(refused, 'a stream URL');
     return sources;
   }
 };
