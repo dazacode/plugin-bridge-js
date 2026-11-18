@@ -886,4 +886,68 @@ globalThis.Target = Target;
 		// 1 is Head and 2 is Post; an older table here sent 1 as a GET.
 		expect(sent.map((one) => one.method)).toEqual(['HEAD', 'POST']);
 	});
+
+	it('sends covers through the cover client as headers by host, once per host', async () => {
+		const bundle = TRANSPORT_BUNDLE(false)
+			.replace(
+				'async getChapterData()',
+				`async search() {
+    return { results: [
+      { id: 'a', title: 'A', cover: 'https://cdn.example.invalid/a.jpg' },
+      { id: 'b', title: 'B', cover: 'https://cdn.example.invalid/b.jpg' }
+    ], isLastPage: true };
+  }
+  getCoverTransport() { return this.covers; }
+  async getChapterData()`
+			)
+			.replace(
+				'this.images = new Client(',
+				`this.covers = new Client([async (request) => {
+      // A real request on the way, so the test can count dry runs.
+      await this.client.get('https://site.example.invalid/viewer/0');
+      return { url: request.url, headers: { referer: 'https://site.example.invalid/', host: 'x' } };
+    }], []);
+    this.images = new Client(`
+			);
+		const module = (await loadBundle(bundle)) as unknown as {
+			searchCatalog(q: string, p: number, ctx: unknown): Promise<Record<string, unknown>>;
+		};
+		const page = await module.searchCatalog('q', 1, context());
+		expect(page['imageHeadersByHost']).toEqual({
+			'cdn.example.invalid': { referer: 'https://site.example.invalid/' }
+		});
+		// Two covers on one host, one dry run.
+		expect(sent.map((one) => one.url)).toEqual(['https://site.example.invalid/viewer/0']);
+		expect(
+			(page['entries'] as Record<string, unknown>[]).map((one) => one['posterImageHeaders'])
+		).toEqual([undefined, undefined]);
+	});
+
+	it('gives each cover its own headers where the cover client rewrites the address', async () => {
+		const bundle = TRANSPORT_BUNDLE(false).replace(
+			'async getChapterData()',
+			`async search() {
+    return { results: [
+      { id: 'a', title: 'A', cover: 'https://site.example.invalid/viewer/1' },
+      { id: 'b', title: 'B', cover: 'https://site.example.invalid/viewer/2' }
+    ], isLastPage: true };
+  }
+  getCoverTransport() { return this.images; }
+  async getChapterData()`
+		);
+		const module = (await loadBundle(bundle)) as unknown as {
+			searchCatalog(q: string, p: number, ctx: unknown): Promise<Record<string, unknown>>;
+		};
+		const page = await module.searchCatalog('q', 1, context());
+		expect(page['imageHeadersByHost']).toBeUndefined();
+		expect(
+			(page['entries'] as Record<string, unknown>[]).map((one) => [
+				one['posterImageUrl'],
+				one['posterImageHeaders']
+			])
+		).toEqual([
+			['https://img.example.invalid/1.jpg', { referer: 'https://site.example.invalid/' }],
+			['https://img.example.invalid/2.jpg', { referer: 'https://site.example.invalid/' }]
+		]);
+	});
 });

@@ -176,9 +176,9 @@ async function __throughTransport(source, result) {
     var own = page.headers || {};
     for (var key in own) { headers[key] = own[key]; has = true; }
     if (sent !== null) {
-      for (var name in sent.headers) {
-        if (__HOST_HEADERS[String(name).toLowerCase()] === 1) continue;
-        headers[name] = String(sent.headers[name]);
+      var captured = __imageHeaders(sent.headers);
+      for (var name in captured) {
+        headers[name] = captured[name];
         has = true;
       }
     }
@@ -188,15 +188,85 @@ async function __throughTransport(source, result) {
   return { pages: pages };
 }
 
+var __ORIGIN_COVER = 1;
+
+/**
+ * Covers through the source's cover client, as headers the host applies.
+ *
+ * \`ABI.md\` §9.1 (level 3): a catalogue page may carry \`imageHeadersByHost\`,
+ * and a cover may carry its own \`posterImageHeaders\`. The client
+ * \`getCoverTransport\` returns is run once per cover host on that host's first
+ * cover, and what it would have sent becomes the host's entry — a page of
+ * thirty covers from one CDN costs one dry run, not thirty. Only where the
+ * client rewrites the address does each cover on that host get its own run.
+ *
+ * A cover is a nicety, not the content: a client that reads the image's own
+ * response, or that fails, leaves that host's covers without headers rather
+ * than failing the search a viewer asked for. Before level 3 a host ignores
+ * both fields, and is exactly where it was.
+ */
+async function __throughCoverTransport(source, page) {
+  if (typeof source.getCoverTransport !== 'function' || !page || !Array.isArray(page.entries)) return page;
+  var byHost = {};
+  var rewrites = {};
+  var tried = {};
+  for (var i = 0; i < page.entries.length; i++) {
+    var entry = page.entries[i];
+    var url = entry.posterImageUrl;
+    if (typeof url !== 'string' || url.indexOf('https://') !== 0) continue;
+    var host = __hostOf(url);
+    if (host === null) continue;
+    if (tried[host] === true && rewrites[host] !== true) continue;
+    tried[host] = true;
+    var sent = null;
+    try {
+      var transport = source.getCoverTransport({ url: url, origin: __ORIGIN_COVER });
+      if (transport && typeof transport === 'object') sent = await __dispatchImage(transport, url, __ORIGIN_COVER);
+    } catch (error) {
+      sent = null;
+    }
+    if (sent === null) continue;
+    var headers = __imageHeaders(sent.headers);
+    if (sent.url !== url) {
+      rewrites[host] = true;
+      entry.posterImageUrl = sent.url;
+      if (Object.keys(headers).length > 0) entry.posterImageHeaders = headers;
+    } else if (Object.keys(headers).length > 0) {
+      byHost[host] = headers;
+    }
+  }
+  if (Object.keys(byHost).length > 0) page.imageHeadersByHost = byHost;
+  return page;
+}
+
+function __hostOf(url) {
+  var text = String(url);
+  if (text.slice(0, 8).toLowerCase() !== 'https://') return null;
+  var host = text.slice(8).split(/[/?#:]/)[0].toLowerCase();
+  return host.length === 0 ? null : host;
+}
+
+/** A captured request's headers, without the ones the host owns. */
+function __imageHeaders(headers) {
+  var out = {};
+  for (var name in headers || {}) {
+    var lower = String(name).toLowerCase();
+    if (__HOST_HEADERS[lower] === 1 || lower.indexOf('proxy-') === 0) continue;
+    out[lower] = String(headers[name]);
+  }
+  return out;
+}
+
 /** What the transport would have sent for one page, or null if it sent nothing. */
-async function __dispatchImage(transport, url) {
+async function __dispatchImage(transport, url, origin) {
+  var as = origin === undefined ? __ORIGIN_PAGE : origin;
   __capture = { request: null, bodyID: null, bodyRead: false };
   try {
     try {
       if (typeof transport[__IMAGE_DISPATCH] === 'function') {
-        await transport[__IMAGE_DISPATCH]({ url: url, origin: __ORIGIN_PAGE }, undefined);
+        await transport[__IMAGE_DISPATCH]({ url: url, origin: as }, undefined);
       } else if (typeof transport.__dispatchImage === 'function') {
-        await transport.__dispatchImage(url, __ORIGIN_PAGE);
+        await transport.__dispatchImage(url, as);
       } else {
         return null;
       }
@@ -263,7 +333,7 @@ export default {
     var asked = String(query === null || query === undefined ? '' : query);
     var wanted = Number(page) > 0 ? Number(page) : 1;
     __checkout(source);
-    return __search(source, asked, wanted);
+    return __throughCoverTransport(source, await __search(source, asked, wanted));
   },
 
   async listChapters(sourceMediaId, ctx) {
