@@ -9203,6 +9203,9 @@ function __responseOf(raw, text, request, bytes) {
        which is also what a host that does not report one answers here. */
     message: __str(raw.message),
     isSuccessful: raw.status >= 200 && raw.status < 300,
+    // okhttp's set, which is the one a client that turned redirects off reads
+    // to tell "here is where it went" from a failure.
+    isRedirect: [300, 301, 302, 303, 307, 308].indexOf(raw.status) !== -1,
     request: finalRequest,
     url: finalUrl,
     headers: __headersObject(__headerPairs(raw.headers)),

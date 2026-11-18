@@ -2201,6 +2201,25 @@ describe('okhttp, over the host', () => {
 		);
 	});
 
+	it('tells a redirect from a failure, for a client with redirects off', async () => {
+		// Such a client reads `isRedirect` to take the `Location` as its answer;
+		// missing, every redirect read as a failure and the stream was dropped.
+		const { ctx } = context({
+			'https://example.invalid/file': {
+				body: '',
+				status: 302,
+				headers: { Location: 'https://cdn.example.invalid/file.mp4' }
+			}
+		});
+		runtime.enter(ctx);
+		const noRedirects = runtime.client.newBuilder().followRedirects(false).build();
+		const response = (await noRedirects
+			.newCall(runtime.globals.GET('https://example.invalid/file'))
+			.execute()) as { isRedirect: boolean; isSuccessful: boolean };
+		expect(response.isRedirect).toBe(true);
+		expect(response.isSuccessful).toBe(false);
+	});
+
 	it('reads one response header by name, as okhttp does', async () => {
 		// `response.header("Server") !in SERVER_CHECK` is how an interceptor
 		// tells a challenge from an answer. Missing, it was a TypeError on every
