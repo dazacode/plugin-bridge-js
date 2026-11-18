@@ -871,6 +871,51 @@ describe('file-scope functions that share a name', () => {
 	});
 });
 
+describe('a member with a reified type parameter, called bare', () => {
+	it('passes the type, including one with commas of its own', async () => {
+		// `extract<Dto>(text, "items")` from inside the class. The member is
+		// emitted as `extract(__type_T, text, key)`, and the bare call passed
+		// only `(text, key)`: the text became the type, the key the text, and
+		// the member's own catch answered null — a list read as empty. A type
+		// argument such as `Map<String, Map<String, String>>` was split at its
+		// inner commas and refused for arity.
+		const d = await instantiate(
+			'Demo',
+			kt(
+				'class Item(val name: String)',
+				'class Demo {',
+				'    private inline fun <reified T> extract(text: String, key: String): T? =',
+				'        try { text.substringAfter("$key=").parseAs<T>() } catch (e: Exception) { null }',
+				'    fun items(text: String): List<String> = extract<List<Item>>(text, "items")?.map { it.name } ?: emptyList()',
+				'    fun nested(text: String): Int = extract<Map<String, Map<String, String>>>(text, "dict")?.size ?: -1',
+				'}'
+			)
+		);
+		expect(d.items('items=[{"name":"x"},{"name":"y"}]')).toEqual(['x', 'y']);
+		expect(d.nested('dict={"a":{"b":"c"},"d":{}}')).toBe(2);
+	});
+
+	it('decodes a class handed through the type parameter by its serializer, defaults and all', async () => {
+		// The same class decoded through a generic helper and decoded directly
+		// must agree: by shape alone, a field's default and its `with = …`
+		// serializer were skipped, and the first read of it found null.
+		const d = await instantiate(
+			'Demo',
+			kt(
+				'@Serializable',
+				'class Row(val url: String, @SerialName("title_list") val titles: Map<String, String> = emptyMap())',
+				'class Demo {',
+				'    private inline fun <reified T> read(text: String): T = text.parseAs<T>()',
+				'    fun viaHelper(): String = read<Row>("""{"url":"/x"}""").titles["1"] ?: "none"',
+				'    fun direct(): String = """{"url":"/x"}""".parseAs<Row>().titles["1"] ?: "none"',
+				'}'
+			)
+		);
+		expect(d.direct()).toBe('none');
+		expect(d.viaHelper()).toBe('none');
+	});
+});
+
 describe('a reference to a member the template declares', () => {
 	it('binds it to the inherited value, not to the argument', async () => {
 		// DooPlay's `protected open val episodeNumberRegex`, read by a subclass

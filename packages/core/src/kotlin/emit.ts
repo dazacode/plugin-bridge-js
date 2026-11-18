@@ -8084,7 +8084,9 @@ class Emitter {
 		if (written === null) {
 			this.refuse(at, `\`.${name}()\` with no type argument for its \`reified\` parameter`);
 		}
-		const parts = written.split(',').map((one) => one.trim());
+		// Split at the commas between arguments, not the ones inside them:
+		// `<Map<String, Map<String, String>>>` is one type argument.
+		const parts = topLevelTypeArguments(written);
 		if (parts.length !== reified.length) {
 			this.refuse(at, `\`.${name}()\` with ${parts.length} type arguments for ${reified.length}`);
 		}
@@ -10085,10 +10087,20 @@ class Emitter {
 		// from inside an `apply {}` landed on the record being built.
 		const self = this.selfReference();
 		const collided = this.fieldNames().has(name) ? this.overloadsOf(name) : null;
+		// A member's own `reified` parameter is its first JavaScript argument
+		// (`pick(__type_T, …)`), so the bare call has to pass the type as the
+		// member call already does. Without it `pick<Dto>(text, "items")` sent
+		// the text as the type and the key as the text, and answered null
+		// from inside whatever catch the member had — a list read as empty,
+		// with nothing refused.
+		const reifiedTypes =
+			this.isSourceMember(name) && this.reifiedFunctions.has(name)
+				? this.reifiedArguments(callee, name, typeArgument, expected)
+				: [];
 		const call =
 			collided === null
-				? `${self}.${name}(${tail.join(', ')})`
-				: this.overloadCall(self, self, name, tail, collided);
+				? `${self}.${name}(${[...reifiedTypes, ...tail].join(', ')})`
+				: this.overloadCall(self, self, name, [...reifiedTypes, ...tail], collided);
 		// Declared by the class being emitted, or by a translated base class it
 		// really `extends` — `launchIO { countViews(document) }` in an extension
 		// on a theme that declares `launchIO`. Either way the method exists on
@@ -13921,6 +13933,23 @@ function overloadTable(name: string, shapes: readonly OverloadSignature[]): stri
 			shape.defaults
 		])
 	);
+}
+
+/** A written type-argument list split at its own commas, generics kept whole. */
+function topLevelTypeArguments(written: string): string[] {
+	const parts: string[] = [];
+	let depth = 0;
+	let current = '';
+	for (const char of written) {
+		if (char === '<' || char === '(') depth += 1;
+		else if (char === '>' || char === ')') depth -= 1;
+		if (char === ',' && depth === 0) {
+			parts.push(current.trim());
+			current = '';
+		} else current += char;
+	}
+	if (current.trim().length > 0) parts.push(current.trim());
+	return parts;
 }
 
 /** A `class` this emitter writes as a JavaScript class: not an interface, enum or data class. */

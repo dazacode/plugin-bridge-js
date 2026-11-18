@@ -7634,7 +7634,7 @@ var __k = {
    * is null when it names none.
    */
   serial: function (name, make, meta, custom, ctor) {
-    var registration = { make: make, meta: meta, custom: custom };
+    var registration = { make: make, meta: meta, custom: custom, name: name };
     __SERIAL[name] = registration;
     // The class (or a data class's factory) answers for its instances, which
     // is how the encoder finds the registration from a value — see
@@ -7882,7 +7882,18 @@ var __k = {
    * descriptor thunk, which an ES6 class refuses.
    */
   typeText: function (type) {
-    return typeof type === 'string' ? type : 'Any';
+    if (typeof type === 'string') return type;
+    // A class with a serializer registration is read by that registration,
+    // which is what the same call written with the type in place — '__k.decode
+    // (text, "Dto")' — already does: its defaults, its '@SerialName's and a
+    // field's own 'with = …' serializer all run. Read by shape instead, a
+    // field whose serializer turns '[]' into an empty map came back as the raw
+    // array or absent, and the first read of it found null.
+    if (typeof type === 'function' && type.__kSerial !== undefined) {
+      var name = type.__kSerial.name;
+      if (typeof name === 'string' && __SERIAL[name] === type.__kSerial) return name;
+    }
+    return 'Any';
   },
 
   /**
