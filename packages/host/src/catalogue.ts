@@ -25,6 +25,7 @@ import type { RepositoryPlugin } from '@plugin-bridge/core/repository-index';
 import { settingValues } from '@plugin-bridge/core/settings';
 import { verifyConvertedPlugin, type ReachOutcome } from '@plugin-bridge/core/verify';
 import type { PluginHost } from './host';
+import { pageImageProbe } from './page-probe';
 import type { ConversionRecord } from '@plugin-bridge/core/formats';
 
 /** Everything a check needs from the world, and nothing it does not. */
@@ -97,6 +98,9 @@ async function convertToBundle(
  *   plugin refused at its first request.
  * - `log` goes through so a plugin that explains itself on the way down is not
  *   silent in the one tool whose output is a diagnosis.
+ * - `probePage` is the host's own, over the same `fetch`: a check that said a
+ *   book source reads here without loading one of its pages was reporting on
+ *   a step it never took.
  */
 export function verifyOptionsFor(
 	capabilities: CheckCapabilities,
@@ -105,6 +109,11 @@ export function verifyOptionsFor(
 	return {
 		settings,
 		reach: capabilities.reach,
+		// A book source's first page, fetched through this host's own relay as a
+		// reader would load it, whether or not the caller can reach streams:
+		// "searched, listed and opened a page" was said of sources whose every
+		// page answered 403 with an HTML body.
+		probePage: pageImageProbe(capabilities.host.fetch),
 		createWorker: capabilities.host.sandbox,
 		fetcher: capabilities.host.fetch,
 		log: capabilities.host.log,

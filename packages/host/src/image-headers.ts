@@ -203,3 +203,64 @@ export function readCatalogImages(value: unknown): CatalogImages {
 				})
 	};
 }
+
+/**
+ * What a host may apply image headers for: the plugin's grant.
+ *
+ * An `<img>` loads without asking anybody, so the grant cannot refuse a plain
+ * image. What it decides is whether the host makes the request *on the
+ * plugin's behalf* — through its relay, carrying headers a browser will not
+ * send — and outside it an image keeps its own url and carries nothing (§9.1:
+ * "the image request itself is still refused by the grant").
+ */
+export interface ImageGrant {
+	/** The plugin's `network.hosts` patterns. */
+	readonly declared: readonly string[];
+}
+
+/** Header names that carry a credential, which a wildcard never hands out. */
+const CREDENTIAL_HEADERS = new Set(['authorization', 'cookie', 'proxy-authorization']);
+
+function withoutCredentials(headers: ImageHeaders): ImageHeaders {
+	return Object.fromEntries(
+		Object.entries(headers).filter(([name]) => !CREDENTIAL_HEADERS.has(name.toLowerCase()))
+	);
+}
+
+/**
+ * The headers a host sends with one plugin image, or null when it sends none.
+ *
+ * The one answer to "what does this image go out with", so that a reader and
+ * a check asking it get the same one: `https:` only, inside the grant, the
+ * image's own headers over the most specific `…ByHost` entry — and a
+ * credential only through an exact-host pattern or the image's own map, since
+ * `*.cdn.example` names every host that ever answers under it (engine
+ * ADR-0005 §3c).
+ */
+export function grantedImageHeaders(
+	url: string,
+	own: ImageHeaders | undefined,
+	byHost: ImageHeadersByHost | undefined,
+	grant: ImageGrant
+): ImageHeaders | null {
+	let host: string;
+	try {
+		const parsed = new URL(url);
+		if (parsed.protocol !== 'https:') return null;
+		host = parsed.hostname.toLowerCase();
+	} catch {
+		return null;
+	}
+	if (!grant.declared.some((pattern) => hostMatches(host, pattern))) return null;
+	const scoped =
+		byHost === undefined
+			? undefined
+			: Object.fromEntries(
+					Object.entries(byHost).map(([pattern, headers]) => [
+						pattern,
+						pattern.startsWith('*.') ? withoutCredentials(headers) : headers
+					])
+				);
+	const headers = imageHeadersFor(url, own, scoped);
+	return Object.keys(headers).length === 0 ? null : headers;
+}

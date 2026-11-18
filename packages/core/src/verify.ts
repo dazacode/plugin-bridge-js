@@ -31,6 +31,13 @@ import {
 	type RunnablePlugin,
 	type SandboxOptions
 } from '@plugin-bridge/host/sandbox-host';
+import {
+	grantedImageHeaders,
+	readImageHeaders,
+	readImageHeadersByHost,
+	type ImageHeaders
+} from '@plugin-bridge/host/image-headers';
+import { pageImageProbe, type PageProbe } from '@plugin-bridge/host/page-probe';
 import type { ExternalIdKind } from './formats';
 
 /**
@@ -82,6 +89,17 @@ export interface VerificationResult {
 }
 
 export interface VerifyOptions extends SandboxOptions {
+	/**
+	 * Fetches a book source's first page image, and says whether it is one.
+	 *
+	 * Given the url and exactly the headers the host would send with it
+	 * (`grantedImageHeaders`). Where it is absent and `reach` is not, a caller
+	 * that holds a relay `fetcher` gets `pageImageProbe` over it — a caller
+	 * that asked for streams to be reached has asked for pages to be too, and
+	 * a status-only reach is the probe that called a 403-and-HTML page
+	 * readable. `checkListing` always passes one.
+	 */
+	readonly probePage?: PageProbe;
 	/**
 	 * What the sandbox is started with, if anything.
 	 *
@@ -318,6 +336,7 @@ export async function verifyConvertedPlugin(
 		probeIds = DEFAULT_PROBE_IDS,
 		budgetMs = DEFAULT_BUDGET_MS,
 		reach,
+		probePage,
 		settings = {},
 		...sandboxOptions
 	} = options;
@@ -465,12 +484,14 @@ export async function verifyConvertedPlugin(
 			}
 
 			let pages: PageRow[];
+			let headersByHost: unknown;
 			try {
 				const read = (await live.readChapter(candidate, {
 					number: Number(chapter.number) || 1,
 					sourceChapterId: String(chapter.sourceChapterId)
-				})) as { pages?: PageRow[] } | null;
+				})) as { pages?: PageRow[]; headersByHost?: unknown } | null;
 				pages = read?.pages ?? [];
+				headersByHost = read?.headersByHost;
 			} catch (error) {
 				return {
 					ok: false,
@@ -511,35 +532,61 @@ export async function verifyConvertedPlugin(
 				};
 			}
 
-			// A returned image url is a claim, exactly as a stream url is. The
-			// first page is fetched where a probe exists, with the headers the
-			// source asked for — `ABI.md` §8.3 is the whole reason those travel
-			// beside the url, and a probe that dropped them would report 403 on
-			// every source that protects its images and call it broken.
-			// Probed where it is remote. A text page has no host to ask; that it
-			// carries text was settled above.
+			// A returned image url is a claim, exactly as a stream url is, and it is
+			// checked the way a reader will use it: the first remote page, with
+			// the headers the host would send for it — `ABI.md` §8.3 is why those
+			// travel beside the url, §9.1 decides which of them the host applies —
+			// and judged on whether image bytes come back. A text page has no
+			// host to ask; that it carries text was settled above.
 			const remote = readable.filter((page) => String(page.url).startsWith('https://'));
-			if (reach !== undefined && remote.length > 0 && !outOfTime()) {
+			const pageProbe =
+				probePage ??
+				(reach !== undefined && sandboxOptions.fetcher !== undefined
+					? pageImageProbe(sandboxOptions.fetcher)
+					: undefined);
+			if ((pageProbe !== undefined || reach !== undefined) && remote.length > 0 && !outOfTime()) {
 				const first = remote[0];
-				const headers = (first.headers ?? {}) as Record<string, string>;
+				const url = String(first.url);
+				let sent: Readonly<Record<string, string>>;
 				try {
-					const outcome = await reach(String(first.url), headers, [
-						...(sandbox?.reachableHosts ?? plugin.hosts),
-						...hostsOf(String(first.url))
-					]);
+					sent =
+						grantedImageHeaders(
+							url,
+							first.headers === undefined
+								? undefined
+								: readImageHeaders(first.headers, 'pages[0].headers'),
+							headersByHost === undefined
+								? undefined
+								: readImageHeadersByHost(headersByHost, 'headersByHost'),
+							{ declared: plugin.hosts }
+						) ?? {};
+				} catch (error) {
+					// The reader refuses the whole chapter for a header it may not
+					// send, with the field named; so does the check.
+					return { ok: false, failedAt: 'pages', detail: messageOf(error), ...counts };
+				}
+				const dropped = droppedHeaders(first.headers, sent);
+				try {
+					const outcome =
+						pageProbe !== undefined
+							? await pageProbe(url, sent)
+							: await reach!(url, { ...sent }, [
+									...(sandbox?.reachableHosts ?? plugin.hosts),
+									...hostsOf(url)
+								]);
 					if (!outcome.ok) {
 						return {
 							ok: false,
-							failedAt: 'reach',
-							detail: `${hostOf(String(first.url))}: ${outcome.detail}`,
+							failedAt: 'pages',
+							detail: `The first page did not load: ${hostOf(url)} ${outcome.detail}.${dropped}`,
 							...counts
 						};
 					}
 				} catch (error) {
 					return {
 						ok: false,
-						failedAt: 'reach',
-						detail: `${hostOf(String(first.url))}: ${messageOf(error)}`,
+						failedAt: 'pages',
+						detail: `The first page did not load: ${hostOf(url)}: ${messageOf(error)}.${dropped}`,
 						...counts
 					};
 				}
@@ -852,6 +899,24 @@ function textPage(url: string): boolean {
 		return false;
 	}
 	return body.replace(/<[^>]*>/g, '').trim().length > 0;
+}
+
+/**
+ * A clause naming the headers a source set on a page that the host will not
+ * send, or ''.
+ *
+ * The difference between "the CDN refuses us" and "the CDN refuses a request
+ * the source never meant to be made bare": a page whose own `Referer` was left
+ * off because its host is outside the plugin's grant fails for a reason that
+ * is ours, and the verdict says so rather than blaming the source.
+ */
+function droppedHeaders(own: unknown, sent: Readonly<Record<string, string>>): string {
+	if (own === null || typeof own !== 'object') return '';
+	const names = Object.keys(own as ImageHeaders)
+		.map((name) => name.toLowerCase())
+		.filter((name) => !(name in sent));
+	if (names.length === 0) return '';
+	return ` The source set ${names.join(', ')} for it, which this host does not send there.`;
 }
 
 function hostsOf(url: unknown): string[] {

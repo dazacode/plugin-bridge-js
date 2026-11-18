@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest';
 
 import vectors from '../../../contract/fixtures/level-3/image-headers.json';
 import {
+	grantedImageHeaders,
 	imageHeadersFor,
 	readCatalogImages,
 	readChapterImages,
@@ -62,5 +63,30 @@ describe('image headers a level-3 host applies', () => {
 				}
 			]
 		});
+	});
+});
+
+describe('the headers a host sends with one plugin image', () => {
+	const grant = { declared: ['read.example.invalid', '*.cdn.example.invalid'] };
+	const byHost = {
+		'*.cdn.example.invalid': { referer: 'https://read.example.invalid/', cookie: 'k=v' }
+	};
+
+	it('applies them inside the grant and nowhere else', () => {
+		expect(
+			grantedImageHeaders('https://a.cdn.example.invalid/1.jpg', undefined, byHost, grant)
+		).toEqual({ referer: 'https://read.example.invalid/' });
+		expect(
+			grantedImageHeaders('https://other.example.invalid/1.jpg', { referer: 'x' }, byHost, grant)
+		).toBeNull();
+		expect(
+			grantedImageHeaders('http://read.example.invalid/1.jpg', { referer: 'x' }, undefined, grant)
+		).toBeNull();
+	});
+
+	it('hands a credential out only through the image’s own map, never a wildcard', () => {
+		expect(
+			grantedImageHeaders('https://a.cdn.example.invalid/1.jpg', { cookie: 'mine' }, byHost, grant)
+		).toEqual({ referer: 'https://read.example.invalid/', cookie: 'mine' });
 	});
 });

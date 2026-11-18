@@ -16,6 +16,9 @@ import { describe, expect, it } from 'vitest';
 
 import { describeVerification, verifyConvertedPlugin } from './verify';
 import type { RunnablePlugin } from '@plugin-bridge/host/sandbox-host';
+import { pageImageProbe } from '@plugin-bridge/host/page-probe';
+import { encodeFrame } from '@plugin-bridge/host/net/frames';
+import { FRAME_CONTENT_TYPE } from '@plugin-bridge/host/net/relay';
 
 const PLUGIN: RunnablePlugin = {
 	id: 'app.yorozo.converted.sora.example',
@@ -600,5 +603,131 @@ describe('a source that answers a word and not a letter', () => {
 		expect(result).toMatchObject({ ok: false, failedAt: 'search', searchHits: 0 });
 		expect(asked).toEqual(['a', 'the']);
 		expect(result.detail).toMatch(/searched for "a", then "the"/);
+	});
+});
+
+describe('a book source’s first page, loaded as a reader would load it', () => {
+	// Measured live: a Mana source's image client sets a Referer, its CDN
+	// answers 403 with an HTML body without one, and the in-app check said
+	// "reads here" while the reader showed "Page 1 did not load". The check now
+	// fetches the first page with exactly the headers the host would send, and
+	// counts it only when image bytes come back.
+	const BOOK: RunnablePlugin = {
+		...PLUGIN,
+		hosts: ['read.example.invalid', 'img.example.invalid'],
+		converted: {
+			format: 'mana',
+			foreignId: 'demo',
+			foreignVersion: '1',
+			convertedAt: '2026-01-01T00:00:00.000Z',
+			converterVersion: 1,
+			verified: false,
+			mediaKind: 'manga'
+		}
+	};
+	const REFERER = { referer: 'https://read.example.invalid/' };
+	const JPEG = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 16, 74, 70, 73, 70]);
+	const HTML = new TextEncoder().encode('<!DOCTYPE html><html><body>Forbidden</body></html>');
+
+	function framed(status: number, type: string, body: Uint8Array, url: string): Response {
+		return new Response(
+			encodeFrame({ status, url, headers: { 'content-type': type }, body }) as BodyInit,
+			{ headers: { 'content-type': FRAME_CONTENT_TYPE } }
+		);
+	}
+
+	/**
+	 * A relay over a small world: the source's chapter document names its CDN,
+	 * and every image server answers 403 and HTML unless the Referer is there.
+	 */
+	function relay(imageAnswer?: (sent: Record<string, string>) => Response) {
+		const probed: { url: string; headers: Record<string, string> }[] = [];
+		const fetcher = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+			const sent = JSON.parse(String(init?.body)) as {
+				url: string;
+				headers: Record<string, string>;
+			};
+			if (sent.url.startsWith('https://read.example.invalid/')) {
+				const page = '{"images":["https://cdn7.media.example.invalid/c/1.jpg"]}';
+				return framed(200, 'text/html', new TextEncoder().encode(page), sent.url);
+			}
+			probed.push({ url: sent.url, headers: sent.headers });
+			if (imageAnswer !== undefined) return imageAnswer(sent.headers);
+			return sent.headers['referer'] === REFERER.referer
+				? framed(200, 'image/jpeg', JPEG, sent.url)
+				: framed(403, 'text/html; charset=UTF-8', HTML, sent.url);
+		}) as typeof fetch;
+		return { fetcher, probed };
+	}
+
+	function readWith(pages: unknown[], fetcher: typeof fetch) {
+		return verifyConvertedPlugin(BOOK, 'export default {};', {
+			createWorker: () =>
+				new FakeWorker(
+					{
+						load: { id: PLUGIN.id, declares: ['searchCatalog', 'listChapters', 'readChapter'] },
+						searchCatalog: { entries: [{ sourceMediaId: 'https://read.example.invalid/b/1' }] },
+						listChapters: [{ number: 1, sourceChapterId: 'https://read.example.invalid/b/1/1' }],
+						readChapter: { pages }
+					},
+					{ readChapter: ['https://read.example.invalid/b/1/1'] }
+				) as unknown as Worker,
+			fetcher,
+			probePage: pageImageProbe(fetcher)
+		});
+	}
+
+	it('reads a page that comes back as image bytes with the headers its source set', async () => {
+		const { fetcher, probed } = relay();
+		const result = await readWith(
+			[{ index: 0, url: 'https://img.example.invalid/c/1.jpg', headers: REFERER }],
+			fetcher
+		);
+
+		expect(result).toMatchObject({ ok: true, failedAt: null });
+		expect(probed[0].headers).toMatchObject({ ...REFERER, 'sec-fetch-dest': 'image' });
+		expect(probed[0].headers['accept']).toMatch(/^image\//);
+	});
+
+	it('fails at pages when the image server answers 403 with a page of HTML', async () => {
+		const { fetcher } = relay();
+		const result = await readWith(
+			[{ index: 0, url: 'https://img.example.invalid/c/1.jpg' }],
+			fetcher
+		);
+
+		expect(result).toMatchObject({ ok: false, failedAt: 'pages' });
+		expect(result.detail).toBe(
+			'The first page did not load: img.example.invalid answered 403 (text/html), not an image.'
+		);
+	});
+
+	it('fails at pages when a 200 carries an HTML page rather than an image', async () => {
+		const { fetcher } = relay(() =>
+			framed(200, 'image/jpeg', HTML, 'https://img.example.invalid/c/1.jpg')
+		);
+		const result = await readWith(
+			[{ index: 0, url: 'https://img.example.invalid/c/1.jpg', headers: REFERER }],
+			fetcher
+		);
+
+		expect(result).toMatchObject({ ok: false, failedAt: 'pages' });
+		expect(result.detail).toMatch(/answered 200 \(image\/jpeg\) with an HTML page, not an image/);
+	});
+
+	it('sends no header the host would not, and says which the source set', async () => {
+		// The page's host is outside the declared grant: the reader loads it
+		// bare, so the check does too, and its verdict names what was left off.
+		const { fetcher, probed } = relay();
+		const result = await readWith(
+			[{ index: 0, url: 'https://elsewhere.example.invalid/c/1.jpg', headers: REFERER }],
+			fetcher
+		);
+
+		expect(probed[0].headers['referer']).toBeUndefined();
+		expect(result).toMatchObject({ ok: false, failedAt: 'pages' });
+		expect(result.detail).toMatch(
+			/The source set referer for it, which this host does not send there\./
+		);
 	});
 });
