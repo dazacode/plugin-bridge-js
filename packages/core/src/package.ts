@@ -216,8 +216,14 @@ const ENTRYPOINT = 'source';
  *     returned as a value (`"Error: …"` where a URL belongs) is a failure
  *     carrying its text rather than an episode id. Reconvert every bundle
  *     made at 60 or earlier.
+ * 62: IReader's declarative base class runs (it answered every list empty);
+ *     a function-typed property is callable, named arguments with a trailing
+ *     block are placed, a call longer than its declaration goes to the base's
+ *     overload, `String.matches(Regex)` and `println` translate, and a
+ *     template's refused override of a driver-called member now blocks.
+ *     Reconvert every bundle made at 61 or earlier.
  */
-export const CONVERTER_VERSION = 61;
+export const CONVERTER_VERSION = 62;
 
 export interface BundleInput {
 	readonly id: string;
