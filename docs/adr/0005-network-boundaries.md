@@ -126,6 +126,39 @@ platform would have given it, and nothing else.
 
 ---
 
+## 3c. Amended 2026-11-17 — a plugin-authored `Authorization` reaches its own grant
+
+Decided by the owner, against one listing that could not search without it.
+Its search host answers only a bearer token that the extension itself reads off
+the source's own page and puts on its own request. The relay forwarded an
+allowlist of headers that did not include `Authorization`, so the token the
+plugin built never left, every search answered 401, and the extension reported
+an empty result.
+
+`relay.ts` kept `Authorization` out of its allowlist for a stated reason: a
+caller able to set arbitrary headers could attach a credential meant for
+somewhere else. That reason still stands, so the header is **not** added to the
+allowlist. It travels on its own field, the same way the jar's `Cookie` does,
+and only under these bounds:
+
+- **Plugin-authored only.** It is the `Authorization` the plugin's own request
+  carried. The host never adds one, never fills one from a request policy, and
+  never forwards a credential the viewer or the host holds.
+- **Declared grant only.** It is sent only when the request's host matches a
+  host the plugin _declared_ — not one learned at run time from a page.
+- **One origin.** The relay puts it on the first hop and on any redirect hop
+  with the same origin as the first, and drops it on every other hop, as a
+  browser drops `Authorization` on a cross-origin redirect. A redirect that
+  leaves the origin therefore cannot leave the grant with the header, and the
+  next request the plugin makes is checked against the grant again.
+- `Cookie` stays out of the allowlist; see §3d.
+
+The plugin gains nothing it could not already do: it could already reach the
+host, and it already holds the token, because it fetched it. What it gains is
+that the token arrives.
+
+---
+
 ## 4. Site-side JavaScript execution
 
 **What is missing.** A way to run the page's own scripts so that a player
