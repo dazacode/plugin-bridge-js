@@ -251,6 +251,22 @@ for (const __own of [
   if (!(__own[0] in __source)) __source[__own[0]] = __own[1];
 }
 
+/**
+ * The client the base class's own requests go through: the extension's.
+ *
+ * 'AnimeHttpSource' sends its default requests — the shelf, a search, the
+ * details and episode pages, the hoster and video pages — with 'client', a
+ * property the extension overrides whenever it needs an interceptor: an
+ * auth token, a rate limit, a header the API insists on. The driver sent them
+ * with the runtime's shared client, so an extension whose search host wants a
+ * bearer token added by its own interceptor was searched without one and
+ * answered 401, with nothing refused.
+ */
+function __client() {
+  const own = __source.client;
+  return own && typeof own.newCall === 'function' ? own : client;
+}
+
 /** Calls the extension's own member when it has one. */
 function __declares(name) {
   return typeof __source[name] === 'function';
@@ -374,7 +390,7 @@ const __super = {
   },
 
   getAnimeDetails: async function (anime) {
-    const response = await client.newCall(__detailsRequest(anime)).execute();
+    const response = await __client().newCall(__detailsRequest(anime)).execute();
     if (!__declares('animeDetailsParse')) {
       throw new Error('This extension calls super.getAnimeDetails but declares no details parser.');
     }
@@ -388,7 +404,7 @@ const __super = {
     return parsed;
   },
   getEpisodeList: async function (anime) {
-    const response = await client.newCall(__episodeRequest(anime)).execute();
+    const response = await __client().newCall(__episodeRequest(anime)).execute();
     return __declares('episodeListParse')
       ? await __call('episodeListParse', response)
       : await __defaultEpisodeList(response);
@@ -562,7 +578,7 @@ async function __page(kind, request) {
  * catalogue entries. One code path, two shapes at the ends of it.
  */
 async function __fetchPage(kind, request) {
-  const response = await client.newCall(request).execute();
+  const response = await __client().newCall(request).execute();
   const parse = kind + 'Parse';
   return __declares(parse) ? await __call(parse, response) : __parsePage(kind, response);
 }
@@ -785,7 +801,7 @@ async function __hosterListDefault(episode) {
   const request = __declares('hosterListRequest')
     ? await __call('hosterListRequest', episode)
     : __super.hosterListRequest(episode);
-  const response = await client.newCall(request).execute();
+  const response = await __client().newCall(request).execute();
   return __declares('hosterListParse')
     ? await __call('hosterListParse', response)
     : await __defaultHosterList(response);
@@ -835,7 +851,7 @@ async function __videoListDefault(source) {
   const request = __declares('videoListRequest')
     ? await __call('videoListRequest', source)
     : __super.videoListRequest(source);
-  const response = await client.newCall(request).execute();
+  const response = await __client().newCall(request).execute();
   if (!__declares('videoListParse')) return await __defaultVideoList(response);
   // The hoster is passed as a second argument on the hoster path and nowhere
   // else. A legacy parser declared with one parameter simply ignores it.
@@ -952,7 +968,7 @@ async function __videoUrlDefault(video) {
   const request = __declares('videoUrlRequest')
     ? await __call('videoUrlRequest', video)
     : __super.videoUrlRequest(video);
-  const response = await client.newCall(request).execute();
+  const response = await __client().newCall(request).execute();
   if (!__declares('videoUrlParse')) {
     throw new Error('This extension declares no videoUrlParse, so a stream url cannot be read.');
   }
@@ -1150,7 +1166,7 @@ export default {
     if (__overrides('getEpisodeList', 1)) {
       parsed = await __call('getEpisodeList', anime);
     } else {
-      const response = await client.newCall(__episodeRequest(anime)).execute();
+      const response = await __client().newCall(__episodeRequest(anime)).execute();
       parsed = __declares('episodeListParse')
         ? await __call('episodeListParse', response)
         : await __defaultEpisodeList(response);

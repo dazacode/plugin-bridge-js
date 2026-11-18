@@ -689,6 +689,42 @@ class Extension {
 	});
 });
 
+describe('the client the base class sends its own requests with', () => {
+	// `AnimeHttpSource` sends its default requests with `client`, a property an
+	// extension overrides to install an interceptor — an auth token, a rate
+	// limit. The driver used the runtime's shared client instead, so a search
+	// host that wanted the extension's bearer token was asked without it.
+	it('is the extension’s own, interceptors and all', async () => {
+		const seen: string[] = [];
+		(globalThis as { __ownClientSeen?: string[] }).__ownClientSeen = seen;
+		const module = await load(`
+class Extension {
+  constructor() { this.baseUrl = '${BASE_URL}'; }
+  get client() {
+    return client.newBuilder().addInterceptor({
+      intercept: function (chain) {
+        globalThis.__ownClientSeen.push(String(chain.request().url));
+        return chain.proceed(chain.request());
+      }
+    }).build();
+  }
+  searchAnimeRequest(page, query, filters) { return GET(this.baseUrl + '/search?q=' + query, {}); }
+  searchAnimeSelector() { return 'li.card'; }
+  searchAnimeFromElement(element) {
+    const anime = SAnime.create();
+    anime.title = element.selectFirst('h3').text();
+    anime.setUrlWithoutDomain(element.selectFirst('a').attr('href'));
+    return anime;
+  }
+}
+`);
+		const page = await module.searchCatalog('one', 1, context().ctx);
+
+		expect(page.entries.map((entry) => entry.title)).toEqual(['One & Only']);
+		expect(seen).toEqual([`${BASE_URL}/search?q=one`]);
+	});
+});
+
 describe('sortVideos, which is where a quality preference is applied', () => {
 	// Extensions override this constantly. A driver without it hands back
 	// streams in whatever order the page listed them, so a viewer gets the
