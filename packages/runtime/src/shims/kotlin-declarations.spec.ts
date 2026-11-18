@@ -824,6 +824,53 @@ describe('an unbound reference to a field of a video model', () => {
 	});
 });
 
+describe('file-scope functions that share a name', () => {
+	// Kotlin resolves these by the receiver's static type, or by the
+	// parameters; each is a function of its own. Emitted under one name they
+	// were two `function` declarations in one module — a SyntaxError at load,
+	// the whole bundle lost to one overload.
+	it('dispatches extension functions by the class of their receiver', async () => {
+		// A listing's two DTO shapes, each with its own `toEntry`.
+		const d = await instantiate(
+			'Demo',
+			kt(
+				'@Serializable',
+				'class Flat(val url: String, val title: String)',
+				'@Serializable',
+				'class Wrapped(val inner: Flat, val note: String? = null)',
+				'fun Flat.toEntry(prefix: String): String = prefix + title + "@" + url',
+				'fun Wrapped.toEntry(prefix: String): String = prefix + "wrapped " + inner.title',
+				'class Demo {',
+				'    fun both(): List<String> = listOf(Flat("/a", "A").toEntry(">"), Wrapped(Flat("/b", "B")).toEntry(">"))',
+				'    fun decoded(): List<String> = """[{"inner":{"url":"/c","title":"C"}}]""".parseAs<List<Wrapped>>().map { it.toEntry("~") }',
+				'}'
+			)
+		);
+		expect(d.both()).toEqual(['>A@/a', '>wrapped B']);
+		expect(d.decoded()).toEqual(['~wrapped C']);
+	});
+
+	it('tells an extension from a plain function of the same name, as a shared helper file declares them', async () => {
+		// The shape of a helper file shared across a whole extension
+		// repository: `fun Source.prefs(migration)` for the source to call,
+		// and `fun prefs(id: Long)` underneath it doing the work.
+		const d = await instantiate(
+			'Demo',
+			kt(
+				'open class Source(val id: Long)',
+				'fun Source.prefs(suffix: String = ""): String = prefs(id) + suffix',
+				'fun prefs(sourceId: Long): String = "store_$sourceId"',
+				'class Demo : Source(7L) {',
+				'    fun mine(): String = prefs("!")',
+				'    fun theirs(): String = prefs(9L)',
+				'}'
+			)
+		);
+		expect(d.mine()).toBe('store_7!');
+		expect(d.theirs()).toBe('store_9');
+	});
+});
+
 describe('a reference to a member the template declares', () => {
 	it('binds it to the inherited value, not to the argument', async () => {
 		// DooPlay's `protected open val episodeNumberRegex`, read by a subclass

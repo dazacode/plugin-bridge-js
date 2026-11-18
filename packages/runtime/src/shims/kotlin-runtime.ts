@@ -966,6 +966,20 @@ function __jeBoolean(value, name, orNull) {
  * default, 'masterHeadersGen: (…) -> Headers' does, and a call naming neither
  * is the second — taken as the first, it called itself for ever.
  */
+/**
+ * Whether a value is an instance of a class the unit declares: constructed as
+ * one, or a decoded record carrying that class's shape.
+ */
+function __receiverIs(value, ctor) {
+  if (value === null || value === undefined || typeof ctor !== 'function') return false;
+  if (value instanceof ctor) return true;
+  if (typeof value !== 'object' || Array.isArray(value)) return false;
+  for (var s = 0; s < __SHAPES.length; s += 1) {
+    if (__SHAPES[s].ctor === ctor) return __shapeFits(__SHAPES[s], value);
+  }
+  return false;
+}
+
 function __overloadAccepts(entry, args) {
   var types = entry[3];
   var nullable = entry[4];
@@ -4827,6 +4841,50 @@ var __k = {
    * no translated declarations at all (a runtime object answering a name a
    * class of this extension also uses).
    */
+  /**
+   * Several file-scope functions under one name: the emitter's dispatcher
+   * (see 'moduleOverload' in emit.ts). Each entry is [function, receiver
+   * class or null, required, total, types, nullable, defaults]. A receiver
+   * class decides first — Kotlin resolved the call by it — and the rest is
+   * the member overload's own test and ranking.
+   */
+  moduleOverload: function (name, args, table, implicit) {
+    var best = null;
+    var bestArgs = null;
+    var bestRank = -1;
+    // A call written with no receiver arrives with the implicit one as
+    // 'implicit', and an extension is tried with it in front: Kotlin passes
+    // it there, and only the arguments' types tell that call from a plain one.
+    var forms = implicit === undefined || implicit === null ? [args] : [args, [implicit].concat(args)];
+    for (var i = 0; i < table.length; i += 1) {
+      var entry = table[i];
+      if (typeof entry[0] !== 'function') continue;
+      var isExtension = entry[4].length > 0 && entry[7] === true;
+      for (var f = 0; f < forms.length; f += 1) {
+        var given = forms[f];
+        if (f === 1 && !isExtension) continue;
+        if (f === 0 && forms.length > 1 && isExtension) continue;
+        if (given.length < entry[2]) continue;
+        if (entry[3] !== -1 && given.length > entry[3]) continue;
+        if (entry[1] !== null && !__receiverIs(given[0], entry[1])) continue;
+        var shaped = [null, entry[2], entry[3], entry[4], entry[5], entry[6]];
+        if (!__overloadAccepts(shaped, given)) continue;
+        var rank = __overloadRank(shaped, given) + (entry[1] !== null ? 8 : 0);
+        if (rank > bestRank) {
+          best = entry;
+          bestArgs = given;
+          bestRank = rank;
+        }
+      }
+    }
+    if (best === null) {
+      throw new Error(
+        'This converted extension called ' + name + ' with arguments none of its declarations takes.'
+      );
+    }
+    return best[0].apply(undefined, bestArgs);
+  },
+
   overload: function (target, self, name, args, table, fallback) {
     var fits = [];
     var declares = false;

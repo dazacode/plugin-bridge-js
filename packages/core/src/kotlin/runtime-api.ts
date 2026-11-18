@@ -140,6 +140,7 @@ export const RUNTIME_HELPERS = [
 	   overloads by count and type and a JavaScript class has one slot per
 	   name. See `Declared.overloads` in emit.ts. */
 	'overload',
+	'moduleOverload',
 	/* `String.format(…)` and `"%s".format(…)`, one formatter either way. */
 	'format',
 
