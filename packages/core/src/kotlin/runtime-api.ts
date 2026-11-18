@@ -140,6 +140,9 @@ export const RUNTIME_HELPERS = [
 	   overloads by count and type and a JavaScript class has one slot per
 	   name. See `Declared.overloads` in emit.ts. */
 	'overload',
+	'moduleOverload',
+	/* `withTimeoutOrNull(ms) { … }`. */
+	'withTimeoutOrNull',
 	/* `String.format(…)` and `"%s".format(…)`, one formatter either way. */
 	'format',
 
@@ -545,6 +548,8 @@ export const RUNTIME_HELPERS = [
 	'maxOfOrNull',
 	'minByOrNull',
 	'maxByOrNull',
+	'minBy',
+	'maxBy',
 	'reduce',
 	'fold',
 	'random',
@@ -1133,8 +1138,13 @@ export const RUNTIME_GLOBALS = [
 	'BigDecimal',
 	'RoundingMode',
 
-	/* java.io.File, as far as `File.createTempFile` goes: see `JSOUP_STATICS`. */
+	/* java.io.File: `File(path)` and `File.createTempFile`. See `JSOUP_STATICS`. */
 	'File',
+
+	/* kotlin.Result's constructors, and android.os.Handler on the main Looper. */
+	'Result',
+	'Handler',
+	'Looper',
 
 	/* A local HTTP server with no port. An extension that extends NanoHTTPD
 	   gets a server the runtime registers under a stand-in port and answers

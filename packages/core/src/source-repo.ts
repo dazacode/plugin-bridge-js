@@ -82,7 +82,15 @@
  * repository is addressed by whatever origin its own metadata gave.
  */
 
-import { DEFAULT_REFS, parseRepositoryUrl, rawCandidates, type GitRepository } from './git-hosts';
+import {
+	DEFAULT_REFS,
+	githubPagesOwner,
+	githubRepository,
+	isGitHub,
+	parseRepositoryUrl,
+	rawCandidates,
+	type GitRepository
+} from './git-hosts';
 import { TreeError } from './git-trees';
 import type { TextFetcher } from './adapter';
 
@@ -342,8 +350,330 @@ export function sourceRepositoryOf(repoJsonBody: string): string | null {
 	const website = (meta as { website?: unknown }).website;
 	if (typeof website !== 'string' || website.length === 0) return null;
 
+	return sourceRepositoryOfUrl(website);
+}
+
+/**
+ * A website field read as a repository, or null when it names none.
+ *
+ * Split out of `sourceRepositoryOf` so a publisher document of another shape
+ * — one that keeps the website under `contact` rather than `meta` — is read
+ * by the same rule.
+ */
+export function sourceRepositoryOfUrl(website: string): string | null {
 	const repository = repositoryOf(website.trim());
 	return repository === null ? null : canonicalUrl(repository);
+}
+
+/* ── finding the source repository when the metadata does not name it ────── */
+
+/**
+ * One listing's published version, as evidence a candidate repository must
+ * agree with before it is believed.
+ */
+export interface PublishedVersion {
+	/** The package name the index lists. */
+	readonly pkg: string;
+	/** The build number the index lists — `code`, or the part after the dot. */
+	readonly versionCode: number;
+}
+
+/**
+ * How many candidate repositories are probed, at most, per index.
+ *
+ * Every candidate costs at least one request whether or not it exists, and an
+ * index with no findable source pays for all of them on every add, so the list
+ * is short on purpose. It covers the index's own repository and the handful of
+ * names publishers in this ecosystem give the source beside it; past that a
+ * guess is more likely to be somebody else's repository than this one's.
+ */
+export const MAX_SOURCE_CANDIDATES = 6;
+
+/**
+ * How many listings a candidate is checked against, at most.
+ *
+ * One conclusive answer decides — see `verifyCandidate` — and a sample is only
+ * inconclusive when its build file is missing or unreadable, so this bounds
+ * the cost of a candidate whose first listings were renamed or removed.
+ */
+export const MAX_VERIFICATION_SAMPLES = 3;
+
+/**
+ * The repositories worth asking whether they hold an index's source, best
+ * first.
+ *
+ * Derived from nothing but what the index already said about itself — its own
+ * URL and its publisher's website — and never from listing anybody's account:
+ *
+ * 1. The repository the index is published from. Some publishers build the
+ *    listing onto a branch of the very repository the source is on.
+ * 2. Siblings named after it. A listing published from `<x>-repo` is built
+ *    from `<x>-extensions` or `<x>-extensions-source`; one published from
+ *    `<x>` is built from `<x>-source`.
+ * 3. `conventionalNames`, the caller's short list of names the ecosystem uses
+ *    for a source repository without reference to the published one.
+ *
+ * Every candidate is under the same owner as the index. A website on an
+ * account's static site (`<owner>.github.io`) names an owner too, and is used
+ * only when the index itself names none, or names a different one.
+ *
+ * A candidate here is not an answer. `discoverSourceRepository` verifies each
+ * one against the index before it is used, and this list only bounds where it
+ * looks.
+ */
+export function sourceRepositoryCandidates(
+	indexUrl: string,
+	website: string | null,
+	conventionalNames: readonly string[]
+): GitRepository[] {
+	const anchors: { origin: GitRepository; publishRepo: string | null }[] = [];
+
+	const fromUrl = (href: string): GitRepository | null => {
+		let parsed: URL;
+		try {
+			parsed = new URL(href);
+		} catch {
+			return null;
+		}
+		if (parsed.protocol !== 'https:') return null;
+		const pages = githubPagesOwner(parsed);
+		if (pages !== null) {
+			return githubRepository(pages.owner, pages.repo ?? `${pages.owner}.github.io`);
+		}
+		const repository = parseRepositoryUrl(parsed);
+		if (repository === null) return null;
+		// Any URL with two path segments parses as *some* repository, and off
+		// GitHub every probe of one is several requests across two forge
+		// shapes. So off GitHub a URL counts only when it is visibly a forge's
+		// raw-file path; an index on a plain web host names no repository.
+		if (!isGitHub(repository) && !parsed.pathname.split('/').includes('raw')) return null;
+		return repository;
+	};
+
+	const published = fromUrl(indexUrl);
+	if (published !== null) anchors.push({ origin: published, publishRepo: published.repo });
+	if (website !== null) {
+		const hinted = fromUrl(website);
+		// A website names an *owner*, and that is all it is trusted for: the
+		// repository its path happens to name is a homepage, not a publisher.
+		if (hinted !== null) anchors.push({ origin: hinted, publishRepo: null });
+	}
+
+	const out: GitRepository[] = [];
+	const seen = new Set<string>();
+	const add = (origin: GitRepository, repo: string) => {
+		if (!isSafeSegment(repo) || !isSafeSegment(origin.owner)) return;
+		const candidate: GitRepository = { ...origin, repo, ref: null };
+		const key = `${candidate.origin}/${candidate.owner}/${candidate.repo}`.toLowerCase();
+		if (seen.has(key)) return;
+		seen.add(key);
+		out.push(candidate);
+	};
+
+	for (const { origin, publishRepo } of anchors) {
+		if (publishRepo !== null) {
+			add(origin, publishRepo);
+			const stem = /^(.+?)[-_.]?repo$/i.exec(publishRepo)?.[1];
+			if (stem !== undefined) {
+				add(origin, `${stem}-extensions`);
+				add(origin, `${stem}-extensions-source`);
+			} else {
+				add(origin, `${publishRepo}-source`);
+			}
+		}
+		for (const name of conventionalNames) add(origin, name);
+	}
+	return out.slice(0, MAX_SOURCE_CANDIDATES);
+}
+
+/**
+ * Where an extension's build file is, given only its package name.
+ *
+ * Exact rather than guessed: the build compiles `src/<lang>/<directory>` to the
+ * package `….<lang>.<directory>`, so the last two segments *are* the path. Null
+ * when either would not be a safe path segment.
+ */
+function buildDirectoryOf(pkg: string): string | null {
+	const segments = pkg.split('.').filter((segment) => segment.length > 0);
+	if (segments.length < 2) return null;
+	const lang = segments[segments.length - 2];
+	const directory = segments[segments.length - 1];
+	if (!isSafeSegment(lang) || !isSafeSegment(directory)) return null;
+	return `${EXTENSION_ROOT}/${lang}/${directory}`;
+}
+
+/** A plain non-negative integer literal, or null for anything else. */
+function integerOf(value: string | undefined): number | null {
+	if (value === undefined || !/^\d+$/.test(value)) return null;
+	const parsed = Number(value);
+	return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+/**
+ * The version code a build file would publish, or null when it cannot be read
+ * without evaluating anything.
+ *
+ * Two layouts, read by the same keys. An unthemed extension states its code
+ * outright — `extVersionCode` in the older `ext { }` block, `versionCode` in
+ * the newer extension block. A themed one publishes its template's
+ * `baseVersionCode` *plus* its own — `overrideVersionCode` in the older layout,
+ * `versionCode` in the newer — so the template's build file is read too, and
+ * an unreadable one makes the answer unknown rather than wrong.
+ */
+async function declaredVersionCode(
+	buildFile: string,
+	readTheme: (theme: string) => Promise<string | null>
+): Promise<number | null> {
+	const declared = readBuildGradle(buildFile);
+	const theme = declared['themePkg'] ?? declared['theme'];
+	if (theme === undefined) {
+		return integerOf(declared['extVersionCode']) ?? integerOf(declared['versionCode']);
+	}
+	if (!isSafeSegment(theme)) return null;
+	const themeFile = await readTheme(theme);
+	if (themeFile === null) return null;
+	const base = integerOf(readBuildGradle(themeFile)['baseVersionCode']);
+	if (base === null) return null;
+	const own =
+		declared['overrideVersionCode'] !== undefined
+			? integerOf(declared['overrideVersionCode'])
+			: declared['versionCode'] !== undefined
+				? integerOf(declared['versionCode'])
+				: 0;
+	return own === null ? null : base + own;
+}
+
+/** The first of the build-file names that answers under `directory`, or null. */
+async function firstBuildFile(
+	repository: GitRepository,
+	ref: string,
+	directory: string,
+	getText: TextFetcher
+): Promise<string | null> {
+	for (const filename of BUILD_FILES) {
+		for (const url of rawCandidates(repository, `${directory}/${filename}`, [ref])) {
+			try {
+				return await getText(url);
+			} catch {
+				// A missing file is the ordinary case for one of the two names.
+			}
+		}
+	}
+	return null;
+}
+
+/**
+ * Whether one candidate really is where an index's extensions are built from.
+ *
+ * The repository has to hold the source directory of a listing from *this*
+ * index, at the exact path its package name compiles from, **and** the build
+ * file there has to declare the version code the index published for it. A
+ * same-named directory in an unrelated fork rarely declares the same build
+ * number; one that does is building the same extension, which is the claim.
+ *
+ * Listings are tried in turn until one is conclusive — its build file found
+ * and its version code readable — and that one decides. A mismatch is a
+ * refusal, not a reason to keep looking: it is positive evidence the candidate
+ * is building something else.
+ *
+ * Returns the ref that answered, or null.
+ */
+async function verifyCandidate(
+	repository: GitRepository,
+	samples: readonly PublishedVersion[],
+	getText: TextFetcher
+): Promise<string | null> {
+	// `HEAD` is the default branch on GitHub's raw host, whatever it is called,
+	// so one ref settles it there; elsewhere the usual names are tried in turn.
+	const refs: readonly string[] = isGitHub(repository) ? ['HEAD'] : DEFAULT_REFS;
+
+	for (const ref of refs) {
+		// Existence first, and cheaply. Every layout this file reads is a Gradle
+		// multi-project, so a repository holding one has a settings file at its
+		// root — and a candidate that does not exist costs these two requests
+		// rather than two per sampled listing.
+		const settings = await firstFile(repository, ref, SETTINGS_FILES, getText);
+		if (settings === null) continue;
+
+		const themeFiles = new Map<string, Promise<string | null>>();
+		const readTheme = (theme: string): Promise<string | null> => {
+			let pending = themeFiles.get(theme);
+			if (pending === undefined) {
+				pending = firstBuildFile(repository, ref, themeDirectory(theme), getText);
+				themeFiles.set(theme, pending);
+			}
+			return pending;
+		};
+
+		for (const sample of samples.slice(0, MAX_VERIFICATION_SAMPLES)) {
+			const directory = buildDirectoryOf(sample.pkg);
+			if (directory === null) continue;
+			const buildFile = await firstBuildFile(repository, ref, directory, getText);
+			if (buildFile === null) continue;
+			const declared = await declaredVersionCode(buildFile, readTheme);
+			if (declared === null) continue;
+			return declared === sample.versionCode ? ref : null;
+		}
+		return null;
+	}
+	return null;
+}
+
+const SETTINGS_FILES = ['settings.gradle.kts', 'settings.gradle'] as const;
+
+async function firstFile(
+	repository: GitRepository,
+	ref: string,
+	names: readonly string[],
+	getText: TextFetcher
+): Promise<string | null> {
+	for (const name of names) {
+		for (const url of rawCandidates(repository, name, [ref])) {
+			try {
+				return await getText(url);
+			} catch {
+				// Absent under this name; the next one may answer.
+			}
+		}
+	}
+	return null;
+}
+
+/**
+ * The repository an index's extensions are built from, found by asking the
+ * likely places and believing only one that proves it.
+ *
+ * For the publisher whose metadata names a homepage rather than a repository.
+ * The candidates come from `sourceRepositoryCandidates`, each is checked by
+ * `verifyCandidate`, and the first that passes is returned in the same
+ * canonical form `sourceRepositoryOf` returns. Null when none passes, which is
+ * exactly the answer the caller had before asking.
+ *
+ * Sequential, and over raw files only: no forge API is called, so nothing here
+ * draws on the rate limit the tree lister needs later, and a publisher with no
+ * findable source costs at most two requests per candidate. Never throws.
+ */
+export async function discoverSourceRepository(
+	indexUrl: string,
+	website: string | null,
+	samples: readonly PublishedVersion[],
+	getText: TextFetcher,
+	conventionalNames: readonly string[] = []
+): Promise<string | null> {
+	if (samples.length === 0) return null;
+	for (const candidate of sourceRepositoryCandidates(indexUrl, website, conventionalNames)) {
+		let ref: string | null;
+		try {
+			ref = await verifyCandidate(candidate, samples, getText);
+		} catch {
+			ref = null;
+		}
+		if (ref === null) continue;
+		// `HEAD` is what "the default branch" is spelled as, not a branch, so it
+		// is left implicit; a branch that had to be named is carried.
+		return canonicalUrl(ref === 'HEAD' ? candidate : { ...candidate, ref });
+	}
+	return null;
 }
 
 /** The path of one extension's directory, relative to the repository root. */

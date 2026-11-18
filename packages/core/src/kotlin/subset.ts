@@ -1021,6 +1021,8 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 	['maxOfOrNull', 'maxOfOrNull'],
 	['minByOrNull', 'minByOrNull'],
 	['maxByOrNull', 'maxByOrNull'],
+	['minBy', 'minBy'],
+	['maxBy', 'maxBy'],
 	['reduce', 'reduce'],
 	// `fold` is a list fold and a Result fold under one name; the receiver
 	// decides, because the emitter has no types to decide with.
@@ -1294,7 +1296,9 @@ export const ARGUMENT_LAMBDA_METHODS: ReadonlySet<string> = new Set([
 	'addCookie',
 	// Observable takes each block as a function of the value or error.
 	'doOnNext',
-	'onErrorReturn'
+	'onErrorReturn',
+	// android.os.Handler's `post { … }`: the block is the task, run later.
+	'post'
 ]);
 
 /**
@@ -1425,6 +1429,21 @@ export const RUNTIME_STATIC_REFERENCES: ReadonlyMap<string, ReadonlySet<string>>
  * is a deliberate cost rather than an oversight.
  */
 export const HOST_METHODS: ReadonlySet<string> = new Set([
+	// java.io.File's, on the path the runtime's `File(…)` builds — a path on a
+	// filesystem a plugin does not have, so every query answers "absent" and
+	// every write fails with an IOException the extension sees. See `__KFile`.
+	'exists',
+	'mkdirs',
+	'mkdir',
+	'walkTopDown',
+	'copyTo',
+	'renameTo',
+	'lastModified',
+	'setLastModified',
+	'outputStream',
+	'listFiles',
+	'createNewFile',
+	'delete',
 	// The one terminal of a `groupingBy { }` Grouping this runtime builds.
 	'eachCount',
 	// java.text.CharacterIterator's reads, on the one this runtime builds.
@@ -2278,10 +2297,11 @@ export const JSOUP_STATICS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
 	['Entities', new Set(['unescape'])],
 	['Evaluator', new Set(['Tag', 'Class', 'Id'])],
 	['TextNode', new Set<string>()],
-	// java.io.File, whose only member a plugin can honour is a temporary file
-	// handed to the player as a `data:` uri — see `__KTempFile` in the runtime.
-	// Not jsoup, but the same question: a capitalised receiver the runtime
-	// defines only in part. `File(path)` is refused in the emitter.
+	// java.io.File's statics: a temporary file handed to the player as a
+	// `data:` uri (`__KTempFile` in the runtime), or, given a directory, the
+	// failure a filesystem that is not there gives. Not jsoup, but the same
+	// question: a capitalised receiver the runtime defines only in part.
+	// `File(path)` itself is a path on that filesystem — see `__KFile`.
 	['File', new Set(['createTempFile'])]
 ]);
 
@@ -2497,8 +2517,15 @@ export const GLOBAL_NAMES: ReadonlySet<string> = new Set([
 	'PrimitiveKind',
 	'JsonNull',
 
-	/* java.io.File, as far as `File.createTempFile` goes: see `JSOUP_STATICS`. */
-	'File'
+	/* java.io.File: `File(path)` and `File.createTempFile`. See `JSOUP_STATICS`. */
+	'File',
+
+	/* kotlin.Result's two constructors, over the Result `runCatching` builds. */
+	'Result',
+
+	/* android.os.Handler on the main Looper: a block posted to run later. */
+	'Handler',
+	'Looper'
 ]);
 
 /**
@@ -2773,6 +2800,10 @@ export const SUPER_SUSPEND_MEMBERS: ReadonlySet<string> = new Set([
  */
 export const KNOWN_SIGNATURES: ReadonlyMap<string, readonly string[]> = new Map([
 	['GET', ['url', 'headers', 'cache']],
+	// kotlin.io's `File.copyTo(target, overwrite, bufferSize)`. `InputStream.
+	// copyTo(out, bufferSize)` shares the name and never takes `overwrite`, so
+	// the one spelling that is named here is the File one.
+	['copyTo', ['target', 'overwrite', 'bufferSize']],
 	['POST', ['url', 'headers', 'body', 'cache']],
 	// **The ext-lib 14 secondary constructor**, which is still what the
 	// overwhelming majority of the catalogue writes: 137 calls pass three

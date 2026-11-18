@@ -557,6 +557,230 @@ describe('finding the source at all', () => {
 	});
 });
 
+/* ── a publisher whose metadata names a homepage, not a repository ────────── */
+
+/**
+ * The index is published from one repository, the source lives in a sibling
+ * under the same owner, and `repo.json`'s website is the owner's static site.
+ * Nothing links the two except what `loadIndex` can verify for itself.
+ *
+ * Every owner and repository name here is invented. The hosts are the forge's
+ * own, because those are the URLs the code under test builds.
+ */
+const HOMEPAGE_OWNER = 'example-publisher';
+const HOMEPAGE_INDEX_URL = `https://raw.githubusercontent.com/${HOMEPAGE_OWNER}/widget-repo/repo/index.min.json`;
+const SIBLING = `https://github.com/${HOMEPAGE_OWNER}/widget-extensions`;
+const SIBLING_RAW = `https://raw.githubusercontent.com/${HOMEPAGE_OWNER}/widget-extensions/HEAD/`;
+
+/** The publisher's metadata, with a homepage where a repository would be. */
+const HOMEPAGE_REPO_JSON = JSON.stringify({
+	index_v2: `https://github.com/${HOMEPAGE_OWNER}/widget-repo/raw/repo/index.pb`,
+	meta: {
+		name: 'Example extensions',
+		website: `https://${HOMEPAGE_OWNER}.github.io`,
+		signingKeyFingerprint: 'ab'.repeat(32)
+	}
+});
+
+/**
+ * The newer build layout: a block named after the publisher's build plugin,
+ * the version and the generator's `source { }` declaration inside it, and no
+ * `ext`. The block's name is arbitrary on purpose — the reader must not
+ * depend on it.
+ */
+function newLayoutBuildFile(versionCode: number): string {
+	return `
+import org.example.gradle.api.ContentWarning
+
+plugins {
+    alias(example.plugins.extension)
+}
+
+examplepublisher {
+    name = "Example Anime"
+    versionCode = ${versionCode}
+    contentWarning = ContentWarning.SAFE
+    libVersion = "16"
+
+    listOf("en", "ja").forEach {
+        source {
+            lang = it
+            baseUrl = "https://build.example.invalid"
+        }
+    }
+}
+
+dependencies {
+}
+`;
+}
+
+/** The generator's input: annotated, abstract, and declaring no base URL. */
+const GENERATOR_INPUT_KT = `
+package ${PACKAGE}
+
+@Source
+abstract class ExampleAnime : ParsedAnimeHttpSource() {
+    override val supportsLatest = false
+
+    override fun popularAnimeRequest(page: Int) = GET("$baseUrl/hot?page=$page", headers)
+
+    override fun popularAnimeSelector() = "li.card"
+
+    override fun popularAnimeNextPageSelector() = "a.next"
+}
+`;
+
+/**
+ * One listing published as `16.3` from two sources, so the index carries no
+ * single base URL a converter could fall back on.
+ */
+const HOMEPAGE_INDEX_BODY = JSON.stringify([
+	{
+		name: 'Aniyomi: Example Anime',
+		pkg: PACKAGE,
+		apk: 'example-anime-v16.3.apk',
+		lang: 'en',
+		code: 3,
+		version: '16.3',
+		nsfw: 0,
+		sources: [
+			{ name: 'Example Anime', lang: 'en', baseUrl: 'https://build.example.invalid' },
+			{ name: 'Example Anime', lang: 'ja', baseUrl: 'https://build.example.invalid' }
+		]
+	}
+]);
+
+/** The sibling repository, as files under its root. */
+function siblingFiles(buildFile: string, extension: string = GENERATOR_INPUT_KT) {
+	return new Map([
+		['LICENSE', LICENCE],
+		['settings.gradle.kts', 'include(":core")\n'],
+		['src/en/example/build.gradle.kts', buildFile],
+		['src/en/example/src/ExampleAnime.kt', extension]
+	]);
+}
+
+/** A fetcher over the index's own directory and one repository's raw files. */
+function homepageFetcher(files: Map<string, string>, fetched: string[] = []) {
+	const indexDirectory = new URL('./', HOMEPAGE_INDEX_URL).toString();
+	return async (url: string): Promise<string> => {
+		fetched.push(url);
+		if (url === `${indexDirectory}repo.json`) return HOMEPAGE_REPO_JSON;
+		const body = url.startsWith(SIBLING_RAW) ? files.get(url.slice(SIBLING_RAW.length)) : undefined;
+		if (body === undefined) throw new Error(`nothing at ${url}`);
+		return body;
+	};
+}
+
+describe('a publisher whose metadata names a homepage', () => {
+	it('finds the sibling that builds this index, and records it on every listing', async () => {
+		const index = await aniyomiAdapter.loadIndex!(
+			HOMEPAGE_INDEX_BODY,
+			HOMEPAGE_INDEX_URL,
+			homepageFetcher(siblingFiles(newLayoutBuildFile(3)))
+		);
+
+		expect(index.plugins.map((one) => one.origin?.detail?.['sourceRepository'])).toEqual([SIBLING]);
+		// The rest of the metadata is read exactly as before.
+		expect(index.name).toBe('Example extensions');
+		expect(index.signingKey).toBe(`apk-cert-sha256:${'ab'.repeat(32)}`);
+	});
+
+	it('believes no sibling whose build file declares a different version', async () => {
+		const index = await aniyomiAdapter.loadIndex!(
+			HOMEPAGE_INDEX_BODY,
+			HOMEPAGE_INDEX_URL,
+			homepageFetcher(siblingFiles(newLayoutBuildFile(4)))
+		);
+
+		const [one] = index.plugins;
+		expect(one.origin?.detail?.['sourceRepository']).toBeUndefined();
+		// And the refusal a viewer sees is the one they saw before: nothing
+		// about this repository was learned, so nothing about it is claimed.
+		await expect(
+			aniyomiAdapter.convert(one, services(siblingFiles(newLayoutBuildFile(4)), [], SIBLING_RAW))
+		).rejects.toThrow(/does not say where its extensions are built from/);
+	});
+
+	it('changes nothing when no candidate exists, and asks a bounded few', async () => {
+		const fetched: string[] = [];
+		const index = await aniyomiAdapter.loadIndex!(
+			HOMEPAGE_INDEX_BODY,
+			HOMEPAGE_INDEX_URL,
+			homepageFetcher(new Map(), fetched)
+		);
+
+		expect(index.plugins[0].origin?.detail?.['sourceRepository']).toBeUndefined();
+		expect(index.name).toBe('Example extensions');
+		// `repo.json`, then at most two requests per candidate — and every one
+		// of them a raw file, so none of it draws on the forge API's limit.
+		expect(fetched.length).toBeLessThanOrEqual(1 + 2 * 6);
+		expect(fetched.every((url) => url.startsWith('https://raw.githubusercontent.com/'))).toBe(true);
+	});
+
+	it('reads the newer `index.json` when there is no `repo.json`', async () => {
+		const indexDirectory = new URL('./', HOMEPAGE_INDEX_URL).toString();
+		const files = siblingFiles(newLayoutBuildFile(3));
+		const index = await aniyomiAdapter.loadIndex!(
+			HOMEPAGE_INDEX_BODY,
+			HOMEPAGE_INDEX_URL,
+			async (url: string) => {
+				if (url === `${indexDirectory}index.json`) {
+					return JSON.stringify({
+						name: 'Example extensions',
+						signingKey: 'CD'.repeat(32),
+						contact: { website: `https://${HOMEPAGE_OWNER}.github.io` },
+						extensionList: { extensions: [] }
+					});
+				}
+				const body = url.startsWith(SIBLING_RAW)
+					? files.get(url.slice(SIBLING_RAW.length))
+					: undefined;
+				if (body === undefined) throw new Error(`nothing at ${url}`);
+				return body;
+			}
+		);
+
+		expect(index.name).toBe('Example extensions');
+		expect(index.signingKey).toBe(`apk-cert-sha256:${'cd'.repeat(32)}`);
+		expect(index.plugins[0].origin?.detail?.['sourceRepository']).toBe(SIBLING);
+	});
+
+	it('ignores an `index.json` that is the older listing array', async () => {
+		const indexDirectory = new URL('./', HOMEPAGE_INDEX_URL).toString();
+		const index = await aniyomiAdapter.loadIndex!(
+			HOMEPAGE_INDEX_BODY,
+			HOMEPAGE_INDEX_URL,
+			async (url: string) => {
+				if (url === `${indexDirectory}index.json`) return HOMEPAGE_INDEX_BODY;
+				throw new Error(`nothing at ${url}`);
+			}
+		);
+		expect(index.name).toBe('Aniyomi extensions');
+		expect(index.signingKey).toBeNull();
+	});
+
+	it('reads the newer build layout end to end: the class it generates, and its base URL', async () => {
+		const files = siblingFiles(newLayoutBuildFile(3));
+		const index = await aniyomiAdapter.loadIndex!(
+			HOMEPAGE_INDEX_BODY,
+			HOMEPAGE_INDEX_URL,
+			homepageFetcher(files)
+		);
+		const bundle = await openPluginArchive(
+			await aniyomiAdapter.convert(index.plugins[0], services(files, [], SIBLING_RAW))
+		);
+
+		// The base URL is the build file's: the Kotlin declares none and the
+		// index, with two sources, offers no single one.
+		expect(bundle.hosts).toContain('build.example.invalid');
+		// And what the generated subclass would have carried is put where the
+		// abstract class's own initialisers will find it.
+		expect(bundle.entrypointSource).toContain('lang: "en", name: "Example Anime"');
+	}, 60_000);
+});
+
 describe('an extension that translates', () => {
 	it('produces a bundle the ordinary archive reader opens', async () => {
 		const one = await listing();

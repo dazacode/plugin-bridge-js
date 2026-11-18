@@ -127,6 +127,50 @@ export interface AniyomiEntrypointOptions {
 	 * the bundle is then byte-identical to one built before it existed.
 	 */
 	readonly synchronyScript?: string;
+	/**
+	 * What a build-time generated subclass would have supplied, when the
+	 * translated class is only that generator's abstract input.
+	 *
+	 * The newer build layout loads a class its build step generates from the
+	 * one annotated `@Source`, carrying `name`, `lang` and `baseUrl`; the class
+	 * in the source tree declares none of them, and a source that builds every
+	 * request from `baseUrl` asks for `undefined/…` without them. Absent for
+	 * every extension that is the class it loads, and the bundle is then
+	 * byte-identical to one built before this existed.
+	 */
+	readonly generated?: { readonly name: string; readonly lang: string };
+}
+
+/**
+ * The members a generated subclass supplies, attached before the constructor
+ * runs — see `AniyomiEntrypointOptions.generated`.
+ *
+ * On the prototype and only where nothing in the chain answers the name
+ * already, which is the order Kotlin resolves an override in: a class that
+ * declares one itself still wins. Before \`new\` rather than after, because the
+ * generated class is the most-derived one, so what it supplies is already there
+ * while every class above it initialises — a property initialiser that reads
+ * \`baseUrl\` reads the real one. The same arrangement as \`mihon-entry.ts\`'s,
+ * for the same generator.
+ */
+function generatedPrelude(
+	className: string,
+	generated: AniyomiEntrypointOptions['generated']
+): string {
+	if (generated === undefined) return '';
+	return `(function (proto) {
+  var supplied = { baseUrl: __BASE_URL, lang: ${JSON.stringify(generated.lang)}, name: ${JSON.stringify(generated.name)} };
+  for (var key in supplied) {
+    if (supplied[key].length === 0 || key in proto) continue;
+    Object.defineProperty(proto, key, {
+      value: supplied[key],
+      writable: true,
+      enumerable: false,
+      configurable: true
+    });
+  }
+})(${className}.prototype);
+`;
 }
 
 /**
@@ -205,6 +249,22 @@ for (const __own of [
   ['preferences', getPreferences()]
 ]) {
   if (!(__own[0] in __source)) __source[__own[0]] = __own[1];
+}
+
+/**
+ * The client the base class's own requests go through: the extension's.
+ *
+ * 'AnimeHttpSource' sends its default requests — the shelf, a search, the
+ * details and episode pages, the hoster and video pages — with 'client', a
+ * property the extension overrides whenever it needs an interceptor: an
+ * auth token, a rate limit, a header the API insists on. The driver sent them
+ * with the runtime's shared client, so an extension whose search host wants a
+ * bearer token added by its own interceptor was searched without one and
+ * answered 401, with nothing refused.
+ */
+function __client() {
+  const own = __source.client;
+  return own && typeof own.newCall === 'function' ? own : client;
 }
 
 /** Calls the extension's own member when it has one. */
@@ -330,7 +390,7 @@ const __super = {
   },
 
   getAnimeDetails: async function (anime) {
-    const response = await client.newCall(__detailsRequest(anime)).execute();
+    const response = await __client().newCall(__detailsRequest(anime)).execute();
     if (!__declares('animeDetailsParse')) {
       throw new Error('This extension calls super.getAnimeDetails but declares no details parser.');
     }
@@ -344,7 +404,7 @@ const __super = {
     return parsed;
   },
   getEpisodeList: async function (anime) {
-    const response = await client.newCall(__episodeRequest(anime)).execute();
+    const response = await __client().newCall(__episodeRequest(anime)).execute();
     return __declares('episodeListParse')
       ? await __call('episodeListParse', response)
       : await __defaultEpisodeList(response);
@@ -518,7 +578,7 @@ async function __page(kind, request) {
  * catalogue entries. One code path, two shapes at the ends of it.
  */
 async function __fetchPage(kind, request) {
-  const response = await client.newCall(request).execute();
+  const response = await __client().newCall(request).execute();
   const parse = kind + 'Parse';
   return __declares(parse) ? await __call(parse, response) : __parsePage(kind, response);
 }
@@ -741,7 +801,7 @@ async function __hosterListDefault(episode) {
   const request = __declares('hosterListRequest')
     ? await __call('hosterListRequest', episode)
     : __super.hosterListRequest(episode);
-  const response = await client.newCall(request).execute();
+  const response = await __client().newCall(request).execute();
   return __declares('hosterListParse')
     ? await __call('hosterListParse', response)
     : await __defaultHosterList(response);
@@ -791,7 +851,7 @@ async function __videoListDefault(source) {
   const request = __declares('videoListRequest')
     ? await __call('videoListRequest', source)
     : __super.videoListRequest(source);
-  const response = await client.newCall(request).execute();
+  const response = await __client().newCall(request).execute();
   if (!__declares('videoListParse')) return await __defaultVideoList(response);
   // The hoster is passed as a second argument on the hoster path and nowhere
   // else. A legacy parser declared with one parameter simply ignores it.
@@ -908,7 +968,7 @@ async function __videoUrlDefault(video) {
   const request = __declares('videoUrlRequest')
     ? await __call('videoUrlRequest', video)
     : __super.videoUrlRequest(video);
-  const response = await client.newCall(request).execute();
+  const response = await __client().newCall(request).execute();
   if (!__declares('videoUrlParse')) {
     throw new Error('This extension declares no videoUrlParse, so a stream url cannot be read.');
   }
@@ -1057,7 +1117,7 @@ function __firstSource(made) {
   return all[0];
 }
 
-const __source = __firstSource(new ${options.className}());
+${generatedPrelude(options.className, options.generated)}const __source = __firstSource(new ${options.className}());
 ${ANIYOMI_DRIVER}
 
 /* --- the adapter ----------------------------------------------------------- */
@@ -1106,7 +1166,7 @@ export default {
     if (__overrides('getEpisodeList', 1)) {
       parsed = await __call('getEpisodeList', anime);
     } else {
-      const response = await client.newCall(__episodeRequest(anime)).execute();
+      const response = await __client().newCall(__episodeRequest(anime)).execute();
       parsed = __declares('episodeListParse')
         ? await __call('episodeListParse', response)
         : await __defaultEpisodeList(response);

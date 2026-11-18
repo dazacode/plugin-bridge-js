@@ -2392,6 +2392,101 @@ class Emitter {
 	 * name becomes a dispatcher — unless a property holds it, in which case
 	 * calls go through `__k.overload` directly (`overloadCall`).
 	 */
+	/**
+	 * The plain constructor parameters in scope for the property being emitted,
+	 * by their emitted names — see the delegate case of `classProperty`.
+	 */
+	private initialiserOnlyParams: readonly string[] = [];
+
+	/** File-scope functions declared more than once under one name, and how far emission got. */
+	private readonly moduleOverloads = new Map<
+		string,
+		{ readonly nodes: readonly KNode[]; readonly emitted: string[] }
+	>();
+
+	/**
+	 * One of several file-scope functions sharing a name.
+	 *
+	 * Kotlin resolves `items.map { it.toSAnime(lang) }` by the receiver's static
+	 * type, so two `fun A.toSAnime(…)` and `fun B.toSAnime(…)` in one file are
+	 * two functions. Emitted as written they were two `function toSAnime`
+	 * declarations in one module, which is a SyntaxError at load — the whole
+	 * bundle lost to one overload — and the same for a plain `fun getPrefs(id)`
+	 * beside an extension `fun Source.getPrefs()`.
+	 *
+	 * Each is emitted under its own name, and after the last of them the shared
+	 * name is declared once, as a dispatcher that picks by what it was handed:
+	 * the receiver's class where the receiver is a class this unit declares
+	 * (an instance of it, or a decoded record of its shape), and otherwise the
+	 * argument count and the types the runtime can check, ranked the way a
+	 * member overload is. A call no declaration takes throws by name. Callers
+	 * call the shared name; one written with its receiver implicit hands that
+	 * receiver over as `this` (see the module-call path in `bareCall`).
+	 */
+	private moduleOverload(
+		name: string,
+		node: KNode,
+		overloads: { readonly nodes: readonly KNode[]; readonly emitted: string[] }
+	): string | null {
+		const index = overloads.nodes.indexOf(node);
+		const own = `${this.safe(name)}$${index}`;
+		const piece = this.member(name, node, () => {
+			this.moduleNames.add(name);
+			return this.functionDeclaration(node, 'module', own);
+		});
+		overloads.emitted.push(own);
+		if (overloads.emitted.length < overloads.nodes.length) return piece;
+		const table = overloads.nodes.map((one, at) => {
+			const fn = `${this.safe(name)}$${at}`;
+			const signature = this.signatureOf(one);
+			const receiver = receiverOf(one);
+			const receiverClass =
+				receiver !== null &&
+				!receiver.includes('<') &&
+				(this.declaredTypes.has(simpleTypeName(receiver)) ||
+					this.topLevelTypes.has(simpleTypeName(receiver)))
+					? this.safe(simpleTypeName(receiver))
+					: 'null';
+			return (
+				`[typeof ${fn} === 'function' ? ${fn} : null, ${receiverClass}, ` +
+				`${signature.required}, ${signature.total}, ${JSON.stringify(signature.types)}, ` +
+				`${JSON.stringify(signature.nullable)}, ${JSON.stringify(signature.defaults)}, ` +
+				`${receiver !== null}]`
+			);
+		});
+		const dispatcher =
+			`function ${this.safe(name)}(...__a) { return ${this.helper('moduleOverload')}(` +
+			`${JSON.stringify(name)}, __a, [${table.join(', ')}], this); }`;
+		return piece === null ? dispatcher : `${piece}\n\n${dispatcher}`;
+	}
+
+	/**
+	 * Whether a bare call to a file-scope function of this name, with this
+	 * many arguments, is a call to an extension (its receiver implicit) or to
+	 * a plain function — decided by which declarations could take that many.
+	 */
+	private moduleExtensionShape(name: string, count: number): 'extension' | 'plain' | 'ambiguous' {
+		const overloads = this.moduleOverloads.get(name);
+		if (overloads === undefined) {
+			return this.extensionFunctions.get(name) === 'module' && !this.isSourceMember(name)
+				? 'extension'
+				: 'plain';
+		}
+		let extension = false;
+		let plain = false;
+		for (const node of overloads.nodes) {
+			const signature = this.signatureOf(node);
+			const isExtension = receiverOf(node) !== null;
+			const taken = isExtension ? count + 1 : count;
+			if (taken < signature.required || (signature.total !== -1 && taken > signature.total))
+				continue;
+			if (isExtension) extension = true;
+			else plain = true;
+		}
+		if (extension && plain) return 'ambiguous';
+		return extension ? 'extension' : 'plain';
+	}
+
 	private overloadsOf(name: string): readonly OverloadSignature[] | null {
 		const shapes = this.overloadIndex.get(name);
 		if (shapes === undefined || shapes.size === 0) return null;
@@ -2432,6 +2527,10 @@ class Emitter {
 			this.declaredTypes.has(name) ||
 			this.moduleNames.has(name) ||
 			this.declaredObjects.has(name) ||
+			// A property of an `object` in this unit, read from inside it —
+			// `private val FONT_REGEX = Regex(…)` used as `FONT_REGEX.findAll(…)`
+			// two lines below. `read` resolves it; this has to agree.
+			this.objectMembers.has(name) ||
 			this.qualifiedTypes.has(name) ||
 			GLOBAL_NAMES.has(name) ||
 			BASE_CONSTANTS.has(name) ||
@@ -2554,6 +2653,19 @@ class Emitter {
 		this.registerImports(kids(root).find((child) => child.type === 'import_list'));
 
 		const top = kids(root);
+		// File-scope functions sharing a name — overloads, most often extension
+		// functions on different receivers. Each is emitted under its own name
+		// and the shared one becomes a dispatcher; see `moduleOverload`.
+		const topNames = new Map<string, KNode[]>();
+		for (const child of top) {
+			if (child.type !== 'function_declaration') continue;
+			const declared = this.nameOf(child);
+			if (declared === null) continue;
+			topNames.set(declared, [...(topNames.get(declared) ?? []), child]);
+		}
+		for (const [declared, nodes] of topNames) {
+			if (nodes.length > 1) this.moduleOverloads.set(declared, { nodes, emitted: [] });
+		}
 		for (const child of top) {
 			if (child.type !== 'class_declaration' && child.type !== 'object_declaration') continue;
 			const declared = this.nameOf(child);
@@ -2662,6 +2774,8 @@ class Emitter {
 				return this.objectDeclaration(node, this.nameOf(node) ?? 'object');
 			case 'function_declaration': {
 				const name = this.nameOf(node) ?? 'fun';
+				const overloads = this.moduleOverloads.get(name);
+				if (overloads !== undefined) return this.moduleOverload(name, node, overloads);
 				return this.member(name, node, () => {
 					this.moduleNames.add(name);
 					return this.functionDeclaration(node, 'module');
@@ -3055,7 +3169,15 @@ class Emitter {
 							!child.allChildren.some((part) => part.type === '=') &&
 							!kids(child).some((part) => part.type === 'property_delegate');
 						if (!getterOnly) for (const param of initialiserOnly) this.declare(param.name);
-						emitted = this.classProperty(child, detached);
+						const outerParams = this.initialiserOnlyParams;
+						this.initialiserOnlyParams = getterOnly
+							? []
+							: initialiserOnly.map((param) => this.safe(param.name));
+						try {
+							emitted = this.classProperty(child, detached);
+						} finally {
+							this.initialiserOnlyParams = outerParams;
+						}
 					} finally {
 						this.popScope();
 					}
@@ -3914,6 +4036,22 @@ class Emitter {
 
 			const outerOwner = this.owner;
 			const outerSelf = this.selfClass;
+			// The object's own suspending members, decided the way a class's are
+			// (`suspend`, then `BLOCKING_CALLS` to a fixpoint). Left as whatever
+			// the enclosing scope had, a bare `download(…)` from one member of an
+			// `object` to its own `suspend fun download` was emitted unawaited:
+			// the caller went on before it finished, and a failure inside it
+			// was a rejected promise nobody held — which kills the isolate.
+			const outerSuspends = this.suspendMembers;
+			this.suspendMembers = new Set(
+				members
+					.filter(
+						(child) => child.type === 'function_declaration' && this.hasModifier(child, 'suspend')
+					)
+					.map((child) => this.nameOf(child))
+					.filter((found): found is string => found !== null)
+			);
+			for (const blocking of this.blockingMembers(members)) this.suspendMembers.add(blocking);
 			this.owner = name;
 			const dispatched = new Set<string>();
 			// An `object` is its own only instance.
@@ -4012,6 +4150,7 @@ class Emitter {
 			} finally {
 				this.owner = outerOwner;
 				this.selfClass = outerSelf;
+				this.suspendMembers = outerSuspends;
 			}
 
 			// The object's plain names, resolved against the object itself
@@ -4457,14 +4596,36 @@ class Emitter {
 		if (this.hasModifier(node, 'lateinit')) return null;
 
 		if (delegate !== undefined) {
+			let ctor: string | undefined;
 			const text = this.member(name, node, () => {
 				const initialiser = this.delegateValue(delegate, node, name);
+				// `private val token by lazy { client.newCall(GET(baseUrl)) … }` in a
+				// class whose `client` and `baseUrl` are plain constructor
+				// parameters. Kotlin's lambda captures them; a getter on the
+				// prototype cannot see a constructor's parameters at all, so the
+				// first read threw "client is not defined" — inside the source's
+				// own `runCatching`, which answered an empty token, and every
+				// search went out unauthorised. The block is built in the
+				// constructor, where they are in scope, and the getter runs that.
+				const captured = this.initialiserOnlyParams.some((param) =>
+					new RegExp(`(^|[^.\\w$])${param.replace(/\$/g, '\\$')}\\b`).test(initialiser)
+				);
+				if (!captured) {
+					return this.overridable(
+						name,
+						`get ${name}() ${block([`return ${this.helper('lazy')}(this, ${JSON.stringify(name)}, ${initialiser});`])}`
+					);
+				}
+				const slot = `__lazyInit_${plainName(name)}`;
+				ctor = `Object.defineProperty(this, ${JSON.stringify(slot)}, { value: ${initialiser}, configurable: true });`;
 				return this.overridable(
 					name,
-					`get ${name}() ${block([`return ${this.helper('lazy')}(this, ${JSON.stringify(name)}, ${initialiser});`])}`
+					`get ${name}() ${block([`return ${this.helper('lazy')}(this, ${JSON.stringify(name)}, this[${JSON.stringify(slot)}]);`])}`
 				);
 			});
-			return text === null ? null : { kind: 'member', text };
+			return text === null
+				? null
+				: { kind: 'member', text, ...(ctor === undefined ? {} : { ctor }) };
 		}
 
 		const mutableProperty = kids(node).some(
@@ -5747,11 +5908,18 @@ class Emitter {
 			return;
 		}
 		const visit = (node: KNode): void => {
-			for (const child of kids(node)) {
+			const children = kids(node);
+			for (const [index, child] of children.entries()) {
 				// A nested function, class or object returns to itself.
 				if (EXPECTATION_BARRIERS.has(child.type)) continue;
 				if (child.type === 'jump_expression' && /^return(?![@\w])/.test(child.text)) {
-					this.expect(kids(child)[0], type);
+					// The grammar splits some `return f(x)` into a bare `return`
+					// and the call beside it — the emitter rejoins them, and the
+					// value they return is the sibling's.
+					this.expect(
+						kids(child)[0] ?? (child.text === 'return' ? children[index + 1] : undefined),
+						type
+					);
 				}
 				visit(child);
 			}
@@ -6015,7 +6183,7 @@ class Emitter {
 		// a `function` here would rebind it and every member the body reads
 		// would resolve to undefined at the first call.
 		if (shape === 'local') return `${prefix}${signature} => ${emitted.text}`;
-		return `${prefix}function ${this.safe(name)}${signature} ${emitted.text}`;
+		return `${prefix}function ${emittedName ?? this.safe(name)}${signature} ${emitted.text}`;
 	}
 
 	private functionBody(node: KNode): string {
@@ -8063,7 +8231,9 @@ class Emitter {
 		if (written === null) {
 			this.refuse(at, `\`.${name}()\` with no type argument for its \`reified\` parameter`);
 		}
-		const parts = written.split(',').map((one) => one.trim());
+		// Split at the commas between arguments, not the ones inside them:
+		// `<Map<String, Map<String, String>>>` is one type argument.
+		const parts = topLevelTypeArguments(written);
 		if (parts.length !== reified.length) {
 			this.refuse(at, `\`.${name}()\` with ${parts.length} type arguments for ${reified.length}`);
 		}
@@ -8308,6 +8478,21 @@ class Emitter {
 			FRAMEWORK_PROPERTIES.has(member.text) &&
 			(MODEL_TYPES.has(owner.text) ||
 				(this.declaredTypes.has(owner.text) && !this.baseDeclares(owner.text, member.text)))
+		) {
+			return `(__recv) => __recv.${member.text}`;
+		}
+		// `distinctBy(Track::url)` and `sortedBy(Video::quality)` — the same
+		// unbound property reference, to a field of one of the video models
+		// the runtime builds as plain records. The bound branch below read
+		// `Track` as a value and emitted `Track.url(…)`, a call on the
+		// constructor, which threw inside every HLS extraction that grouped
+		// its audio or subtitle tracks — and the catch around that answered no
+		// videos at all, with nothing refused.
+		if (
+			named &&
+			RUNTIME_RECORD_PROPERTIES.get(owner.text)?.has(member.text) === true &&
+			!this.declaredTypes.has(owner.text) &&
+			!this.moduleNames.has(owner.text)
 		) {
 			return `(__recv) => __recv.${member.text}`;
 		}
@@ -8599,6 +8784,14 @@ class Emitter {
 			if (lambda !== null) this.refuse(lambda, 'a lambda passed to a callable reference');
 			return `(${this.callableReference(callee)})(${this.plainArguments('', args).join(', ')})`;
 		}
+		// `"tags" to filters.getText<TagFilter>()` and `if (ok) set("K", v)`:
+		// the grammar hands the argument list to the whole infix or `if`
+		// rather than to its last operand. Kotlin cannot call either of those
+		// as a function without parentheses — which would make the callee a
+		// parenthesised expression, not this — so the call belongs to the
+		// operand, and the expression is read again with it there.
+		const regrouped = regroupCall(node, callee);
+		if (regrouped !== null) return this.expr(regrouped);
 		// `(f)(x)` and `map[k](x)`: a call through something with no name, whose
 		// signature is not knowable from here.
 		this.refuse(callee, `a call through ${spoken(callee)}`);
@@ -9303,8 +9496,13 @@ class Emitter {
 		) {
 			this.refuse(receiver, `\`${receiver.text}\``);
 		}
+		// An object's own property goes through `read`, which knows to reach it
+		// as `Holder.NAME` (or the hoisted const while the object is still
+		// being built); the bare name is not bound at module scope.
 		const receiverText =
-			receiver.type === 'simple_identifier' && /^[A-Z]/.test(receiver.text)
+			receiver.type === 'simple_identifier' &&
+			/^[A-Z]/.test(receiver.text) &&
+			!(this.objectMembers.has(receiver.text) && this.lookup(receiver.text) === null)
 				? this.safe(receiver.text)
 				: this.expr(receiver);
 
@@ -9514,11 +9712,6 @@ class Emitter {
 		expected: string | null = null
 	): string {
 		const name = callee.text;
-		// `File(path)`: a path on a filesystem a plugin does not have. The one
-		// `File` the runtime makes is `File.createTempFile` — see `JSOUP_STATICS`.
-		if (name === 'File' && !this.moduleNames.has(name) && this.lookup(name) === null) {
-			this.refuse(callee, '`File(…)`');
-		}
 
 		// `withContext(dispatcher) { … }` is a thread hop, and the sandbox has
 		// one thread. The dispatcher is dropped and the block is awaited.
@@ -9535,6 +9728,21 @@ class Emitter {
 				block(this.lambdaLines(lambda))
 			);
 			return this.awaited(`(async () => ${body.text})()`);
+		}
+		// `withTimeoutOrNull(ms) { … }`: the block's value, or null when it has
+		// not finished in time — awaited, like `withContext` above. Labelled the
+		// same way, so `return@withTimeoutOrNull` leaves the block.
+		if (name === 'withTimeoutOrNull' && !this.isSourceMember(name) && this.lookup(name) === null) {
+			if (lambda === null || args.length !== 1) {
+				this.refuse(callee, 'a `withTimeoutOrNull` of an unusual shape');
+			}
+			const limit = this.expr(this.argumentValue(args[0]));
+			const body = this.functionScope('lambda', labelled ?? name, [], () =>
+				block(this.lambdaLines(lambda))
+			);
+			return this.awaited(
+				`${this.helper('withTimeoutOrNull')}(${limit}, async () => ${body.text})`
+			);
 		}
 		if (name === 'with') {
 			if (lambda === null || args.length !== 1) this.refuse(callee, 'a `with` of an unusual shape');
@@ -9707,7 +9915,7 @@ class Emitter {
 			// ambiguous here, has nothing to place it by and stays refused.
 			const placeable = !GLOBAL_NAMES.has(declared) && this.signatures.get(declared) !== undefined;
 			if (lambda !== null && !placeable) this.refuse(lambda, `a lambda passed to \`${name}\``);
-			const callee = hoisted ?? declared;
+			const calleeName = hoisted ?? declared;
 			// Kotlin spells construction and invocation the same way. A class
 			// emitted as an ES6 class throws when called without `new`, and it
 			// throws on the first search rather than at load.
@@ -9715,17 +9923,47 @@ class Emitter {
 			// A getter's name is a function here, so calling the *value* it
 			// returns takes the extra pair: `f()` in Kotlin reads `f` and then
 			// invokes what it read.
-			const named = this.moduleGetters.has(declared) ? `${this.safe(callee)}()` : this.safe(callee);
+			const named = this.moduleGetters.has(declared)
+				? `${this.safe(calleeName)}()`
+				: this.safe(calleeName);
 			const passed =
 				lambda === null
-					? this.plainArguments(callee, args)
+					? this.plainArguments(calleeName, args)
 					: this.lastParameterBlock(
 							declared,
 							args,
 							this.callArguments(declared, args, lambda, labelled, false),
 							lambda
 						);
-			const made = `${build}${named}(${passed.join(', ')})`;
+			// A file-scope *extension* function called with no receiver written:
+			// Kotlin passes the implicit one — an `apply {}` block's record, an
+			// enclosing extension's receiver, or else the instance whose member
+			// this is. The declaration takes it as its first argument, and it
+			// was left off: `fun Source.prefs()` called as `prefs()` inside a
+			// subclass read its `id` off the first argument and answered
+			// `store_undefined`, with nothing refused.
+			//
+			// Where an extension and a plain function of the name could both take
+			// the call, Kotlin decides by the arguments' types, and so does the
+			// dispatcher: it is handed the implicit receiver as `this` and tries
+			// the extensions with it in front. See `moduleOverload`.
+			const shape = build === '' ? this.moduleExtensionShape(declared, passed.length) : 'plain';
+			const implicitReceiver =
+				shape === 'plain'
+					? null
+					: (this.receiverAlias() ??
+						this.receiverParam ??
+						(this.selfClass !== null ? this.selfReference() : null));
+			if (shape === 'extension') {
+				if (implicitReceiver === null) {
+					this.refuse(callee, `\`${name}(…)\` with no receiver in scope`);
+				}
+				passed.unshift(implicitReceiver);
+			}
+			const made =
+				shape === 'ambiguous' && implicitReceiver !== null
+					? `${named}.call(${[implicitReceiver, ...passed].join(', ')})`
+					: `${build}${named}(${passed.join(', ')})`;
 			// A file-scope `suspend fun` is an `async function` here, and its
 			// call site says nothing about that in either language.
 			return this.moduleSuspends.has(declared) ? this.awaited(made) : made;
@@ -10053,10 +10291,20 @@ class Emitter {
 		// from inside an `apply {}` landed on the record being built.
 		const self = this.selfReference();
 		const collided = this.fieldNames().has(name) ? this.overloadsOf(name) : null;
+		// A member's own `reified` parameter is its first JavaScript argument
+		// (`pick(__type_T, …)`), so the bare call has to pass the type as the
+		// member call already does. Without it `pick<Dto>(text, "items")` sent
+		// the text as the type and the key as the text, and answered null
+		// from inside whatever catch the member had — a list read as empty,
+		// with nothing refused.
+		const reifiedTypes =
+			this.isSourceMember(name) && this.reifiedFunctions.has(name)
+				? this.reifiedArguments(callee, name, typeArgument, expected)
+				: [];
 		const call =
 			collided === null
-				? `${self}.${name}(${tail.join(', ')})`
-				: this.overloadCall(self, self, name, tail, collided);
+				? `${self}.${name}(${[...reifiedTypes, ...tail].join(', ')})`
+				: this.overloadCall(self, self, name, [...reifiedTypes, ...tail], collided);
 		// Declared by the class being emitted, or by a translated base class it
 		// really `extends` — `launchIO { countViews(document) }` in an extension
 		// on a theme that declares `launchIO`. Either way the method exists on
@@ -11762,6 +12010,19 @@ class Emitter {
 		) {
 			return 'Json';
 		}
+		// keiyoushi core's `applicationContext`, the injected `Application`,
+		// imported by name. The runtime's `Application` is the one this build
+		// has: the preference store, and the app's directories on the
+		// filesystem a plugin does not have (see `__KFile`). Read as a member it
+		// was `this.applicationContext`, undefined, and the first `.filesDir`
+		// threw a TypeError that only a catch-all happened to swallow.
+		if (
+			name === 'applicationContext' &&
+			this.keiyoushiImports.get(name) === 'keiyoushi.utils' &&
+			!this.classMembers.has(name)
+		) {
+			return 'Application';
+		}
 		const hoisted = this.localTypes.get(name);
 		if (hoisted !== undefined) return this.safe(hoisted);
 		// A member of the `object` this code is being emitted into, reached the
@@ -12596,6 +12857,29 @@ const TAGGED_EXCEPTIONS: ReadonlySet<string> = new Set(['IllegalStateException']
 
 /** The framework's model types, whose fields `MODEL_FIELDS` lists. */
 const MODEL_TYPES: ReadonlySet<string> = new Set(MODEL_FIELDS.keys());
+
+/**
+ * The video models' fields, as the runtime's constructors set them, for an
+ * unbound `Type::field` reference. Only fields the runtime assigns as plain
+ * properties: a name missing here is still refused rather than guessed.
+ */
+const RUNTIME_RECORD_PROPERTIES: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+	['Track', new Set(['url', 'lang'])],
+	[
+		'Video',
+		new Set([
+			'url',
+			'quality',
+			'videoUrl',
+			'videoTitle',
+			'resolution',
+			'bitrate',
+			'headers',
+			'preferred'
+		])
+	],
+	['Hoster', new Set(['hosterUrl', 'hosterName', 'internalData'])]
+]);
 
 /** Properties the framework declares, for an unbound `Type::name` reference to one. */
 const FRAMEWORK_PROPERTIES: ReadonlySet<string> = new Set([...ANY_MODEL_FIELD, 'state', 'values']);
@@ -13915,6 +14199,121 @@ function overloadTable(name: string, shapes: readonly OverloadSignature[]): stri
 			shape.defaults
 		])
 	);
+}
+
+/**
+ * A call the grammar attached to an infix or a brace-less `if`, rebuilt with
+ * the call on the expression's last operand — or null when the callee is not
+ * one of those, or its last operand is not something a call can apply to.
+ */
+function regroupCall(node: KNode, callee: KNode): KNode | null {
+	if (callee.type !== 'infix_expression' && callee.type !== 'if_expression') return null;
+	if (
+		callee.type === 'if_expression' &&
+		callee.allChildren.some((child) => child.type === 'else')
+	) {
+		return null;
+	}
+	// The operand the call belongs to: down the last child of the infix, or of
+	// the `if`'s body, to a name or a navigation.
+	let target: KNode | undefined = callee;
+	while (
+		target !== undefined &&
+		(target.type === 'infix_expression' ||
+			target.type === 'if_expression' ||
+			target.type === 'control_structure_body')
+	) {
+		const named = kids(target);
+		target = named[named.length - 1];
+	}
+	if (target === undefined) return null;
+	// A bare `set` or `get` there is read by the grammar as an accessor
+	// keyword; as the callee of a call it is only ever the name.
+	const accessorName =
+		(target.type === 'setter' || target.type === 'getter') && /^(?:set|get)$/.test(target.text);
+	if (
+		target.type !== 'simple_identifier' &&
+		target.type !== 'navigation_expression' &&
+		!accessorName
+	) {
+		return null;
+	}
+	const written = target;
+	const operand: KNode = accessorName
+		? { ...written, type: 'simple_identifier', children: [], field: () => null }
+		: written;
+
+	// The call chain with the operand where the callee was.
+	const rebuildCall = (current: KNode): KNode => {
+		if (current === callee) return operand;
+		const [inner, ...rest] = kids(current);
+		const rebuilt = rebuildCall(inner);
+		return synthetic(
+			current,
+			[rebuilt, ...rest],
+			rebuilt.text + rest.map((one) => one.text).join('')
+		);
+	};
+	const call = rebuildCall(node);
+
+	// The callee with the call where the operand was.
+	const replace = (current: KNode): KNode => {
+		if (current === written) return call;
+		const named = kids(current);
+		const last = named[named.length - 1];
+		if (last === undefined) return current;
+		const swapped = replace(last);
+		return synthetic(
+			current,
+			[...named.slice(0, -1), swapped],
+			current.text.slice(0, current.text.length - last.text.length) + swapped.text
+		);
+	};
+	return replace(callee);
+}
+
+/** A node like `like`, with these named children and this text. */
+function synthetic(like: KNode, children: readonly KNode[], text: string): KNode {
+	const named = new Set(kids(like));
+	const replaced = new Map<KNode, KNode>();
+	const original = kids(like);
+	for (let at = 0; at < original.length; at += 1) {
+		if (children[at] !== undefined && children[at] !== original[at]) {
+			replaced.set(original[at], children[at]);
+		}
+	}
+	return {
+		type: like.type,
+		text,
+		line: like.line,
+		hasError: like.hasError,
+		isMissing: like.isMissing,
+		children: like.children.map((child) => replaced.get(child) ?? child),
+		allChildren: like.allChildren.map((child) =>
+			named.has(child) ? (replaced.get(child) ?? child) : child
+		),
+		field: (name: string) => {
+			const found = like.field(name);
+			return found === null ? null : (replaced.get(found) ?? found);
+		}
+	};
+}
+
+/** A written type-argument list split at its own commas, generics kept whole. */
+function topLevelTypeArguments(written: string): string[] {
+	const parts: string[] = [];
+	let depth = 0;
+	let current = '';
+	for (const char of written) {
+		if (char === '<' || char === '(') depth += 1;
+		else if (char === '>' || char === ')') depth -= 1;
+		if (char === ',' && depth === 0) {
+			parts.push(current.trim());
+			current = '';
+		} else current += char;
+	}
+	if (current.trim().length > 0) parts.push(current.trim());
+	return parts;
 }
 
 /** A `class` this emitter writes as a JavaScript class: not an interface, enum or data class. */

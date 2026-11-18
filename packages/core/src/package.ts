@@ -231,8 +231,19 @@ const ENTRYPOINT = 'source';
  *     overload, `String.matches(Regex)` and `println` translate, and a
  *     template's refused override of a driver-called member now blocks.
  *     Reconvert every bundle made at 61 or earlier.
+ * 63: a generated `@Source` class gets its build file's name, language and
+ *     base URL; an Aniyomi driver request goes through the extension's own
+ *     client; java.io.File answers as a filesystem that is not there; a
+ *     helper object's own properties and suspending members, file-scope
+ *     overloads, a bare call to a reified member, an unbound
+ *     `Track::url`, a lazy reading a constructor parameter and a call the
+ *     grammar hands to a whole infix or `if` all translate faithfully; and
+ *     `mapTo` into a set, okhttp's reading of backslashes in a url, minBy,
+ *     Result, withTimeoutOrNull and a main-Looper Handler are supplied. Bundles
+ *     that refused, loaded and failed, or resolved nothing at 62 convert
+ *     differently. Reconvert every bundle made at 62 or earlier.
  */
-export const CONVERTER_VERSION = 62;
+export const CONVERTER_VERSION = 63;
 
 export interface BundleInput {
 	readonly id: string;
