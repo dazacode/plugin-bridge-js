@@ -292,3 +292,30 @@ describe('a converted Paperback source, searched', () => {
 		expect(page.entries.map((entry) => entry.title)).toEqual(['configured']);
 	});
 });
+
+describe('a converted Paperback source, read', () => {
+	it('carries an HTML chapter as one text page rather than as no pages', async () => {
+		// A novel source answers a chapter with `{ type: 'html', html }` and no
+		// `pages`. Only `pages` was read, so every chapter opened empty.
+		const module = (await loadSearch(`
+			var source=(function(e){
+				var x=class{
+					async getSearchResults(){return {items:[]}}
+					async getChapters(){return [{chapterId:'c1',chapNum:1}]}
+					async getChapterDetails(c){return {id:c.chapterId,mangaId:c.sourceManga.mangaId,type:'html',html:'<p>Once</p>'}}
+				};
+				return e.AlphaExtension=x,e
+			})({});
+		`)) as unknown as {
+			readChapter(
+				id: string,
+				chapter: { number: number; sourceChapterId: string },
+				ctx: unknown
+			): Promise<{ pages: { index: number; url: string }[] }>;
+		};
+		const read = await module.readChapter('m1', { number: 1, sourceChapterId: 'c1' }, CONTEXT);
+		expect(read.pages).toHaveLength(1);
+		expect(decodeURIComponent(read.pages[0].url.split(',').slice(1).join(','))).toBe('<p>Once</p>');
+		expect(read.pages[0].url.startsWith('data:text/html')).toBe(true);
+	});
+});

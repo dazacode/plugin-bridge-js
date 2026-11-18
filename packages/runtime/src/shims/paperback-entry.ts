@@ -692,6 +692,12 @@ export default {
       chapNum: chapter && chapter.number !== undefined ? Number(chapter.number) : 0,
       langCode: 'en'
     });
+    // A novel chapter is one HTML document, \`{ type: 'html', html }\`, and has
+    // no page urls at all. It is carried as a \`data:\` url, as the Kotlin
+    // family's text chapters are, so it is still an ordered page list.
+    if (details && details.type === 'html' && typeof details.html === 'string') {
+      return { pages: [{ index: 0, url: 'data:text/html;charset=utf-8,' + encodeURIComponent(details.html) }] };
+    }
     var urls = details && Array.isArray(details.pages) ? details.pages : [];
     var pages = [];
     for (var i = 0; i < urls.length; i++) pages.push({ index: pages.length, url: String(urls[i]) });
