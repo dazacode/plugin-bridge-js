@@ -273,6 +273,49 @@ function __cookiesOf(headers) {
  * cookie stores, rate limiters and Cloudflare handlers through it, and a
  * request that skipped them would carry no session and pace nothing.
  */
+/** The request half of every registered interceptor, in registration order. */
+async function __interceptRequest(request) {
+  var chain = [];
+  __interceptors.forEach(function (pair) { chain.push(pair); });
+  for (var i = 0; i < chain.length; i++) {
+    if (chain[i].request === null) continue;
+    var next = await chain[i].request(request);
+    if (next !== undefined && next !== null) request = next;
+  }
+  return request;
+}
+
+/** A request's headers, with its cookie jar folded into a Cookie header. */
+function __headersOf(request) {
+  var headers = {};
+  for (var name in request.headers || {}) headers[name] = request.headers[name];
+  var cookieHeader = [];
+  var cookies = request.cookies || {};
+  for (var cookie in cookies) cookieHeader.push(cookie + '=' + cookies[cookie]);
+  if (cookieHeader.length > 0 && headers['cookie'] === undefined) headers['cookie'] = cookieHeader.join('; ');
+  return headers;
+}
+
+/**
+ * A page image as the app would have requested it.
+ *
+ * Paperback runs an extension's interceptors on every request it makes for
+ * the extension, page images included — that is where a Referer for the
+ * image host is usually added. The host fetches page images itself, so the
+ * request half is run here, without sending, and what it produced travels on
+ * the page (ABI §8.3). The response half cannot run on bytes this code never
+ * sees; an interceptor that rewrites an image's bytes is a limitation of
+ * host-fetched pages, and one that only reads cookies or status loses nothing.
+ */
+async function __pageRequest(url) {
+  var request = await __interceptRequest({ url: url, method: 'GET', headers: {}, cookies: {} });
+  var headers = __headersOf(request);
+  delete headers['content-length'];
+  var page = { url: String(request.url || url) };
+  if (Object.keys(headers).length > 0) page.headers = headers;
+  return page;
+}
+
 async function __scheduleRequest(init) {
   var call = init || {};
   var url = String(call.url || '') + String(call.param || '');
@@ -286,20 +329,8 @@ async function __scheduleRequest(init) {
     cookies: call.cookies || {}
   };
 
-  var chain = [];
-  __interceptors.forEach(function (pair) { chain.push(pair); });
-  for (var i = 0; i < chain.length; i++) {
-    if (chain[i].request === null) continue;
-    var next = await chain[i].request(request);
-    if (next !== undefined && next !== null) request = next;
-  }
-
-  var headers = {};
-  for (var name in request.headers || {}) headers[name] = request.headers[name];
-  var cookieHeader = [];
-  var cookies = request.cookies || {};
-  for (var cookie in cookies) cookieHeader.push(cookie + '=' + cookies[cookie]);
-  if (cookieHeader.length > 0 && headers['cookie'] === undefined) headers['cookie'] = cookieHeader.join('; ');
+  request = await __interceptRequest(request);
+  var headers = __headersOf(request);
 
   var options = { method: request.method, headers: headers, body: request.body === undefined ? null : request.body };
   if (request.follow === false) options.redirect = 'manual';
@@ -624,7 +655,11 @@ export default {
     });
     var urls = details && Array.isArray(details.pages) ? details.pages : [];
     var pages = [];
-    for (var i = 0; i < urls.length; i++) pages.push({ index: pages.length, url: String(urls[i]) });
+    for (var i = 0; i < urls.length; i++) {
+      var page = await __pageRequest(String(urls[i]));
+      page.index = pages.length;
+      pages.push(page);
+    }
     return { pages: pages };
   }
 };

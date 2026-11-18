@@ -640,3 +640,169 @@ const result: { id: string; title: string }[] = [
 		).toEqual([{ id: 'a', title: 'Enabled' }]);
 	});
 });
+
+/**
+ * The page transport: the client a source hands the app for its images, run
+ * here so that what it would have sent travels on the page (ABI §8.3).
+ */
+describe('a Mana page transport', () => {
+	const sent: { url: string; headers: Record<string, string> }[] = [];
+	function context() {
+		sent.length = 0;
+		return {
+			http: {
+				send: async (url: string, init: { headers?: Record<string, string> }) => {
+					sent.push({ url, headers: init.headers ?? {} });
+					const body = url.includes('/viewer/')
+						? `<img id="img" src="https://img.example.invalid${url.slice(url.indexOf('/viewer/') + 7)}.jpg">`
+						: '{}';
+					return {
+						status: 200,
+						url,
+						headers: {},
+						text: async () => body,
+						json: async () => ({}),
+						bytes: async () => new TextEncoder().encode(body)
+					};
+				}
+			},
+			text: {
+				encode: (v: string) => new TextEncoder().encode(v),
+				decode: (b: Uint8Array) => new TextDecoder().decode(b)
+			},
+			bytes: {
+				toBase64: (b: Uint8Array) => Buffer.from(b).toString('base64'),
+				fromBase64: (v: string) => new Uint8Array(Buffer.from(v, 'base64'))
+			}
+		};
+	}
+
+	async function loadBundle(bundle: string) {
+		const opened = await openPluginArchive(
+			await manaAdapter.convert(
+				listing(),
+				services({ fetchArtifact: async () => new TextEncoder().encode(bundle) })
+			)
+		);
+		const url = `data:text/javascript;base64,${Buffer.from(opened.entrypointSource).toString('base64')}`;
+		return (await import(/* @vite-ignore */ url)).default as {
+			readChapter(
+				id: string,
+				chapter: unknown,
+				ctx: unknown
+			): Promise<{ pages: { url: string; headers?: Record<string, string> }[] }>;
+		};
+	}
+
+	/**
+	 * A built bundle whose image client works the way the published one does:
+	 * request interceptors in order, then a send through the app's bridge at
+	 * the page origin. Its interceptor reads a viewer page through the
+	 * ordinary client first — a real request — to learn the image address.
+	 */
+	const TRANSPORT_BUNDLE = (reads: boolean) => `
+class Client {
+  constructor(interceptors, responses) { this.requests = interceptors; this.responses = responses; }
+  async get(url) {
+    const answer = await globalThis.__manaHTTPBridge.send({ operation: 0, url: url, method: 0, headers: {}, origin: 0 });
+    const read = await globalThis.__manaHTTPBridge.send({ operation: 1, bodyID: answer.bodyID, reader: 0 });
+    return read.value;
+  }
+  async [Symbol.for('mana.http.image.v1')](request) {
+    let current = { url: request.url, headers: {} };
+    for (const one of this.requests) current = await one(current, { origin: request.origin });
+    let response = await globalThis.__manaHTTPBridge.send({ operation: 0, url: current.url, method: 0, headers: current.headers, origin: request.origin });
+    for (const one of this.responses) response = await one(response, { origin: request.origin });
+    return response;
+  }
+}
+class Target {
+  constructor() {
+    this.info = { id: 'Example', name: 'Example', version: '1.0.0', website: 'https://site.example.invalid' };
+    this.client = new Client([], []);
+    this.images = new Client([async (request) => {
+      const html = await this.client.get(request.url);
+      const url = /src="([^"]+)"/.exec(html)[1];
+      return { url: url, headers: Object.assign({}, request.headers, { referer: 'https://site.example.invalid/', 'content-length': '0' }) };
+    }], [
+      // A status check scoped to ordinary requests, which passes an image through.
+      async (response, context) => (context.origin === 0 && response.status !== 200 ? Promise.reject(new Error('blocked')) : response),
+      ${reads ? 'async (response) => { await globalThis.__manaHTTPBridge.send({ operation: 1, bodyID: response.bodyID, reader: 1 }); return response; },' : ''}
+    ]);
+  }
+  async getChapterData() { return { pages: [{ url: 'https://site.example.invalid/viewer/7' }] }; }
+  getPageTransport() { return this.images; }
+}
+globalThis.Target = Target;
+`;
+
+	it('sends each page as its transport would have: rewritten, with the headers it added', async () => {
+		const module = await loadBundle(TRANSPORT_BUNDLE(false));
+		const read = await module.readChapter('one', { number: 1, sourceChapterId: 'c1' }, context());
+		expect(read.pages).toEqual([
+			{
+				index: 0,
+				url: 'https://img.example.invalid/7.jpg',
+				headers: { referer: 'https://site.example.invalid/' }
+			}
+		]);
+		// The viewer page went out for real; the image request did not.
+		expect(sent.map((one) => one.url)).toEqual(['https://site.example.invalid/viewer/7']);
+	});
+
+	it('refuses a transport that reads the image response, and passes one that does not', async () => {
+		const module = await loadBundle(TRANSPORT_BUNDLE(true));
+		await expect(
+			module.readChapter('one', { number: 1, sourceChapterId: 'c1' }, context())
+		).rejects.toThrow(/reads the image response itself/);
+	});
+
+	it('runs a source tree’s async interceptors and takes what they answer', async () => {
+		const REPO = 'https://repo.example.invalid/mana/main/';
+		const entry = `
+import { HttpClient } from '@mana-app/types';
+export class Target {
+  info = { id: 'Example', name: 'Example', version: '1.0.0', website: 'https://site.example.invalid' };
+  client = new HttpClient().addRequestInterceptor(async (request: any) => { request.headers.set('x-signed', 'yes'); return request; });
+  images = new HttpClient().addRequestInterceptor(async (request: any) => ({ ...request, url: request.url + '?sig=1' }))
+    .addRequestInterceptor(async (request: any) => { if (!request.headers.has('referer')) request.headers.set('Referer', 'https://site.example.invalid/'); return request; });
+  async getSearchResults(query: string) {
+    await this.client.get('https://api.example.invalid/search');
+    return [];
+  }
+  async getChapterData() { return { pages: [{ url: 'https://img.example.invalid/1.jpg' }] }; }
+  getPageTransport() { return this.images; }
+}`;
+		const sourceListing = manaAdapter.parseIndex(
+			JSON.stringify([
+				{ id: 'Example', name: 'Example', path: 'Example', website: 'https://site.example.invalid' }
+			]),
+			`${REPO}sources.json`
+		).plugins[0];
+		const opened = await openPluginArchive(
+			await manaAdapter.convert(
+				sourceListing,
+				services({
+					getText: async (url) =>
+						url === `${REPO}src/Example/main.ts` ? entry : Promise.reject(new Error(url))
+				})
+			)
+		);
+		const url = `data:text/javascript;base64,${Buffer.from(opened.entrypointSource).toString('base64')}`;
+		const module = (await import(/* @vite-ignore */ url)).default as {
+			searchCatalog(q: string, p: number, ctx: unknown): Promise<unknown>;
+			readChapter(id: string, chapter: unknown, ctx: unknown): Promise<{ pages: unknown[] }>;
+		};
+		const ctx = context();
+		await module.searchCatalog('q', 1, ctx);
+		expect(sent[0].headers['x-signed']).toBe('yes');
+		const read = await module.readChapter('one', { number: 1, sourceChapterId: 'c1' }, ctx);
+		expect(read.pages).toEqual([
+			{
+				index: 0,
+				url: 'https://img.example.invalid/1.jpg?sig=1',
+				headers: { referer: 'https://site.example.invalid/' }
+			}
+		]);
+	});
+});

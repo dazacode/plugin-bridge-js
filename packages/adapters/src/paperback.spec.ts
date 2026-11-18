@@ -199,4 +199,42 @@ describe('what a converted Paperback bundle declares', () => {
 		expect(opened.entrypointSource).toContain('executeInWebView:');
 		expect(opened.entrypointSource).toContain('globalThis.Application = Application;');
 	});
+
+	it('sends each page image with what the registered interceptors add to a request', async () => {
+		const listing = paperbackAdapter.parseIndex(registration(ONE), INDEX_URL).plugins[0];
+		const source = `var source=(function(e){
+  class Alpha {
+    constructor() {
+      Application.registerInterceptor('main', Application.Selector(this, 'interceptRequest'), Application.Selector(this, 'interceptResponse'));
+    }
+    async interceptRequest(request) {
+      request.headers = Object.assign({}, request.headers, { referer: 'https://site.example.invalid/' });
+      request.cookies = { session: 'abc' };
+      return request;
+    }
+    async interceptResponse(response) { return response; }
+    async getSearchResults() { return { items: [] }; }
+    async getMangaDetails() { return {}; }
+    async getChapters() { return []; }
+    async getChapterDetails() { return { pages: ['https://img.example.invalid/1.jpg'] }; }
+  }
+  e.Alpha = Alpha;
+  return e;
+})({});`;
+		const opened = await openPluginArchive(
+			await paperbackAdapter.convert(listing, services(source))
+		);
+		const url = `data:text/javascript;base64,${Buffer.from(opened.entrypointSource).toString('base64')}`;
+		const module = (await import(/* @vite-ignore */ url)).default as {
+			readChapter(id: string, chapter: unknown, ctx: unknown): Promise<{ pages: unknown[] }>;
+		};
+		const read = await module.readChapter('m1', { number: 1, sourceChapterId: 'c1' }, {});
+		expect(read.pages).toEqual([
+			{
+				url: 'https://img.example.invalid/1.jpg',
+				headers: { referer: 'https://site.example.invalid/', cookie: 'session=abc' },
+				index: 0
+			}
+		]);
+	});
 });
