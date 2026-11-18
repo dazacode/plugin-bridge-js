@@ -2329,6 +2329,12 @@ class Emitter {
 	 * name becomes a dispatcher — unless a property holds it, in which case
 	 * calls go through `__k.overload` directly (`overloadCall`).
 	 */
+	/**
+	 * The plain constructor parameters in scope for the property being emitted,
+	 * by their emitted names — see the delegate case of `classProperty`.
+	 */
+	private initialiserOnlyParams: readonly string[] = [];
+
 	/** File-scope functions declared more than once under one name, and how far emission got. */
 	private readonly moduleOverloads = new Map<
 		string,
@@ -3100,7 +3106,15 @@ class Emitter {
 							!child.allChildren.some((part) => part.type === '=') &&
 							!kids(child).some((part) => part.type === 'property_delegate');
 						if (!getterOnly) for (const param of initialiserOnly) this.declare(param.name);
-						emitted = this.classProperty(child, detached);
+						const outerParams = this.initialiserOnlyParams;
+						this.initialiserOnlyParams = getterOnly
+							? []
+							: initialiserOnly.map((param) => this.safe(param.name));
+						try {
+							emitted = this.classProperty(child, detached);
+						} finally {
+							this.initialiserOnlyParams = outerParams;
+						}
 					} finally {
 						this.popScope();
 					}
@@ -4519,14 +4533,36 @@ class Emitter {
 		if (this.hasModifier(node, 'lateinit')) return null;
 
 		if (delegate !== undefined) {
+			let ctor: string | undefined;
 			const text = this.member(name, node, () => {
 				const initialiser = this.delegateValue(delegate, node, name);
+				// `private val token by lazy { client.newCall(GET(baseUrl)) … }` in a
+				// class whose `client` and `baseUrl` are plain constructor
+				// parameters. Kotlin's lambda captures them; a getter on the
+				// prototype cannot see a constructor's parameters at all, so the
+				// first read threw "client is not defined" — inside the source's
+				// own `runCatching`, which answered an empty token, and every
+				// search went out unauthorised. The block is built in the
+				// constructor, where they are in scope, and the getter runs that.
+				const captured = this.initialiserOnlyParams.some((param) =>
+					new RegExp(`(^|[^.\\w$])${param.replace(/\$/g, '\\$')}\\b`).test(initialiser)
+				);
+				if (!captured) {
+					return this.overridable(
+						name,
+						`get ${name}() ${block([`return ${this.helper('lazy')}(this, ${JSON.stringify(name)}, ${initialiser});`])}`
+					);
+				}
+				const slot = `__lazyInit_${plainName(name)}`;
+				ctor = `Object.defineProperty(this, ${JSON.stringify(slot)}, { value: ${initialiser}, configurable: true });`;
 				return this.overridable(
 					name,
-					`get ${name}() ${block([`return ${this.helper('lazy')}(this, ${JSON.stringify(name)}, ${initialiser});`])}`
+					`get ${name}() ${block([`return ${this.helper('lazy')}(this, ${JSON.stringify(name)}, this[${JSON.stringify(slot)}]);`])}`
 				);
 			});
-			return text === null ? null : { kind: 'member', text };
+			return text === null
+				? null
+				: { kind: 'member', text, ...(ctor === undefined ? {} : { ctor }) };
 		}
 
 		const mutableProperty = kids(node).some(

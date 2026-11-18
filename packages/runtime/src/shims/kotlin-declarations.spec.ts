@@ -995,6 +995,30 @@ describe('a call the grammar hands to the whole expression before it', () => {
 	});
 });
 
+describe('a lazy property that reads a constructor parameter', () => {
+	it('reads the parameter the lambda captured', async () => {
+		// `class SearchInterceptor(client: OkHttpClient, baseUrl: String) {
+		// private val token by lazy { client.newCall(GET(baseUrl)) … } }`. A
+		// getter on the prototype cannot see a constructor's parameters, so the
+		// first read threw "client is not defined" — inside the source's own
+		// `runCatching`, which answered an empty token.
+		const d = await instantiate(
+			'Demo',
+			kt(
+				'class Holder(prefix: String, private val base: String) {',
+				'    private val token: String by lazy { runCatching { prefix + "@" + base }.getOrElse { "" } }',
+				'    val upper: String by lazy { base.uppercase() }',
+				'    fun read(): String = token + "|" + upper',
+				'}',
+				'class Demo {',
+				'    fun go(): String = Holder("p", "b").read()',
+				'}'
+			)
+		);
+		expect(d.go()).toBe('p@b|B');
+	});
+});
+
 describe('a reference to a member the template declares', () => {
 	it('binds it to the inherited value, not to the argument', async () => {
 		// DooPlay's `protected open val episodeNumberRegex`, read by a subclass
