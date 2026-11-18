@@ -62,8 +62,11 @@ import {
 	fetchExtensionSource,
 	locationCandidates,
 	newSharedCache,
+	discoverSourceRepository,
 	readBuildGradle,
 	sourceRepositoryOf,
+	sourceRepositoryOfUrl,
+	type PublishedVersion,
 	type SharedCache
 } from '@plugin-bridge/core/source-repo';
 import { readKotlinFast, type KotlinConversion } from '@plugin-bridge/core/kotlin/pipeline';
@@ -124,6 +127,110 @@ function withSourceRepository(
 			detail: { ...(listing.origin.detail ?? {}), sourceRepository }
 		}
 	};
+}
+
+/**
+ * Names this ecosystem gives a source repository without reference to the
+ * repository its listing is published from. Tried, under the index's own
+ * owner, only when the publisher's metadata names no repository; each costs a
+ * request or two, so the list is kept to the ones actually in use.
+ */
+const CONVENTIONAL_SOURCE_NAMES = [
+	'anime-extensions',
+	'aniyomi-extensions',
+	'extensions-source',
+	'extensions'
+] as const;
+
+/** What the publisher says about itself, from whichever document it publishes. */
+interface PublisherMetadata {
+	readonly name: string | null;
+	/** Lowercase hex SHA-256 of the signing certificate, or null. */
+	readonly fingerprint: string | null;
+	readonly website: string | null;
+	/** The website, when it names a repository. */
+	readonly sourceRepository: string | null;
+}
+
+function stringField(value: unknown): string | null {
+	return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+function fingerprintField(value: unknown): string | null {
+	return typeof value === 'string' && /^[0-9a-f]{64}$/i.test(value) ? value.toLowerCase() : null;
+}
+
+/**
+ * The publisher's metadata, from `repo.json` beside the index or, failing
+ * that, from the newer `index.json` that carries the same facts in another
+ * shape (`name`, `signingKey`, `contact.website`).
+ *
+ * Null when neither is there or readable. The second document is only asked
+ * for when the first is missing, so a repository publishing the usual one pays
+ * nothing extra for this; and `index.json` is also the *older* name of the
+ * listing array in some repositories, which is not an object and is ignored.
+ */
+async function publisherMetadata(
+	indexUrl: string,
+	getText: TextFetcher
+): Promise<PublisherMetadata | null> {
+	let sibling: string | null = null;
+	try {
+		sibling = await getText(new URL('repo.json', indexUrl).toString());
+	} catch {
+		sibling = null;
+	}
+
+	if (sibling !== null) {
+		try {
+			const decoded = JSON.parse(sibling) as {
+				meta?: { name?: unknown; signingKeyFingerprint?: unknown; website?: unknown };
+			};
+			return {
+				name: stringField(decoded.meta?.name),
+				fingerprint: fingerprintField(decoded.meta?.signingKeyFingerprint),
+				website: stringField(decoded.meta?.website),
+				sourceRepository: sourceRepositoryOf(sibling)
+			};
+		} catch {
+			return null;
+		}
+	}
+
+	try {
+		const decoded: unknown = JSON.parse(await getText(new URL('index.json', indexUrl).toString()));
+		if (typeof decoded !== 'object' || decoded === null || Array.isArray(decoded)) return null;
+		const document = decoded as {
+			name?: unknown;
+			signingKey?: unknown;
+			contact?: { website?: unknown };
+		};
+		const website = stringField(document.contact?.website);
+		return {
+			name: stringField(document.name),
+			fingerprint: fingerprintField(document.signingKey),
+			website,
+			sourceRepository: website === null ? null : sourceRepositoryOfUrl(website)
+		};
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * The listings a candidate source repository is checked against: package and
+ * published build number, from the index's own `<library>.<build>` version.
+ * A listing whose version does not read that way is no evidence either way.
+ */
+function verificationSamples(listings: readonly RepositoryPlugin[]): PublishedVersion[] {
+	const out: PublishedVersion[] = [];
+	for (const listing of listings) {
+		const pkg = listing.origin?.foreignId;
+		const match = /^\d+\.(\d+)$/.exec(listing.origin?.foreignVersion ?? '');
+		if (pkg === undefined || match === null) continue;
+		out.push({ pkg, versionCode: Number(match[1]) });
+	}
+	return out;
 }
 
 /**
@@ -267,40 +374,50 @@ export const aniyomiAdapter: ForeignAdapter = {
 		const index = this.parseIndex(body, indexUrl);
 
 		// Metadata only. A repository that does not publish it is perfectly
-		// usable, so this never fails the add — it just adds less.
-		try {
-			const siblingUrl = new URL('repo.json', indexUrl).toString();
-			const sibling = await getText(siblingUrl);
-			const meta = JSON.parse(sibling) as {
-				meta?: { name?: unknown; signingKeyFingerprint?: unknown };
-			};
-			const name = meta.meta?.name;
-			const fingerprint = meta.meta?.signingKeyFingerprint;
+		// usable, so none of this ever fails the add — it just adds less.
+		const publisher = await publisherMetadata(indexUrl, getText);
 
-			// The published artifact is Android bytecode with its classpath
-			// missing, but the same document names the repository the artifact
-			// was *built* from — and that is readable Kotlin. Resolving it here,
-			// while the metadata is in hand, is what later lets `convert` read a
-			// program instead of reverse-engineering a binary; it is also the
-			// only place the original author and their licence can be found, and
-			// a derived work has to carry both (`FOREIGN.md` §5.1).
-			const sourceRepository = sourceRepositoryOf(sibling);
-
-			return {
-				...index,
-				name: typeof name === 'string' && name.length > 0 ? name : index.name,
-				signingKey:
-					typeof fingerprint === 'string' && /^[0-9a-f]{64}$/i.test(fingerprint)
-						? `${CERTIFICATE_KEY_PREFIX}${fingerprint.toLowerCase()}`
-						: null,
-				plugins:
-					sourceRepository === null
-						? index.plugins
-						: index.plugins.map((listing) => withSourceRepository(listing, sourceRepository))
-			};
-		} catch {
-			return index;
+		// The published artifact is Android bytecode with its classpath
+		// missing, but the same document usually names the repository the
+		// artifact was *built* from — and that is readable Kotlin. Resolving it
+		// here, while the metadata is in hand, is what later lets `convert` read
+		// a program instead of reverse-engineering a binary; it is also the only
+		// place the original author and their licence can be found, and a
+		// derived work has to carry both (`FOREIGN.md` §5.1).
+		//
+		// When the website is a homepage instead, the likely places beside the
+		// index are asked, once per index and never per listing, and a candidate
+		// is believed only when it proves itself against listings from this
+		// index — see `discoverSourceRepository`. None proving itself leaves the
+		// listings exactly as a homepage always left them.
+		let sourceRepository = publisher?.sourceRepository ?? null;
+		if (sourceRepository === null) {
+			try {
+				sourceRepository = await discoverSourceRepository(
+					indexUrl,
+					publisher?.website ?? null,
+					verificationSamples(index.plugins),
+					getText,
+					CONVENTIONAL_SOURCE_NAMES
+				);
+			} catch {
+				sourceRepository = null;
+			}
 		}
+
+		const withSource =
+			sourceRepository === null
+				? index.plugins
+				: index.plugins.map((listing) => withSourceRepository(listing, sourceRepository));
+
+		if (publisher === null) return { ...index, plugins: withSource };
+		return {
+			...index,
+			name: publisher.name ?? index.name,
+			signingKey:
+				publisher.fingerprint === null ? null : `${CERTIFICATE_KEY_PREFIX}${publisher.fingerprint}`,
+			plugins: withSource
+		};
 	},
 
 	/**

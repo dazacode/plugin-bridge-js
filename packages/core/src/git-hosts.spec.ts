@@ -11,7 +11,13 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { DEFAULT_REFS, looksLikeFile, parseRepositoryUrl, rawCandidates } from './git-hosts';
+import {
+	DEFAULT_REFS,
+	githubPagesOwner,
+	looksLikeFile,
+	parseRepositoryUrl,
+	rawCandidates
+} from './git-hosts';
 import { FOREIGN_ADAPTERS } from '@plugin-bridge/adapters';
 
 const repo = (href: string) => parseRepositoryUrl(new URL(href));
@@ -131,4 +137,29 @@ describe('a URL that is already a file', () => {
 			expect(adapter.candidates(new URL(pasted))).toEqual([pasted]);
 		}
 	);
+});
+
+describe('an account’s static site', () => {
+	const pages = (href: string) => githubPagesOwner(new URL(href));
+
+	it('names the owner, and the project a project site is served from', () => {
+		expect(pages('https://example-owner.github.io')).toEqual({
+			owner: 'example-owner',
+			repo: null
+		});
+		expect(pages('https://example-owner.github.io/index.min.json')).toEqual({
+			owner: 'example-owner',
+			repo: null
+		});
+		expect(pages('https://Example-Owner.github.io/widgets/index.min.json')).toEqual({
+			owner: 'example-owner',
+			repo: 'widgets'
+		});
+	});
+
+	it('names nobody for any other host, or for the bare suffix', () => {
+		expect(pages('https://example.invalid/owner/repo')).toBeNull();
+		expect(pages('https://a.b.github.io/')).toBeNull();
+		expect(pages('http://example-owner.github.io/')).toBeNull();
+	});
 });
