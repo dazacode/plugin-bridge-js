@@ -42,7 +42,7 @@
  */
 
 /** Every setting type the manifest schema allows. */
-export type SettingType = 'select' | 'multiselect' | 'switch' | 'text';
+export type SettingType = 'select' | 'multiselect' | 'switch' | 'text' | 'number';
 
 export interface SettingOption {
 	readonly value: string;
@@ -65,6 +65,36 @@ export interface SettingDescriptor {
 	readonly help?: string;
 	readonly default?: unknown;
 	readonly options?: readonly SettingOption[];
+	/** A `number` setting's bounds and step (`ABI.md` §9.2), and only its. */
+	readonly min?: number;
+	readonly max?: number;
+	readonly step?: number;
+}
+
+/**
+ * The most values a `number` setting may span, `floor((max − min) / step) + 1`.
+ *
+ * A bound on what a host is asked to draw — a stepper over a billion values is
+ * a control nobody can operate — not a judgement about the plugin.
+ */
+export const MAX_NUMBER_VALUES = 100_000;
+
+/** The API level a manifest needs for what its settings declare (`ABI.md` §9.2). */
+export function settingsApiLevel(descriptors: readonly SettingDescriptor[]): number {
+	return descriptors.some((one) => one.type === 'number') ? 3 : 1;
+}
+
+/** A number inside a `number` setting's bounds, on its step from `min`. */
+function onStep(descriptor: SettingDescriptor, value: number): number {
+	const min = descriptor.min ?? 0;
+	const max = descriptor.max ?? min;
+	const step = descriptor.step ?? 1;
+	const clamped = Math.min(max, Math.max(min, value));
+	const snapped = min + Math.round((clamped - min) / step) * step;
+	// Rounded to the step's own precision, so 0.1 steps do not answer 0.30000000000000004.
+	const decimals = (String(step).split('.')[1] ?? '').length;
+	const tidy = Number(snapped.toFixed(Math.min(decimals, 12)));
+	return tidy > max ? tidy - step : tidy;
 }
 
 /** What the schema caps these at, repeated here so a derivation can obey it. */
@@ -136,11 +166,46 @@ export function coerce(descriptor: SettingDescriptor, value: unknown): unknown {
 		case 'multiselect':
 			if (!Array.isArray(value)) return [];
 			return value.filter((entry): entry is string => typeof entry === 'string');
+		case 'number': {
+			const read =
+				typeof value === 'number'
+					? value
+					: typeof value === 'string' && value.trim() !== ''
+						? Number(value)
+						: NaN;
+			return onStep(descriptor, Number.isFinite(read) ? read : (descriptor.min ?? 0));
+		}
 		case 'select':
 		case 'text':
 		default:
 			return typeof value === 'string' ? value : '';
 	}
+}
+
+/**
+ * A `number` setting's bounds, or null when the schema would refuse them:
+ * every bound finite, `min ≤ default ≤ max`, `step > 0`, and a bounded count.
+ */
+function numberBounds(
+	row: Record<string, unknown>
+): { min: number; max: number; step: number } | null {
+	const { min, max, step } = row as { min?: unknown; max?: unknown; step?: unknown };
+	if (typeof min !== 'number' || typeof max !== 'number' || typeof step !== 'number') return null;
+	if (!Number.isFinite(min) || !Number.isFinite(max) || !Number.isFinite(step)) return null;
+	if (step <= 0 || min > max) return null;
+	if (Math.floor((max - min) / step) + 1 > MAX_NUMBER_VALUES) return null;
+	if ('default' in row) {
+		const fallback = row['default'];
+		if (
+			typeof fallback !== 'number' ||
+			!Number.isFinite(fallback) ||
+			fallback < min ||
+			fallback > max
+		) {
+			return null;
+		}
+	}
+	return { min, max, step };
 }
 
 /**
@@ -164,9 +229,17 @@ export function parseSettingDescriptors(value: unknown): readonly SettingDescrip
 		if (id === null || !ID_PATTERN.test(id) || seen.has(id)) continue;
 
 		const type = row['type'];
-		if (type !== 'select' && type !== 'multiselect' && type !== 'switch' && type !== 'text') {
+		if (
+			type !== 'select' &&
+			type !== 'multiselect' &&
+			type !== 'switch' &&
+			type !== 'text' &&
+			type !== 'number'
+		) {
 			continue;
 		}
+		const bounds = type === 'number' ? numberBounds(row) : null;
+		if (type === 'number' && bounds === null) continue;
 
 		const label = text(row['label'], MAX_LABEL);
 		if (label === null) continue;
@@ -186,7 +259,8 @@ export function parseSettingDescriptors(value: unknown): readonly SettingDescrip
 			label,
 			...(key === null ? {} : { key }),
 			...(help === null ? {} : { help }),
-			...(choices === null ? {} : { options: choices }),
+			...(choices === null || type === 'number' ? {} : { options: choices }),
+			...(bounds === null ? {} : bounds),
 			...('default' in row ? { default: row['default'] } : {})
 		};
 		out.push({ ...descriptor, default: defaultValue(descriptor) });

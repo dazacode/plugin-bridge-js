@@ -61,6 +61,8 @@ export interface SuwatteEntrypointOptions {
 		readonly id: string;
 		readonly key: string;
 		readonly type: string;
+		/** A stepper drawn as a select, for a host below level 3: read back as a number. */
+		readonly numeric?: boolean;
 	}[];
 	/**
 	 * A built `.stt`, carried verbatim in place of `modules`. It declares
@@ -847,6 +849,12 @@ function __plantSettings(ctx) {
       // \`ctx.settings\` answers a list as \`list(id)\` (ABI §2); the source reads it
       // back through \`ObjectStore.stringArray\`, which is the toolchain's name.
       else if (setting.type === 'multiselect') value = ctx.settings.list(setting.id);
+      // A stepper: a number setting at level 3, or its values as a select below.
+      else if (setting.type === 'number') value = ctx.settings.number(setting.id);
+      else if (setting.numeric === true) {
+        var chosen = Number(ctx.settings.string(setting.id));
+        value = Number.isFinite(chosen) ? chosen : null;
+      }
       else value = ctx.settings.string(setting.id);
     }
     __objectStore.set(setting.key, value);
@@ -1396,7 +1404,16 @@ export default {
     var runner = await __instance();
     if (typeof runner.getSearchResults !== 'function') return { entries: [] };
     var request = { query: String(query), filters: {}, sort: undefined };
-    return __page(await runner.getSearchResults(request, Math.max(1, Number(page) || 1)));
+    var found = __page(await runner.getSearchResults(request, Math.max(1, Number(page) || 1)));
+    // The configuration's image Referer applies to covers too (ABI §9.1,
+    // level 3); a host below that ignores the field, as before.
+    var referer = await __imageReferer(runner);
+    if (referer.length > 0) {
+      for (var i = 0; i < found.entries.length; i++) {
+        if (found.entries[i].posterImageUrl !== undefined) found.entries[i].posterImageHeaders = { Referer: referer };
+      }
+    }
+    return found;
   },
 
   async listChapters(sourceMediaId, ctx) {

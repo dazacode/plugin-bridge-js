@@ -206,6 +206,107 @@ export default class Alpha {
 		expect(page.entries[0].title).toBe('a+b');
 	});
 
+	/** A source tree whose settings form holds one stepper, run with a given host level. */
+	async function stepperSource(bounds: string, hostApiLevel?: number) {
+		const files = sourceFiles();
+		files[`${BASE}/alpha/settings.ts`] = `
+import { UIStepper } from "@suwatte/toolchain";
+export function form() {
+  return UIStepper({ id: "minChapters", title: "Minimum chapters", ${bounds} });
+}`;
+		files[`${BASE}/alpha/index.ts`] = `
+import { form } from "./settings";
+export default class Alpha {
+  async getSearchResults(request: { query: string }, page: number) {
+    const value = await ObjectStore.number("minChapters");
+    return { items: [{ id: "one", title: typeof value + ":" + value }], isLastPage: true };
+  }
+}`;
+		const listing = suwatteAdapter.parseIndex(
+			JSON.stringify([
+				{ id: 'alpha', name: 'Alpha', version: '1.0.0', website: 'https://site.example.invalid' }
+			]),
+			INDEX_URL
+		).plugins[0];
+		const services = {
+			...servicesFor(files),
+			...(hostApiLevel === undefined ? {} : { hostApiLevel })
+		};
+		return suwatteAdapter.convert(listing, services);
+	}
+
+	async function searchWith(bundle: Uint8Array, settings: Record<string, unknown>) {
+		const opened = await openPluginArchive(bundle);
+		const url = `data:text/javascript;base64,${Buffer.from(opened.entrypointSource).toString('base64')}`;
+		const module = (await import(/* @vite-ignore */ url)).default as {
+			searchCatalog(q: string, p: number, ctx: unknown): Promise<{ entries: { title: string }[] }>;
+		};
+		return (await module.searchCatalog('x', 1, { settings })).entries[0].title;
+	}
+
+	it('carries a stepper as a number setting at level 3, read back as a number', async () => {
+		const bundle = await stepperSource('lowerBound: 0, upperBound: 1000, step: 5, defaultValue: 0');
+		const opened = await openPluginArchive(bundle);
+		expect(opened.manifest['yorozoPluginApi']).toBe(3);
+		expect(opened.settings).toEqual([
+			{
+				id: 'minchapters',
+				key: 'minChapters',
+				type: 'number',
+				label: 'Minimum chapters',
+				min: 0,
+				max: 1000,
+				step: 5,
+				default: 0
+			}
+		]);
+		const settings = { string: () => '', boolean: () => false, list: () => [], number: () => 25 };
+		expect(await searchWith(bundle, settings)).toBe('number:25');
+	});
+
+	it('draws a stepper that fits as a select for a host below level 3', async () => {
+		const bundle = await stepperSource(
+			'lowerBound: 0, upperBound: 20, step: 5, defaultValue: 5',
+			2
+		);
+		const opened = await openPluginArchive(bundle);
+		expect(opened.manifest['yorozoPluginApi']).toBe(1);
+		expect(opened.settings[0]).toMatchObject({
+			type: 'select',
+			default: '5',
+			options: ['0', '5', '10', '15', '20'].map((value) => ({ value, label: value }))
+		});
+		const settings = { string: () => '15', boolean: () => false, list: () => [] };
+		expect(await searchWith(bundle, settings)).toBe('number:15');
+	});
+
+	it('refuses a stepper too wide for a select when the host is below level 3', async () => {
+		await expect(stepperSource('lowerBound: 0, upperBound: 1000, step: 5', 2)).rejects.toThrow(
+			/UIStepper "minChapters" spans 201 values/
+		);
+	});
+
+	it('reads a setting whose id is a module constant, rather than dropping it', async () => {
+		const files = sourceFiles();
+		files[`${BASE}/alpha/constants.ts`] =
+			`${CONSTANTS}\nexport const PREF_ADULT = "pref_show_adult";`;
+		files[`${BASE}/alpha/settings.ts`] = `
+import { UIToggle } from "@suwatte/toolchain";
+import { PREF_ADULT } from "./constants";
+export function form() { return UIToggle({ id: PREF_ADULT, title: "Show adult", defaultValue: false }); }`;
+		files[`${BASE}/alpha/index.ts`] = `${INDEX}\nimport "./settings";`;
+		const listing = suwatteAdapter.parseIndex(
+			JSON.stringify([{ id: 'alpha', name: 'Alpha', version: '1.0.0' }]),
+			INDEX_URL
+		).plugins[0];
+		const opened = await openPluginArchive(
+			await suwatteAdapter.convert(listing, servicesFor(files))
+		);
+		expect(opened.settings.map((one) => [one.id, one.key, one.type])).toEqual([
+			['pref_show_adult', 'pref_show_adult', 'switch']
+		]);
+	});
+
 	it('refuses a missing sibling by the address', async () => {
 		const files = sourceFiles();
 		delete files[`${BASE}/alpha/constants.ts`];
@@ -372,6 +473,25 @@ var SourcePackage = (() => {
 		};
 		const page = await module.searchCatalog('x', 1, { settings: undefined });
 		expect(page.entries[0].title).toBe('hello x');
+	});
+
+	it('sends the same Referer with covers, as level-3 poster headers', async () => {
+		const stt = STT.replace(
+			'async getSearchResults(request, page) {',
+			`getConfiguration() { return { imageReferer: 'https://site.example.invalid/' }; }
+    async getSearchResults(request, page) {`
+		);
+		const module = (await loadBuilt(stt)) as unknown as {
+			searchCatalog(
+				q: string,
+				p: number,
+				ctx: unknown
+			): Promise<{ entries: Record<string, unknown>[] }>;
+		};
+		const page = await module.searchCatalog('x', 1, { settings: undefined });
+		expect(page.entries[0]['posterImageHeaders']).toEqual({
+			Referer: 'https://site.example.invalid/'
+		});
 	});
 
 	it("sends the image Referer the source's configuration declares, unless a page set its own", async () => {

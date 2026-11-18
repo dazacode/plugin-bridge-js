@@ -24,7 +24,11 @@
  */
 
 import type { ForeignOrigin } from './formats';
-import { parseSettingDescriptors, type SettingDescriptor } from '@plugin-bridge/core/settings';
+import {
+	parseSettingDescriptors,
+	settingsApiLevel,
+	type SettingDescriptor
+} from '@plugin-bridge/core/settings';
 import { measurementGrants } from './kotlin/grants';
 
 /** Kept well below `zip.ts`'s own caps, which apply when this is read back. */
@@ -407,7 +411,11 @@ export function convertedManifest(input: BundleInput): Record<string, unknown> {
 		// manifest would be asserting terms on their behalf.
 		license: spdx(input.license) ?? 'NOASSERTION',
 		...(httpUrl(input.repository) === null ? {} : { repository: httpUrl(input.repository) }),
-		yorozoPluginApi: 1,
+		// Level 3 only when the manifest needs it: a `number` setting is drawn by
+		// the host, and a host below level 3 must refuse the plugin rather than
+		// install it with a control missing (`ABI.md` §9.2). Optional level-3
+		// outputs — image headers — never raise it (§9.1).
+		yorozoPluginApi: settingsApiLevel(settings),
 		minimumYorozoVersion: '0.0.0',
 		platforms: ['android', 'ios', 'macos', 'windows', 'linux', 'web'],
 		capabilities: ['search', 'episodes', 'resolve'],

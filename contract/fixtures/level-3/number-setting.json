@@ -1,0 +1,82 @@
+{
+	"$comment": "ABI.md section 9.2 vectors. `valid` descriptors a level-3 host draws, each with `values`: what ctx.settings.number(id) answers for a stored value (`stored` absent means unset). `invalid` descriptors a host must not draw. No real source appears here (AGENTS.md rule 9).",
+	"valid": [
+		{
+			"descriptor": {
+				"id": "min_chapters",
+				"type": "number",
+				"label": "Minimum chapters",
+				"min": 0,
+				"max": 1000,
+				"step": 5,
+				"default": 0
+			},
+			"values": [
+				{ "expected": 0 },
+				{ "stored": 25, "expected": 25 },
+				{ "stored": 27, "expected": 25 },
+				{ "stored": 28, "expected": 30 },
+				{ "stored": 5000, "expected": 1000 },
+				{ "stored": -3, "expected": 0 },
+				{ "stored": "40", "expected": 40 },
+				{ "stored": "not a number", "expected": 0 }
+			]
+		},
+		{
+			"descriptor": {
+				"id": "zoom",
+				"type": "number",
+				"label": "Zoom",
+				"min": 0.5,
+				"max": 2,
+				"step": 0.1
+			},
+			"values": [
+				{ "expected": 0.5 },
+				{ "stored": 0.74, "expected": 0.7 },
+				{ "stored": 1.97, "expected": 2 }
+			]
+		}
+	],
+	"invalid": [
+		{
+			"name": "no step",
+			"descriptor": { "id": "n", "type": "number", "label": "N", "min": 0, "max": 10 }
+		},
+		{
+			"name": "a step of zero",
+			"descriptor": { "id": "n", "type": "number", "label": "N", "min": 0, "max": 10, "step": 0 }
+		},
+		{
+			"name": "a negative step",
+			"descriptor": { "id": "n", "type": "number", "label": "N", "min": 0, "max": 10, "step": -1 }
+		},
+		{
+			"name": "min above max",
+			"descriptor": { "id": "n", "type": "number", "label": "N", "min": 10, "max": 0, "step": 1 }
+		},
+		{
+			"name": "a default outside the bounds",
+			"descriptor": {
+				"id": "n",
+				"type": "number",
+				"label": "N",
+				"min": 0,
+				"max": 10,
+				"step": 1,
+				"default": 11
+			}
+		},
+		{
+			"name": "more values than a host is asked to draw",
+			"descriptor": {
+				"id": "n",
+				"type": "number",
+				"label": "N",
+				"min": 0,
+				"max": 1000000,
+				"step": 1
+			}
+		}
+	]
+}

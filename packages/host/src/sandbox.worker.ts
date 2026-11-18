@@ -360,7 +360,13 @@ function makeContext() {
 		settings: {
 			string: (id: string) => (typeof settings[id] === 'string' ? (settings[id] as string) : ''),
 			boolean: (id: string) => settings[id] === true,
-			list: (id: string) => (Array.isArray(settings[id]) ? (settings[id] as string[]) : [])
+			list: (id: string) => (Array.isArray(settings[id]) ? (settings[id] as string[]) : []),
+			// `ABI.md` §9.2: already snapped and clamped by `settingValues`, which
+			// resolved the default too; 0 only for an id nothing declared.
+			number: (id: string) =>
+				typeof settings[id] === 'number' && Number.isFinite(settings[id])
+					? (settings[id] as number)
+					: 0
 		},
 		storage: {
 			get: (key: string) => callHost('storageGet', key) as Promise<string | null>,

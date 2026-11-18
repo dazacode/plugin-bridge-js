@@ -56,7 +56,12 @@ import {
 const MAX_MODULES = 24;
 
 /** The view builders this build can turn into a manifest setting. */
-const FAITHFUL_VIEWS = new Set(['UIToggle', 'UITextField', 'UIPicker', 'UISelect']);
+const FAITHFUL_VIEWS = new Set(['UIToggle', 'UITextField', 'UIPicker', 'UISelect', 'UIStepper']);
+
+/** The level a `number` setting needs (`ABI.md` §9.2). */
+const NUMBER_SETTING_LEVEL = 3;
+/** The most options a `select` may carry — the manifest schema's bound. */
+const MAX_SELECT_OPTIONS = 64;
 
 function directoryOf(indexUrl: string): string {
 	const url = new URL(indexUrl);
@@ -147,7 +152,10 @@ function websiteOf(modules: Map<string, string>, value: string | null): string |
  * the host has no exclude half — and `UIWebViewButton` stores nothing, like a
  * header.
  */
-function declaredSettings(modules: Map<string, string>): SettingDescriptor[] {
+function declaredSettings(
+	modules: Map<string, string>,
+	hostApiLevel: number | undefined
+): SettingDescriptor[] {
 	const out: SettingDescriptor[] = [];
 	const called = /\b(UI[A-Za-z]+)\s*\(/g;
 
@@ -177,6 +185,24 @@ function declaredSettings(modules: Map<string, string>): SettingDescriptor[] {
 			const parsed = parseJsObjectLiteral(source, open);
 			if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) continue;
 			const row = parsed as Record<string, unknown>;
+			// A field written as a module constant — `id: PREF_MIN_CHAPTERS`,
+			// the measured sources' habit — parses as undefined, and the setting
+			// was dropped without a word. The constant is looked up where the
+			// sources keep them, in the modules this conversion read.
+			const close = source.indexOf('}', open);
+			const literal = close < 0 ? '' : source.slice(open, close + 1);
+			for (const field of ['id', 'title', 'defaultValue']) {
+				if (row[field] !== undefined) continue;
+				const named = new RegExp(`\\b${field}\\s*:\\s*([A-Za-z_$][\\w$]*)\\s*[,}]`).exec(literal);
+				if (named === null) continue;
+				for (const other of modules.values()) {
+					const resolved = constant(other, named[1]);
+					if (resolved !== null) {
+						row[field] = resolved;
+						break;
+					}
+				}
+			}
 
 			const id = typeof row['id'] === 'string' ? row['id'] : '';
 			const title = typeof row['title'] === 'string' ? row['title'] : id;
@@ -191,6 +217,10 @@ function declaredSettings(modules: Map<string, string>): SettingDescriptor[] {
 
 			if (view === 'UIToggle') {
 				out.push({ ...base, type: 'switch', default: row['defaultValue'] === true });
+				continue;
+			}
+			if (view === 'UIStepper') {
+				out.push(stepperSetting(base, row, hostApiLevel, url, match[0].trim()));
 				continue;
 			}
 			if (view === 'UITextField') {
@@ -301,6 +331,86 @@ function builtListing(row: Record<string, unknown>, indexUrl: string): Repositor
 			detail: { layout: 'bundle', path }
 		}
 	});
+}
+
+/**
+ * A `UIStepper` — a bounded count, in steps — as a manifest setting.
+ *
+ * A `number` setting at level 3 (`ABI.md` §9.2), which is what it is. For a
+ * host below that level, a `select` over every value says the same thing when
+ * the values fit a select's 64; past that there is no older spelling, and the
+ * source is refused by the view's name rather than installed without it. The
+ * shim reads either back as a number (`numeric`), because the source asks
+ * `ObjectStore.number`.
+ */
+function stepperSetting(
+	base: { id: string; key: string; label: string; help?: string },
+	row: Record<string, unknown>,
+	hostApiLevel: number | undefined,
+	file: string,
+	text: string
+): SettingDescriptor {
+	const min = row['lowerBound'];
+	const max = row['upperBound'];
+	const step = row['step'] === undefined ? 1 : row['step'];
+	const fallback = row['defaultValue'];
+	if (
+		typeof min !== 'number' ||
+		typeof max !== 'number' ||
+		typeof step !== 'number' ||
+		!(step > 0) ||
+		min > max ||
+		(fallback !== undefined && (typeof fallback !== 'number' || fallback < min || fallback > max))
+	) {
+		throw new ForeignFormatError(
+			`This source's UIStepper "${base.key}" states no bounds a setting can carry.`,
+			['settings-view:UIStepper'],
+			[
+				{
+					kind: 'settings-view:UIStepper',
+					file,
+					member: 'UIStepper',
+					line: 1,
+					text,
+					blocking: true
+				}
+			]
+		);
+	}
+	const count = Math.floor((max - min) / step) + 1;
+	const level = hostApiLevel ?? NUMBER_SETTING_LEVEL;
+	if (level >= NUMBER_SETTING_LEVEL) {
+		return { ...base, type: 'number', min, max, step, default: fallback ?? min };
+	}
+	if (count > MAX_SELECT_OPTIONS) {
+		throw new ForeignFormatError(
+			`This source's UIStepper "${base.key}" spans ${count} values: a host at API level ` +
+				`${level} can draw it only as a select of at most ${MAX_SELECT_OPTIONS}, and a number ` +
+				`setting needs level ${NUMBER_SETTING_LEVEL}.`,
+			['settings-view:UIStepper'],
+			[
+				{
+					kind: 'settings-view:UIStepper',
+					file,
+					member: 'UIStepper',
+					line: 1,
+					text,
+					blocking: true
+				}
+			]
+		);
+	}
+	const options = Array.from({ length: count }, (_, at) => {
+		const value = String(Number((min + at * step).toFixed(12)));
+		return { value, label: value };
+	});
+	return {
+		...base,
+		type: 'select',
+		options,
+		default: String(fallback ?? min),
+		numeric: true
+	} as SettingDescriptor;
 }
 
 export const suwatteAdapter: ForeignAdapter = {
@@ -554,7 +664,7 @@ export const suwatteAdapter: ForeignAdapter = {
 		for (const source of modules.values())
 			for (const host of hostsInSource(source)) hosts.add(host);
 
-		const settings = declaredSettings(modules);
+		const settings = declaredSettings(modules, services.hostApiLevel);
 		const version = infoField(info, 'version') ?? origin.foreignVersion;
 
 		return packageBundle({
@@ -572,7 +682,12 @@ export const suwatteAdapter: ForeignAdapter = {
 				pluginId: listing.id,
 				entryUrl: plan.entry,
 				modules: [...modules].map(([url, source]) => ({ url, source })),
-				settings: settings.map((one) => ({ id: one.id, key: one.key ?? one.id, type: one.type }))
+				settings: settings.map((one) => ({
+					id: one.id,
+					key: one.key ?? one.id,
+					type: one.type,
+					...((one as { numeric?: boolean }).numeric === true ? { numeric: true } : {})
+				}))
 			}),
 			settings
 		});

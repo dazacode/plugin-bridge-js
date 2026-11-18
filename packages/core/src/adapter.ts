@@ -147,6 +147,16 @@ export interface ConversionServices {
 	 * being granted instead.
 	 */
 	readonly loadWasm?: WasmLoader;
+	/**
+	 * The plugin API level of the host the bundle is being made for.
+	 *
+	 * Absent means the level this build implements. A conversion only reads it
+	 * where a construct has a level-3 spelling and an older one — a stepper is
+	 * a `number` setting at level 3 (`ABI.md` §9.2) and, when its values fit,
+	 * a `select` over them below it — so a host that cannot draw the first is
+	 * handed the second rather than a plugin it must refuse.
+	 */
+	readonly hostApiLevel?: number;
 }
 
 export interface ForeignAdapter {

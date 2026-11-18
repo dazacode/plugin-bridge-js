@@ -53,7 +53,10 @@ const PLUGIN: RunnablePlugin = {
 const PROBE_SOURCE = `
 export default {
 	id: 'com.example.plugins.probe',
-	async searchCatalog(query) {
+	async searchCatalog(query, page, ctx) {
+		if (query === 'settings') {
+			return { entries: [], number: ctx.settings.number('n'), undeclared: ctx.settings.number('missing') };
+		}
 		if (query === 'globals') {
 			return {
 				entries: [],
@@ -183,6 +186,17 @@ describe('the headless isolate', () => {
 		expect(seen['header']).toBe('yes');
 		expect(seen['request']).toBe('function');
 		expect(seen['response']).toBe('function');
+	}, 30_000);
+
+	it('answers a number setting through ctx.settings.number (ABI section 9.2)', async () => {
+		const sandbox = await PluginSandbox.start(PLUGIN, PROBE_SOURCE, { n: 25 }, sandboxOptions());
+		try {
+			const seen = (await sandbox.searchCatalog('settings', 1)) as Record<string, unknown>;
+			expect(seen['number']).toBe(25);
+			expect(seen['undeclared']).toBe(0);
+		} finally {
+			sandbox.dispose();
+		}
 	}, 30_000);
 
 	it('refuses a plugin that reaches for a Node builtin', async () => {
