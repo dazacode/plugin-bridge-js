@@ -648,6 +648,43 @@ export function hostsInSource(source: string, limit = 24): string[] {
  * failure, which surfaces as a refusal naming the host, and is the direction
  * to be wrong in.
  */
+/** Whether a `/` after what has been emitted so far starts a regex, not a division. */
+function regexCanStart(emitted: readonly string[]): boolean {
+	for (let at = emitted.length - 1, seen = 0; at >= 0 && seen < 16; at -= 1, seen += 1) {
+		const char = emitted[at];
+		if (/\s/.test(char)) continue;
+		if (/[(,=:[!&|?{};+\-*%~^<>]/.test(char)) return true;
+		if (/[A-Za-z0-9_$]/.test(char)) {
+			let word = '';
+			for (let back = at; back >= 0 && /[A-Za-z0-9_$]/.test(emitted[back]); back -= 1)
+				word = emitted[back] + word;
+			return /^(?:return|typeof|case|in|of|void|throw|delete|yield|await|else|do)$/.test(word);
+		}
+		return false;
+	}
+	return true;
+}
+
+/** The index just past the regex literal starting at `from`, or `from` if there is none. */
+function regexEnd(line: string, from: number): number {
+	let inClass = false;
+	for (let at = from + 1; at < line.length; at += 1) {
+		const char = line[at];
+		if (char === '\\') {
+			at += 1;
+			continue;
+		}
+		if (char === '[') inClass = true;
+		else if (char === ']') inClass = false;
+		else if (char === '/' && !inClass) {
+			let end = at + 1;
+			while (end < line.length && /[a-z]/i.test(line[end])) end += 1;
+			return end;
+		}
+	}
+	return from;
+}
+
 function withoutComments(source: string): string {
 	const out: string[] = [];
 	// Carried across lines, because these two constructs really do span them.
@@ -708,6 +745,18 @@ function withoutComments(source: string): string {
 				inBlock = true;
 				i += 1;
 				continue;
+			}
+			// A regex literal is copied whole. Read a character at a time, a
+			// quote inside one (`/["']/`) opened a "string" that never closed,
+			// and on a minified bundle — one line — everything after it was
+			// lost: every address the source names, read as nothing.
+			if (char === '/' && regexCanStart(out)) {
+				const end = regexEnd(line, i);
+				if (end > i) {
+					for (const one of line.slice(i, end)) out.push(one);
+					i = end - 1;
+					continue;
+				}
 			}
 
 			out.push(char);

@@ -556,6 +556,19 @@ describe('the hosts a module’s source text names', () => {
 		);
 	});
 
+	it('reads past a regex literal holding a quote, on one minified line', () => {
+		// A built bundle is one line. Read a character at a time, the quote in
+		// the character class opened a string that never closed, and every
+		// address after it — the source's own API — went unread and was then
+		// refused at request time as undeclared.
+		const minified = `var q=/["']/g,d=a/b/c,u="https://api.example.invalid/v1";`;
+		expect(hostsInSource(minified)).toContain('api.example.invalid');
+		// …and a division is still a division, not the start of one.
+		expect(hostsInSource(`var d=a/b+"/"+c,u="https://api.example.invalid/v1";`)).toContain(
+			'api.example.invalid'
+		);
+	});
+
 	it('grants the wildcard sibling beside every host it finds', () => {
 		// The failure this prevents, seen for real: the code names one CDN host,
 		// the page it scrapes then hands it a numbered neighbour, and the plugin
