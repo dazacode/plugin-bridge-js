@@ -560,6 +560,76 @@ function quoteFor(value: string): string {
 }
 
 /**
+ * Every `name { … }` at the top level of a file, in order.
+ *
+ * Top level only, so a `source { }` inside the extension block, or a block
+ * inside `android { }`, is never mistaken for the file's own declaration.
+ */
+function topLevelBlocks(source: string): { name: string; body: string }[] {
+	const out: { name: string; body: string }[] = [];
+	let depth = 0;
+	let at = 0;
+	while (at < source.length) {
+		const char = source[at];
+		if (char === '"') {
+			at += 1;
+			while (at < source.length && source[at] !== '"') {
+				if (source[at] === '\\') at += 1;
+				at += 1;
+			}
+			at += 1;
+			continue;
+		}
+		if (char === '}') depth -= 1;
+		else if (char === '{') {
+			if (depth === 0) {
+				const head = /([A-Za-z_][A-Za-z0-9_]*)\s*$/.exec(source.slice(0, at));
+				const found = head === null ? null : block(source, head[1], Math.max(0, head.index - 1));
+				if (head !== null && found !== null) {
+					out.push({ name: head[1], body: found.body });
+					at = found.end;
+					continue;
+				}
+			}
+			depth += 1;
+		}
+		at += 1;
+	}
+	return out;
+}
+
+/** Blocks every build file has, which are never the extension's own. */
+const GRADLE_BLOCKS: ReadonlySet<string> = new Set([
+	'plugins',
+	'dependencies',
+	'android',
+	'kotlin',
+	'repositories',
+	'tasks',
+	'ksp',
+	'java',
+	'configurations',
+	'buildscript'
+]);
+
+/**
+ * The block the generator reads its declaration from.
+ *
+ * Found by **shape, not by name**. The block is named after whatever the
+ * publisher's build plugin registered — each fork of this toolchain names it
+ * after itself — so matching one spelling reads one publisher and silently
+ * reads nothing out of every other. What they all share is what is inside: a
+ * `source { }` block for each source the generator emits. The first top-level
+ * block that is not one of Gradle's own and holds one is the declaration; a
+ * file with none — a template, which declares no sources — has its first
+ * block that is not one of Gradle's own read instead.
+ */
+function extensionBlock(source: string): { body: string } | null {
+	const candidates = topLevelBlocks(source).filter((one) => !GRADLE_BLOCKS.has(one.name));
+	return candidates.find((one) => block(one.body, 'source') !== null) ?? candidates[0] ?? null;
+}
+
+/**
  * Read one `build.gradle.kts`.
  *
  * Never throws. A file this cannot read yields a record whose fields are null,
@@ -568,7 +638,7 @@ function quoteFor(value: string): string {
  */
 export function readMihonBuildFile(text: string): MihonBuildFile {
 	const source = stripComments(text);
-	const root = block(source, 'keiyoushi');
+	const root = extensionBlock(source);
 	const body = expandSourceLoops(inlineBoundLists(resolveLocalVals(root?.body ?? '')));
 	const top = shallow(body);
 
