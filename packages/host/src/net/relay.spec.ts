@@ -449,6 +449,24 @@ describe('carrying a jar’s header, and reporting what a chain set', () => {
 	});
 });
 
+describe('an Authorization header', () => {
+	it('is not taken from the ordinary header map', async () => {
+		// Only `authorization` — the field `sandbox-host.ts` fills from the
+		// plugin's own request, for its declared grant — carries one
+		// (ADR-0005 §3c). A caller that could set it in `headers` could attach
+		// a credential to any host with nothing recording that it had.
+		let carried: string | null = 'unset';
+		await call(
+			{ url: 'https://a.example.invalid/', headers: { Authorization: 'Bearer smuggled' } },
+			(request) => {
+				carried = request.headers.get('authorization');
+				return new Response('ok');
+			}
+		);
+		expect(carried).toBeNull();
+	});
+});
+
 describe('the budget a relayed call is held to', () => {
 	/** Mirrors `MAX_REDIRECTS` in the route, which is not exported. */
 	const MAX_REDIRECTS = 4;

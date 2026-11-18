@@ -173,7 +173,17 @@ export async function checkListing(
 	};
 
 	const result = await verifyConvertedPlugin(
-		{ id: bundle.id, name: listing.name, hosts: bundle.hosts, converted },
+		// The manifest's permissions, as an install grants them. Without them a
+		// bundle that serves its own stream — `segment-transform-js` — was
+		// refused at `resolve` here and played once installed, so the check was
+		// reporting on a stricter host than the one it stands in for.
+		{
+			id: bundle.id,
+			name: listing.name,
+			hosts: bundle.hosts,
+			permissions: bundle.permissions,
+			converted
+		},
 		bundle.entrypointSource,
 		verifyOptionsFor(capabilities, settingValues(bundle.settings))
 	);

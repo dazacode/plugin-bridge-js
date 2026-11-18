@@ -64,6 +64,7 @@ function context(pages: Record<string, Page> = {}, settings: Record<string, stri
 	const requests: Record<string, unknown>[] = [];
 	const logged: string[] = [];
 	const policies: Record<string, unknown>[] = [];
+	const cookieReads: string[] = [];
 	const ctx = {
 		http: {
 			/**
@@ -76,6 +77,16 @@ function context(pages: Record<string, Page> = {}, settings: Record<string, stri
 			 */
 			async policy(declared: Record<string, unknown>) {
 				policies.push(declared);
+			},
+			/** `ABI.md` §2.2: this plugin's own cookies for a url, as the host answers them. */
+			async cookies(url: string) {
+				cookieReads.push(url);
+				return url.startsWith('https://example.invalid/')
+					? [
+							{ name: 'PHPSESSID', value: 'abc' },
+							{ name: 'XSRF-TOKEN', value: 'x%3D' }
+						]
+					: [];
 			},
 			async send(
 				url: string,
@@ -2156,6 +2167,79 @@ describe('okhttp, over the host', () => {
 
 		expect(sent.at(-1)?.url).toBe('https://example.invalid/a?signed=1');
 		expect(response.code).toBe(200);
+	});
+
+	it('hands a builder its interceptors as a live list an extension edits', async () => {
+		// A token client is the source's own client with its auth interceptor
+		// taken back off — `newBuilder().apply { interceptors().removeAll { it
+		// is Auth } }` — so the token request does not recurse into the
+		// interceptor that wants the token. Missing, `interceptors()` threw, the
+		// token fetch answered null, and every API call went out unauthorised.
+		const { ctx, sent } = context();
+		runtime.enter(ctx);
+		const tagging = (tag: string) =>
+			function (chain: Chain) {
+				return chain.proceed(
+					chain
+						.request()
+						.newBuilder()
+						.header('X-' + tag, '1')
+						.build()
+				);
+			};
+		const auth = tagging('Auth');
+		const full = runtime.client
+			.newBuilder()
+			.addInterceptor(auth)
+			.addInterceptor(tagging('Other'))
+			.build();
+		const builder = full.newBuilder();
+		const live = builder.interceptors() as unknown[];
+		live.splice(live.indexOf(auth), 1);
+		const tokenClient = builder.build();
+
+		await tokenClient.newCall(runtime.globals.GET('https://example.invalid/token')).execute();
+		const headers = sent.at(-1)?.headers as Record<string, string>;
+		expect(headers['X-Auth']).toBeUndefined();
+		expect(headers['X-Other']).toBe('1');
+		expect(full.interceptors).toHaveLength(2);
+	});
+
+	it('reads a plugin’s own cookies through the host', async () => {
+		// `client.cookieJar.loadForRequest(url)` answers what the host's
+		// `ctx.http.cookies` answers for that url (ADR-0005 §3d), as records
+		// with okhttp's `name` and `value`.
+		const { ctx } = context();
+		runtime.enter(ctx);
+		const found = (await runtime.client.cookieJar.loadForRequest(
+			runtime.globals.GET('https://example.invalid/page').url
+		)) as { name: string; value: string }[];
+		expect(found.map((one) => `${one.name}=${one.value}`)).toEqual([
+			'PHPSESSID=abc',
+			'XSRF-TOKEN=x%3D'
+		]);
+		expect(await runtime.client.cookieJar.loadForRequest('https://other.example.invalid/')).toEqual(
+			[]
+		);
+	});
+
+	it('tells a redirect from a failure, for a client with redirects off', async () => {
+		// Such a client reads `isRedirect` to take the `Location` as its answer;
+		// missing, every redirect read as a failure and the stream was dropped.
+		const { ctx } = context({
+			'https://example.invalid/file': {
+				body: '',
+				status: 302,
+				headers: { Location: 'https://cdn.example.invalid/file.mp4' }
+			}
+		});
+		runtime.enter(ctx);
+		const noRedirects = runtime.client.newBuilder().followRedirects(false).build();
+		const response = (await noRedirects
+			.newCall(runtime.globals.GET('https://example.invalid/file'))
+			.execute()) as { isRedirect: boolean; isSuccessful: boolean };
+		expect(response.isRedirect).toBe(true);
+		expect(response.isSuccessful).toBe(false);
 	});
 
 	it('reads one response header by name, as okhttp does', async () => {

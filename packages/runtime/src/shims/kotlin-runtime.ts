@@ -9234,6 +9234,9 @@ function __responseOf(raw, text, request, bytes) {
        which is also what a host that does not report one answers here. */
     message: __str(raw.message),
     isSuccessful: raw.status >= 200 && raw.status < 300,
+    // okhttp's set, which is the one a client that turned redirects off reads
+    // to tell "here is where it went" from a failure.
+    isRedirect: [300, 301, 302, 303, 307, 308].indexOf(raw.status) !== -1,
     request: finalRequest,
     url: finalUrl,
     headers: __headersObject(__headerPairs(raw.headers)),
@@ -10024,12 +10027,35 @@ function __hasHeader(headers, name) {
  */
 var __cookieJar = {
   saveFromResponse: function () {},
-  loadForRequest: function () {
-    throw new Error(
-      'This converted extension reads its own cookie jar. Yorozo holds the cookies host-side ' +
-      'and attaches them itself, and does not hand them to plugin code, so the extension can ' +
-      'be converted but not run as written.'
-    );
+  /*
+   * okhttp's 'loadForRequest(url)': the cookies that apply to a request for
+   * that url. The host holds the jar; what it answers here is this plugin's
+   * own — cookies set on responses to its own requests, for a host it
+   * declared — read-only (ABI.md section 2.2, ADR-0005 section 3d). Each is a
+   * record with okhttp's 'name' and 'value'. A host that predates the read
+   * says so by name rather than answering an empty jar it cannot vouch for.
+   */
+  loadForRequest: async function (url) {
+    var http = __host().http;
+    if (!http || typeof http.cookies !== 'function') {
+      throw new Error(
+        'This converted extension reads its own cookie jar, and this host does not let a plugin ' +
+        'read its own cookies.'
+      );
+    }
+    var found = await http.cookies(__str(url));
+    var out = [];
+    var list = Array.isArray(found) ? found : [];
+    for (var i = 0; i < list.length; i += 1) {
+      var one = list[i];
+      if (!one || typeof one.name !== 'string' || typeof one.value !== 'string') continue;
+      out.push({
+        name: one.name,
+        value: one.value,
+        toString: function () { return this.name + '=' + this.value; }
+      });
+    }
+    return __mutableList(out);
   }
 };
 
@@ -10077,6 +10103,15 @@ function __clientBuilder(follow, inherited, inheritedCookies, inheritedNetwork) 
     /* Kept in written order, which is the order okhttp runs them in: the first
        one added is the outermost, and it sees the request before the ones
        after it and the response after them. */
+    /*
+     * okhttp's live lists of the interceptors this builder will install, which
+     * an extension edits in place: a client for fetching a token is the
+     * source's own client with its auth interceptor taken back off —
+     * 'newBuilder().apply { interceptors().removeAll { it is Auth } }' — so the
+     * token request does not recurse into the interceptor that wants it.
+     */
+    interceptors: function () { return chain; },
+    networkInterceptors: function () { return network; },
     addInterceptor: function (interceptor) {
       if (interceptor === null || interceptor === undefined) return builder;
       if (typeof interceptor !== 'function' && typeof interceptor.intercept !== 'function') {

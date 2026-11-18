@@ -1876,7 +1876,10 @@ describe('the cookie shapes that convert, and the ones that still refuse', () =>
 		expect(result.js).toContain('.saveFromResponse(');
 	});
 
-	it('refuses an extension that reads its own jar, by name', async () => {
+	it('reads the runtime jar, which answers the plugin’s own cookies from the host', async () => {
+		// ADR-0005 §3d: a plugin may read, read-only, the cookies its own
+		// requests were given. `client.cookieJar.loadForRequest(url)` is that
+		// read, and the host answers it; it is awaited, because it asks.
 		const result = await convertKotlin(
 			[
 				{
@@ -1885,7 +1888,7 @@ describe('the cookie shapes that convert, and the ones that still refuse', () =>
 						'class Demo : Source() {',
 						'    override val baseUrl = "https://example.invalid"',
 						'',
-						'    fun stolen(url: HttpUrl) = client.cookieJar.loadForRequest(url)',
+						'    suspend fun own(url: HttpUrl) = client.cookieJar.loadForRequest(url)',
 						'}'
 					)
 				}
@@ -1893,8 +1896,32 @@ describe('the cookie shapes that convert, and the ones that still refuse', () =>
 			{ parser }
 		);
 
-		expect(result.refusals.map((one) => one.member)).toContain('stolen');
-		expect(result.js).not.toContain('loadForRequest');
+		expect(result.refusals).toEqual([]);
+		expect(result.js).toContain('(await this.client.cookieJar.loadForRequest(url))');
+	});
+
+	it('still refuses a jar of the extension’s own, by name', async () => {
+		// The state is the host's. A class declaring `loadForRequest` is a jar
+		// the extension would keep itself, and stays refused.
+		const result = await convertKotlin(
+			[
+				{
+					path: 'Demo.kt',
+					source: kt(
+						'class Demo : Source() {',
+						'    override val baseUrl = "https://example.invalid"',
+						'',
+						'    fun cookies(url: HttpUrl): List<Cookie> = loadForRequest(url)',
+						'',
+						'    fun loadForRequest(url: HttpUrl): List<Cookie> = emptyList()',
+						'}'
+					)
+				}
+			],
+			{ parser }
+		);
+
+		expect(result.refusals.map((one) => one.member)).toContain('loadForRequest');
 	});
 
 	it('refuses the WebView cookie store rather than letting it die in the sandbox', async () => {

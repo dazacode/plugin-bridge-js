@@ -1834,6 +1834,10 @@ export const HOST_METHODS: ReadonlySet<string> = new Set([
 	// all, so the call is an acknowledgement of work already done.
 	'cookieJar',
 	'saveFromResponse',
+	// `.loadForRequest(url)` on the runtime's jar: the plugin's own cookies,
+	// read-only, from the host (ADR-0005 §3d). Reached only through the
+	// call-level exemption in `scanInto`; a declaration of it stays refused.
+	'loadForRequest',
 
 	// url building
 	'newBuilder',
@@ -2022,7 +2026,9 @@ export const AWAITED_HOST_METHODS: ReadonlySet<string> = new Set([
 	'sign',
 	'verify',
 	'generateKeyPair',
-	'proceed'
+	'proceed',
+	// The runtime jar's read, which asks the host — see `scanInto`.
+	'loadForRequest'
 ]);
 
 /**
@@ -3496,6 +3502,23 @@ function scanInto(node: KNode, memberName: string, found: Untranslatable[]): voi
 	// `ignoreUnknownKeys` and `explicitNulls = false`, which is what the
 	// runtime's decoder does. Anything else asked of Injekt stays refused.
 	if (INJECTED_JSON.test(node.text.replace(/\s+/g, ''))) return;
+
+	// The runtime jar's read, `client.cookieJar.loadForRequest(url)`: a
+	// plugin's own cookies for a host it declared, read-only, which the host
+	// answers through `ctx.http.cookies` (ADR-0005 §3d). Only the callee is
+	// forgiven, and only on a client's `cookieJar`: a class that *declares*
+	// `loadForRequest` — a jar of the extension's own — still reaches the leaf
+	// below and is refused, because the state is the host's and not the
+	// extension's to keep.
+	if (
+		node.type === 'call_expression' &&
+		/^[\w.()]*\bcookieJar\.loadForRequest\(/.test(node.text.replace(/\s+/g, ''))
+	) {
+		for (const child of node.children) {
+			if (child.type === 'call_suffix') scanInto(child, memberName, found);
+		}
+		return;
+	}
 
 	// And a fourth: `Thread.sleep(ms)`. The name table refuses `Thread` because
 	// a leaf cannot tell a pause from a thread (see the note on that entry),

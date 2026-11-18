@@ -246,8 +246,12 @@ const ENTRYPOINT = 'source';
  *     and the chapter choice exist, records copy by name, a star import
  *     follows a renamed declaration, and jsoup's `Elements.first()` is null on
  *     an empty selection. Reconvert every bundle made at 63 or earlier.
+ * 65: an OkHttp builder's live `interceptors()`, a response's `isRedirect`,
+ *     a read of the plugin's own cookies (`loadForRequest`, ADR-0005 §3d)
+ *     and `applicationContext` read unimported inside its own package are
+ *     supplied. Reconvert every bundle made at 64 or earlier.
  */
-export const CONVERTER_VERSION = 64;
+export const CONVERTER_VERSION = 65;
 
 export interface BundleInput {
 	readonly id: string;

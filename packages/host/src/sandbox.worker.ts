@@ -63,7 +63,8 @@ interface HostReply {
 interface OutboundCall {
 	readonly outbound: true;
 	readonly id: number;
-	readonly method: 'http' | 'httpPolicy' | 'storageGet' | 'storageSet' | 'storageDelete' | 'log';
+	readonly method:
+		'http' | 'httpPolicy' | 'httpCookies' | 'storageGet' | 'storageSet' | 'storageDelete' | 'log';
 	readonly args: unknown[];
 }
 
@@ -347,6 +348,14 @@ function makeContext() {
 		 * error names the field. The only check here is the one whose answer
 		 * would otherwise be "the host rejected `undefined`".
 		 */
+		/**
+		 * The cookies this plugin's own requests were given for a URL, read-only
+		 * (`ABI.md` §2.2, ADR-0005 §3d): `[{ name, value }]`, empty for a host it
+		 * did not declare or a plugin the host keeps no jar for.
+		 */
+		cookies(url: string): Promise<{ name: string; value: string }[]> {
+			return callHost('httpCookies', String(url)) as Promise<{ name: string; value: string }[]>;
+		},
 		policy(policy: unknown): Promise<void> {
 			if (policy === null || typeof policy !== 'object' || Array.isArray(policy)) {
 				throw new Error('ctx.http.policy() takes a request policy object.');

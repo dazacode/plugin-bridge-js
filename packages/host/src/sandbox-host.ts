@@ -104,6 +104,17 @@ const MAX_SERVED_BYTES = 32 * 1024 * 1024;
 const MAX_CONCURRENT_SERVES = 6;
 const SERVE_TIMEOUT_MS = 30_000;
 
+/** The `Authorization` a plugin wrote on its own request, whatever its case, or null. */
+function pluginAuthorization(headers: Record<string, string> | undefined): string | null {
+	if (headers === undefined || headers === null || typeof headers !== 'object') return null;
+	for (const [name, value] of Object.entries(headers)) {
+		if (name.toLowerCase() === 'authorization' && typeof value === 'string' && value.length > 0) {
+			return value;
+		}
+	}
+	return null;
+}
+
 /** One request a player made to a served origin (`ABI.md`, `ServedRequest`). */
 export interface ServedRequest {
 	readonly url: string;
@@ -821,6 +832,9 @@ export class PluginSandbox {
 				case 'http':
 					respond(true, await this.fetchForPlugin(call.args[0] as string, call.args[1]));
 					return;
+				case 'httpCookies':
+					respond(true, this.cookiesForPlugin(call.args[0]));
+					return;
 				case 'httpPolicy':
 					// Re-read rather than trusted. The isolate validated it too, so
 					// a plugin's own mistake throws at the line that made it — but
@@ -859,6 +873,32 @@ export class PluginSandbox {
 		} catch (error) {
 			respond(false, undefined, (error as Error).message, error);
 		}
+	}
+
+	/**
+	 * The cookies this plugin may read for one URL (ADR-0005 §3d).
+	 *
+	 * Read-only, and only its own: a cookie a response to this plugin's own
+	 * request set, for a host it declared, by the same rules that would attach
+	 * it to a request for that URL. A plugin without the jar, a URL that is not
+	 * https, and a host it did not declare all answer nothing — never an error
+	 * that would tell it whether a cookie exists.
+	 */
+	private cookiesForPlugin(url: unknown): { name: string; value: string }[] {
+		if (this.cookies === null || typeof url !== 'string') return [];
+		let target: URL;
+		try {
+			target = new URL(url);
+		} catch {
+			return [];
+		}
+		if (target.protocol !== 'https:' || !this.declaredHost(target.hostname)) return [];
+		return this.cookies.readable(target, this.plugin.id);
+	}
+
+	/** Whether a host is one the plugin declared — not one learned at run time. */
+	private declaredHost(hostname: string): boolean {
+		return this.plugin.hosts.some((pattern) => hostMatches(hostname, pattern));
 	}
 
 	/**
@@ -933,6 +973,16 @@ export class PluginSandbox {
 		// again, and a policy that changed between the two would make the second
 		// one a different question.
 		const headers = this.gate.headersFor(host, options.headers ?? {});
+
+		// The plugin's own `Authorization`, and only for a host it *declared*
+		// (ADR-0005 §3c). Read from the request the plugin made, before the
+		// policy filled anything in, so it is never a value the host supplied;
+		// and dropped for a host the run only learned from a page, which the
+		// plugin never asked a viewer to trust it with. The relay then keeps it
+		// to this origin across redirects.
+		const authorization = this.declaredHost(target.hostname)
+			? pluginAuthorization(options.headers)
+			: null;
 		const attempt = async (): Promise<PluginResponse> => {
 			const response = await fetcher('/api/plugin-fetch', {
 				method: 'POST',
@@ -946,6 +996,7 @@ export class PluginSandbox {
 					// a plugin without the permission gets the route's pre-jar
 					// behaviour exactly, including its response shape.
 					...(this.cookies === null ? {} : { cookies: cookie === '' ? {} : { send: cookie } }),
+					...(authorization === null ? {} : { authorization }),
 					// Only sent when the caller said no, so the route's default stays
 					// the route's own business rather than something every request
 					// restates.
@@ -1025,9 +1076,13 @@ export class PluginSandbox {
 			if (this.cookies !== null && Array.isArray(events) && events.length > 0) {
 				for (const event of events as { url?: unknown; headers?: unknown }[]) {
 					if (typeof event?.url !== 'string' || !Array.isArray(event.headers)) continue;
+					// Filed with this plugin's provenance: these arrived on its own
+					// request, which is the only way a cookie becomes readable to
+					// it (ADR-0005 §3d).
 					this.cookies.absorb(
 						event.url,
-						event.headers.filter((one): one is string => typeof one === 'string')
+						event.headers.filter((one): one is string => typeof one === 'string'),
+						this.plugin.id
 					);
 				}
 				this.log('took cookies from a response', {
