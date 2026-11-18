@@ -159,45 +159,51 @@ export const seanimeAdapter: ForeignAdapter = {
 			const id = String(row['id']);
 			const language = typeof row['lang'] === 'string' ? row['lang'] : null;
 
-			plugins.push(
-				foreignListing({
-					id: convertedPluginId('seanime', id),
-					name: String(row['name']),
-					description: String(row['description'] ?? ''),
-					// The marketplace rarely states a version; the manifest does,
-					// and conversion copies it across before packaging.
-					version: String(row['version'] ?? '0'),
-					author: String(row['author'] ?? ''),
-					language,
-					// The site the provider scrapes — which is what the consent
-					// sheet is for — plus the icon. Neither the manifest nor the
-					// payload is fetched at runtime, so neither host is granted.
-					hosts: hostsFromUrls([
-						typeof row['website'] === 'string' ? row['website'] : null,
-						typeof row['icon'] === 'string' ? row['icon'] : null
-					]),
-					origin: {
-						format: 'seanime',
-						// The first hop. Convert walks to the payload from here.
-						artifactUrl: manifestURI,
-						foreignId: id,
-						foreignVersion: String(row['version'] ?? '0'),
-						mediaKind: medium,
-						// A torrent provider is the one kind that will never hand
-						// back a URL; this is what tells a viewer before they
-						// install it that a peer-to-peer client is involved.
-						...(type === 'anime-torrent-provider' ? { declaredP2p: true } : {}),
-						isNsfw: row['nsfw'] === true,
-						detail: {
-							manifestURI,
-							providerType: type,
-							// Carried from the marketplace so the row can be refused
-							// by language before any second fetch happens.
-							payloadLanguage: typeof row['language'] === 'string' ? row['language'] : ''
+			try {
+				plugins.push(
+					foreignListing({
+						id: convertedPluginId('seanime', id),
+						name: String(row['name']),
+						description: String(row['description'] ?? ''),
+						// The marketplace rarely states a version; the manifest does,
+						// and conversion copies it across before packaging.
+						version: String(row['version'] ?? '0'),
+						author: String(row['author'] ?? ''),
+						language,
+						// The site the provider scrapes — which is what the consent
+						// sheet is for — plus the icon. Neither the manifest nor the
+						// payload is fetched at runtime, so neither host is granted.
+						hosts: hostsFromUrls([
+							typeof row['website'] === 'string' ? row['website'] : null,
+							typeof row['icon'] === 'string' ? row['icon'] : null
+						]),
+						origin: {
+							format: 'seanime',
+							// The first hop. Convert walks to the payload from here.
+							artifactUrl: manifestURI,
+							foreignId: id,
+							foreignVersion: String(row['version'] ?? '0'),
+							mediaKind: medium,
+							// A torrent provider is the one kind that will never hand
+							// back a URL; this is what tells a viewer before they
+							// install it that a peer-to-peer client is involved.
+							...(type === 'anime-torrent-provider' ? { declaredP2p: true } : {}),
+							isNsfw: row['nsfw'] === true,
+							detail: {
+								manifestURI,
+								providerType: type,
+								// Carried from the marketplace so the row can be refused
+								// by language before any second fetch happens.
+								payloadLanguage: typeof row['language'] === 'string' ? row['language'] : ''
+							}
 						}
-					}
-				})
-			);
+					})
+				);
+			} catch {
+				// An id with nothing usable in it must not cost the rest of the
+				// catalogue, and a skipped row is counted either way.
+				skipped += 1;
+			}
 		}
 
 		const kept = keepMediums({

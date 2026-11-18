@@ -224,6 +224,16 @@ function __number(row, fallback) {
   return fallback;
 }
 
+function __entries(rows) {
+  var list = __array(rows);
+  var entries = [];
+  for (var i = 0; i < list.length; i++) {
+    var entry = __entry(list[i]);
+    if (entry !== null) entries.push(entry);
+  }
+  return entries;
+}
+
 function __chapter(row, fallback) {
   if (!row || typeof row !== 'object') return null;
   var id = String(row.id || row.chapterId || row.url || '');
@@ -345,7 +355,8 @@ function __call(provider, names, a, b, c) {
  */
 function __legacy(provider) {
   return (
-    typeof provider.getChapters === 'function' ||
+    typeof provider.getManga === 'function' ||
+    typeof provider.getMangaDetails === 'function' ||
     typeof provider.getChapterDetails === 'function' ||
     typeof provider.getStreamUrl === 'function' ||
     typeof provider.getEpisodes === 'function'
@@ -356,15 +367,20 @@ async function __search(provider, query, page) {
   // These providers page nowhere: one search is one page of results, and
   // claiming otherwise would ask for a page the payload answers again.
   if (Number(page) > 1) return { entries: [], hasMore: false };
-  var rows = __legacy(provider)
-    ? await __call(provider, ['search'], query)
-    : await __call(provider, ['search'], { query: query, media: __media(query) });
 
-  var list = __array(rows);
-  var entries = [];
-  for (var i = 0; i < list.length; i++) {
-    var entry = __entry(list[i]);
-    if (entry !== null) entries.push(entry);
+  // Which shape \`search\` expects is the family's, but the family is read from
+  // other members and a payload can mix them, so the other shape is tried when
+  // the first yields nothing. A string handed to an options-object provider
+  // builds \`q=undefined\`; an object handed to a string provider is
+  // \`[object Object]\`. Neither throws, so trying is the only way to tell.
+  var legacy = __legacy(provider);
+  var entries = __entries(
+    await __call(provider, ['search'], legacy ? query : { query: query, media: __media(query) })
+  );
+  if (entries.length === 0) {
+    entries = __entries(
+      await __call(provider, ['search'], legacy ? { query: query, media: __media(query) } : query)
+    );
   }
   return { entries: entries, hasMore: false };
 }

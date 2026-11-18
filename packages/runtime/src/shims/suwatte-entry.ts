@@ -925,9 +925,12 @@ class URL {
   toJSON() { return this.toString(); }
 }
 
-globalThis.Headers = Headers;
-globalThis.URLSearchParams = URLSearchParams;
-globalThis.URL = URL;
+globalThis.Headers = globalThis.Headers || Headers;
+globalThis.URLSearchParams = globalThis.URLSearchParams || URLSearchParams;
+
+/** Prefer the engine's own URL; the class above is the fallback realm shape. */
+var __URL = globalThis.URL || URL;
+if (globalThis.URL === undefined) globalThis.URL = URL;
 
 /* --- the toolchain surface ----------------------------------------------- */
 
@@ -1096,7 +1099,7 @@ class HttpClient {
     var config = options || {};
     var url = /^[a-z][a-z0-9+.-]*:/i.test(String(path))
       ? String(path)
-      : new URL(String(path), this.baseUrl).toString();
+      : new __URL(String(path), this.baseUrl).toString();
     var query = __query(config.params);
     if (query.length > 0) url += (url.indexOf('?') < 0 ? '?' : '&') + query;
 

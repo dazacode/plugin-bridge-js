@@ -149,6 +149,15 @@ describe('what a converted Suwatte bundle declares', () => {
 		expect(opened.entrypointSource).toContain('export default {');
 		expect(opened.entrypointSource).toContain('getChapterPages');
 		expect(opened.entrypointSource).not.toContain('SourceInfo = {');
+		expect(opened.entrypointSource).not.toContain('from "@suwatte/toolchain"');
+
+		// …and the result has to parse and evaluate, or it installs and dies.
+		const run = new Function(
+			opened.entrypointSource.replace('export default', 'globalThis.__suwatte =')
+		);
+		run();
+		const scope = globalThis as unknown as { __suwatte: { id: string } };
+		expect(scope.__suwatte.id).toBe(opened.id);
 	});
 
 	it('refuses a settings view it cannot express rather than dropping it', async () => {

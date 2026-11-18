@@ -218,7 +218,11 @@ export const manaAdapter: ForeignAdapter = {
 		if (rows.length === 0) throw new ForeignFormatError('not a Mana source index');
 
 		const plugins: RepositoryPlugin[] = [];
+		// Both a tracker and a row that cannot be identified are counted rather
+		// than dropped in silence — a row that vanishes is indistinguishable
+		// from a parser that lost it.
 		let trackers = 0;
+		let skipped = 0;
 
 		for (const row of rows) {
 			const environment = typeof row['environment'] === 'string' ? row['environment'] : 'source';
@@ -240,42 +244,48 @@ export const manaAdapter: ForeignAdapter = {
 					? String((first as Record<string, unknown>)['name'] ?? '')
 					: '';
 
-			plugins.push(
-				foreignListing({
-					id: convertedPluginId('mana', id),
-					name: String(row['name']),
-					description: String(row['description'] ?? ''),
-					version: String(row['version'] ?? '0'),
-					author,
-					language: languages.length > 0 ? String(languages[0]) : null,
-					// The site the source scrapes, and the icon a client draws for
-					// it. The bundle's own hosts are added at conversion, from the
-					// bundle, because they are not in the index.
-					hosts: hostsFromUrls([
-						typeof row['website'] === 'string' ? row['website'] : null,
-						typeof row['thumbnail'] === 'string' ? row['thumbnail'] : null
-					]),
-					origin: {
-						format: 'mana',
-						artifactUrl,
-						foreignId: id,
-						foreignVersion: String(row['version'] ?? '0'),
-						mediaKind: 'manga',
-						isNsfw: isNsfwRating(row['rating']),
-						// Everything the later hops need, resolved while the index is
-						// in hand, so conversion stays a function of the listing.
-						// `hash` is the ecosystem's own 96-character digest, carried
-						// as a fact and deliberately not checked: it is not our
-						// digest, and verifying against it would report every
-						// converted bundle as tampered with.
-						detail: {
-							path: pathOf(row) ?? '',
-							alternates: candidates.slice(1),
-							ecosystemHash: typeof row['hash'] === 'string' ? row['hash'] : ''
+			try {
+				plugins.push(
+					foreignListing({
+						id: convertedPluginId('mana', id),
+						name: String(row['name']),
+						description: String(row['description'] ?? ''),
+						version: String(row['version'] ?? '0'),
+						author,
+						language: languages.length > 0 ? String(languages[0]) : null,
+						// The site the source scrapes, and the icon a client draws for
+						// it. The bundle's own hosts are added at conversion, from the
+						// bundle, because they are not in the index.
+						hosts: hostsFromUrls([
+							typeof row['website'] === 'string' ? row['website'] : null,
+							typeof row['thumbnail'] === 'string' ? row['thumbnail'] : null
+						]),
+						origin: {
+							format: 'mana',
+							artifactUrl,
+							foreignId: id,
+							foreignVersion: String(row['version'] ?? '0'),
+							mediaKind: 'manga',
+							isNsfw: isNsfwRating(row['rating']),
+							// Everything the later hops need, resolved while the index is
+							// in hand, so conversion stays a function of the listing.
+							// `hash` is the ecosystem's own 96-character digest, carried
+							// as a fact and deliberately not checked: it is not our
+							// digest, and verifying against it would report every
+							// converted bundle as tampered with.
+							detail: {
+								path: pathOf(row) ?? '',
+								alternates: candidates.slice(1),
+								ecosystemHash: typeof row['hash'] === 'string' ? row['hash'] : ''
+							}
 						}
-					}
-				})
-			);
+					})
+				);
+			} catch {
+				// `convertedPluginId` refuses an id with nothing usable in it. One
+				// such row is not a reason to lose the rest of the catalogue.
+				skipped += 1;
+			}
 		}
 
 		const kept = keepMediums({
@@ -285,7 +295,7 @@ export const manaAdapter: ForeignAdapter = {
 			plugins,
 			format: 'mana'
 		});
-		return { ...kept, filteredOut: (kept.filteredOut ?? 0) + trackers };
+		return { ...kept, filteredOut: (kept.filteredOut ?? 0) + trackers + skipped };
 	},
 
 	async convert(listing: RepositoryPlugin, services: ConversionServices): Promise<Uint8Array> {
@@ -683,7 +693,10 @@ export function stripTypescript(
 					.trimStart()
 					.charAt(0);
 				if (char === ';') return at + 1;
-				if (/[|&=,([<{]/.test(before.charAt(before.length - 1))) continue;
+				if (/[|&=,([<{]/.test(before.charAt(before.length - 1))) {
+					at += 1;
+					continue;
+				}
 				if (next === '|' || next === '&' || next === '}') {
 					at += 1;
 					continue;
@@ -1013,6 +1026,9 @@ export function stripTypescript(
 				iSet(skipType(at + 1));
 				continue;
 			}
+			// A ternary's colon closes one pending `?`; leaving the count up
+			// would make every later colon in the same block look like one too.
+			if ((ternaries[stack.length] ?? 0) > 0) ternaries[stack.length] -= 1;
 			push(char);
 			iSet(at + 1);
 			continue;

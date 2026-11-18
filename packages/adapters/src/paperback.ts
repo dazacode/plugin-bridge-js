@@ -59,9 +59,8 @@ const PAVED_INDEX = '0.9/stable/versioning.json';
 /**
  * The directory part of an index URL, with its trailing slash.
  *
- * Exported for the shim spec's benefit is unnecessary: every artifact in this
- * format is a sibling of the index, so the join is done once here rather than
- * in three places with three chances to forget the slash.
+ * Every artifact in this format is a sibling of the index, so the join is done
+ * once here rather than in three places with three chances to forget the slash.
  */
 function directoryOf(indexUrl: string): string {
 	const url = new URL(indexUrl);
