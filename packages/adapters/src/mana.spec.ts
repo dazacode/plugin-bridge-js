@@ -647,12 +647,15 @@ const result: { id: string; title: string }[] = [
  */
 describe('a Mana page transport', () => {
 	const sent: { url: string; headers: Record<string, string> }[] = [];
+	const sentBodies: unknown[] = [];
 	function context() {
 		sent.length = 0;
+		sentBodies.length = 0;
 		return {
 			http: {
-				send: async (url: string, init: { headers?: Record<string, string> }) => {
+				send: async (url: string, init: { headers?: Record<string, string>; body?: unknown }) => {
 					sent.push({ url, headers: init.headers ?? {} });
+					sentBodies.push(init.body);
 					const body = url.includes('/viewer/')
 						? `<img id="img" src="https://img.example.invalid${url.slice(url.indexOf('/viewer/') + 7)}.jpg">`
 						: '{}';
@@ -760,7 +763,7 @@ globalThis.Target = Target;
 	it('runs a source tree’s async interceptors and takes what they answer', async () => {
 		const REPO = 'https://repo.example.invalid/mana/main/';
 		const entry = `
-import { HttpClient } from '@mana-app/types';
+import { Body, HttpClient } from '@mana-app/types';
 export class Target {
   info = { id: 'Example', name: 'Example', version: '1.0.0', website: 'https://site.example.invalid' };
   client = new HttpClient().addRequestInterceptor(async (request: any) => { request.headers.set('x-signed', 'yes'); return request; });
@@ -768,6 +771,7 @@ export class Target {
     .addRequestInterceptor(async (request: any) => { if (!request.headers.has('referer')) request.headers.set('Referer', 'https://site.example.invalid/'); return request; });
   async getSearchResults(query: string) {
     await this.client.get('https://api.example.invalid/search');
+    await this.client.request({ url: 'https://api.example.invalid/graphql', method: 'POST', body: Body.json({ q: query }) });
     return [];
   }
   async getChapterData() { return { pages: [{ url: 'https://img.example.invalid/1.jpg' }] }; }
@@ -796,6 +800,9 @@ export class Target {
 		const ctx = context();
 		await module.searchCatalog('q', 1, ctx);
 		expect(sent[0].headers['x-signed']).toBe('yes');
+		// A published body builder goes on the wire as the published client puts it.
+		expect(sent[1].headers['content-type']).toBe('application/json');
+		expect(sentBodies[1]).toBe('{"q":"q"}');
 		const read = await module.readChapter('one', { number: 1, sourceChapterId: 'c1' }, ctx);
 		expect(read.pages).toEqual([
 			{

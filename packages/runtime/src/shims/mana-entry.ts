@@ -568,6 +568,41 @@ function __manaResponse(raw, request) {
  * and writes, because that class keeps each header as an own property too.
  * Names are matched case-insensitively and stored lowercased.
  */
+/**
+ * A body as the published \`Body\` builders describe one — \`{ kind, value,
+ * contentType }\` — onto the wire, as the published client puts it there; a
+ * plain string or bytes as written; anything else as JSON, which is what the
+ * older sources hand \`request\` directly.
+ */
+function __wireBody(body, headers) {
+  if (typeof body === 'string' || body instanceof Uint8Array) return body;
+  if (body && typeof body === 'object' && typeof body.kind === 'number' && 'value' in body) {
+    if (body.contentType && !Object.keys(headers).some(function (name) { return name.toLowerCase() === 'content-type'; })) {
+      headers['content-type'] = body.contentType;
+    }
+    if (body.kind === 0) return JSON.stringify(body.value);
+    if (body.kind === 1) {
+      var pairs = [];
+      for (var key in body.value || {}) {
+        var values = Array.isArray(body.value[key]) ? body.value[key] : [body.value[key]];
+        for (var i = 0; i < values.length; i++) pairs.push(encodeURIComponent(key) + '=' + encodeURIComponent(String(values[i])));
+      }
+      return pairs.join('&');
+    }
+    if (body.kind === 2) return String(body.value);
+    if (body.kind === 3) return new Uint8Array(body.value);
+  }
+  return JSON.stringify(body);
+}
+
+/** The published body builders: a description the client puts on the wire. */
+var __manaBody = {
+  json: function (value) { return { kind: 0, value: JSON.parse(JSON.stringify(value)), contentType: 'application/json' }; },
+  form: function (value) { return { kind: 1, value: JSON.parse(JSON.stringify(value)), contentType: 'application/x-www-form-urlencoded' }; },
+  text: function (value, contentType) { return { kind: 2, value: value, contentType: contentType || 'text/plain; charset=utf-8' }; },
+  bytes: function (value, contentType) { return { kind: 3, value: new Uint8Array(value), contentType: contentType || 'application/octet-stream' }; }
+};
+
 class __ManaHeaders {
   constructor(initial) {
     var from = initial || {};
@@ -661,9 +696,7 @@ class HttpClient {
 
     var init = { method: request.method, headers: headers };
     if (request.body !== undefined && request.body !== null) {
-      init.body = typeof request.body === 'string' || request.body instanceof Uint8Array
-        ? request.body
-        : JSON.stringify(request.body);
+      init.body = __wireBody(request.body, headers);
     }
     var raw = await __host().http.send(String(request.url), init);
     response = __manaResponse(raw, request);
@@ -747,6 +780,8 @@ class SourceInfo {
 
 const __manaKnown = {
   HttpClient: HttpClient,
+  HttpHeaders: __ManaHeaders,
+  Body: __manaBody,
   Source: Source,
   Manga: Manga,
   Chapter: Chapter,
