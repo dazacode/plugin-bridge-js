@@ -131,3 +131,104 @@ as a build artifact. Echo converts nothing by design; its extensions are APKs.
   index lives on a build branch. A repository with no index is reported as
   `no-index` by the harness rather than counted as a failure, and the two numbers
   are kept apart for the same reason the check states are.
+
+## Closing the gaps the pass left
+
+The pass above stopped at four named gaps. This is what became of each, and
+what a live run of two of the formats found besides.
+
+### Mana sources published as a tree: 0 → 19 of 139 convert
+
+Every Mana source in the corpus is published unbuilt, as a TypeScript entry
+that extends a template a directory or two away. The source path read the
+entry file alone and refused all 139 for `relativeModuleImports`.
+
+The relative-import walker the Hayase adapter already had is now shared
+(`core/repository-modules.ts`). Mana links the closure in dependency order —
+each module wrapped and returning its exports, re-exports and `export * from`
+included — and refuses by name a module that cannot be read, climbs out of the
+repository, closes a cycle or lies past the bound. Running the linked trees
+found eleven pieces of type syntax the stripper mishandled, each a bundle that
+converted and then failed to parse or returned a different value; each is
+fixed and pinned.
+
+Measured with `bun scripts/wotaku-catalogue.ts`, which now converts and loads
+every Mana entry file in the clones:
+
+|                                           | before | after |
+| ----------------------------------------- | ------ | ----- |
+| Mana entry files (declare `Target`)       | 139    | 139   |
+| refused `relativeModuleImports`           | 139    | 0     |
+| refused `packageImports`                  | 0      | 120   |
+| convert                                   | 0      | 19    |
+| convert and load                          | 0      | 9     |
+| load stops at a `@mana-app/types` builder | —      | 10    |
+
+The 120 are the honest next obstacle, not a regression: they import `cheerio`
+(116 closures), `html-entities` (80) or `crypto-js` (52), which a converted
+bundle has no copy of. The ten that convert and stop at load call a search-form
+builder (`SearchMenuPicker`, `SearchMultiPicker`, `SearchPicker`) at module
+scope, which the shim names rather than approximates.
+
+### Image transport: written up, not built
+
+A Mana source that serves page images through `getPageTransport` is honoured
+for the URL only. 109 of the 139 entry files carry a page transport in their
+closure. Carrying it is an ABI decision and is left to the contract's owner.
+
+### A numeric setting: written up, not built
+
+The one Suwatte source refused for settings uses `UIStepper`. The manifest
+schema's setting types are `select`, `multiselect`, `switch` and `text`, and
+`ctx.settings` answers strings, booleans and lists, so a number is an ABI
+change rather than an adapter one.
+
+### Seanime: the AniList id, and unnumbered episodes
+
+- A torrent provider is now declared addressed by `anilist` (`ExternalIdKind`).
+  Seanime's `Media.id` is an AniList id, and a host that holds one already
+  hands an id-addressed source `anilist:<id>|<title>`; the shim reads it into
+  `media.id`. A host that binds by title still gets `0`, as before. The host is
+  asked for nothing new.
+- An episode with no number is placed between its numbered neighbours, with
+  the rule the Mangayomi shim already used, instead of by position, which could
+  land on a number another row held.
+
+### What a live run of Seanime and Suwatte found
+
+Converting is not running, so both formats were run against their live
+repositories with the catalogue harness (real addresses on the command line
+only). Each failure below converted, loaded or not, and failed on something
+the host hands a provider that this build did not:
+
+- **Seanime**: `LoadDoc`/`Doc` (the host's goquery document API, 81 call sites
+  in the corpus), `$getUserPreference` (67), `$store` (71). All three are now
+  supplied — the document API over the shared parser, following goquery where
+  it and jsoup disagree, and preferences from the manifest's `userConfig` as
+  manifest settings. A payload whose file is `.ts` is stripped whatever the
+  manifest says.
+- **Suwatte**: what a repository serves is the toolchain's built catalogue
+  (`sources.json`, `catalogVersion` 2, one `.stt` bundle per row), which the
+  adapter did not model and Mana's parser claimed, answering zero listings.
+  It is now read as Suwatte, Mana's positive match requires its own
+  `environment`, and a pasted repository link also asks the repository's
+  Pages site. Bundles load with the same boot context the Mana bundle path
+  uses, and the image Referer a source's configuration declares travels on its
+  pages.
+- **The headless host** threw `Buffer is not defined` on any bundle that read
+  `globalThis.Headers`, because Node defines it lazily over a client that needs
+  the `Buffer` the isolate deletes. Those classes are now pinned before the
+  sealing. No browser was affected.
+
+| Live, against the repository as published  | before                                                      | after                     |
+| ------------------------------------------ | ----------------------------------------------------------- | ------------------------- |
+| Suwatte catalogue, detected as             | Mana, 0 listings                                            | Suwatte, 120 listings     |
+| Suwatte repository link                    | not found                                                   | 120 listings              |
+| Suwatte, first six checked                 | —                                                           | 1 works; 5 fail past load |
+| Seanime, five listings that failed by name | 0 work, 5 fail at load/search on a missing global or a type | 1 works, 5 load           |
+| Seanime, a second marketplace's first six  | 1 works                                                     | 2 work                    |
+
+What still fails after load is the site's or the probe's, and is reported as
+such: a provider that needs its own local helper process, a search that
+answers nothing for the harness's title, a CDN that refuses the probe's own
+request shape while answering the same request without it.

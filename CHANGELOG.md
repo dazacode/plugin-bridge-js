@@ -12,6 +12,62 @@ to exhaustion and deliberately closed it. `v0.1.x` is for fixes to what has
 already been promised; a minor bump whose case is "the number went up" is not a
 minor bump.
 
+## Unreleased — the wotaku gaps: Mana source trees, Seanime's host surface, Suwatte's built catalogue
+
+The ten-ecosystem pass left four named gaps; a live run of two of its formats
+found more. `docs/compatibility-wotaku.md` has the measurements.
+**`CONVERTER_VERSION` moves from 60 to 61**, because a Mana source listing that
+was refused at 60 converts now, and a stored verdict for one is an answer this
+converter no longer gives.
+
+### Capabilities
+
+- **A Mana source tree converts with the modules it imports from its own
+  repository.** The Hayase adapter's relative-import walker is shared
+  (`core/repository-modules.ts`) and reports what it could not follow instead
+  of skipping it. _Corpus: 0 → 19 of 139 Mana entry files convert, 9 load;
+  the other 120 now stop at a named third-party package._
+- **Seanime providers get `LoadDoc`/`Doc`, `$getUserPreference` and `$store`.**
+  The document API follows goquery over the shared parser; `userConfig`
+  becomes manifest settings.
+- **A Seanime torrent provider is addressed by AniList id**, and the shim reads
+  the id the host already hands id-addressed sources into `media.id`.
+- **Suwatte's built catalogue is read**: `sources.json`, `catalogVersion` 2,
+  one `.stt` bundle per row, run with the bundle's own `bootstrap()`. A GitHub
+  repository link also asks the repository's Pages site for it.
+- **A Suwatte source's declared image Referer travels on its pages.**
+
+### Correctness
+
+- The Mana/Seanime TypeScript stripper left in, or cut too far, eleven
+  constructs: an object type after `|`, `&` or `readonly`; a function type in a
+  parameter; `??`; a regex after `return`; a generic over an object type
+  (including a generic _call_); `x! + y`; `abstract` classes and members;
+  documented union members; a generic alias over several lines; `a?[b]:c`; and
+  `let` inside a string read as a declarator. `import { type X }` imports
+  nothing.
+- A Seanime episode with no number is placed between its numbered neighbours,
+  not numbered by position, which could collide with a stated number.
+- A Seanime payload whose file is `.ts` is stripped whatever its manifest says.
+
+### Detection
+
+- Mana's index parser no longer claims Suwatte's built catalogue: a row that
+  states an `environment` must state one of Mana's own. Before, every row was
+  filed as a tracker and the repository answered with no listings.
+
+### Host
+
+- The headless isolate pins `Headers`, `Request`, `Response` and `FormData`
+  before deleting `Buffer`; Node's lazy definitions of them threw
+  `Buffer is not defined` on first read.
+
+### Left for a decision, on purpose
+
+- **Image transport** (a page or cover image fetched through the source's own
+  client) and **a numeric setting** (`UIStepper`) are ABI changes and are
+  written up, not built.
+
 ## Unreleased — served playback: a plugin's own local server, without the socket
 
 Thirteen video extensions run a local HTTP server of their own to feed their
