@@ -206,8 +206,14 @@ const ENTRYPOINT = 'source';
  *     is reached with the class that extends it, so six bundles that loaded
  *     and sent every request to `undefined/…` are now refused by name.
  *     Reconvert every bundle made at 59 or earlier.
+ * 61: a Mana source published as a TypeScript tree is read with the modules
+ *     it imports from its own repository, where 60 refused every one of them
+ *     for importing a template; the stripper reads the type syntax those
+ *     templates write instead of leaving it in. A verdict stored at 60 for any
+ *     Mana source listing is a refusal this converter no longer gives.
+ *     Reconvert every bundle made at 60 or earlier.
  */
-export const CONVERTER_VERSION = 60;
+export const CONVERTER_VERSION = 61;
 
 export interface BundleInput {
 	readonly id: string;

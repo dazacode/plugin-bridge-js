@@ -11,7 +11,7 @@ import { describe, expect, it } from 'vitest';
 
 import { ForeignFormatError, type ConversionServices } from '@plugin-bridge/core/adapter';
 import { openPluginArchive } from '@plugin-bridge/core/archive';
-import { manaAdapter } from './mana';
+import { manaAdapter, stripTypescript } from './mana';
 
 const INDEX_URL = 'https://repo.example.invalid/mana/main/sources.json';
 
@@ -196,7 +196,7 @@ describe('what a converted Mana source is', () => {
 		expect(opened.hosts).toContain('api.example.invalid');
 	});
 
-	it('refuses a source file that imports a sibling, naming it', async () => {
+	it('refuses a source file whose sibling is not there, naming it', async () => {
 		const source = 'https://repo.example.invalid/mana/main/src/sources/Example/index.ts';
 		const entry = `
 			import { Base } from './ExampleBase';
@@ -210,7 +210,7 @@ describe('what a converted Mana source is', () => {
 			.catch((error: unknown) => error);
 
 		expect(failure).toBeInstanceOf(ForeignFormatError);
-		expect((failure as ForeignFormatError).obstacles).toEqual(['relativeModuleImports']);
+		expect((failure as ForeignFormatError).obstacles).toEqual(['relativeModuleMissing']);
 		expect((failure as ForeignFormatError).message).toContain('"./ExampleBase"');
 	});
 
@@ -220,5 +220,305 @@ describe('what a converted Mana source is', () => {
 			.catch((error: unknown) => error);
 		expect(failure).toBeInstanceOf(ForeignFormatError);
 		expect((failure as ForeignFormatError).obstacles).toEqual(['missingArtifact']);
+	});
+});
+
+/**
+ * The source path across files: an entry that extends a template in its own
+ * repository, the way every unbuilt source in the measured corpus is written.
+ */
+describe('a Mana source that imports its own repository', () => {
+	const REPO = 'https://repo.example.invalid/mana/main/';
+	const ENTRY = `${REPO}src/Example/main.ts`;
+
+	const FILES: Record<string, string> = {
+		[ENTRY]: `
+import { ContentRating, type SourceInfo } from '@mana-app/types';
+import type { ClientOptions } from '../../lib/client.ts';
+import { TemplateSource } from '../../lib/source.ts';
+import { tidy, LABEL } from '../../lib/forms';
+import shout from './shout.js';
+
+export class Target extends TemplateSource {
+  info: SourceInfo = { id: 'Example', name: 'Example', version: '1.0.0' };
+  label(): string {
+    return shout(tidy(LABEL)) + ':' + ContentRating.MATURE;
+  }
+}
+`,
+		[`${REPO}lib/source.ts`]: `
+import { tidy as clean } from './text';
+export abstract class TemplateSource {
+  abstract label(): string;
+  async getSearchResults(query: string, page: number) {
+    return { results: [{ id: clean(' one '), title: this.label() + '/' + query }], isLastPage: true };
+  }
+}
+`,
+		[`${REPO}lib/text.ts`]: `
+export function tidy(value: string): string {
+  return value.trim();
+}
+const LOUD = 'example';
+export { LOUD as LABEL };
+`,
+		[`${REPO}lib/forms/index.ts`]: `
+export * from './query.ts';
+export { LABEL } from '../text.ts';
+`,
+		[`${REPO}lib/forms/query.ts`]: `
+export { tidy } from '../text';
+`,
+		[`${REPO}src/Example/shout.ts`]: `
+export default function shout(value: string): string {
+  return value.toUpperCase();
+}
+`
+	};
+
+	function served(files: Record<string, string>, asked: string[] = []) {
+		return services({
+			getText: async (url) => {
+				asked.push(url);
+				const body = files[url];
+				return body === undefined ? Promise.reject(new Error(`no ${url}`)) : body;
+			}
+		});
+	}
+
+	function sourceListing() {
+		return manaAdapter.parseIndex(
+			JSON.stringify([
+				{ id: 'Example', name: 'Example', path: 'Example', website: 'https://site.example.invalid' }
+			]),
+			`${REPO}sources.json`
+		).plugins[0];
+	}
+
+	async function load(files: Record<string, string>) {
+		const opened = await openPluginArchive(
+			await manaAdapter.convert(sourceListing(), served(files))
+		);
+		const url = `data:text/javascript;base64,${Buffer.from(opened.entrypointSource).toString('base64')}`;
+		return (await import(/* @vite-ignore */ url)).default as {
+			searchCatalog(
+				query: string,
+				page: number,
+				ctx: unknown
+			): Promise<{ entries: { sourceMediaId: string; title: string }[] }>;
+		};
+	}
+
+	it('links every module it imports, and runs as one source', async () => {
+		const module = await load(FILES);
+		const page = await module.searchCatalog('q', 1, { http: {} });
+		// Each piece of that title came through a different link: a base class
+		// two directories up, a renamed re-export, a wholesale re-export through
+		// a barrel, a default import spelled `.js` for a `.ts` file, and the
+		// shim's own types package.
+		expect(page.entries).toEqual([
+			{ sourceMediaId: 'one', title: 'EXAMPLE:2/q', alternativeTitles: [] }
+		]);
+	});
+
+	it('imports nothing for a list of types, even from a package it does not have', async () => {
+		const files = {
+			...FILES,
+			[ENTRY]: `import { type CheerioAPI } from 'cheerio';\n${FILES[ENTRY]}`
+		};
+		const module = await load(files);
+		const page = await module.searchCatalog('q', 1, { http: {} });
+		expect(page.entries).toHaveLength(1);
+	});
+
+	it('never fetches what an import only uses as a type', async () => {
+		const asked: string[] = [];
+		await manaAdapter.convert(sourceListing(), served(FILES, asked));
+		expect(asked).not.toContain(`${REPO}lib/client.ts`);
+	});
+
+	it('refuses a sibling that climbs out of the repository, without fetching it', async () => {
+		const asked: string[] = [];
+		const files = {
+			...FILES,
+			[`${REPO}lib/text.ts`]: `import { x } from '../../../../elsewhere/x.ts';\nexport const tidy = x;`
+		};
+		const failure = await manaAdapter
+			.convert(sourceListing(), served(files, asked))
+			.catch((error: unknown) => error);
+		expect((failure as ForeignFormatError).obstacles).toEqual(['relativeModuleEscapes']);
+		expect(asked.some((one) => one.includes('elsewhere'))).toBe(false);
+	});
+
+	it('refuses modules that import each other', async () => {
+		const files = {
+			...FILES,
+			[`${REPO}lib/text.ts`]: `import { TemplateSource } from './source.ts';\nexport const tidy = (v: string) => v;\nexport const LABEL = 'x';`
+		};
+		const failure = await manaAdapter
+			.convert(sourceListing(), served(files))
+			.catch((error: unknown) => error);
+		expect((failure as ForeignFormatError).obstacles).toEqual(['relativeModuleCycle']);
+	});
+
+	it('refuses a package a sibling imports, not only one the entry does', async () => {
+		const required = {
+			...FILES,
+			[`${REPO}lib/text.ts`]: `const helper = require('left-pad');\nexport const tidy = helper;\nexport const LABEL = 'x';`
+		};
+		const imported = {
+			...FILES,
+			[`${REPO}lib/text.ts`]: `import { load } from 'cheerio';\nexport const tidy = load;\nexport const LABEL = 'x';`
+		};
+		for (const [files, name] of [
+			[required, 'left-pad'],
+			[imported, 'cheerio']
+		] as const) {
+			const failure = await manaAdapter
+				.convert(sourceListing(), served(files))
+				.catch((error: unknown) => error);
+			expect((failure as ForeignFormatError).obstacles).toEqual(['packageImports']);
+			expect((failure as ForeignFormatError).message).toContain(`"${name}"`);
+		}
+	});
+
+	it('scans every module it carries for the hosts it reaches', async () => {
+		const files = {
+			...FILES,
+			[`${REPO}lib/text.ts`]: `${FILES[`${REPO}lib/text.ts`]}\nexport const API = 'https://api.example.invalid/v1';`
+		};
+		const opened = await openPluginArchive(
+			await manaAdapter.convert(sourceListing(), served(files))
+		);
+		expect(opened.hosts).toContain('api.example.invalid');
+	});
+});
+
+/**
+ * Type syntax the measured sources write, each of which the stripper once left
+ * in or cut too far. Each is checked by *running* the output: a stripper that
+ * leaves a type behind produces a syntax error, and one that cuts too far
+ * produces a different value.
+ */
+describe('stripping TypeScript', () => {
+	function run(source: string): unknown {
+		const code = stripTypescript(source).code;
+		return new Function(`${code}\nreturn result;`)();
+	}
+
+	it('keeps an object type that is the second half of a union', () => {
+		expect(
+			run(`function f(request: string | { filters?: Record<string, number> }) { return 1; }
+const result = f('x');`)
+		).toBe(1);
+	});
+
+	it('keeps an object type behind a type operator', () => {
+		expect(
+			run(`function f(options: readonly { id: string; isDefault?: boolean }[], fallback = 'z') {
+  return options.length + fallback;
+}
+const result = f([]);`)
+		).toBe('0z');
+	});
+
+	it('reads a function type in a parameter as one type', () => {
+		expect(
+			run(`async function attempt<T>(read: () => Promise<T | null>, fallback: T) { return fallback; }
+const result = typeof attempt;`)
+		).toBe('function');
+	});
+
+	it('does not read the second ? of ?? as a ternary', () => {
+		expect(
+			run(`function f(title: { tags?: string[] }) {
+  const name = title.tags ?? undefined;
+  const tags: string[] = (title.tags ?? []).map((one) => one);
+  return tags.length;
+}
+const result = f({ tags: ['a'] });`)
+		).toBe(1);
+	});
+
+	it('reads a regex after return as a regex', () => {
+		expect(
+			run(`function f(url: string): boolean {
+  return /^https?:\\/\\//.test(url);
+}
+const result = f('https://x');`)
+		).toBe(true);
+	});
+
+	it('strips a generic whose argument is an object type', () => {
+		expect(
+			run(`const cache = new Map<string, { at: number; page: string }>();
+cache.set('a', { at: 1, page: 'p' });
+const result = cache.size;`)
+		).toBe(1);
+	});
+
+	it('strips a non-null assertion before an operator', () => {
+		expect(
+			run(`const w: number[] = [1, 2];
+const result = (w[0]! + w[1]!) >>> 0;`)
+		).toBe(3);
+	});
+
+	it('strips an abstract class and drops its abstract members', () => {
+		expect(
+			run(`abstract class Base {
+  abstract name(): string;
+  protected abstract readonly kind: string;
+  greet(): string { return 'hi ' + this.name(); }
+}
+class One extends Base { name() { return 'one'; } }
+const result = new One().greet();`)
+		).toBe('hi one');
+	});
+
+	it('reads a union whose members are documented between them as one type', () => {
+		expect(
+			run(`type Field =
+  | { type: "text"; key: string }
+  /**
+   * An action, so it carries no key of its own.
+   */
+  | { type: "button"; id: string };
+const result = 'kept';`)
+		).toBe('kept');
+	});
+
+	it('reads a generic alias split over lines as one type', () => {
+		expect(
+			run(`type Picked = Pick<
+  Record<string, number>,
+  "a" | "b"
+>;
+const result = 'kept';`)
+		).toBe('kept');
+	});
+
+	it('keeps the else branch of a ternary written without spaces', () => {
+		expect(
+			run(`const author = '';
+const result = [...(author?['x']:[])].length;`)
+		).toBe(0);
+	});
+
+	it('does not read the letters of a string as a declarator', () => {
+		expect(
+			run(`const result: { id: string; title: string }[] = [
+  { id: "let", title: "Enabled" },
+];`)
+		).toEqual([{ id: 'let', title: 'Enabled' }]);
+	});
+
+	it('does not read the start of a longer name as a declarator', () => {
+		expect(
+			run(`const letters = 'a';
+const result: { id: string; title: string }[] = [
+  { id: letters, title: "Enabled" },
+];`)
+		).toEqual([{ id: 'a', title: 'Enabled' }]);
 	});
 });

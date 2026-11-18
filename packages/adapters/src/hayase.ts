@@ -32,6 +32,7 @@ import {
 	type TextFetcher
 } from '@plugin-bridge/core/adapter';
 import { packageBundle } from '@plugin-bridge/core/package';
+import { walkRepositoryModules } from '@plugin-bridge/core/repository-modules';
 import type { RepositoryIndex, RepositoryPlugin } from '@plugin-bridge/core/repository-index';
 import { hayaseEntrypoint } from '@plugin-bridge/runtime/shims/hayase-entry';
 import {
@@ -52,35 +53,6 @@ function decodeUrl(value: unknown): string | null {
 	}
 }
 
-/**
- * The modules an extension imports from its own repository, fetched.
- *
- * Eight of the measured extensions split a helper out — `./utils.js`,
- * `./lib/shared.js` — and without it the entry module converts, loads, and
- * throws `parseFeed is not defined` at the first search. Resolving them is
- * therefore part of reading the extension, not an extra.
- *
- * ## What is refused, and why each rule is here
- *
- * - **Only relative specifiers.** A bare one (`node:fs`, a package name) is a
- *   dependency this runtime does not have, and inventing a fetch for it would
- *   turn a named refusal into a mystery at call time.
- * - **Only under the same repository, at the same ref.** Resolution is against
- *   the artifact's own URL, and the result must still begin with the
- *   `<owner>/<repo>/<ref>/` the artifact came from. `../../../other/repo/x.js`
- *   resolves to a real URL on the same forge, and fetching it would let one
- *   listing pull code from a repository nobody added — provenance laundering,
- *   not a module system.
- * - **Bounded.** Depth and count are capped, because how many requests one
- *   conversion costs must not be a property of somebody else's repository.
- *
- * `abstract.js` is skipped rather than fetched: the runtime defines that base
- * class itself, so fetching it would be a request whose answer is discarded.
- *
- * Deepest first, so a helper is declared before whatever reads it, and each
- * URL appears once however many modules import it — which is also what stops a
- * cycle.
- */
 /**
  * The hosts a source names, including the ones it wrote in base64.
  *
@@ -139,52 +111,46 @@ function repositoryRoot(artifactUrl: string): string | null {
 	return `${url.origin}/${segments.slice(0, 3).join('/')}/`;
 }
 
+/**
+ * The modules an extension imports from its own repository, fetched.
+ *
+ * Eight of the measured extensions split a helper out — `./utils.js`,
+ * `./lib/shared.js` — and without it the entry module converts, loads, and
+ * throws `parseFeed is not defined` at the first search. Resolving them is
+ * therefore part of reading the extension, not an extra. The walk itself, and
+ * what it refuses, is `walkRepositoryModules`; this is what Hayase asks of it.
+ *
+ * The root is `<owner>/<repo>/<ref>/` of the artifact's own forge URL, so a
+ * sibling must come from the same repository at the same ref.
+ *
+ * `abstract.js` is skipped rather than fetched: the runtime defines that base
+ * class itself, so fetching it would be a request whose answer is discarded.
+ *
+ * A helper that cannot be read, or that lies past the bound, is left out
+ * rather than fatal: the entry module then refuses by the missing symbol's own
+ * name, which says more than "a file this build expected was not there".
+ */
 async function repositoryModules(
 	script: string,
 	artifactUrl: string,
 	getText: TextFetcher
 ): Promise<{ specifier: string; source: string }[]> {
-	const found = repositoryRoot(artifactUrl);
-	if (found === null) return [];
-	// Bound outside the closure: narrowing does not reach into one, and the
-	// prefix check is the whole provenance guarantee.
-	const root: string = found;
-
-	const seen = new Set<string>([artifactUrl]);
-	const collected: { specifier: string; source: string }[] = [];
-
-	async function walk(source: string, base: string, depth: number): Promise<void> {
-		if (depth > MAX_DEPTH) return;
-		for (const match of source.matchAll(/^[ \t]*import\s[\s\S]*?\sfrom\s*['"](\.[^'"]*)['"]/gm)) {
-			if (collected.length >= MAX_MODULES) return;
-			const specifier = match[1];
-			if (/abstract\.js$/.test(specifier)) continue;
-
-			let resolved: string;
-			try {
-				resolved = new URL(specifier, base).toString();
-			} catch {
-				continue;
-			}
-			if (!resolved.startsWith(root) || seen.has(resolved)) continue;
-			seen.add(resolved);
-
-			let body: string;
-			try {
-				body = await getText(resolved);
-			} catch {
-				// Left out rather than fatal: the entry module then refuses by
-				// the missing symbol's own name, which says more than "a file
-				// this build expected was not there".
-				continue;
-			}
-			await walk(body, resolved, depth + 1);
-			collected.push({ specifier, source: body });
+	const root = repositoryRoot(artifactUrl);
+	if (root === null) return [];
+	const walk = await walkRepositoryModules(
+		{ source: script, url: artifactUrl },
+		{
+			root,
+			getText,
+			specifiers: (source) =>
+				[...source.matchAll(/^[ \t]*import\s[\s\S]*?\sfrom\s*['"](\.[^'"]*)['"]/gm)]
+					.map((match) => match[1])
+					.filter((specifier) => !/abstract\.js$/.test(specifier)),
+			maxModules: MAX_MODULES,
+			maxDepth: MAX_DEPTH
 		}
-	}
-
-	await walk(script, artifactUrl, 0);
-	return collected;
+	);
+	return walk.modules.map((one) => ({ specifier: one.specifier, source: one.source }));
 }
 
 export const hayaseAdapter: ForeignAdapter = {
