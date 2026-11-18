@@ -955,6 +955,46 @@ describe('two collection and url behaviours a listing depended on', () => {
 	});
 });
 
+describe('a call the grammar hands to the whole expression before it', () => {
+	// `"tags" to filters.getText<TagFilter>()` and `if (ok) set("K", v)` parse
+	// with the argument list attached to the whole infix, or the whole `if`,
+	// rather than to its last operand. Kotlin cannot call either of those
+	// without parentheses, so the call is the operand's — and both were
+	// refused as "a call through" something with no name.
+	it('applies the call to the last operand of an infix', async () => {
+		const d = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    private inline fun <reified T> List<Any>.firstOf(): String = firstOrNull { it is T }?.toString() ?: "-"',
+				'    fun pairs(items: List<Any>): String = listOf("s" to items.firstOf<String>(), "n" to items.firstOf<Int>()).joinToString { it.first + "=" + it.second }',
+				'}'
+			)
+		);
+		expect(d.pairs([3, 'x'])).toBe('s=x, n=3');
+		expect(d.pairs(['y'])).toBe('s=y, n=-');
+	});
+
+	it('applies the call to the body of an `if` with no braces, `set` included', async () => {
+		const d = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    fun built(ok: Boolean): String {',
+				'        val h = Headers.Builder().apply {',
+				'            if (ok) set("X-Token", "t")',
+				'            set("Accept", "*/*")',
+				'        }.build()',
+				'        return (h["X-Token"] ?: "none") + "|" + h["Accept"]',
+				'    }',
+				'}'
+			)
+		);
+		expect(d.built(true)).toBe('t|*/*');
+		expect(d.built(false)).toBe('none|*/*');
+	});
+});
+
 describe('a reference to a member the template declares', () => {
 	it('binds it to the inherited value, not to the argument', async () => {
 		// DooPlay's `protected open val episodeNumberRegex`, read by a subclass

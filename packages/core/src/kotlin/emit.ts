@@ -8637,6 +8637,14 @@ class Emitter {
 			if (lambda !== null) this.refuse(lambda, 'a lambda passed to a callable reference');
 			return `(${this.callableReference(callee)})(${this.plainArguments('', args).join(', ')})`;
 		}
+		// `"tags" to filters.getText<TagFilter>()` and `if (ok) set("K", v)`:
+		// the grammar hands the argument list to the whole infix or `if`
+		// rather than to its last operand. Kotlin cannot call either of those
+		// as a function without parentheses — which would make the callee a
+		// parenthesised expression, not this — so the call belongs to the
+		// operand, and the expression is read again with it there.
+		const regrouped = regroupCall(node, callee);
+		if (regrouped !== null) return this.expr(regrouped);
 		// `(f)(x)` and `map[k](x)`: a call through something with no name, whose
 		// signature is not knowable from here.
 		this.refuse(callee, `a call through ${spoken(callee)}`);
@@ -13933,6 +13941,104 @@ function overloadTable(name: string, shapes: readonly OverloadSignature[]): stri
 			shape.defaults
 		])
 	);
+}
+
+/**
+ * A call the grammar attached to an infix or a brace-less `if`, rebuilt with
+ * the call on the expression's last operand — or null when the callee is not
+ * one of those, or its last operand is not something a call can apply to.
+ */
+function regroupCall(node: KNode, callee: KNode): KNode | null {
+	if (callee.type !== 'infix_expression' && callee.type !== 'if_expression') return null;
+	if (
+		callee.type === 'if_expression' &&
+		callee.allChildren.some((child) => child.type === 'else')
+	) {
+		return null;
+	}
+	// The operand the call belongs to: down the last child of the infix, or of
+	// the `if`'s body, to a name or a navigation.
+	let target: KNode | undefined = callee;
+	while (
+		target !== undefined &&
+		(target.type === 'infix_expression' ||
+			target.type === 'if_expression' ||
+			target.type === 'control_structure_body')
+	) {
+		const named = kids(target);
+		target = named[named.length - 1];
+	}
+	if (target === undefined) return null;
+	// A bare `set` or `get` there is read by the grammar as an accessor
+	// keyword; as the callee of a call it is only ever the name.
+	const accessorName =
+		(target.type === 'setter' || target.type === 'getter') && /^(?:set|get)$/.test(target.text);
+	if (
+		target.type !== 'simple_identifier' &&
+		target.type !== 'navigation_expression' &&
+		!accessorName
+	) {
+		return null;
+	}
+	const written = target;
+	const operand: KNode = accessorName
+		? { ...written, type: 'simple_identifier', children: [], field: () => null }
+		: written;
+
+	// The call chain with the operand where the callee was.
+	const rebuildCall = (current: KNode): KNode => {
+		if (current === callee) return operand;
+		const [inner, ...rest] = kids(current);
+		const rebuilt = rebuildCall(inner);
+		return synthetic(
+			current,
+			[rebuilt, ...rest],
+			rebuilt.text + rest.map((one) => one.text).join('')
+		);
+	};
+	const call = rebuildCall(node);
+
+	// The callee with the call where the operand was.
+	const replace = (current: KNode): KNode => {
+		if (current === written) return call;
+		const named = kids(current);
+		const last = named[named.length - 1];
+		if (last === undefined) return current;
+		const swapped = replace(last);
+		return synthetic(
+			current,
+			[...named.slice(0, -1), swapped],
+			current.text.slice(0, current.text.length - last.text.length) + swapped.text
+		);
+	};
+	return replace(callee);
+}
+
+/** A node like `like`, with these named children and this text. */
+function synthetic(like: KNode, children: readonly KNode[], text: string): KNode {
+	const named = new Set(kids(like));
+	const replaced = new Map<KNode, KNode>();
+	const original = kids(like);
+	for (let at = 0; at < original.length; at += 1) {
+		if (children[at] !== undefined && children[at] !== original[at]) {
+			replaced.set(original[at], children[at]);
+		}
+	}
+	return {
+		type: like.type,
+		text,
+		line: like.line,
+		hasError: like.hasError,
+		isMissing: like.isMissing,
+		children: like.children.map((child) => replaced.get(child) ?? child),
+		allChildren: like.allChildren.map((child) =>
+			named.has(child) ? (replaced.get(child) ?? child) : child
+		),
+		field: (name: string) => {
+			const found = like.field(name);
+			return found === null ? null : (replaced.get(found) ?? found);
+		}
+	};
 }
 
 /** A written type-argument list split at its own commas, generics kept whole. */
