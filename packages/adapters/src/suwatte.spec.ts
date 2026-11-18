@@ -306,6 +306,57 @@ var SourcePackage = (() => {
 		expect(page.entries.map((one) => [one.sourceMediaId, one.title])).toEqual([['one', 'Found x']]);
 	});
 
+	/** Converts and loads a bundle for the first catalogue row. */
+	async function loadBuilt(stt: string) {
+		const listing = suwatteAdapter.parseIndex(CATALOGUE, CATALOGUE_URL).plugins[0];
+		const opened = await openPluginArchive(
+			await suwatteAdapter.convert(listing, {
+				fetchArtifact: async () => new TextEncoder().encode(stt),
+				getText: async () => '',
+				listFiles: async () => []
+			})
+		);
+		const url = `data:text/javascript;base64,${Buffer.from(opened.entrypointSource).toString('base64')}`;
+		return (await import(/* @vite-ignore */ url)).default as {
+			readChapter(
+				id: string,
+				chapter: unknown,
+				ctx: unknown
+			): Promise<{ pages: { url: string; headers?: Record<string, string> }[] }>;
+		};
+	}
+
+	it('decodes at load, before the host has made a call', async () => {
+		// An HTML entity table decoded from base64 while the module evaluates,
+		// which is what a bundled parser does.
+		const stt = STT.replace(
+			'var SourcePackage = (() => {',
+			"var TABLE = atob('aGVsbG8=');\nvar SourcePackage = (() => {"
+		).replace("title: 'Found ' + request.query", "title: TABLE + ' ' + request.query");
+		const module = (await loadBuilt(stt)) as unknown as {
+			searchCatalog(q: string, p: number, ctx: unknown): Promise<{ entries: { title: string }[] }>;
+		};
+		const page = await module.searchCatalog('x', 1, { settings: undefined });
+		expect(page.entries[0].title).toBe('hello x');
+	});
+
+	it("sends the image Referer the source's configuration declares, unless a page set its own", async () => {
+		const stt = STT.replace(
+			'async getSearchResults(request, page) {',
+			`getConfiguration() { return { imageReferer: 'https://site.example.invalid/' }; }
+    async getChapterPages() {
+      return [{ url: 'https://img.example.invalid/1.jpg' }, { url: 'https://img.example.invalid/2.jpg', headers: { referer: 'https://own.example.invalid/' } }];
+    }
+    async getSearchResults(request, page) {`
+		);
+		const module = await loadBuilt(stt);
+		const read = await module.readChapter('one', { number: 1, sourceChapterId: 'c1' }, {});
+		expect(read.pages.map((one) => one.headers)).toEqual([
+			{ Referer: 'https://site.example.invalid/' },
+			{ referer: 'https://own.example.invalid/' }
+		]);
+	});
+
 	it('refuses a file at the bundle path that is not a toolchain bundle', async () => {
 		const listing = suwatteAdapter.parseIndex(CATALOGUE, CATALOGUE_URL).plugins[0];
 		const failure = await suwatteAdapter
