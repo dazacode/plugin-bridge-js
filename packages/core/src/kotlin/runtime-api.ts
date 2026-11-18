@@ -156,6 +156,7 @@ export const RUNTIME_HELPERS = [
 	'lastOrNull',
 	'last',
 	'find',
+	'matches',
 	'any',
 	'all',
 	'none',

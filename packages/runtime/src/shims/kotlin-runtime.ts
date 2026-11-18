@@ -3757,6 +3757,17 @@ var __k = {
    * They mean entirely different things — a matching element, and a MatchResult
    * — and the emitter has no types to disambiguate with, so the receiver does.
    */
+  /**
+   * A whole-input match, with the regex on either side: 'Regex.matches(input)'
+   * and 'String.matches(regex)', the second also as Java's pattern string.
+   */
+  matches: function (receiver, other) {
+    if (receiver && receiver.__isRegex === true) return receiver.matches(other);
+    if (other && other.__isRegex === true) return other.matches(__str(receiver));
+    if (typeof other === 'string') return __k.regex(other).matches(__str(receiver));
+    throw new Error('matches() was given neither a Regex nor a pattern.');
+  },
+
   find: function (list, predicate, startIndex) {
     if (list && list.__isRegex === true) return list.find(predicate, startIndex);
     return __k.firstOrNull(list, predicate);

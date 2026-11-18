@@ -1938,6 +1938,8 @@ class Emitter {
 	private readonly reifiedMembers = new Map<string, readonly string[]>();
 	/** See `Declared.moduleReified`. */
 	private readonly moduleReified = new Map<string, ModuleReified>();
+	/** Parameters an extension function this file declares takes; null if it varies. */
+	private readonly extensionArity = new Map<string, number | null>();
 	/**
 	 * The enum whose body is being emitted, and its entries' names.
 	 *
@@ -5530,6 +5532,11 @@ class Emitter {
 			const reified = reifiedParams(child);
 			if (reified.length > 0) this.reifiedFunctions.set(name, reified);
 			if (receiverOf(child) === null) continue;
+			// How many it takes, past its receiver — null once two declarations
+			// of the name disagree. See the over-long call in \`bareCall\`.
+			const arity = this.parameterNames(child).length;
+			const known = this.extensionArity.get(name);
+			this.extensionArity.set(name, known === undefined || known === arity ? arity : null);
 			this.extensionFunctions.set(name, shape);
 			if (owner !== null) this.extensionOwners.set(name, owner);
 		}
@@ -9783,6 +9790,24 @@ class Emitter {
 		// `__recv` took the first argument's value and the argument took
 		// undefined. Nothing threw; the wrong attribute was read.
 		const declaredExtension = lambda === null ? this.extensionFunctions.get(name) : undefined;
+		// More arguments than the one declaration in reach takes: Kotlin chose
+		// another overload, and the only other place one can be is the base the
+		// driver supplies. \`private fun SManga.setSlugUrl(href) =
+		// setSlugUrl(mangaPath, href)\` calls keiyoushi's two-argument
+		// \`setSlugUrl\`; emitted on \`this\` it called itself until the stack ran
+		// out, at the first search. The driver's base answers it, or says by
+		// name that it does not.
+		const declaredArity = this.extensionArity.get(name) ?? undefined;
+		if (
+			implicit !== null &&
+			declaredExtension === 'method' &&
+			declaredArity !== undefined &&
+			tail.length > declaredArity &&
+			!tail.some((one) => one.startsWith('...'))
+		) {
+			const call = `__super.${name}(${[implicit, ...tail].join(', ')})`;
+			return this.suspendMembers.has(name) ? this.awaited(call) : call;
+		}
 		if (implicit !== null && declaredExtension !== undefined) {
 			const owner = this.extensionOwners.get(name);
 			const target =

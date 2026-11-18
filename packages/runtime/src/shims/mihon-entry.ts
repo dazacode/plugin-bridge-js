@@ -321,6 +321,16 @@ function __both(response) {
  * header argues this at length and the argument is unchanged here.
  */
 const __super = {
+  /*
+   * keiyoushi's 'KeiSource.setSlugUrl(slugPath, href)', on a manga or a
+   * chapter: the url without its domain, then the slug the path keeps. An
+   * extension that declares its own one-argument 'setSlugUrl' calls this
+   * one by its second argument.
+   */
+  setSlugUrl: function (target, slugPath, href) {
+    target.setUrlWithoutDomain(href);
+    target.url = slugPath.slug(target.url);
+  },
   popularMangaParse: function (response) { return __parsePage('popularManga', response); },
   searchMangaParse: function (response) { return __parsePage('searchManga', response); },
   latestUpdatesParse: function (response) { return __parsePage('latestUpdates', response); },

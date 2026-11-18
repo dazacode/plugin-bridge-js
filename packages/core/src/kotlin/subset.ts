@@ -790,6 +790,10 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 	['lastOrNull', 'lastOrNull'],
 	['last', 'last'],
 	['find', 'find'],
+	// \`Regex.matches(input)\` and \`String.matches(regex)\` are one name with
+	// the receiver on either side. Passed through, the string half was
+	// \`id.matches(…)\` on a JavaScript string, which has no such method.
+	['matches', 'matches'],
 	['any', 'any'],
 	['all', 'all'],
 	['none', 'none'],
@@ -1876,7 +1880,6 @@ export const HOST_METHODS: ReadonlySet<string> = new Set([
 	'findAll',
 	'matchEntire',
 	'containsMatchIn',
-	'matches',
 	'toPattern',
 
 	// strings that behave identically in both languages

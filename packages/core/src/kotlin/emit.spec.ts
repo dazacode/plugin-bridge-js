@@ -3130,6 +3130,36 @@ describe('a name declared somewhere the emitter had not looked', () => {
 		expect(evaluate(source, 'new Demo().run()')).toBe('ut!');
 	});
 
+	it('sends a call with more arguments than its own declaration takes to the base', () => {
+		// `private fun SManga.setSlugUrl(href) = setSlugUrl(mangaPath, href)`:
+		// Kotlin resolves the inner call to the base class's two-argument
+		// overload. Emitted on `this`, it called itself, and the first search
+		// ended in "Maximum call stack size exceeded".
+		const source = kt(
+			'class Demo : Source() {',
+			'    private val mangaPath = "/p/"',
+			'    private fun SManga.setSlugUrl(href: String) = setSlugUrl(mangaPath, href)',
+			'    fun build(href: String): String = SManga.create().apply { setSlugUrl(href) }.url',
+			'}'
+		);
+		const base = {
+			setSlugUrl: (target: { url?: string }, path: string, href: string) => {
+				target.url = path + href;
+			}
+		};
+		expect(
+			instantiate(source, {}, { __super: base, SManga: { create: () => ({}) } }).build('x')
+		).toBe('/p/x');
+	});
+
+	it('sends `String.matches(Regex)` to the runtime, which knows which side the regex is', () => {
+		const js = translate(
+			inClass('    fun ok(id: String): Boolean = id.matches(Regex("[a-f0-9]{24}"))')
+		).js;
+		expect(js).toContain('__k.matches(id, ');
+		expect(js).not.toContain('id.matches(');
+	});
+
 	it('prints from a file-scope function to the runtime, not to `this`', () => {
 		// Bare, `println` fell to "a lowercase call is a member of the source"
 		// and came out `this.println(…)`. In a file-scope function `this` is

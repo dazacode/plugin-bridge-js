@@ -1075,6 +1075,15 @@ describe('the helpers that must dispatch on their receiver', () => {
 		expect(k.find(k.regex('x'), 'e12')).toBeNull();
 	});
 
+	it('matches a whole input with the regex on either side', () => {
+		// `String.matches(Regex)` was passed through as a method on a
+		// JavaScript string, which has none: "id.matches is not a function".
+		expect(k.matches('a1f', k.regex('[a-f0-9]{3}'))).toBe(true);
+		expect(k.matches('a1fz', k.regex('[a-f0-9]{3}'))).toBe(false);
+		expect(k.matches(k.regex('[a-f0-9]{3}'), 'a1f')).toBe(true);
+		expect(k.matches('ab', 'a.')).toBe(true);
+	});
+
 	it('replaces through a string receiver or a regex one', () => {
 		expect(k.replaceString('a-b-c', '-', '_')).toBe('a_b_c');
 		expect(k.replaceString(k.regex('[0-9]+'), 'e1 e2', 'x')).toBe('ex ex');
