@@ -3160,6 +3160,27 @@ describe('a name declared somewhere the emitter had not looked', () => {
 		expect(js).not.toContain('id.matches(');
 	});
 
+	it('passes a block to a name two classes declare with different parameters', () => {
+		// Neither declaration takes its block with a receiver, so a block at
+		// either call is a plain function. The table recording receiver slots
+		// marked the name ambiguous because the parameter counts differed, and
+		// every trailing block to it was refused.
+		const source = kt(
+			'class Demo : Source() {',
+			'    fun run(): String = Older().parse("a", null) { it + "!" }',
+			'}',
+			'',
+			'class Older {',
+			'    fun parse(text: String, next: String?, parser: (String) -> String): String = parser(text)',
+			'}',
+			'',
+			'class Newer {',
+			'    fun parse(text: String, selector: String, extra: Int, parser: (String) -> String, page: Int): String = parser(text)',
+			'}'
+		);
+		expect(translate(source).refusals).toEqual([]);
+	});
+
 	it('prints from a file-scope function to the runtime, not to `this`', () => {
 		// Bare, `println` fell to "a lowercase call is a member of the source"
 		// and came out `this.println(…)`. In a file-scope function `this` is

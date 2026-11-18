@@ -1531,6 +1531,14 @@ function mergeReceiverSlots(
 		existing.count === slots.count &&
 		existing.at.join(',') === slots.at.join(',') &&
 		existing.names.join(',') === slots.names.join(',');
+	// Two declarations that each take their blocks with no receiver agree on
+	// the one thing this table is for, whatever else they take: a block at
+	// either is a plain function. `bookListParse(doc, sel, next) { … }` under
+	// one base and `bookListParse(doc, sel, fetcher, parser, page)` under the
+	// other were refused for disagreeing about a receiver neither has.
+	const neitherReceives =
+		existing !== null && slots !== null && existing.at.length === 0 && slots.at.length === 0;
+	if (neitherReceives) return;
 	if (!same) into.set(name, null);
 }
 
