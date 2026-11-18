@@ -206,8 +206,16 @@ const ENTRYPOINT = 'source';
  *     is reached with the class that extends it, so six bundles that loaded
  *     and sent every request to `undefined/…` are now refused by name.
  *     Reconvert every bundle made at 59 or earlier.
+ * 61: a Paperback search reads the current toolchain's `items` and pages by
+ *     the source's own cursor, an instance-published source runs, and an
+ *     HTML chapter is a page — every Paperback bundle at 60 searched empty.
+ *     A file-scope reified function called from another file is given its
+ *     type, and a nested `object` read by its qualified name resolves, so an
+ *     IReader search no longer dies on `findInstance` or `Type.Search`; the
+ *     IReader shim's page rows are `mangas`. Reconvert every bundle made at
+ *     60 or earlier.
  */
-export const CONVERTER_VERSION = 60;
+export const CONVERTER_VERSION = 61;
 
 export interface BundleInput {
 	readonly id: string;
