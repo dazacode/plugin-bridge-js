@@ -49,7 +49,15 @@ import {
 } from '@plugin-bridge/core/adapter';
 import { packageBundle } from '@plugin-bridge/core/package';
 import { hostsInEncoded, stripTypescript } from './mana';
-import { seanimeEntrypoint } from '@plugin-bridge/runtime/shims/seanime-entry';
+import {
+	seanimeEntrypoint,
+	type SeanimePreference
+} from '@plugin-bridge/runtime/shims/seanime-entry';
+import {
+	settingIdFor,
+	type SettingDescriptor,
+	type SettingOption
+} from '@plugin-bridge/core/settings';
 import type { ForeignMedium } from '@plugin-bridge/core/formats';
 import type { RepositoryIndex, RepositoryPlugin } from '@plugin-bridge/core/repository-index';
 import {
@@ -84,6 +92,74 @@ interface Manifest {
 	readonly language?: unknown;
 	readonly type?: unknown;
 	readonly payloadURI?: unknown;
+	readonly userConfig?: unknown;
+}
+
+/**
+ * The manifest's `userConfig`, as settings the host draws and the payload reads.
+ *
+ * Seanime's three field types are exactly three of the four the manifest
+ * schema has, so each maps one to one; a field of any other type, or with no
+ * name, is left out rather than coerced, and `$getUserPreference` then answers
+ * `undefined` for it — which is what Seanime answers for a key nothing set.
+ * Defaults are carried as written: a switch's is the string `"true"`, which the
+ * schema's own coercion reads as the boolean.
+ */
+function preferencesOf(manifest: Manifest): {
+	settings: SettingDescriptor[];
+	preferences: SeanimePreference[];
+} {
+	const config = manifest.userConfig;
+	const fields =
+		typeof config === 'object' &&
+		config !== null &&
+		Array.isArray((config as { fields?: unknown }).fields)
+			? (config as { fields: unknown[] }).fields
+			: [];
+	const settings: SettingDescriptor[] = [];
+	const preferences: SeanimePreference[] = [];
+	const taken = new Set<string>();
+	for (const entry of fields) {
+		if (typeof entry !== 'object' || entry === null) continue;
+		const field = entry as Record<string, unknown>;
+		const type = field['type'];
+		const key = field['name'];
+		if (type !== 'text' && type !== 'select' && type !== 'switch') continue;
+		if (typeof key !== 'string' || key.length === 0) continue;
+		const id = settingIdFor(key);
+		// Two keys that normalise alike would share one stored value; the second
+		// is left out rather than answering the first one's.
+		if (id.length === 0 || taken.has(id)) continue;
+		taken.add(id);
+		settings.push({
+			id,
+			key,
+			type,
+			label: typeof field['label'] === 'string' && field['label'].length > 0 ? field['label'] : key,
+			...(field['default'] !== undefined ? { default: field['default'] } : {}),
+			...(Array.isArray(field['options']) ? { options: field['options'] as SettingOption[] } : {})
+		});
+		preferences.push({ key, id, type });
+	}
+	return { settings, preferences };
+}
+
+/**
+ * Whether a payload is TypeScript, by what it is rather than what it says.
+ *
+ * The manifest's `language` is the author's statement and usually right, but a
+ * payload whose own file is `.ts` is TypeScript whatever the manifest says, and
+ * handing one to the runtime unstripped fails at load on its first annotation.
+ * Nothing subtler than the file name is read: guessing at JavaScript by its
+ * syntax is how a stripper gets run over code it then corrupts.
+ */
+function isTypescript(language: string, payloadURI: string): boolean {
+	if (language === 'typescript') return true;
+	try {
+		return /\.(?:ts|mts|cts)$/i.test(new URL(payloadURI).pathname);
+	} catch {
+		return false;
+	}
 }
 
 export const seanimeAdapter: ForeignAdapter = {
@@ -188,6 +264,13 @@ export const seanimeAdapter: ForeignAdapter = {
 							// back a URL; this is what tells a viewer before they
 							// install it that a peer-to-peer client is involved.
 							...(type === 'anime-torrent-provider' ? { declaredP2p: true } : {}),
+							// A torrent provider has no catalogue: it answers about a show
+							// the caller names, and Seanime names it by its AniList id —
+							// `Media.id` is one. Declaring the kind is what lets a host
+							// holding that id bind the row exactly and hand it over, rather
+							// than searching a catalogue that does not exist and leaving
+							// the id at zero. Nothing else here is keyed on AniList.
+							...(type === 'anime-torrent-provider' ? { idKinds: ['anilist'] as const } : {}),
 							isNsfw: row['nsfw'] === true,
 							detail: {
 								manifestURI,
@@ -278,17 +361,17 @@ export const seanimeAdapter: ForeignAdapter = {
 
 		const payload = await services.getText(payloadURI);
 
-		const script =
-			language === 'typescript'
-				? // `require` is the runtime's own registry, which throws by name for
-					// anything it does not hold — so a payload that imports a sibling
-					// module refuses at load instead of arriving as `undefined`.
-					stripTypescript(payload, (one) => `require(${JSON.stringify(one)})`).code
-				: payload;
+		const script = isTypescript(language, payloadURI)
+			? // `require` is the runtime's own registry, which throws by name for
+				// anything it does not hold — so a payload that imports a sibling
+				// module refuses at load instead of arriving as `undefined`.
+				stripTypescript(payload, (one) => `require(${JSON.stringify(one)})`).code
+			: payload;
 
 		const hosts = [
 			...new Set([...listing.hosts, ...hostsInSource(payload), ...hostsInEncoded(payload)])
 		].sort();
+		const { settings, preferences } = preferencesOf(manifest);
 
 		return packageBundle({
 			id: listing.id,
@@ -301,9 +384,11 @@ export const seanimeAdapter: ForeignAdapter = {
 			author: typeof manifest.author === 'string' ? manifest.author : listing.author,
 			hosts,
 			origin,
+			settings,
 			entrypointSource: seanimeEntrypoint({
 				pluginId: listing.id,
 				script,
+				preferences,
 				serves:
 					type === 'manga-provider'
 						? 'manga'

@@ -112,6 +112,14 @@ describe('the Seanime marketplace', () => {
 		expect(parsed.plugins[0].origin?.declaredP2p).toBe(true);
 	});
 
+	it('declares a torrent provider addressed by AniList id, and nothing else', () => {
+		const torrent = { ...MANGA, id: 'example-torrent', type: 'anime-torrent-provider' };
+		const parsed = seanimeAdapter.parseIndex(marketplace([torrent, ANIME]), INDEX_URL);
+		expect(parsed.plugins[0].origin?.idKinds).toEqual(['anilist']);
+		// A provider with a catalogue of its own is searched, and its ids are its own.
+		expect(parsed.plugins[1].origin?.idKinds).toBeUndefined();
+	});
+
 	it('resolves a relative manifest against the marketplace', () => {
 		const relative = { ...MANGA, manifestURI: 'providers/example/manifest.json' };
 		const parsed = seanimeAdapter.parseIndex(marketplace([relative]), INDEX_URL);
@@ -207,5 +215,104 @@ describe('what a converted Seanime provider is', () => {
 
 		expect(opened.entrypointSource).toContain('async search(opts)');
 		expect(opened.entrypointSource).not.toContain('Promise<unknown[]>');
+	});
+
+	it('reads a payload whose file is .ts as TypeScript, whatever the manifest says', async () => {
+		const typed = `class Provider {\n  async search(opts: { query: string }): Promise<unknown[]> {\n    return [];\n  }\n}`;
+		const tsPayload = 'https://market.example.invalid/providers/example/provider.ts';
+		const manifest = JSON.stringify({
+			id: 'example',
+			name: 'Example',
+			language: 'javascript',
+			type: 'onlinestream-provider',
+			payloadURI: tsPayload
+		});
+		const opened = await openPluginArchive(
+			await seanimeAdapter.convert(
+				listing(),
+				services({
+					getText: async (url) => {
+						if (url === MANIFEST) return manifest;
+						if (url === tsPayload) return typed;
+						throw new Error(url);
+					}
+				})
+			)
+		);
+		expect(opened.entrypointSource).toContain('async search(opts)');
+		expect(opened.entrypointSource).not.toContain('Promise<unknown[]>');
+	});
+
+	it('leaves a .js payload the manifest calls JavaScript exactly as written', async () => {
+		const opened = await openPluginArchive(await seanimeAdapter.convert(listing(), services()));
+		expect(opened.entrypointSource).toContain(PAYLOAD_SOURCE);
+	});
+
+	it('turns userConfig into settings the payload reads by its own key', async () => {
+		const manifest = JSON.stringify({
+			id: 'example',
+			name: 'Example',
+			language: 'javascript',
+			type: 'manga-provider',
+			payloadURI: PAYLOAD,
+			userConfig: {
+				version: 1,
+				fields: [
+					{ type: 'text', name: 'apiUrl', label: 'API URL', default: '' },
+					{ type: 'switch', name: 'dub-only', label: 'Dub only', default: 'true' },
+					{
+						type: 'select',
+						name: 'quality',
+						label: 'Quality',
+						default: '720',
+						options: [
+							{ value: '720', label: '720p' },
+							{ value: '1080', label: '1080p' }
+						]
+					},
+					{ type: 'colour', name: 'tint', label: 'Tint' }
+				]
+			}
+		});
+		const opened = await openPluginArchive(
+			await seanimeAdapter.convert(
+				listing(),
+				services({
+					getText: async (url) => {
+						if (url === MANIFEST) return manifest;
+						if (url === PAYLOAD) return PAYLOAD_SOURCE;
+						throw new Error(url);
+					}
+				})
+			)
+		);
+		expect(opened.settings.map((one) => [one.id, one.type])).toEqual([
+			['apiurl', 'text'],
+			['dub_only', 'switch'],
+			['quality', 'select']
+		]);
+		expect(opened.entrypointSource).toContain('{"key":"dub-only","id":"dub_only","type":"switch"}');
+	});
+
+	it('carries the document parser only for a payload that reaches for it', async () => {
+		const plain = await openPluginArchive(await seanimeAdapter.convert(listing(), services()));
+		expect(plain.entrypointSource).not.toContain('function LoadDoc(');
+
+		const scraping = PAYLOAD_SOURCE.replace(
+			'async search(opts) {',
+			'async search(opts) {\n    const $ = LoadDoc("<p></p>");'
+		);
+		const opened = await openPluginArchive(
+			await seanimeAdapter.convert(
+				listing(),
+				services({
+					getText: async (url) => {
+						if (url === PAYLOAD) return scraping;
+						return services().getText(url);
+					}
+				})
+			)
+		);
+		expect(opened.entrypointSource).toContain('function LoadDoc(');
 	});
 });

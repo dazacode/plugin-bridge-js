@@ -505,6 +505,26 @@ const result = [...(author?['x']:[])].length;`)
 		).toBe(0);
 	});
 
+	it('reads a typed arrow whose parameter is itself a function type', () => {
+		expect(
+			run(`const hits = (r: { t: string }, match: (b: string, t: string) => boolean): boolean =>
+  match(r.t, 'x');
+const result = hits({ t: 'x' }, (b, t) => b === t);`)
+		).toBe(true);
+	});
+
+	it('strips an object type handed to a generic call', () => {
+		expect(
+			run(`const store = { get: (key: string) => ({ at: 1, value: key }) };
+const hit = store.get<{
+  at: number;
+  value: string;
+}>('k');
+const parsed = JSON.parse<{ status: number; result: string }>('{"status":1}');
+const result = [hit.value, parsed.status];`)
+		).toEqual(['k', 1]);
+	});
+
 	it('does not read the letters of a string as a declarator', () => {
 		expect(
 			run(`const result: { id: string; title: string }[] = [

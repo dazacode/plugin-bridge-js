@@ -43,6 +43,8 @@
  * never reaches this file at all because it has no catalogue to convert.
  */
 
+import { DOM_RUNTIME_SOURCE } from './generated/dom-source';
+import { EPISODE_NUMBERING } from './episode-numbering';
 import { JS_RUNTIME } from './js-runtime';
 import { STREAM_GUARDS } from './stream-guards';
 
@@ -53,25 +55,335 @@ export interface SeanimeEntrypointOptions {
 	readonly script: string;
 	/** Which pair of terminal methods this bundle declares. */
 	readonly serves: 'anime' | 'manga' | 'torrent';
+	/**
+	 * The manifest's `userConfig` fields, as the settings they became: the key
+	 * the payload asks `$getUserPreference` for, the manifest setting id the host
+	 * stores it under, and the type that decides how it reads back.
+	 */
+	readonly preferences?: readonly SeanimePreference[];
+}
+
+export interface SeanimePreference {
+	readonly key: string;
+	readonly id: string;
+	readonly type: 'text' | 'select' | 'switch';
 }
 
 /**
- * The `Media` shape an `AnimeTorrentProvider` is handed.
+ * Whether a payload reaches for the document API, so the parser is carried.
  *
- * Built from what this build actually knows, which is a title and nothing else:
- * the id is zero because an AniList id would be a claim the host already holds
- * and this shim cannot see. A provider keying on `media.id` therefore searches
- * on its own results rather than on the host's metadata, and one keying on the
- * title — every provider measured — is unaffected.
+ * The engine is sixty-odd kilobytes and most providers read JSON; a payload
+ * that names neither `LoadDoc` nor `Doc` cannot reach it, because both are
+ * globals and a global is reached by name.
  */
-const MEDIA = `function __media(query) {
-  return {
-    id: 0,
+export function seanimeUsesDocuments(script: string): boolean {
+	return /\bLoadDoc\b|\bnew\s+Doc\b/.test(script);
+}
+
+/**
+ * `LoadDoc` and `Doc`: the host's goquery selection, over the shared parser.
+ *
+ * Seanime hands a provider goquery through its Goja bindings, so these follow
+ * goquery rather than jsoup wherever the two disagree:
+ *
+ * - `find` is descendants only. The parser's `select` includes the element
+ *   it is asked from when that element matches, which is jsoup's rule.
+ * - `text()` is every text node *as written*, script and style bodies
+ *   included and comments not, concatenated across the selection — not jsoup's
+ *   whitespace-normalised text. Providers trim it themselves.
+ * - `attr` answers `undefined` for an attribute that is not there, not `''`,
+ *   so `attr("href") ?? fallback` behaves as its author tested it.
+ * - `length()` is a method, and `eq` counts back from the end when negative.
+ * - Matches are collected per element in selection order and de-duplicated,
+ *   which is goquery's order — not re-sorted into document order.
+ *
+ * A member goquery has and this does not is absent, so calling it fails with
+ * its own name rather than answering something empty.
+ */
+const DOCUMENTS = `
+/* --- the DOM engine, inlined ---------------------------------------------- */
+${DOM_RUNTIME_SOURCE}
+const __rt = globalThis.__yorozoRuntime;
+
+function __isElement(node) { return node !== null && typeof node === 'object' && node.kind === 'element'; }
+
+/** goquery's text: text and script bodies as written, comments left out. */
+function __nodeText(node) {
+  if (node === null || typeof node !== 'object') return '';
+  if (node.kind === 'text' || node.kind === 'data') return String(node.wholeText);
+  if (node.kind === 'comment') return '';
+  var out = '';
+  var children = node.childNodes();
+  for (var i = 0; i < children.length; i++) out += __nodeText(children[i]);
+  return out;
+}
+
+function __unique(nodes) {
+  var out = [];
+  for (var i = 0; i < nodes.length; i++) if (out.indexOf(nodes[i]) < 0) out.push(nodes[i]);
+  return out;
+}
+
+function __matches(node, selector) {
+  return __isElement(node) && node.is(String(selector));
+}
+
+class DocSelection {
+  constructor(nodes, previous) {
+    this.__nodes = nodes;
+    this.__previous = previous === undefined ? null : previous;
+  }
+
+  __chain(nodes) { return new DocSelection(__unique(nodes), this); }
+  __each(fn) {
+    var out = [];
+    for (var i = 0; i < this.__nodes.length; i++) {
+      var node = this.__nodes[i];
+      if (__isElement(node)) out.push.apply(out, fn(node));
+    }
+    return out;
+  }
+  __filtered(nodes, selector) {
+    if (selector === undefined || selector === null || selector === '') return this.__chain(nodes);
+    return this.__chain(nodes.filter(function (node) { return __matches(node, selector); }));
+  }
+  __test(selector) {
+    if (typeof selector === 'function') {
+      var self = this;
+      return function (node, index) { return Boolean(selector(index, new DocSelection([node], self))); };
+    }
+    return function (node) { return __matches(node, selector); };
+  }
+
+  length() { return this.__nodes.length; }
+  text() {
+    var out = '';
+    for (var i = 0; i < this.__nodes.length; i++) out += __nodeText(this.__nodes[i]);
+    return out;
+  }
+  html() {
+    var node = this.__nodes[0];
+    return __isElement(node) ? node.html() : null;
+  }
+  attr(name) {
+    var node = this.__nodes[0];
+    if (!__isElement(node) || !node.hasAttr(String(name))) return undefined;
+    return node.attr(String(name));
+  }
+  attrs() {
+    var node = this.__nodes[0];
+    var out = {};
+    if (!__isElement(node)) return out;
+    var list = node.attributes();
+    for (var i = 0; i < list.length; i++) out[list[i].key] = list[i].value;
+    return out;
+  }
+  data(name) {
+    var node = this.__nodes[0];
+    if (name === undefined) {
+      var out = {};
+      if (__isElement(node)) node.dataset().forEach(function (value, key) { out[key] = value; });
+      return out;
+    }
+    return __isElement(node) && node.hasAttr('data-' + name) ? node.attr('data-' + name) : undefined;
+  }
+
+  each(callback) {
+    for (var i = 0; i < this.__nodes.length; i++) callback(i, new DocSelection([this.__nodes[i]], this));
+    return this;
+  }
+  map(callback) {
+    var out = [];
+    for (var i = 0; i < this.__nodes.length; i++) out.push(callback(i, new DocSelection([this.__nodes[i]], this)));
+    return out;
+  }
+
+  find(selector) {
+    return this.__chain(this.__each(function (node) {
+      return node.select(String(selector)).filter(function (found) { return found !== node; });
+    }));
+  }
+  first() { return this.__chain(this.__nodes.slice(0, 1)); }
+  last() { return this.__chain(this.__nodes.slice(-1)); }
+  eq(index) {
+    var at = Number(index) < 0 ? this.__nodes.length + Number(index) : Number(index);
+    return this.__chain(at >= 0 && at < this.__nodes.length ? [this.__nodes[at]] : []);
+  }
+  end() { return this.__previous === null ? new DocSelection([], null) : this.__previous; }
+
+  filter(selector) {
+    var test = this.__test(selector);
+    return this.__chain(this.__nodes.filter(function (node, index) { return test(node, index); }));
+  }
+  not(selector) {
+    var test = this.__test(selector);
+    return this.__chain(this.__nodes.filter(function (node, index) { return !test(node, index); }));
+  }
+  is(selector) {
+    var test = this.__test(selector);
+    for (var i = 0; i < this.__nodes.length; i++) if (test(this.__nodes[i], i)) return true;
+    return false;
+  }
+  has(selector) {
+    return this.__chain(this.__nodes.filter(function (node) {
+      return __isElement(node) && node.select(String(selector)).some(function (found) { return found !== node; });
+    }));
+  }
+
+  children(selector) {
+    return this.__filtered(this.__each(function (node) { return node.children.slice(); }), selector);
+  }
+  contents() {
+    return this.__chain(this.__each(function (node) { return node.childNodes(); }));
+  }
+  contentsFiltered(selector) {
+    return this.__filtered(this.__each(function (node) { return node.childNodes(); }), selector);
+  }
+  parent(selector) {
+    return this.__filtered(this.__each(function (node) { return __isElement(node.parent) ? [node.parent] : []; }), selector);
+  }
+  parents(selector) {
+    return this.__filtered(this.__each(function (node) { return node.parents(); }), selector);
+  }
+  parentsUntil(selector, until) { return this.__until(function (node) { return node.parents(); }, selector, until); }
+  closest(selector) {
+    return this.__chain(this.__each(function (node) {
+      if (selector === undefined) return [node];
+      var found = node.closest(String(selector));
+      return found === null ? [] : [found];
+    }));
+  }
+  next(selector) {
+    return this.__filtered(this.__each(function (node) {
+      var found = node.nextElementSibling();
+      return found === null ? [] : [found];
+    }), selector);
+  }
+  prev(selector) {
+    return this.__filtered(this.__each(function (node) {
+      var found = node.previousElementSibling();
+      return found === null ? [] : [found];
+    }), selector);
+  }
+  nextAll(selector) {
+    return this.__filtered(this.__each(function (node) { return node.nextElementSiblings(); }), selector);
+  }
+  prevAll(selector) {
+    return this.__filtered(this.__each(function (node) { return node.previousElementSiblings(); }), selector);
+  }
+  nextUntil(selector, until) { return this.__until(function (node) { return node.nextElementSiblings(); }, selector, until); }
+  prevUntil(selector, until) { return this.__until(function (node) { return node.previousElementSiblings(); }, selector, until); }
+  siblings(selector) {
+    return this.__filtered(this.__each(function (node) {
+      var parent = node.parent;
+      if (!__isElement(parent)) return [];
+      return parent.children.filter(function (one) { return one !== node; });
+    }), selector);
+  }
+
+  /**
+   * goquery's two spellings: \`…Until(stop)\` walks until \`stop\` matches, and
+   * \`…FilteredUntil(filter, stop)\` does the same keeping only \`filter\`.
+   */
+  __until(walk, selector, until) {
+    var stop = until === undefined ? selector : until;
+    var keep = until === undefined ? undefined : selector;
+    return this.__filtered(this.__each(function (node) {
+      var out = [];
+      var list = walk(node);
+      for (var i = 0; i < list.length; i++) {
+        if (__matches(list[i], stop)) break;
+        out.push(list[i]);
+      }
+      return out;
+    }), keep);
+  }
+}
+
+class Doc extends DocSelection {
+  constructor(html) {
+    super([__rt.parseHtml(html === null || html === undefined ? '' : String(html), '')], null);
+  }
+}
+
+/** goquery's document function: \`$(selector)\` finds below the document. */
+function LoadDoc(html) {
+  var doc = new Doc(html);
+  return function (selector) { return doc.find(selector); };
+}
+`;
+
+/**
+ * `$getUserPreference`, over `ctx.settings`.
+ *
+ * Seanime answers a string, or `undefined` for a key nothing set and nothing
+ * defaulted; providers write `$getUserPreference("x") ?? "fallback"`, so an
+ * unset text field answers `undefined` rather than the host's `''` — the
+ * fallback is the author's, and `''` would skip it. A switch reads back as
+ * the string Seanime stores, `"true"` or `"false"`. A key the manifest never
+ * declared answers `undefined`, as it does there.
+ */
+function preferencesRuntime(preferences: readonly SeanimePreference[]): string {
+	return `
+var __PREFERENCES = ${JSON.stringify(preferences)};
+
+function $getUserPreference(key) {
+  var wanted = String(key);
+  for (var i = 0; i < __PREFERENCES.length; i++) {
+    var one = __PREFERENCES[i];
+    if (one.key !== wanted) continue;
+    var settings = __host().settings;
+    if (!settings) return undefined;
+    if (one.type === 'switch') return settings.boolean(one.id) ? 'true' : 'false';
+    var value = settings.string(one.id);
+    return typeof value === 'string' && value.length > 0 ? value : undefined;
+  }
+  return undefined;
+}
+`;
+}
+
+/**
+ * The `Media` shape a provider is handed, and the reference the host binds by.
+ *
+ * Seanime's `Media.id` *is* an AniList id — that client is keyed on AniList
+ * throughout — so a torrent provider is declared addressed by `anilist`
+ * (`ExternalIdKind`), and a host holding the show's AniList id binds it
+ * without a search and hands over `anilist:<id>|<title>`: the same reference
+ * the Hayase shim reads. That id becomes `media.id` here.
+ *
+ * A bare title is still read, because a host holding no AniList id falls back
+ * to searching by title, and then the id stays zero — which is what it was
+ * before, and a provider keying on it searches by `query` instead. Zero
+ * rather than a guess: an id from another namespace, or one matched from a
+ * title, would be results for the wrong show.
+ */
+const MEDIA = `function __ref(sourceMediaId) {
+  var raw = String(sourceMediaId || '');
+  var bar = raw.indexOf('|');
+  if (bar < 0 || !/^[a-z]+:/.test(raw)) return { title: raw, ids: {} };
+  var ids = {};
+  var pairs = raw.slice(0, bar).split(',');
+  for (var i = 0; i < pairs.length; i++) {
+    var at = pairs[i].indexOf(':');
+    if (at <= 0) continue;
+    var value = Number(pairs[i].slice(at + 1));
+    if (Number.isFinite(value) && value > 0) ids[pairs[i].slice(0, at).trim()] = value;
+  }
+  return { title: raw.slice(bar + 1), ids: ids };
+}
+
+function __media(query, ids) {
+  var known = ids || {};
+  var media = {
+    id: known.anilist !== undefined ? known.anilist : 0,
     synonyms: [],
     isAdult: false,
     romajiTitle: query,
     englishTitle: query
   };
+  if (known.mal !== undefined) media.idMal = known.mal;
+  return media;
 }`;
 
 const MANGA_METHODS = `  async listChapters(sourceMediaId, ctx) {
@@ -108,17 +420,31 @@ const VIDEO_METHODS = `  async listEpisodes(sourceMediaId, ctx) {
     var provider = __provider();
     var rows = __array(await __call(provider, ['getEpisodes', 'findEpisodes'], String(sourceMediaId)));
 
-    var episodes = [];
+    // A row with no number of its own is placed between the rows that state
+    // one, never counted by position: a count lands on a number another row
+    // already holds, and two rows claiming one episode is a wrong episode in
+    // front of a viewer. Seanime's own lists run oldest first, so a list that
+    // states no number anywhere counts from the start.
+    var kept = [];
+    var stated = [];
     for (var i = 0; i < rows.length; i++) {
       var row = rows[i];
       if (!row || typeof row !== 'object') continue;
       var id = String(row.id || row.url || '');
       if (id.length === 0) continue;
-      var number = Number(row.number !== undefined ? row.number : row.episode);
+      var raw = row.number !== undefined ? row.number : row.episode;
+      var number = raw === undefined || raw === null || raw === '' ? NaN : Number(raw);
+      kept.push({ id: id, title: row.title });
+      stated.push(Number.isFinite(number) ? number : null);
+    }
+    var numbers = __placeEpisodeNumbers(stated, 'ascending');
+
+    var episodes = [];
+    for (var k = 0; k < kept.length; k++) {
       episodes.push({
-        number: Number.isFinite(number) ? number : episodes.length + 1,
-        sourceEpisodeId: id,
-        title: typeof row.title === 'string' && row.title.length > 0 ? row.title : undefined
+        number: numbers[k],
+        sourceEpisodeId: kept[k].id,
+        title: typeof kept[k].title === 'string' && kept[k].title.length > 0 ? kept[k].title : undefined
       });
     }
     episodes.sort(function (a, b) { return a.number - b.number; });
@@ -159,8 +485,11 @@ const TORRENT_METHODS = `  /**
   async resolve(sourceMediaId, episode, ctx) {
     __enter(ctx);
     var provider = __provider();
-    var query = String((episode && episode.title) || sourceMediaId);
-    var rows = __array(await provider.search({ query: query, media: __media(query) }));
+    // The title is the show's, from the reference the host bound — never the
+    // episode's own name, which is "Episode 5" and finds nothing.
+    var ref = __ref(sourceMediaId);
+    var query = ref.title;
+    var rows = __array(await provider.search({ query: query, media: __media(query, ref.ids) }));
 
     var sources = [];
     for (var i = 0; i < rows.length; i++) {
@@ -199,8 +528,12 @@ export function seanimeEntrypoint(options: SeanimeEntrypointOptions): string {
 ${STREAM_GUARDS}
 const __PLUGIN_ID = ${JSON.stringify(options.pluginId)};
 const __SERVES = ${JSON.stringify(options.serves)};
+${seanimeUsesDocuments(options.script) ? DOCUMENTS : ''}
+${preferencesRuntime(options.preferences ?? [])}
 
 ${MEDIA}
+
+${EPISODE_NUMBERING}
 
 /* --- rows ---------------------------------------------------------------- */
 
