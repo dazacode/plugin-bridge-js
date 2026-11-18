@@ -82,14 +82,14 @@ argument, every time. See [`docs/security.md`](docs/security.md) for why.
 
 ## Layout
 
-| Package              | What is in it                                                                                                                                                                         |
-| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `packages/core`      | The Kotlin front-end — grammar, subset, emitter, pipeline — and the format-agnostic conversion machinery                                                                              |
-| `packages/runtime`   | The shims a converted bundle is built from: the Kotlin standard library, a jsoup-shaped DOM, the ecosystem drivers                                                                    |
-| `packages/adapters`  | One adapter per ecosystem: `aniyomi`, `mihon`, `sora`, `stremio`, `nuvio`, `hayase`, `mangayomi`, `lnreader`, `cloudstream`                                                           |
-| `packages/host`      | The port every host implements: the sandbox contract, the network relay, the cookie jar and request policy, the scoreboard — portable, and it names nothing a browser does not have   |
-| `packages/host-node` | One implementation of that port, for Node: the child-process isolate and the sealing that makes it no more capable than a Worker, and the certificate-chain repair the relay asks for |
-| `packages/cli`       | `plugin-bridge`                                                                                                                                                                       |
+| Package              | What is in it                                                                                                                                                                                                                          |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/core`      | The Kotlin front-end — grammar, subset, emitter, pipeline — and the format-agnostic conversion machinery                                                                                                                               |
+| `packages/runtime`   | The shims a converted bundle is built from: the Kotlin standard library, a jsoup-shaped DOM, the ecosystem drivers                                                                                                                     |
+| `packages/adapters`  | One adapter per ecosystem: `aniyomi`, `mihon`, `sora`, `stremio`, `nuvio`, `hayase`, `mangayomi`, `lnreader`, `cloudstream`, `ireader`, `tsundoku`, `echo`, `paperback`, `suwatte`, `mana`, `seanime`, `kotatsu`, `aidoku`, `shosetsu` |
+| `packages/host`      | The port every host implements: the sandbox contract, the network relay, the cookie jar and request policy, the scoreboard — portable, and it names nothing a browser does not have                                                    |
+| `packages/host-node` | One implementation of that port, for Node: the child-process isolate and the sealing that makes it no more capable than a Worker, and the certificate-chain repair the relay asks for                                                  |
+| `packages/cli`       | `plugin-bridge`                                                                                                                                                                                                                        |
 
 ## Status
 
@@ -185,6 +185,7 @@ been measured yet.
 - [`docs/compatibility.md`](docs/compatibility.md) — what is supported, refused, and how it is measured
 - [`docs/compatibility-aniyomi.md`](docs/compatibility-aniyomi.md) — the Kotlin family, API by API
 - [`docs/compatibility-sora.md`](docs/compatibility-sora.md) — the second ecosystem, and what it proved
+- [`docs/compatibility-wotaku.md`](docs/compatibility-wotaku.md) — ten ecosystems in one pass, and what the census cost
 - [`docs/phase-2-capability-map.md`](docs/phase-2-capability-map.md) — what the runtime should become, measured
 - [`docs/security.md`](docs/security.md) — the sandbox, the network relay, and rule 9
 - [`docs/adding-an-adapter.md`](docs/adding-an-adapter.md) — adding an ecosystem

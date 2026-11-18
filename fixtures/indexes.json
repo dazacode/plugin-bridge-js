@@ -351,5 +351,321 @@
 				]
 			}
 		]
+	},
+	"kotatsu": {
+		"indexUrl": "https://example.invalid/kotatsu/index.json",
+		"body": [
+			{
+				"name": "EXAMPLE_PARSER",
+				"title": "Example Parser",
+				"lang": "en",
+				"contentType": "MANGA",
+				"nsfw": 0,
+				"isBroken": false,
+				"baseUrl": "https://manga.example.invalid",
+				"iconUrl": "https://manga.example.invalid/icon.png"
+			},
+			{
+				"name": "EXAMPLE_WEBTOON",
+				"title": "Example Webtoon",
+				"lang": "en",
+				"contentType": "HENTAI",
+				"nsfw": 1,
+				"isBroken": true,
+				"baseUrl": "https://webtoon.example.invalid",
+				"iconUrl": "https://webtoon.example.invalid/icon.png"
+			}
+		]
+	},
+	"aidoku": {
+		"indexUrl": "https://example.invalid/aidoku/index.min.json",
+		"body": {
+			"name": "Example Sources",
+			"sources": [
+				{
+					"id": "en.example",
+					"name": "Example",
+					"version": 3,
+					"iconURL": "icons/en.example-v3.png",
+					"downloadURL": "sources/en.example-v3.aix",
+					"languages": [
+						"en"
+					],
+					"contentRating": 1,
+					"baseURL": "https://example.invalid",
+					"minAppVersion": "0.8.3"
+				},
+				{
+					"id": "en.adult",
+					"name": "Example Adult",
+					"version": 1,
+					"downloadURL": "sources/en.adult-v1.aix",
+					"languages": [
+						"ja"
+					],
+					"contentRating": 2,
+					"baseURL": "https://adult.example.invalid"
+				}
+			]
+		}
+	},
+	"shosetsu": {
+		"indexUrl": "https://example.invalid/shosetsu/index.json",
+		"body": {
+			"authors": [
+				{
+					"id": 1,
+					"name": "Example Author",
+					"desc": "",
+					"imageURL": "",
+					"website": ""
+				}
+			],
+			"libraries": [
+				{
+					"name": "Example Novels",
+					"ver": "1.0.0",
+					"url": null,
+					"hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+				}
+			],
+			"scripts": [
+				{
+					"id": 1,
+					"name": "Example Novels",
+					"fileName": "ExampleNovels",
+					"imageURL": "https://example.invalid/shosetsu/icons/ExampleNovels.png",
+					"lang": "en",
+					"ver": "3.0.1",
+					"libVer": "1.0.0",
+					"md5": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+					"type": "LuaScript"
+				},
+				{
+					"id": 2,
+					"name": "Example Script",
+					"fileName": "ExampleScript",
+					"imageURL": "",
+					"lang": "en",
+					"ver": "1.0.0",
+					"libVer": "1.0.0",
+					"md5": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+					"type": "JavaScript"
+				}
+			],
+			"styles": [],
+			"js": []
+		}
+	},
+	"ireader": {
+		"$comment": [
+			"Both catalogues in the one document this ecosystem publishes: Android APK",
+			"entries under `extensions`, and iOS JavaScript entries under `js`. The",
+			"second is refused at conversion by name, so it is here rather than in a",
+			"spec of its own."
+		],
+		"indexUrl": "https://example.invalid/novels/repov2/index.json",
+		"body": {
+			"extensions": [
+				{
+					"pkg": "ireader.example.source.en",
+					"apk": "ireader-en-example-source-v1.apk",
+					"name": "Example Source",
+					"id": 1,
+					"lang": "en",
+					"code": 1,
+					"version": "1",
+					"description": "A source",
+					"nsfw": false,
+					"sourceDir": "example-source"
+				}
+			],
+			"js": {
+				"note": "needs runtime.js",
+				"sources": [
+					{
+						"id": "examplekomp",
+						"name": "Example KMP",
+						"lang": "en",
+						"file": "sources-bundle.js",
+						"initFunction": "initExampleKmp"
+					}
+				]
+			}
+		}
+	},
+	"tsundoku": {
+		"$comment": [
+			"The keiyoushi array, distinguished from its sibling only by the",
+			"`novelextension` package segment. The real index is a gzipped protobuf and",
+			"is built in the sibling's spec."
+		],
+		"indexUrl": "https://example.invalid/novels/repo/index.min.json",
+		"repoJson": {
+			"meta": {
+				"name": "Example novels"
+			}
+		},
+		"body": [
+			{
+				"name": "Example Novel",
+				"pkg": "eu.kanade.tachiyomi.novelextension.en.example",
+				"apk": "novel-en-example-v2.apk",
+				"lang": "en",
+				"code": 2,
+				"version": "2",
+				"nsfw": false,
+				"sources": [
+					{
+						"name": "Example Novel",
+						"lang": "en",
+						"baseUrl": "https://novels.example.invalid"
+					}
+				]
+			}
+		]
+	},
+	"echo": {
+		"$comment": [
+			"A releases array, which is the only listing an extension repository always",
+			"publishes. `tag_name` plus `assets` is the negative nothing else here has."
+		],
+		"indexUrl": "https://api.example.invalid/repos/owner/extensions/releases",
+		"body": [
+			{
+				"tag_name": "v1.0.0",
+				"name": "Example",
+				"prerelease": false,
+				"published_at": "2026-01-01T00:00:00Z",
+				"html_url": "https://example.invalid/owner/extensions/releases/tag/v1.0.0",
+				"url": "https://api.example.invalid/repos/owner/extensions/releases/1",
+				"assets": [
+					{
+						"id": 1,
+						"name": "example.apk",
+						"browser_download_url": "https://example.invalid/owner/extensions/releases/download/v1.0.0/example.apk"
+					}
+				]
+			}
+		]
+	},
+	"paperback": {
+	 "indexUrl": "https://example.invalid/paperback/0.9/stable/versioning.json",
+	 "body": {
+	  "buildTime": "2026-01-02T03:04:05.000Z",
+	  "builtWith": {
+	   "toolchain": "1.0.0-alpha.1",
+	   "types": "1.0.0-alpha.1"
+	  },
+	  "repository": {
+	   "name": "Example extensions",
+	   "description": "Example repository."
+	  },
+	  "sources": [
+	   {
+	    "id": "Alpha",
+	    "name": "Alpha",
+	    "description": "Example source",
+	    "version": "1.0.0-alpha.4",
+	    "icon": "icon.png",
+	    "language": "en",
+	    "contentRating": "MATURE",
+	    "badges": [],
+	    "capabilities": [
+	     1,
+	     64
+	    ],
+	    "developers": [
+	     {
+	      "name": "Example",
+	      "website": null,
+	      "github": "https://example.invalid/example"
+	     }
+	    ]
+	   }
+	  ]
+	 }
+	},
+	"mana": {
+	 "indexUrl": "https://example.invalid/mana/sources.json",
+	 "body": {
+	  "repositoryName": "Example sources",
+	  "thumbnail": "https://example.invalid/mana/thumb.png",
+	  "sources": [
+	   {
+	    "id": "Beta",
+	    "name": "Beta",
+	    "version": "0.0.1-alpha.3",
+	    "website": "https://site.example.invalid",
+	    "thumbnail": "Beta.png",
+	    "rating": 1,
+	    "description": "Example source",
+	    "supportedLanguages": [
+	     "en_US"
+	    ],
+	    "badges": [],
+	    "developers": [
+	     {
+	      "name": "Example",
+	      "github": "https://example.invalid/example"
+	     }
+	    ],
+	    "path": "Beta",
+	    "environment": "source",
+	    "intents": 106961928,
+	    "hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+	   }
+	  ]
+	 }
+	},
+	"suwatte": {
+	 "indexUrl": "https://example.invalid/suwatte/index.json",
+	 "body": {
+	  "sources": [
+	   {
+	    "id": "en.example.gamma",
+	    "name": "Gamma",
+	    "version": 4,
+	    "website": "https://gamma.example.invalid",
+	    "languages": [
+	     "en"
+	    ],
+	    "rating": "MATURE",
+	    "thumbnail": "gamma.jxl",
+	    "fileName": "en.example.gamma.tjs"
+	   }
+	  ]
+	 }
+	},
+	"seanime": {
+	 "indexUrl": "https://example.invalid/seanime/marketplace/main.json",
+	 "body": [
+	  {
+	   "id": "delta",
+	   "name": "Delta",
+	   "description": "Example provider",
+	   "manifestURI": "https://example.invalid/seanime/src/anime/delta/manifest.json",
+	   "author": "Example",
+	   "type": "anime-provider",
+	   "language": "javascript",
+	   "lang": "en",
+	   "icon": "https://example.invalid/seanime/public/delta.png",
+	   "website": "",
+	   "tags": []
+	  },
+	  {
+	   "id": "delta-plugin",
+	   "name": "Delta Plugin",
+	   "description": "A client plugin with no catalogue",
+	   "manifestURI": "https://example.invalid/seanime/plugins/delta-plugin/manifest.json",
+	   "author": "Example",
+	   "type": "plugin",
+	   "language": "typescript",
+	   "lang": "en",
+	   "icon": "",
+	   "website": "",
+	   "tags": []
+	  }
+	 ]
 	}
 }

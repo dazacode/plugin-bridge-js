@@ -100,6 +100,17 @@ export interface MihonEntrypointOptions {
 	 * adapter reads the class hierarchy it fetched and says so here.
 	 */
 	readonly keiSource?: boolean;
+	/**
+	 * Which member names this extension writes.
+	 *
+	 * Defaults to `mihon`. The other two are ecosystems one fork away whose
+	 * *jobs* are identical — list a catalogue, list chapters, read a chapter —
+	 * and whose spellings are not: IReader calls the listing `getMangaList`
+	 * with a filter list, and both it and the novel half hand back **text**
+	 * pages instead of image urls. Everything else the driver does is shared,
+	 * which is why this is a flag rather than a second driver.
+	 */
+	readonly dialect?: 'mihon' | 'ireader' | 'tsundoku';
 }
 
 const MIHON_BASE = String.raw`
@@ -598,14 +609,14 @@ function __normalisePage(value) {
  */
 function __entryOf(manga) {
   if (!manga || typeof manga !== 'object') return null;
-  const url = String(manga.url || '');
+  const url = String(manga.url || manga.key || '');
   const title = String(manga.title || '').trim();
   if (url.length === 0 || title.length === 0) return null;
   return {
     sourceMediaId: url,
     title: title,
     alternativeTitles: [],
-    posterImageUrl: __absolute(String(manga.thumbnail_url || ''), __BASE_URL) || undefined
+    posterImageUrl: __absolute(String(manga.thumbnail_url || manga.cover || ''), __BASE_URL) || undefined
   };
 }
 
@@ -613,6 +624,7 @@ function __entryOf(manga) {
 function __mangaRef(sourceMediaId) {
   const manga = SManga.create();
   manga.url = String(sourceMediaId);
+  manga.key = manga.url;
   return manga;
 }
 
@@ -711,7 +723,8 @@ export function mihonEntrypoint(options: MihonEntrypointOptions): string {
 		`const __BASE_URL = ${JSON.stringify(options.baseUrl.replace(/\/+$/, ''))};`,
 		`const __LANG = ${JSON.stringify(options.lang ?? '')};`,
 		`const __NAME = ${JSON.stringify(options.name ?? '')};`,
-		`const __KEI_SOURCE = ${options.keiSource === true};`
+		`const __KEI_SOURCE = ${options.keiSource === true};`,
+		`const __DIALECT = ${JSON.stringify(options.dialect ?? 'mihon')};`
 	].join('\n');
 
 	// Before the runtime, for the reason the video entry gives: the preference
@@ -800,6 +813,17 @@ export default {
     const wanted = Number(page) > 0 ? Number(page) : 1;
     const text = String(query || '');
 
+    // IReader's one listing member serves the shelf and the search alike: a
+    // title filter carries the query, and an absent one is the shelf. The
+    // filter object is built by the shim in the extension's own vocabulary so
+    // \`findInstance<Filter.Title>()\` finds it.
+    if (__DIALECT === 'ireader') {
+      if (!__declares('getMangaList')) {
+        throw new Error('This extension declares no getMangaList, which is how IReader lists a catalogue.');
+      }
+      return __normalisePage(await __source.getMangaList(ireaderFilters(text), wanted));
+    }
+
     // An empty query is the shelf, not a search for nothing: the browse screen
     // asks for a catalogue before anybody has typed.
     if (text.length === 0) {
@@ -815,6 +839,12 @@ export default {
   async browse(shelf, page, ctx) {
     __enter(ctx);
     const wanted = Number(page) > 0 ? Number(page) : 1;
+    if (__DIALECT === 'ireader') {
+      if (!__declares('getMangaList')) {
+        throw new Error('This extension declares no getMangaList, which is how IReader lists a catalogue.');
+      }
+      return __normalisePage(await __source.getMangaList(ireaderFilters(''), wanted));
+    }
     const latest =
       shelf === 'latest' &&
       (__declares('latestUpdatesRequest') ||
@@ -837,7 +867,12 @@ export default {
     // chapter member of any other generation, so the pair below would be the
     // base class's request sent to a site whose author wrote something else.
     let rows;
-    if (__declares('fetchMangaUpdate')) {
+    if (__DIALECT === 'ireader') {
+      if (!__declares('getChapterList')) {
+        throw new Error('This extension declares no getChapterList, which is how IReader lists chapters.');
+      }
+      rows = await __source.getChapterList(manga, []);
+    } else if (__declares('fetchMangaUpdate')) {
       rows = (await __super.getMangaUpdate(manga, [], false, true)).chapters;
     } else {
       const chapterOverride = __overrideName(['getChapterList', 'fetchChapterList']);
@@ -849,11 +884,11 @@ export default {
     const chapters = [];
     for (const row of Array.isArray(rows) ? rows : []) {
       if (!row || typeof row !== 'object') continue;
-      const url = String(row.url || '');
+      const url = __DIALECT === 'ireader' ? String(row.key || '') : String(row.url || '');
       if (url.length === 0) continue;
-      const number = Number(row.chapter_number);
+      const number = __DIALECT === 'ireader' ? Number(row.number) : Number(row.chapter_number);
       const name = String(row.name || '');
-      const date = Number(row.date_upload) || 0;
+      const date = __DIALECT === 'ireader' ? Number(row.dateUpload) || 0 : Number(row.date_upload) || 0;
       chapters.push({
         // Verbatim, and handed back to this extension's own page request.
         // Plus its memo, when it wrote one: see '__chapterIdOf'.
@@ -882,13 +917,41 @@ export default {
     // The widened value, so whichever overload this extension wrote is the one
     // that answers. See '__both'.
     const pageOverride = __overrideName(['getPageList', 'fetchPageList']);
-    const rows = pageOverride !== null
-      ? await __source[pageOverride](reference)
-      : __call('pageListParse', [__both(await __send(__call('pageListRequest', [reference])))]);
+    const rows =
+      __DIALECT === 'ireader'
+        ? __declares('getPageList')
+          ? await __source.getPageList(reference, [])
+          : (() => {
+              throw new Error('This extension declares no getPageList, which is how IReader opens a chapter.');
+            })()
+        : pageOverride !== null
+          ? await __source[pageOverride](reference)
+          : __call('pageListParse', [__both(await __send(__call('pageListRequest', [reference])))]);
 
     const pages = [];
     for (const row of Array.isArray(rows) ? rows : []) {
       if (!row || typeof row !== 'object') continue;
+
+      // A novel chapter is **text**. IReader keeps it as \`Text\`, and the
+      // novel half of the Kotlin family as the string \`fetchPageText\` answers,
+      // and neither has an url a player could fetch. Both are carried as a
+      // \`data:\` url so a chapter is still an ordered page list the host can
+      // render, which is the shape it already knows.
+      if (typeof row.text === 'string') {
+        pages.push({
+          index: pages.length,
+          url: 'data:text/plain;charset=utf-8,' + encodeURIComponent(row.text)
+        });
+        continue;
+      }
+      if (__DIALECT === 'tsundoku' && __declares('fetchPageText')) {
+        const body = await __source.fetchPageText({ index: pages.length, url: row.url || row.imageUrl || '' });
+        pages.push({
+          index: pages.length,
+          url: 'data:text/html;charset=utf-8,' + encodeURIComponent(String(body ?? ''))
+        });
+        continue;
+      }
       let image = String(row.imageUrl || '');
 
       // A page that carries only a url resolves its image separately — the

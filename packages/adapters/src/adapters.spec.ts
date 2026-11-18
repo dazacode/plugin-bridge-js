@@ -92,7 +92,17 @@ describe('each adapter recognises only its own format', () => {
 	 * What protects a viewer instead is ordering plus the kind of refusal, and
 	 * both are asserted below rather than left to this exclusion.
 	 */
-	const AMBIGUOUS: readonly (readonly [string, string])[] = [['aniyomi', 'mihon']];
+	const AMBIGUOUS: readonly (readonly [string, string])[] = [
+		['aniyomi', 'mihon'],
+		/*
+		 * The novel format's `index.min.json` is the sibling video format's
+		 * array, row for row — same `pkg`, `apk`, `lang`, `version`. A single
+		 * row is indistinguishable at the text level, and the format's real
+		 * index is a protobuf the sibling cannot read, so the ambiguity only
+		 * ever exists for the JSON a fork may still serve.
+		 */
+		['aniyomi', 'tsundoku']
+	];
 
 	it.each(formats)('%s refuses the other formats’ indexes', (format) => {
 		const adapter = adapterFor(format);

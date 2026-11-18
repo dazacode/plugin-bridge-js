@@ -61,6 +61,14 @@ export interface RepositoryPlugin {
 
 export interface RepositoryIndex {
 	readonly name: string;
+	/**
+	 * What the repository says it is, when its own document says anything.
+	 *
+	 * Optional because half these formats publish no such field and a native
+	 * index is not required to either; absent is a fact about the document
+	 * rather than a parse gap. It is never invented from the URL.
+	 */
+	readonly description?: string;
 	readonly updatedAt: string;
 	/** Base64 SPKI Ed25519, pinned on first add. Null for an unsigned repository. */
 	readonly signingKey: string | null;

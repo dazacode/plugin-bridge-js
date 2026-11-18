@@ -41,7 +41,19 @@ const FORMATS = new Set([
 	'sora',
 	'hayase',
 	'lnreader',
-	'nuvio'
+	'nuvio',
+	'mihon',
+	'stremio',
+	'ireader',
+	'tsundoku',
+	'echo',
+	'paperback',
+	'suwatte',
+	'mana',
+	'seanime',
+	'kotatsu',
+	'aidoku',
+	'shosetsu'
 ]);
 
 async function main(argv: string[]): Promise<number> {
