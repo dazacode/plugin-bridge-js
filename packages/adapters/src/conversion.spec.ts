@@ -24,6 +24,7 @@ import { describe, expect, it } from 'vitest';
 import fixtures from '../../../fixtures/indexes.json';
 import { openPluginArchive, PluginArchiveError } from '@plugin-bridge/core/archive';
 import { hostsInSource, wildcardFor, type ConversionServices } from '@plugin-bridge/core/adapter';
+import { plausibleTld } from '@plugin-bridge/host/host-names';
 import { adapterFor } from './index';
 import { convertedManifest, toSemver, writeZip } from '@plugin-bridge/core/package';
 import type { RepositoryPlugin } from '@plugin-bridge/core/repository-index';
@@ -644,6 +645,52 @@ describe('the hosts a module’s source text names', () => {
 		expect(
 			hostsInSource('const assets = ["player.min.js", "styles.css", "episode.mp4", "index.html"];')
 		).toEqual([]);
+	});
+
+	it('does not read a dotted name in code as a host when its last label is no TLD', () => {
+		// Seen on real consent screens: a built bundle's polyfills and a
+		// translated Kotlin module name these as quoted strings, and each passed
+		// "letters only, not a file extension" — so did its `*.` sibling, which
+		// is how `*.c.staff` got there out of a `j.c.staff`.
+		const source = [
+			'var a = "Array.prototype.indexOf", b = "nodejs.util.inspect.custom";',
+			'var c = "java.net.SocketTimeoutException", d = "j.c.staff";',
+			"var e = 'mana.http.sequence';"
+		].join('\n');
+		// The same strings in a minified line, which the quoted-url pass reads
+		// separately from the comment-stripped text.
+		const minified = `var p=${'0'.repeat(2100)},q="util.promisify.custom",r="https://api.example.invalid/v1";`;
+
+		expect(hostsInSource(source)).toEqual([]);
+		expect(hostsInSource(minified)).toEqual(['*.example.invalid', 'api.example.invalid']);
+	});
+
+	it('does not read a name in code as a host even where its last label is a TLD', () => {
+		// `.search`, `.drive`, `.date`, `.author` and `.android` are all in the
+		// root zone, so the TLD test alone keeps these.
+		const source = [
+			'describe("MUClient.search", () => {});',
+			'const label = "G.Drive"; const key = "nhentai.searchFilter.date";',
+			'const headers = { "x-requested-with": "com.example.android" };',
+			'const author = $("span", "div.author").text();',
+			"const link = $(el).find('a.next').attr('href');"
+		].join('\n');
+
+		expect(hostsInSource(source)).toEqual([]);
+	});
+
+	it('keeps a real host whatever its TLD, and the reserved test names', () => {
+		// New generic TLDs are where these sources register, and RFC 2606's names
+		// are what this repository's own fixtures are written in.
+		const hosts = hostsInSource('const a = "cdn.example.com"; const b = "x.example.test";');
+
+		expect(hosts).toEqual(expect.arrayContaining(['cdn.example.com', 'x.example.test']));
+		for (const tld of ['day', 'cx', 'homes', 'xn--p1ai', 'invalid', 'example']) {
+			expect(plausibleTld(`host.${tld}`), tld).toBe(true);
+		}
+		for (const name of ['custom', 'staff', 'indexof', 'localhost', 'zip']) {
+			expect(plausibleTld(`host.${name}`), name).toBe(false);
+		}
 	});
 
 	it('ignores a single-label string, which is never a host worth granting', () => {

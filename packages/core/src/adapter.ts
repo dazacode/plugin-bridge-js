@@ -604,7 +604,8 @@ export function hostsInSource(source: string, limit = 24): string[] {
 	 * the call it sits inside, which is why this looks left rather than at the
 	 * string.
 	 */
-	const selectorCall = /\.\s*(?:select|selectFirst|closest|is|has|not|matches)\s*\($/;
+	const selectorCall =
+		/(?:\.\s*(?:select|selectFirst|closest|is|has|not|matches|find|children|parents?|siblings|next|prev|querySelector(?:All)?)|(?:^|[^\w$.])\$|\bquerySelector(?:All)?)\s*\($/;
 
 	/*
 	 * A built bundle's quoted addresses first, read from the text as written.
@@ -630,6 +631,7 @@ export function hostsInSource(source: string, limit = 24): string[] {
 	for (const match of source.matchAll(relative)) add(match[1]);
 	for (const match of source.matchAll(bare)) {
 		if (selectorCall.test(source.slice(Math.max(0, match.index - 24), match.index))) continue;
+		if (identifierPath(match[1])) continue;
 		add(match[1]);
 	}
 
@@ -644,6 +646,70 @@ export function hostsInSource(source: string, limit = 24): string[] {
 	}
 	return [...hosts].sort();
 }
+
+/**
+ * Whether a quoted dotted string is a name in code rather than a host.
+ *
+ * Only the bare pass asks this. An `https://` or a `//` in front of a string
+ * says what it is; a bare `"a.b.c"` says nothing, and code is full of them
+ * that are not addresses — a member path, a class name, a package id. The
+ * root-zone test (`plausibleTld`) refuses most, because their last label is
+ * no TLD; these are the ones it cannot, because it is one:
+ *
+ * - **Written with a capital.** A hostname in source is written lower-case,
+ *   by convention so universal that nothing in the measured corpus breaks it;
+ *   a member path almost never is — `"MUClient.search"`, `"G.Drive"`,
+ *   `"nhentai.searchFilter.date"`. Lower-cased, each of those ends in a real
+ *   TLD (`.search`, `.drive`, `.date`).
+ * - **A reverse-domain package id.** `"com.batcave.android"` is an Android
+ *   application id sent as `X-Requested-With`, and `.android` is a TLD. A
+ *   host does not begin with `com.` or `org.`; a package id always does, as
+ *   does every Java and Kotlin namespace.
+ * - **A CSS selector the call-site test could not see.** `$("span",
+ *   "div.author")` passes its selector second, and a minified bundle renames
+ *   `$` to `e`, so `selectorCall` misses both — and `.author`, `.name` and
+ *   `.date` are TLDs. A first label that is a structural HTML tag is the
+ *   selector's own grammar; the tags that also name real subdomains (`a.`,
+ *   `img.`, `p.`, `video.`) are left out, because those are hosts too.
+ */
+function identifierPath(candidate: string): boolean {
+	if (/[A-Z]/.test(candidate)) return true;
+	const first = candidate.slice(0, candidate.indexOf('.'));
+	if (SELECTOR_TAGS.has(first)) return true;
+	return candidate.split('.').length >= 3 && PACKAGE_ROOTS.has(first);
+}
+
+/** Structural tags a selector starts with, and that no measured host does. */
+const SELECTOR_TAGS = new Set([
+	'div',
+	'span',
+	'li',
+	'ul',
+	'ol',
+	'td',
+	'tr',
+	'th',
+	'h1',
+	'h2',
+	'h3',
+	'h4',
+	'h5',
+	'h6',
+	'article',
+	'figure'
+]);
+
+/** The first labels of a package id or a JVM namespace, never of a host. */
+const PACKAGE_ROOTS = new Set([
+	'com',
+	'org',
+	'java',
+	'javax',
+	'kotlin',
+	'kotlinx',
+	'android',
+	'androidx'
+]);
 
 /**
  * The same source with its comments blanked out.

@@ -250,8 +250,13 @@ const ENTRYPOINT = 'source';
  *     a read of the plugin's own cookies (`loadForRequest`, ADR-0005 §3d)
  *     and `applicationContext` read unimported inside its own package are
  *     supplied. Reconvert every bundle made at 64 or earlier.
+ * 66: a host read out of a module's code must end in a TLD that exists (the
+ *     root zone, or RFC 2606's test names) and must not be a name in code — a
+ *     capitalised member path, a package id, a selector — so manifests lose
+ *     `array.prototype.indexof`, `java.net.sockettimeoutexception` and their
+ *     `*.` siblings. Reconvert every bundle made at 65 or earlier.
  */
-export const CONVERTER_VERSION = 65;
+export const CONVERTER_VERSION = 66;
 
 export interface BundleInput {
 	readonly id: string;
