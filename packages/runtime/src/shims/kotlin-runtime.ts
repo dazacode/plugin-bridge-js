@@ -966,6 +966,20 @@ function __jeBoolean(value, name, orNull) {
  * default, 'masterHeadersGen: (…) -> Headers' does, and a call naming neither
  * is the second — taken as the first, it called itself for ever.
  */
+/**
+ * Whether a value is an instance of a class the unit declares: constructed as
+ * one, or a decoded record carrying that class's shape.
+ */
+function __receiverIs(value, ctor) {
+  if (value === null || value === undefined || typeof ctor !== 'function') return false;
+  if (value instanceof ctor) return true;
+  if (typeof value !== 'object' || Array.isArray(value)) return false;
+  for (var s = 0; s < __SHAPES.length; s += 1) {
+    if (__SHAPES[s].ctor === ctor) return __shapeFits(__SHAPES[s], value);
+  }
+  return false;
+}
+
 function __overloadAccepts(entry, args) {
   var types = entry[3];
   var nullable = entry[4];
@@ -3710,6 +3724,10 @@ var __k = {
    * element legitimately IS null is answered rather than reported as empty.
    */
   first: function (list, predicate) {
+    // jsoup's 'Elements.first()' is a member, and Kotlin calls a member before
+    // the stdlib extension of the same name: null on an empty selection, not
+    // a throw. 'select(…).first()?.text()' is written for exactly that.
+    if (typeof predicate !== 'function' && list instanceof __KElements) return list.first();
     var items = __arr(list);
     if (typeof predicate !== 'function') {
       if (items.length === 0) {
@@ -3757,6 +3775,17 @@ var __k = {
    * They mean entirely different things — a matching element, and a MatchResult
    * — and the emitter has no types to disambiguate with, so the receiver does.
    */
+  /**
+   * A whole-input match, with the regex on either side: 'Regex.matches(input)'
+   * and 'String.matches(regex)', the second also as Java's pattern string.
+   */
+  matches: function (receiver, other) {
+    if (receiver && receiver.__isRegex === true) return receiver.matches(other);
+    if (other && other.__isRegex === true) return other.matches(__str(receiver));
+    if (typeof other === 'string') return __k.regex(other).matches(__str(receiver));
+    throw new Error('matches() was given neither a Regex nor a pattern.');
+  },
+
   find: function (list, predicate, startIndex) {
     if (list && list.__isRegex === true) return list.find(predicate, startIndex);
     return __k.firstOrNull(list, predicate);
@@ -4045,7 +4074,10 @@ var __k = {
         return typeof transform === 'function' ? transform(item) : item;
       }),
       function (values) {
-        for (var at = 0; at < values.length; at += 1) destination.push(values[at]);
+        // Through 'add', as 'mapNotNullTo' below does: the destination is any
+        // MutableCollection, and 'mapTo(mutableSetOf())' is how this ecosystem
+        // collects the urls it has already seen — a Set, which has no 'push'.
+        for (var at = 0; at < values.length; at += 1) __k.add(destination, values[at]);
         return destination;
       }
     );
@@ -4827,6 +4859,50 @@ var __k = {
    * no translated declarations at all (a runtime object answering a name a
    * class of this extension also uses).
    */
+  /**
+   * Several file-scope functions under one name: the emitter's dispatcher
+   * (see 'moduleOverload' in emit.ts). Each entry is [function, receiver
+   * class or null, required, total, types, nullable, defaults]. A receiver
+   * class decides first — Kotlin resolved the call by it — and the rest is
+   * the member overload's own test and ranking.
+   */
+  moduleOverload: function (name, args, table, implicit) {
+    var best = null;
+    var bestArgs = null;
+    var bestRank = -1;
+    // A call written with no receiver arrives with the implicit one as
+    // 'implicit', and an extension is tried with it in front: Kotlin passes
+    // it there, and only the arguments' types tell that call from a plain one.
+    var forms = implicit === undefined || implicit === null ? [args] : [args, [implicit].concat(args)];
+    for (var i = 0; i < table.length; i += 1) {
+      var entry = table[i];
+      if (typeof entry[0] !== 'function') continue;
+      var isExtension = entry[4].length > 0 && entry[7] === true;
+      for (var f = 0; f < forms.length; f += 1) {
+        var given = forms[f];
+        if (f === 1 && !isExtension) continue;
+        if (f === 0 && forms.length > 1 && isExtension) continue;
+        if (given.length < entry[2]) continue;
+        if (entry[3] !== -1 && given.length > entry[3]) continue;
+        if (entry[1] !== null && !__receiverIs(given[0], entry[1])) continue;
+        var shaped = [null, entry[2], entry[3], entry[4], entry[5], entry[6]];
+        if (!__overloadAccepts(shaped, given)) continue;
+        var rank = __overloadRank(shaped, given) + (entry[1] !== null ? 8 : 0);
+        if (rank > bestRank) {
+          best = entry;
+          bestArgs = given;
+          bestRank = rank;
+        }
+      }
+    }
+    if (best === null) {
+      throw new Error(
+        'This converted extension called ' + name + ' with arguments none of its declarations takes.'
+      );
+    }
+    return best[0].apply(undefined, bestArgs);
+  },
+
   overload: function (target, self, name, args, table, fallback) {
     var fits = [];
     var declares = false;
@@ -6390,6 +6466,53 @@ var __k = {
     });
   },
 
+  /** minBy and maxBy, which throw on an empty collection where the OrNull forms answer null. */
+  minBy: function (list, selector) {
+    return __then(__k.minByOrNull(list, selector), function (found) {
+      if (__arr(list).length === 0) throw __kTagged(new Error('This converted extension asked for the smallest of an empty collection.'), 'NoSuchElementException');
+      return found;
+    });
+  },
+
+  maxBy: function (list, selector) {
+    return __then(__k.maxByOrNull(list, selector), function (found) {
+      if (__arr(list).length === 0) throw __kTagged(new Error('This converted extension asked for the largest of an empty collection.'), 'NoSuchElementException');
+      return found;
+    });
+  },
+
+  /**
+   * kotlinx's 'withTimeoutOrNull(ms) { … }': the block's value, or null when
+   * it has not finished in time. Kotlin cancels the block cooperatively at its
+   * next suspension point; a promise cannot be cancelled, so here the block
+   * runs on and its answer is discarded — the caller sees exactly what Kotlin's
+   * caller sees, null, at the same moment.
+   */
+  withTimeoutOrNull: function (ms, block) {
+    var limit = Number(ms);
+    return new Promise(function (resolve, reject) {
+      var done = false;
+      var timer = setTimeout(function () {
+        if (done) return;
+        done = true;
+        resolve(null);
+      }, Number.isFinite(limit) && limit > 0 ? limit : 0);
+      Promise.resolve()
+        .then(function () { return block(); })
+        .then(function (value) {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          resolve(value === undefined ? null : value);
+        }, function (error) {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          reject(error);
+        });
+    });
+  },
+
   maxByOrNull: function (list, selector) {
     var items = __arr(list);
     return __then(__each(items, function (item) { return selector(item); }), function (keys) {
@@ -6989,6 +7112,22 @@ var __k = {
    * The message is a lambda in Kotlin so it costs nothing when the check
    * passes, and it is called only when it does not.
    */
+  /**
+   * Kotlin's stdout, as a debug line in the host log. Guarded like \`Log\`: a
+   * diagnostic that can throw is worse than none.
+   */
+  println: function (value) {
+    try {
+      var host = __host();
+      if (host.log && typeof host.log.debug === 'function') {
+        host.log.debug(value === undefined ? '' : __str(value));
+      }
+    } catch (ignored) {
+      // Outside a plugin call, or a host with no logger.
+    }
+    return undefined;
+  },
+
   require: function (value, lazyMessage) {
     if (value) return undefined;
     throw __kTagged(new Error(
@@ -7237,6 +7376,9 @@ var __k = {
     if (value === null || value === undefined) return 0;
     if (Array.isArray(value) || typeof value === 'string') return value.length;
     if (value instanceof Map || value instanceof Set) return value.size;
+    // A record the runtime made that answers 'length()' itself — java.io.File,
+    // whose length is its size in bytes and not a count of its fields.
+    if (typeof value === 'object' && typeof value.length === 'function') return value.length();
     if (typeof value === 'object') return Object.keys(value).length;
     return 0;
   },
@@ -7573,7 +7715,7 @@ var __k = {
    * is null when it names none.
    */
   serial: function (name, make, meta, custom, ctor) {
-    var registration = { make: make, meta: meta, custom: custom };
+    var registration = { make: make, meta: meta, custom: custom, name: name };
     __SERIAL[name] = registration;
     // The class (or a data class's factory) answers for its instances, which
     // is how the encoder finds the registration from a value — see
@@ -7821,7 +7963,18 @@ var __k = {
    * descriptor thunk, which an ES6 class refuses.
    */
   typeText: function (type) {
-    return typeof type === 'string' ? type : 'Any';
+    if (typeof type === 'string') return type;
+    // A class with a serializer registration is read by that registration,
+    // which is what the same call written with the type in place — '__k.decode
+    // (text, "Dto")' — already does: its defaults, its '@SerialName's and a
+    // field's own 'with = …' serializer all run. Read by shape instead, a
+    // field whose serializer turns '[]' into an empty map came back as the raw
+    // array or absent, and the first read of it found null.
+    if (typeof type === 'function' && type.__kSerial !== undefined) {
+      var name = type.__kSerial.name;
+      if (typeof name === 'string' && __SERIAL[name] === type.__kSerial) return name;
+    }
+    return 'Any';
   },
 
   /**
@@ -9081,6 +9234,9 @@ function __responseOf(raw, text, request, bytes) {
        which is also what a host that does not report one answers here. */
     message: __str(raw.message),
     isSuccessful: raw.status >= 200 && raw.status < 300,
+    // okhttp's set, which is the one a client that turned redirects off reads
+    // to tell "here is where it went" from a failure.
+    isRedirect: [300, 301, 302, 303, 307, 308].indexOf(raw.status) !== -1,
     request: finalRequest,
     url: finalUrl,
     headers: __headersObject(__headerPairs(raw.headers)),
@@ -9792,6 +9948,9 @@ var __KOTLIN_EXCEPTIONS = {
   IndexOutOfBoundsException: 'RuntimeException',
   NoSuchElementException: 'RuntimeException',
   IOException: 'Exception',
+  FileNotFoundException: 'IOException',
+  FileSystemException: 'IOException',
+  NoSuchFileException: 'FileSystemException',
   SocketTimeoutException: 'IOException',
   InterruptedIOException: 'IOException',
   EOFException: 'IOException'
@@ -9868,12 +10027,35 @@ function __hasHeader(headers, name) {
  */
 var __cookieJar = {
   saveFromResponse: function () {},
-  loadForRequest: function () {
-    throw new Error(
-      'This converted extension reads its own cookie jar. Yorozo holds the cookies host-side ' +
-      'and attaches them itself, and does not hand them to plugin code, so the extension can ' +
-      'be converted but not run as written.'
-    );
+  /*
+   * okhttp's 'loadForRequest(url)': the cookies that apply to a request for
+   * that url. The host holds the jar; what it answers here is this plugin's
+   * own — cookies set on responses to its own requests, for a host it
+   * declared — read-only (ABI.md section 2.2, ADR-0005 section 3d). Each is a
+   * record with okhttp's 'name' and 'value'. A host that predates the read
+   * says so by name rather than answering an empty jar it cannot vouch for.
+   */
+  loadForRequest: async function (url) {
+    var http = __host().http;
+    if (!http || typeof http.cookies !== 'function') {
+      throw new Error(
+        'This converted extension reads its own cookie jar, and this host does not let a plugin ' +
+        'read its own cookies.'
+      );
+    }
+    var found = await http.cookies(__str(url));
+    var out = [];
+    var list = Array.isArray(found) ? found : [];
+    for (var i = 0; i < list.length; i += 1) {
+      var one = list[i];
+      if (!one || typeof one.name !== 'string' || typeof one.value !== 'string') continue;
+      out.push({
+        name: one.name,
+        value: one.value,
+        toString: function () { return this.name + '=' + this.value; }
+      });
+    }
+    return __mutableList(out);
   }
 };
 
@@ -9921,6 +10103,15 @@ function __clientBuilder(follow, inherited, inheritedCookies, inheritedNetwork) 
     /* Kept in written order, which is the order okhttp runs them in: the first
        one added is the outermost, and it sees the request before the ones
        after it and the response after them. */
+    /*
+     * okhttp's live lists of the interceptors this builder will install, which
+     * an extension edits in place: a client for fetching a token is the
+     * source's own client with its auth interceptor taken back off —
+     * 'newBuilder().apply { interceptors().removeAll { it is Auth } }' — so the
+     * token request does not recurse into the interceptor that wants it.
+     */
+    interceptors: function () { return chain; },
+    networkInterceptors: function () { return network; },
     addInterceptor: function (interceptor) {
       if (interceptor === null || interceptor === undefined) return builder;
       if (typeof interceptor !== 'function' && typeof interceptor.intercept !== 'function') {
@@ -10177,7 +10368,7 @@ var network = {
  * encoded, because only those arrived as plain text.
  */
 function __httpUrlOf(value, keepText) {
-  var text = __str(value);
+  var text = __okhttpSlashes(__str(value));
   var parts = /^([a-zA-Z][a-zA-Z0-9+.-]*:)?(\\/\\/[^/?#]*)?([^?#]*)(\\?[^#]*)?(#.*)?$/.exec(text);
   var scheme = parts[1] === undefined ? '' : parts[1];
   var authority = parts[2] === undefined ? '' : parts[2];
@@ -10197,6 +10388,29 @@ function __httpUrlOf(value, keepText) {
   }
 
   return __httpUrlValue(scheme, authority, path, pairs, fragment, keepText === true ? text : null);
+}
+
+/*
+ * okhttp's reading of the slashes in an http or https url: a backslash is a
+ * slash wherever a slash separates (the run after the scheme, and the path),
+ * and any run of two or more after the scheme introduces the authority. So an
+ * address copied out of a JSON string whose slashes were escaped — every '/'
+ * written as a backslash and a slash — has a host and a path to okhttp, and
+ * here had no host at all, so every relative resolution against it kept the
+ * backslashes. Each backslash-slash pair is two separators to okhttp, and the
+ * empty segment between them is kept as okhttp keeps it. The query and
+ * fragment are left as written, as okhttp leaves them.
+ */
+function __okhttpSlashes(text) {
+  var scheme = /^(https?):/i.exec(text);
+  if (scheme === null || text.indexOf('\\\\') === -1) return text;
+  var end = text.search(/[?#]/);
+  var head = end === -1 ? text : text.slice(0, end);
+  var tail = end === -1 ? '' : text.slice(end);
+  var rest = head.slice(scheme[0].length).replace(/\\\\/g, '/');
+  var lead = /^\\/{2,}/.exec(rest);
+  if (lead !== null) rest = '//' + rest.slice(lead[0].length);
+  return scheme[0] + rest + tail;
 }
 
 /*
@@ -11137,9 +11351,10 @@ function __uriQuote(part) {
  * the same bytes, which the sidecar guard already accepts and a player loads
  * like any caption file. The repair still runs in the extension's own code.
  *
- * Only the temporary file exists. 'File(path)', 'File.separator' and every
- * other member are refused by name in the emitter ('FILE_STATICS'), and a
- * temp file's methods are the ones this carrier can answer truthfully.
+ * A temp file's methods are the ones this carrier can answer truthfully.
+ * 'File(path)' is a path on the filesystem a plugin does not have ('__KFile'
+ * below); 'File.separator' and every member neither answers are refused by
+ * name in the emitter.
  */
 function __KTempFile(prefix, suffix) {
   this.prefix = __str(prefix);
@@ -11178,8 +11393,137 @@ function __tempFileType(suffix) {
   return 'text/plain';
 }
 
-var File = {
-  createTempFile: function (prefix, suffix) { return new __KTempFile(prefix, suffix); }
+/**
+ * java.io.File for a path, on the filesystem a plugin does not have.
+ *
+ * ABI.md gives a plugin no filesystem, and this does not give it one. What it
+ * gives is the *answer* a device with no usable storage gives: a path can be
+ * named, joined and taken apart, and every question about what is there says
+ * nothing is — 'exists()' and 'isFile' are false, 'length()' is 0, a walk of a
+ * directory finds nothing, 'mkdirs()', 'delete()', 'renameTo()' and
+ * 'setLastModified()' report that they did not happen. Anything that would
+ * read or write bytes throws the IOException the JVM would, so the
+ * extension's own handling of a failed write is what runs.
+ *
+ * That is the honest reading of an extension that caches to disk. One that
+ * downloads fonts into its player's fonts directory, say, wraps that in a
+ * catch-all and carries on without them: here the first write fails before
+ * any download is requested, the catch it wrote runs, and playback goes on.
+ * Nothing pretends the file was written, and no byte is fetched for a file
+ * that could never be kept.
+ *
+ * 'File.createTempFile(prefix, suffix)' with no directory is still the
+ * caption carrier above; given a directory, it fails as it would for one that
+ * does not exist.
+ */
+function __noFilesystem(path, doing, type) {
+  var made = new Error(path + ': this host gives a converted extension no filesystem, so it cannot ' + doing + '.');
+  return __kTagged(made, type || 'IOException');
+}
+function __KFile(path) { this.path = path; }
+Object.defineProperties(__KFile.prototype, {
+  name: { get: function () { var at = this.path.lastIndexOf('/'); return at < 0 ? this.path : this.path.slice(at + 1); } },
+  parent: { get: function () { var at = this.path.lastIndexOf('/'); return at <= 0 ? (at === 0 && this.path.length > 1 ? '/' : null) : this.path.slice(0, at); } },
+  parentFile: { get: function () { var up = this.parent; return up === null ? null : new __KFile(up); } },
+  absolutePath: { get: function () { return this.path; } },
+  isFile: { get: function () { return false; } },
+  isDirectory: { get: function () { return false; } },
+  nameWithoutExtension: { get: function () { var n = this.name; var at = n.lastIndexOf('.'); return at <= 0 ? n : n.slice(0, at); } },
+  extension: { get: function () { var n = this.name; var at = n.lastIndexOf('.'); return at < 0 ? '' : n.slice(at + 1); } }
+});
+__KFile.prototype.getPath = function () { return this.path; };
+__KFile.prototype.getName = function () { return this.name; };
+__KFile.prototype.getParent = function () { return this.parent; };
+__KFile.prototype.getParentFile = function () { return this.parentFile; };
+__KFile.prototype.getAbsolutePath = function () { return this.path; };
+__KFile.prototype.toString = function () { return this.path; };
+__KFile.prototype.exists = function () { return false; };
+__KFile.prototype.length = function () { return 0; };
+__KFile.prototype.lastModified = function () { return 0; };
+__KFile.prototype.setLastModified = function () { return false; };
+__KFile.prototype.mkdirs = function () { return false; };
+__KFile.prototype.mkdir = function () { return false; };
+__KFile.prototype.delete = function () { return false; };
+__KFile.prototype.deleteRecursively = function () { return false; };
+__KFile.prototype.deleteOnExit = function () {};
+__KFile.prototype.renameTo = function () { return false; };
+__KFile.prototype.list = function () { return null; };
+__KFile.prototype.listFiles = function () { return null; };
+/* kotlin.io's walk of a root that does not exist yields nothing. */
+__KFile.prototype.walkTopDown = function () { return []; };
+__KFile.prototype.walkBottomUp = function () { return []; };
+__KFile.prototype.walk = function () { return []; };
+__KFile.prototype.createNewFile = function () { throw __noFilesystem(this.path, 'create a file'); };
+__KFile.prototype.readBytes = function () { throw __noFilesystem(this.path, 'read it', 'FileNotFoundException'); };
+__KFile.prototype.readText = function () { throw __noFilesystem(this.path, 'read it', 'FileNotFoundException'); };
+__KFile.prototype.inputStream = function () { throw __noFilesystem(this.path, 'read it', 'FileNotFoundException'); };
+__KFile.prototype.outputStream = function () { throw __noFilesystem(this.path, 'write it', 'FileNotFoundException'); };
+__KFile.prototype.writeBytes = function () { throw __noFilesystem(this.path, 'write it', 'FileNotFoundException'); };
+__KFile.prototype.writeText = function () { throw __noFilesystem(this.path, 'write it', 'FileNotFoundException'); };
+__KFile.prototype.appendText = function () { throw __noFilesystem(this.path, 'write it', 'FileNotFoundException'); };
+/* kotlin.io's copyTo checks its source first: one that is not there throws. */
+__KFile.prototype.copyTo = function () { throw __noFilesystem(this.path, 'copy it', 'NoSuchFileException'); };
+
+/** kotlin.Result's constructors, building the Result 'runCatching' builds. */
+var Result = {
+  success: function (value) { return __success(value); },
+  failure: function (error) { return __failure(error); }
+};
+
+/**
+ * android.os.Handler on the main Looper: a block posted to run after the
+ * current work, or after a delay. One thread here, so "the main thread" is
+ * the only one, and a posted block is a timer. A block that throws is logged
+ * rather than left as a rejection nobody holds, which would end the isolate
+ * over what an app reports as a crash in a toast.
+ */
+var Looper = {
+  getMainLooper: function () { return Looper; },
+  myLooper: function () { return Looper; }
+};
+function Handler() {
+  var pending = [];
+  function report(error) {
+    var host = __ctx;
+    if (host !== null && host.log && typeof host.log.warn === 'function') {
+      host.log.warn('a block posted to a Handler failed: ' + (error && error.message ? String(error.message) : __str(error)));
+    }
+  }
+  function run(block) {
+    try {
+      var produced = block();
+      if (__thenable(produced)) produced.then(undefined, report);
+    } catch (error) {
+      report(error);
+    }
+  }
+  return {
+    post: function (block) { pending.push(setTimeout(function () { run(block); }, 0)); return true; },
+    postDelayed: function (block, delay) {
+      pending.push(setTimeout(function () { run(block); }, Math.max(0, Number(delay) || 0)));
+      return true;
+    },
+    removeCallbacksAndMessages: function () {
+      for (var i = 0; i < pending.length; i += 1) clearTimeout(pending[i]);
+      pending.length = 0;
+    },
+    getLooper: function () { return Looper; }
+  };
+}
+
+/** 'File(path)' and 'File(parent, child)', with or without 'new'. */
+function File(first, second) {
+  var head = first === null || first === undefined ? '' : (first instanceof __KFile ? first.path : __str(first));
+  if (second === undefined) return new __KFile(head);
+  var tail = __str(second);
+  if (head.length === 0) return new __KFile(tail);
+  return new __KFile(head.replace(/\\/+$/, '') + '/' + tail.replace(/^\\/+/, ''));
+}
+File.createTempFile = function (prefix, suffix, directory) {
+  if (directory !== undefined && directory !== null) {
+    throw __noFilesystem(directory instanceof __KFile ? directory.path : __str(directory), 'create a temporary file in it');
+  }
+  return new __KTempFile(prefix, suffix);
 };
 
 var Uri = {
@@ -13833,6 +14177,13 @@ function preferencesKey(id) { return 'source_' + __str(id); }
  */
 var Application = {
   getSharedPreferences: function () { return __prefStore; },
+  // The app's own directories, on the filesystem a plugin does not have: see
+  // '__KFile'. Asked for, they are paths; written to, they fail as storage
+  // that is not there fails, and the extension's own handling runs.
+  filesDir: new __KFile('/app/files'),
+  cacheDir: new __KFile('/app/cache'),
+  getFilesDir: function () { return Application.filesDir; },
+  getCacheDir: function () { return Application.cacheDir; },
   getApplicationContext: function () { return Application; },
   getPackageName: function () { return 'app'; },
   packageName: 'app'

@@ -16,6 +16,9 @@ import { describe, expect, it } from 'vitest';
 
 import { describeVerification, verifyConvertedPlugin } from './verify';
 import type { RunnablePlugin } from '@plugin-bridge/host/sandbox-host';
+import { pageImageProbe } from '@plugin-bridge/host/page-probe';
+import { encodeFrame } from '@plugin-bridge/host/net/frames';
+import { FRAME_CONTENT_TYPE } from '@plugin-bridge/host/net/relay';
 
 const PLUGIN: RunnablePlugin = {
 	id: 'app.yorozo.converted.sora.example',
@@ -54,7 +57,7 @@ class FakeWorker implements Partial<Worker> {
 
 	postMessage(message: unknown): void {
 		const data = message as
-			| { id: number; kind: string }
+			| { id: number; kind: string; payload?: unknown }
 			| {
 					inboundReply: true;
 					id: number;
@@ -86,8 +89,13 @@ class FakeWorker implements Partial<Worker> {
 			}
 
 			if (typeof answer === 'function') {
+				// Called with what the host asked, so an answer can depend on it;
+				// one that throws is the plugin failing.
+				let value: unknown;
 				try {
-					(answer as () => never)();
+					value = (answer as (payload: unknown) => unknown)(
+						(data as { payload?: unknown }).payload
+					);
 				} catch (error) {
 					const failure = error as Error;
 					this.emit({
@@ -97,6 +105,8 @@ class FakeWorker implements Partial<Worker> {
 					});
 					return;
 				}
+				this.emit({ id: data.id, ok: true, value });
+				return;
 			}
 			this.emit({ id: data.id, ok: true, value: answer });
 		})();
@@ -285,7 +295,7 @@ describe('each way a conversion fails is reported as that way', () => {
 			searchHits: 0
 		});
 		expect(describeVerification('Example', result)).toBe(
-			'Example could not search. Searching this source returned nothing.'
+			'Example could not search. Searching this source returned nothing (searched for "a", then "the").'
 		);
 	});
 
@@ -421,7 +431,7 @@ describe('a run that came to nothing because hosts were refused', () => {
 			failedAt: 'search',
 			searchHits: 0
 		});
-		expect(result.detail).toMatch(/Searching this source returned nothing\./);
+		expect(result.detail).toMatch(/Searching this source returned nothing/);
 		expect(result.detail).toMatch(/one\.embed\.example\.invalid/);
 	});
 });
@@ -501,5 +511,278 @@ describe('a run that came to nothing at hosts the proxy could not reach', () => 
 
 		expect(result.detail).toBe('That source returned no stream for its first episode.');
 		expect(result.detail).not.toMatch(/Along the way/);
+	});
+});
+
+describe('a book whose chapter is text', () => {
+	const NOVEL: RunnablePlugin = {
+		...PLUGIN,
+		converted: {
+			format: 'tsundoku',
+			foreignId: 'demo',
+			foreignVersion: '1',
+			convertedAt: '2026-01-01T00:00:00.000Z',
+			converterVersion: 1,
+			verified: false,
+			mediaKind: 'novel'
+		}
+	};
+
+	function readWith(pages: { index: number; url: string }[]) {
+		return verifyConvertedPlugin(NOVEL, 'export default {};', {
+			createWorker: () =>
+				new FakeWorker({
+					load: { id: PLUGIN.id, declares: ['searchCatalog', 'listChapters', 'readChapter'] },
+					searchCatalog: { entries: [{ sourceMediaId: 'https://watch.example.invalid/b/1' }] },
+					listChapters: [{ number: 1, sourceChapterId: 'https://watch.example.invalid/b/1/1' }],
+					readChapter: { pages }
+				}) as unknown as Worker
+		});
+	}
+
+	it('counts an inline text page as the content it is', async () => {
+		// A novel chapter has no address: the Kotlin families and Paperback
+		// hand its text over as `data:text/…`. Only `https://` was counted, so
+		// every text chapter that arrived was reported as "not https".
+		const result = await readWith([
+			{ index: 0, url: 'data:text/plain;charset=utf-8,' + encodeURIComponent('Chapter one.') },
+			{ index: 1, url: 'data:text/html;charset=utf-8,' + encodeURIComponent('<p>More.</p>') }
+		]);
+		expect(result.ok).toBe(true);
+		expect(result.medium).toBe('book');
+		expect(result.streamCount).toBe(2);
+	});
+
+	it('still refuses an empty text page, a cleartext page and an inline image', async () => {
+		for (const url of [
+			'data:text/plain;charset=utf-8,',
+			'data:text/html,' + encodeURIComponent('<p> </p>'),
+			'http://watch.example.invalid/page.jpg',
+			'data:image/png;base64,iVBORw0KGgo='
+		]) {
+			const result = await readWith([{ index: 0, url }]);
+			expect(result.ok, url).toBe(false);
+			expect(result.failedAt, url).toBe('pages');
+		}
+	});
+});
+
+describe('a source that answers a word and not a letter', () => {
+	const asked: string[] = [];
+	const searching = (answersFor: readonly string[]) => (payload: unknown) => {
+		const query = (payload as { query: string }).query;
+		asked.push(query);
+		return {
+			entries: answersFor.includes(query)
+				? [{ sourceMediaId: 'https://watch.example.invalid/show/1' }]
+				: []
+		};
+	};
+
+	it('asks one fixed word after "a" finds nothing, and says so in the verdict', async () => {
+		// Two novel catalogues listed, read and served text for "the" and
+		// answered "a" with an empty page; the check read them as empty.
+		asked.length = 0;
+		const result = await run({ ...WORKING, searchCatalog: searching(['the']) });
+		expect(result.ok).toBe(true);
+		expect(asked).toEqual(['a', 'the']);
+		expect(result.detail).toBe('Searched for "the" after "a" found nothing.');
+	});
+
+	it('asks nothing more of a source "a" already answers', async () => {
+		asked.length = 0;
+		const result = await run({ ...WORKING, searchCatalog: searching(['a', 'the']) });
+		expect(result.ok).toBe(true);
+		expect(asked).toEqual(['a']);
+		expect(result.detail).toBeNull();
+	});
+
+	it('is still empty when both words find nothing', async () => {
+		asked.length = 0;
+		const result = await run({ ...WORKING, searchCatalog: searching([]) });
+		expect(result).toMatchObject({ ok: false, failedAt: 'search', searchHits: 0 });
+		expect(asked).toEqual(['a', 'the']);
+		expect(result.detail).toMatch(/searched for "a", then "the"/);
+	});
+});
+
+describe('a book source’s first page, loaded as a reader would load it', () => {
+	// Measured live: a Mana source's image client sets a Referer, its CDN
+	// answers 403 with an HTML body without one, and the in-app check said
+	// "reads here" while the reader showed "Page 1 did not load". The check now
+	// fetches the first page with exactly the headers the host would send, and
+	// counts it only when image bytes come back.
+	const BOOK: RunnablePlugin = {
+		...PLUGIN,
+		hosts: ['read.example.invalid', 'img.example.invalid'],
+		converted: {
+			format: 'mana',
+			foreignId: 'demo',
+			foreignVersion: '1',
+			convertedAt: '2026-01-01T00:00:00.000Z',
+			converterVersion: 1,
+			verified: false,
+			mediaKind: 'manga'
+		}
+	};
+	const REFERER = { referer: 'https://read.example.invalid/' };
+	const JPEG = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 16, 74, 70, 73, 70]);
+	const HTML = new TextEncoder().encode('<!DOCTYPE html><html><body>Forbidden</body></html>');
+
+	function framed(status: number, type: string, body: Uint8Array, url: string): Response {
+		return new Response(
+			encodeFrame({ status, url, headers: { 'content-type': type }, body }) as BodyInit,
+			{ headers: { 'content-type': FRAME_CONTENT_TYPE } }
+		);
+	}
+
+	/**
+	 * A relay over a small world: the source's chapter document names its CDN,
+	 * and every image server answers 403 and HTML unless the Referer is there.
+	 */
+	function relay(imageAnswer?: (sent: Record<string, string>) => Response) {
+		const probed: { url: string; headers: Record<string, string> }[] = [];
+		const fetcher = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+			const sent = JSON.parse(String(init?.body)) as {
+				url: string;
+				headers: Record<string, string>;
+			};
+			if (sent.url.startsWith('https://read.example.invalid/')) {
+				const page = '{"images":["https://cdn7.media.example.invalid/c/1.jpg"]}';
+				return framed(200, 'text/html', new TextEncoder().encode(page), sent.url);
+			}
+			probed.push({ url: sent.url, headers: sent.headers });
+			if (imageAnswer !== undefined) return imageAnswer(sent.headers);
+			return sent.headers['referer'] === REFERER.referer
+				? framed(200, 'image/jpeg', JPEG, sent.url)
+				: framed(403, 'text/html; charset=UTF-8', HTML, sent.url);
+		}) as typeof fetch;
+		return { fetcher, probed };
+	}
+
+	function readWith(pages: unknown[], fetcher: typeof fetch) {
+		return verifyConvertedPlugin(BOOK, 'export default {};', {
+			createWorker: () =>
+				new FakeWorker(
+					{
+						load: { id: PLUGIN.id, declares: ['searchCatalog', 'listChapters', 'readChapter'] },
+						searchCatalog: { entries: [{ sourceMediaId: 'https://read.example.invalid/b/1' }] },
+						listChapters: [{ number: 1, sourceChapterId: 'https://read.example.invalid/b/1/1' }],
+						readChapter: { pages }
+					},
+					{ readChapter: ['https://read.example.invalid/b/1/1'] }
+				) as unknown as Worker,
+			fetcher,
+			probePage: pageImageProbe(fetcher)
+		});
+	}
+
+	it('reads a page that comes back as image bytes with the headers its source set', async () => {
+		const { fetcher, probed } = relay();
+		const result = await readWith(
+			[{ index: 0, url: 'https://img.example.invalid/c/1.jpg', headers: REFERER }],
+			fetcher
+		);
+
+		expect(result).toMatchObject({ ok: true, failedAt: null });
+		expect(probed[0].headers).toMatchObject({ ...REFERER, 'sec-fetch-dest': 'image' });
+		expect(probed[0].headers['accept']).toMatch(/^image\//);
+	});
+
+	it('fails at pages when the image server answers 403 with a page of HTML', async () => {
+		const { fetcher } = relay();
+		const result = await readWith(
+			[{ index: 0, url: 'https://img.example.invalid/c/1.jpg' }],
+			fetcher
+		);
+
+		expect(result).toMatchObject({ ok: false, failedAt: 'pages' });
+		expect(result.detail).toBe(
+			'The first page did not load: img.example.invalid answered 403 (text/html), not an image.'
+		);
+	});
+
+	it('fails at pages when a 200 carries an HTML page rather than an image', async () => {
+		const { fetcher } = relay(() =>
+			framed(200, 'image/jpeg', HTML, 'https://img.example.invalid/c/1.jpg')
+		);
+		const result = await readWith(
+			[{ index: 0, url: 'https://img.example.invalid/c/1.jpg', headers: REFERER }],
+			fetcher
+		);
+
+		expect(result).toMatchObject({ ok: false, failedAt: 'pages' });
+		expect(result.detail).toMatch(/answered 200 \(image\/jpeg\) with an HTML page, not an image/);
+	});
+
+	it('reads a page on the CDN its own chapter document named, with its Referer', async () => {
+		// The live case. The source's image client sets a Referer; its CDN host is
+		// chosen by the site and named only in the chapter JSON the run read, so
+		// no conversion declares it. The sandbox learned it and let the plugin
+		// reach it, and a host that then refused to send that page's Referer
+		// there loaded every page bare into a 403.
+		const { fetcher, probed } = relay();
+		const result = await readWith(
+			[
+				{
+					index: 0,
+					url: 'https://cdn7.media.example.invalid/c/1.jpg',
+					headers: { ...REFERER, cookie: 'session=1' }
+				}
+			],
+			fetcher
+		);
+
+		expect(result).toMatchObject({ ok: true, failedAt: null });
+		expect(probed[0].headers['referer']).toBe(REFERER.referer);
+		// A credential still goes only where the plugin declared, never to a
+		// host a page named.
+		expect(probed[0].headers['cookie']).toBeUndefined();
+	});
+
+	it('says when the image server answered with a bot check, and when the relay could not reach it', async () => {
+		// Measured: one source's second CDN puts every image behind a Cloudflare
+		// challenge, Referer or not. No header a source sets fixes that, and the
+		// verdict should not read as one that would.
+		const challenged = relay(
+			() =>
+				new Response(
+					encodeFrame({
+						status: 403,
+						url: 'https://img.example.invalid/c/1.jpg',
+						headers: { 'content-type': 'text/html' },
+						challenge: 'cloudflare',
+						body: HTML
+					}) as BodyInit,
+					{ headers: { 'content-type': FRAME_CONTENT_TYPE } }
+				)
+		);
+		const unreachable = relay(() =>
+			Response.json({ error: 'The operation timed out.' }, { status: 502 })
+		);
+		const page = [{ index: 0, url: 'https://img.example.invalid/c/1.jpg', headers: REFERER }];
+
+		expect((await readWith(page, challenged.fetcher)).detail).toBe(
+			'The first page did not load: img.example.invalid answered 403 (text/html) from behind a Cloudflare check, not an image.'
+		);
+		expect((await readWith(page, unreachable.fetcher)).detail).toBe(
+			'The first page did not load: img.example.invalid: The operation timed out.'
+		);
+	});
+
+	it('sends no header the host would not, and says which the source set', async () => {
+		// The page's host is outside the declared grant: the reader loads it
+		// bare, so the check does too, and its verdict names what was left off.
+		const { fetcher, probed } = relay();
+		const result = await readWith(
+			[{ index: 0, url: 'https://elsewhere.example.invalid/c/1.jpg', headers: REFERER }],
+			fetcher
+		);
+
+		expect(probed[0].headers['referer']).toBeUndefined();
+		expect(result).toMatchObject({ ok: false, failedAt: 'pages' });
+		expect(result.detail).toMatch(
+			/The source set referer for it, which this host does not send there\./
+		);
 	});
 });

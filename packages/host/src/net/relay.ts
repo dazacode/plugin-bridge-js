@@ -154,6 +154,9 @@ const FORWARDABLE = new Set([
 ]);
 
 /**
+ * `authorization` is absent from `FORWARDABLE` for the same reason, and its
+ * own field — plugin-authored, declared grant, one origin — is ADR-0005 §3c.
+ *
  * `cookie` is deliberately absent from `FORWARDABLE`, and stays absent.
  *
  * A caller that could put a cookie in `headers` could put *any* cookie there,
@@ -220,6 +223,17 @@ export const relay = async (
 		 * redirect — all of that is the jar's, in one place, host-side.
 		 */
 		cookies?: { send?: string };
+		/**
+		 * An `Authorization` value the *plugin* put on its own request, for a
+		 * host in its declared grant (ADR-0005 §3c). `sandbox-host.ts` decides
+		 * both; this route decides only where on a redirect walk it may go —
+		 * the first hop, and any later hop with that hop's origin.
+		 *
+		 * Its own field and not the header map, for the reason `cookie` is: the
+		 * allowlist is for headers that cannot carry a credential, and "this
+		 * request carried one" stays one grep.
+		 */
+		authorization?: string;
 	};
 	try {
 		body = (await request.json()) as typeof body;
@@ -250,6 +264,12 @@ export const relay = async (
 	const send = typeof body.cookies?.send === 'string' ? body.cookies.send : '';
 	const setCookie: { url: string; headers: string[] }[] = [];
 
+	const authorization =
+		typeof body.authorization === 'string' && body.authorization.length > 0
+			? body.authorization
+			: '';
+	const authorizedOrigin = target.origin;
+
 	// Built once, outside the loop, because it is the budget for the whole walk
 	// and not for each leg of it. See `DEFAULT_TIMEOUT_MS`.
 	const signal = AbortSignal.timeout(options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
@@ -272,6 +292,18 @@ export const relay = async (
 		// is reused across hops.
 		if (hops === 0 && send.length > 0) headers.set('cookie', send);
 		else headers.delete('cookie');
+
+		// A plugin's own `Authorization` goes to the origin it was written for,
+		// on the first hop and on any redirect that stays there, and is dropped
+		// the moment a hop leaves it — as a browser drops it on a cross-origin
+		// redirect. The first hop's host was checked against the plugin's
+		// declared grant before it reached here, so a hop with the same origin
+		// is still inside it; any other hop gets nothing.
+		if (authorization.length > 0 && target.origin === authorizedOrigin) {
+			headers.set('authorization', authorization);
+		} else {
+			headers.delete('authorization');
+		}
 
 		const outbound = {
 			method,

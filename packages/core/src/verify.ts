@@ -31,6 +31,13 @@ import {
 	type RunnablePlugin,
 	type SandboxOptions
 } from '@plugin-bridge/host/sandbox-host';
+import {
+	grantedImageHeaders,
+	readImageHeaders,
+	readImageHeadersByHost,
+	type ImageHeaders
+} from '@plugin-bridge/host/image-headers';
+import { pageImageProbe, type PageProbe } from '@plugin-bridge/host/page-probe';
 import type { ExternalIdKind } from './formats';
 
 /**
@@ -82,6 +89,17 @@ export interface VerificationResult {
 }
 
 export interface VerifyOptions extends SandboxOptions {
+	/**
+	 * Fetches a book source's first page image, and says whether it is one.
+	 *
+	 * Given the url and exactly the headers the host would send with it
+	 * (`grantedImageHeaders`). Where it is absent and `reach` is not, a caller
+	 * that holds a relay `fetcher` gets `pageImageProbe` over it — a caller
+	 * that asked for streams to be reached has asked for pages to be too, and
+	 * a status-only reach is the probe that called a 403-and-HTML page
+	 * readable. `checkListing` always passes one.
+	 */
+	readonly probePage?: PageProbe;
 	/**
 	 * What the sandbox is started with, if anything.
 	 *
@@ -224,6 +242,20 @@ function reachedFurther(candidate: VerificationResult, incumbent: VerificationRe
 const DEFAULT_PROBE = 'a';
 
 /**
+ * The one other word asked, when the default particle finds nothing.
+ *
+ * Some sources search whole words only, or ignore a query of one letter, and
+ * answer "a" with an empty page while answering any real word: measured on
+ * two novel catalogues that listed, read and served text for "the" and
+ * nothing for "a". Asked only after the first query came back empty, and only
+ * when the caller did not choose its own probe, so a source the default
+ * already answers is checked exactly as before. Fixed, and one word: a list
+ * tried until something matched would be searching for a pass. A source empty
+ * for both is still empty, and the verdict says which words were asked.
+ */
+const FALLBACK_PROBE = 'the';
+
+/**
  * What to ask an id-addressed source about, when there is nothing to search.
  *
  * The counterpart to `DEFAULT_PROBE`, and it exists because that probe is
@@ -304,6 +336,7 @@ export async function verifyConvertedPlugin(
 		probeIds = DEFAULT_PROBE_IDS,
 		budgetMs = DEFAULT_BUDGET_MS,
 		reach,
+		probePage,
 		settings = {},
 		...sandboxOptions
 	} = options;
@@ -314,7 +347,10 @@ export async function verifyConvertedPlugin(
 	// bundle declares; for a book listing the two agree, and where a row
 	// predates the field this answers `video`, which is what every caller of
 	// this meant before books existed.
-	const medium: 'video' | 'book' = plugin.converted?.mediaKind === 'manga' ? 'book' : 'video';
+	// A novel is a book too: it is read in chapters, and its pages are text.
+	// Counted as video, a novel listing's report spoke of episodes and streams.
+	const kind = plugin.converted?.mediaKind;
+	const medium: 'video' | 'book' = kind === 'manga' || kind === 'novel' ? 'book' : 'video';
 	const nothing = { medium, searchHits: 0, episodeCount: 0, streamCount: 0, torrentCount: 0 };
 	let sandbox: PluginSandbox | null = null;
 	const deadline = Date.now() + budgetMs;
@@ -345,6 +381,8 @@ export async function verifyConvertedPlugin(
 		const idAddressed = declaredKinds.length > 0;
 
 		let entries: CatalogEntry[];
+		/** Said in the verdict when the second word was the one that answered. */
+		let searchedNote: string | null = null;
 		if (idAddressed) {
 			// The caller's own list when it gave one, otherwise the probes this
 			// source's declared namespaces call for.
@@ -364,15 +402,34 @@ export async function verifyConvertedPlugin(
 					...nothing
 				};
 			}
-			const found = entries.find((entry) => typeof entry.sourceMediaId === 'string');
+			let found = entries.find((entry) => typeof entry.sourceMediaId === 'string');
+			const fallback = options.probe === undefined && found === undefined && !outOfTime();
+			if (fallback) {
+				try {
+					const again = (await sandbox.searchCatalog(FALLBACK_PROBE, 1)) as {
+						entries?: CatalogEntry[];
+					} | null;
+					const second = again?.entries ?? [];
+					const usable = second.find((entry) => typeof entry.sourceMediaId === 'string');
+					if (usable !== undefined) {
+						entries = second;
+						found = usable;
+						searchedNote = `Searched for "${FALLBACK_PROBE}" after "${probe}" found nothing.`;
+					}
+				} catch {
+					// The first query's answer stands: a second query that throws
+					// says nothing about what the first one found.
+				}
+			}
 			if (found === undefined || outOfTime()) {
+				const asked = fallback ? ` (searched for "${probe}", then "${FALLBACK_PROBE}")` : '';
 				return {
 					ok: false,
 					failedAt: 'search',
 					detail:
 						(entries.length === 0
-							? 'Searching this source returned nothing.'
-							: 'Search results carried no id this client can use.') + alsoRefused(sandbox),
+							? `Searching this source returned nothing${asked}.`
+							: `Search results carried no id this client can use${asked}.`) + alsoRefused(sandbox),
 					...nothing,
 					searchHits: entries.length
 				};
@@ -427,12 +484,14 @@ export async function verifyConvertedPlugin(
 			}
 
 			let pages: PageRow[];
+			let headersByHost: unknown;
 			try {
 				const read = (await live.readChapter(candidate, {
 					number: Number(chapter.number) || 1,
 					sourceChapterId: String(chapter.sourceChapterId)
-				})) as { pages?: PageRow[] } | null;
+				})) as { pages?: PageRow[]; headersByHost?: unknown } | null;
 				pages = read?.pages ?? [];
+				headersByHost = read?.headersByHost;
 			} catch (error) {
 				return {
 					ok: false,
@@ -444,8 +503,14 @@ export async function verifyConvertedPlugin(
 				};
 			}
 
+			// A remote page must be https. A text chapter has no remote page at
+			// all: the novel half of every Kotlin family, and a Paperback HTML
+			// chapter, hand the text over as a `data:text/…` url, because there
+			// is no address to give. That is the content itself, in hand, and
+			// it counts when it says something — an empty one does not.
 			const readable = pages.filter(
-				(page) => typeof page.url === 'string' && page.url.startsWith('https://')
+				(page) =>
+					typeof page.url === 'string' && (page.url.startsWith('https://') || textPage(page.url))
 			);
 			const counts = {
 				medium,
@@ -462,37 +527,66 @@ export async function verifyConvertedPlugin(
 					detail:
 						(pages.length === 0
 							? 'That source returned no pages for its first chapter.'
-							: 'The pages it returned are not https.') + alsoRefused(sandbox),
+							: 'The pages it returned are neither https nor text.') + alsoRefused(sandbox),
 					...counts
 				};
 			}
 
-			// A returned image url is a claim, exactly as a stream url is. The
-			// first page is fetched where a probe exists, with the headers the
-			// source asked for — `ABI.md` §8.3 is the whole reason those travel
-			// beside the url, and a probe that dropped them would report 403 on
-			// every source that protects its images and call it broken.
-			if (reach !== undefined && !outOfTime()) {
-				const first = readable[0];
-				const headers = (first.headers ?? {}) as Record<string, string>;
+			// A returned image url is a claim, exactly as a stream url is, and it is
+			// checked the way a reader will use it: the first remote page, with
+			// the headers the host would send for it — `ABI.md` §8.3 is why those
+			// travel beside the url, §9.1 decides which of them the host applies —
+			// and judged on whether image bytes come back. A text page has no
+			// host to ask; that it carries text was settled above.
+			const remote = readable.filter((page) => String(page.url).startsWith('https://'));
+			const pageProbe =
+				probePage ??
+				(reach !== undefined && sandboxOptions.fetcher !== undefined
+					? pageImageProbe(sandboxOptions.fetcher)
+					: undefined);
+			if ((pageProbe !== undefined || reach !== undefined) && remote.length > 0 && !outOfTime()) {
+				const first = remote[0];
+				const url = String(first.url);
+				let sent: Readonly<Record<string, string>>;
 				try {
-					const outcome = await reach(String(first.url), headers, [
-						...(sandbox?.reachableHosts ?? plugin.hosts),
-						...hostsOf(String(first.url))
-					]);
+					sent =
+						grantedImageHeaders(
+							url,
+							first.headers === undefined
+								? undefined
+								: readImageHeaders(first.headers, 'pages[0].headers'),
+							headersByHost === undefined
+								? undefined
+								: readImageHeadersByHost(headersByHost, 'headersByHost'),
+							live.imageGrant
+						) ?? {};
+				} catch (error) {
+					// The reader refuses the whole chapter for a header it may not
+					// send, with the field named; so does the check.
+					return { ok: false, failedAt: 'pages', detail: messageOf(error), ...counts };
+				}
+				const dropped = droppedHeaders(first.headers, sent);
+				try {
+					const outcome =
+						pageProbe !== undefined
+							? await pageProbe(url, sent)
+							: await reach!(url, { ...sent }, [
+									...(sandbox?.reachableHosts ?? plugin.hosts),
+									...hostsOf(url)
+								]);
 					if (!outcome.ok) {
 						return {
 							ok: false,
-							failedAt: 'reach',
-							detail: `${hostOf(String(first.url))}: ${outcome.detail}`,
+							failedAt: 'pages',
+							detail: `The first page did not load: ${pageFailure(hostOf(url), outcome.detail)}${dropped}`,
 							...counts
 						};
 					}
 				} catch (error) {
 					return {
 						ok: false,
-						failedAt: 'reach',
-						detail: `${hostOf(String(first.url))}: ${messageOf(error)}`,
+						failedAt: 'pages',
+						detail: `The first page did not load: ${pageFailure(hostOf(url), messageOf(error))}${dropped}`,
 						...counts
 					};
 				}
@@ -688,13 +782,25 @@ export async function verifyConvertedPlugin(
 		const CHAPTER_CANDIDATES = 3;
 		const limit = idAddressed ? candidates.length : readsChapters ? CHAPTER_CANDIDATES : 1;
 
+		// The second search word, said wherever the verdict ends up: a pass or
+		// a failure past search was reached through it, and a reader comparing
+		// two runs has to know the question differed.
+		const noted = (result: VerificationResult): VerificationResult =>
+			searchedNote === null
+				? result
+				: {
+						...result,
+						detail: result.detail === null ? searchedNote : `${result.detail} (${searchedNote})`
+					};
+
 		let worst: VerificationResult | null = null;
 		for (const candidate of candidates.slice(0, limit)) {
 			const outcome = await drive(candidate);
-			if (outcome.ok) return outcome;
+			if (outcome.ok) return noted(outcome);
 			if (worst === null || reachedFurther(outcome, worst)) worst = outcome;
 			if (outOfTime()) break;
 		}
+		if (worst !== null) return noted(worst);
 		return (
 			worst ?? {
 				ok: false,
@@ -775,6 +881,50 @@ function alsoRefused(sandbox: PluginSandbox | null): string {
 }
 
 /** The https host of a resolved url, as a one-item list, or none. */
+/**
+ * Whether a page is a text chapter carried inline, with something in it.
+ *
+ * `data:` with a `text/` type only — an inline image is not what this is for —
+ * and decoded, because `data:text/plain,` with nothing after the comma is a
+ * chapter that came back empty, which is a failure and not content.
+ */
+function textPage(url: string): boolean {
+	const match = /^data:text\/[a-z0-9.+-]+(?:;[^,]*)?,(.*)$/is.exec(url);
+	if (match === null) return false;
+	const head = url.slice(0, url.indexOf(','));
+	let body: string;
+	try {
+		body = /;base64$/i.test(head) ? atob(match[1]) : decodeURIComponent(match[1]);
+	} catch {
+		return false;
+	}
+	return body.replace(/<[^>]*>/g, '').trim().length > 0;
+}
+
+/**
+ * A clause naming the headers a source set on a page that the host will not
+ * send, or ''.
+ *
+ * The difference between "the CDN refuses us" and "the CDN refuses a request
+ * the source never meant to be made bare": a page whose own `Referer` was left
+ * off because its host is outside the plugin's grant fails for a reason that
+ * is ours, and the verdict says so rather than blaming the source.
+ */
+function droppedHeaders(own: unknown, sent: Readonly<Record<string, string>>): string {
+	if (own === null || typeof own !== 'object') return '';
+	const names = Object.keys(own as ImageHeaders)
+		.map((name) => name.toLowerCase())
+		.filter((name) => !(name in sent));
+	if (names.length === 0) return '';
+	return ` The source set ${names.join(', ')} for it, which this host does not send there.`;
+}
+
+/** "host answered 403 …." from a probe's own words, or "host: why." from anyone else's. */
+function pageFailure(host: string, detail: string): string {
+	const said = detail.replace(/\.+$/, '');
+	return said.startsWith('answered ') ? `${host} ${said}.` : `${host}: ${said}.`;
+}
+
 function hostsOf(url: unknown): string[] {
 	try {
 		const parsed = new URL(String(url));

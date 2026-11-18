@@ -1,0 +1,100 @@
+{
+	"$comment": "ABI.md section 9.1 vectors. Each `apply` case is one image request: the headers a level-3 host sends for `url`, given the image's own headers and the chapter's or catalogue page's `byHost` map. Each `refuse` case is a value a host must refuse, naming the field, rather than apply in part. Header names are compared lowercased. No real host appears here (AGENTS.md rule 9).",
+	"apply": [
+		{
+			"name": "a host's headers apply to its images",
+			"url": "https://cdn.example.invalid/1.jpg",
+			"byHost": { "cdn.example.invalid": { "Referer": "https://site.example.invalid/" } },
+			"expected": { "referer": "https://site.example.invalid/" }
+		},
+		{
+			"name": "the most specific pattern decides, an exact host over a wildcard",
+			"url": "https://img.cdn.example.invalid/1.jpg",
+			"byHost": {
+				"*.example.invalid": { "referer": "https://wide.example.invalid/" },
+				"*.cdn.example.invalid": { "referer": "https://narrow.example.invalid/" },
+				"img.cdn.example.invalid": { "referer": "https://exact.example.invalid/" }
+			},
+			"expected": { "referer": "https://exact.example.invalid/" }
+		},
+		{
+			"name": "the image's own headers win, name by name",
+			"url": "https://cdn.example.invalid/1.jpg",
+			"own": { "Referer": "https://own.example.invalid/" },
+			"byHost": {
+				"cdn.example.invalid": { "referer": "https://host.example.invalid/", "accept": "image/webp" }
+			},
+			"expected": { "referer": "https://own.example.invalid/", "accept": "image/webp" }
+		},
+		{
+			"name": "a host no pattern matches gets only its own headers",
+			"url": "https://other.example.invalid/1.jpg",
+			"own": { "origin": "https://site.example.invalid" },
+			"byHost": { "cdn.example.invalid": { "referer": "https://site.example.invalid/" } },
+			"expected": { "origin": "https://site.example.invalid" }
+		},
+		{
+			"name": "nothing rides an http image",
+			"url": "http://cdn.example.invalid/1.jpg",
+			"own": { "referer": "https://site.example.invalid/" },
+			"byHost": { "cdn.example.invalid": { "referer": "https://site.example.invalid/" } },
+			"expected": {}
+		}
+	],
+	"refuse": [
+		{
+			"name": "a connection header",
+			"field": "chapter",
+			"value": {
+				"pages": [{ "index": 0, "url": "https://cdn.example.invalid/1.jpg" }],
+				"headersByHost": { "cdn.example.invalid": { "Host": "cdn.example.invalid" } }
+			}
+		},
+		{
+			"name": "a proxy header on a page",
+			"field": "chapter",
+			"value": {
+				"pages": [
+					{
+						"index": 0,
+						"url": "https://cdn.example.invalid/1.jpg",
+						"headers": { "proxy-authorization": "x" }
+					}
+				]
+			}
+		},
+		{
+			"name": "a control character in a value",
+			"field": "catalogue",
+			"value": {
+				"entries": [
+					{
+						"posterImageUrl": "https://cdn.example.invalid/c.jpg",
+						"posterImageHeaders": { "referer": "https://site.example.invalid/\r\nx: y" }
+					}
+				]
+			}
+		},
+		{
+			"name": "a name that is not a token",
+			"field": "catalogue",
+			"value": {
+				"entries": [],
+				"imageHeadersByHost": { "cdn.example.invalid": { "bad name": "x" } }
+			}
+		},
+		{
+			"name": "a wildcard that is not a leading label",
+			"field": "catalogue",
+			"value": {
+				"entries": [],
+				"imageHeadersByHost": { "cdn.*.example.invalid": { "referer": "x" } }
+			}
+		},
+		{
+			"name": "a page that is not https",
+			"field": "chapter",
+			"value": { "pages": [{ "index": 0, "url": "http://cdn.example.invalid/1.jpg" }] }
+		}
+	]
+}

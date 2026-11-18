@@ -215,6 +215,35 @@ function removeHostGlobals(): void {
 	}
 }
 
+/**
+ * Web classes a browser Worker has, which Node defines lazily.
+ *
+ * Node installs these as getters that load its HTTP client on first read, and
+ * that client needs `Buffer` — deleted above. Read for the first time after the
+ * sealing, any of them threw `Buffer is not defined`, so a bundle that merely
+ * checked `globalThis.Headers || …` failed at load in this host and in no
+ * browser. They are read once here, before anything is removed, and pinned as
+ * the plain values a Worker would have.
+ */
+const LAZY_WORKER_GLOBALS = ['Headers', 'Request', 'Response', 'FormData'];
+
+function settleLazyGlobals(): void {
+	for (const name of LAZY_WORKER_GLOBALS) {
+		try {
+			const value = scope[name];
+			if (value === undefined) continue;
+			Object.defineProperty(scope, name, {
+				value,
+				writable: true,
+				configurable: true,
+				enumerable: false
+			});
+		} catch {
+			// One this runtime does not define lazily, or at all: left as it is.
+		}
+	}
+}
+
 /** Whether anything on the list survived being deleted. */
 function leftovers(): string[] {
 	return NOT_IN_A_BROWSER.filter((name) => scope[name] !== undefined);
@@ -337,6 +366,7 @@ async function bootstrap(): Promise<void> {
 	// this package writes would resolve here only by luck.
 	await import('../../host/src/sandbox.worker.ts');
 	const sealed = await refuseModuleResolution();
+	settleLazyGlobals();
 	removeHostGlobals();
 	const remaining = leftovers();
 

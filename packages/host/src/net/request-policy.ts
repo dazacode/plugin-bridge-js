@@ -188,7 +188,7 @@ function readRetry(value: unknown): RetryRule {
  * *declaration* would also refuse a plugin that names a host it only reaches
  * after a page has handed it over (`sandbox-host.ts`, `learned`).
  */
-function readPattern(key: string, what: string): string {
+export function readPattern(key: string, what: string): string {
 	const pattern = key.trim().toLowerCase();
 	if (pattern.length === 0) fail(`${what} has an empty host pattern`);
 	if (/\s/.test(pattern)) fail(`${what} host pattern "${key}" contains whitespace`);
@@ -204,7 +204,7 @@ function readPattern(key: string, what: string): string {
 /** RFC 7230 token, which is what a header name is. */
 const HEADER_NAME = /^[!#$%&'*+\-.^_`|~0-9a-z]+$/i;
 
-function readHeaders(value: unknown, what: string): Record<string, string> {
+export function readHeaders(value: unknown, what: string): Record<string, string> {
 	const written = record(value, what);
 	const names = Object.keys(written);
 	if (names.length > MAX_HEADERS_PER_HOST) {
@@ -294,7 +294,7 @@ export function readPolicy(value: unknown): RequestPolicy {
  * `*.cdn.example.invalid` beats `*.example.invalid` for a host both cover, and
  * a plugin does not have to care what order it wrote them in.
  */
-function mostSpecific(patterns: readonly string[], host: string): string | null {
+export function mostSpecific(patterns: readonly string[], host: string): string | null {
 	let best: string | null = null;
 	for (const pattern of patterns) {
 		if (!hostMatches(host, pattern)) continue;

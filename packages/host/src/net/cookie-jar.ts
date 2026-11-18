@@ -13,10 +13,13 @@
  * - **In memory only.** A `Map` on an instance the sandbox owns. There is no
  *   serialiser here, no `toJSON`, and no method that returns the store, so
  *   there is nothing for a caller to accidentally persist.
- * - **Never handed to plugin code.** The only reading method is `header`,
- *   which returns a `Cookie` header for one URL. A plugin cannot call it: the
- *   jar lives host-side of the worker boundary and its output goes into a
- *   request, not into a reply.
+ * - **Handed to plugin code only as its own, read-only** (ADR-0005 §3d, which
+ *   amends the rule this line used to state: "never handed to plugin code").
+ *   `header` returns a `Cookie` header for one URL and goes into a request.
+ *   `readable` answers one plugin the names and values of the cookies that
+ *   responses to *its own* requests set, for one URL — every cookie records
+ *   its provenance, and nothing set any other way is ever in that view. There
+ *   is still no enumeration, no export and no write path.
  *
  * ## What "conservative" means here, concretely
  *
@@ -64,6 +67,12 @@ interface StoredCookie {
 	readonly expiresAt: number | null;
 	/** Insertion order, for the RFC's tie-break when two paths are equal. */
 	readonly created: number;
+	/**
+	 * Which plugin's own request this cookie arrived on, or null for one that
+	 * arrived any other way. Only a cookie whose provenance is the asking
+	 * plugin is ever in its readable view — see `readable` and ADR-0005 §3d.
+	 */
+	readonly setBy: string | null;
 }
 
 /**
@@ -100,7 +109,7 @@ export class CookieJar {
 	 * belong to the step that set them; passing the first URL for all of them
 	 * is exactly the cross-host bug this whole file exists to prevent.
 	 */
-	absorb(url: string | URL, headers: readonly string[]): void {
+	absorb(url: string | URL, headers: readonly string[], setBy: string | null = null): void {
 		let origin: URL;
 		try {
 			origin = url instanceof URL ? url : new URL(url);
@@ -118,7 +127,7 @@ export class CookieJar {
 				this.refuse(host, header, parsed);
 				continue;
 			}
-			this.store(host, parsed);
+			this.store(host, { ...parsed, setBy });
 		}
 	}
 
@@ -130,17 +139,41 @@ export class CookieJar {
 	 * path first, oldest first within a path.
 	 */
 	header(url: string | URL): string {
+		return this.applicable(url)
+			.map((cookie) => `${cookie.name}=${cookie.value}`)
+			.join('; ');
+	}
+
+	/**
+	 * The cookies one plugin may read for this URL: read-only, and only those
+	 * a response to *that plugin's own* request set (ADR-0005 §3d).
+	 *
+	 * Exactly the cookies `header` would attach to the URL — same host, path,
+	 * `Secure` and expiry rules — narrowed to the asking plugin's provenance,
+	 * so a cookie this jar holds for any other reason is never in the view.
+	 * Copies of the name and value, never the stored records; nothing here
+	 * enumerates the jar or writes to it. Whether the URL's host is one the
+	 * plugin was granted is the caller's check, made before this is asked.
+	 */
+	readable(url: string | URL, pluginId: string): { name: string; value: string }[] {
+		return this.applicable(url)
+			.filter((cookie) => cookie.setBy !== null && cookie.setBy === pluginId)
+			.map((cookie) => ({ name: cookie.name, value: cookie.value }));
+	}
+
+	/** The live cookies that apply to a URL, in RFC 6265 §5.4 order. */
+	private applicable(url: string | URL): StoredCookie[] {
 		let target: URL;
 		try {
 			target = url instanceof URL ? url : new URL(url);
 		} catch {
-			return '';
+			return [];
 		}
-		if (target.protocol !== 'https:') return '';
+		if (target.protocol !== 'https:') return [];
 
 		const host = target.hostname.toLowerCase();
 		const stored = this.byHost.get(host);
-		if (stored === undefined) return '';
+		if (stored === undefined) return [];
 
 		const now = Date.now();
 		const path = requestPath(target);
@@ -156,7 +189,7 @@ export class CookieJar {
 		if (stored.size === 0) this.byHost.delete(host);
 
 		applicable.sort((a, b) => b.path.length - a.path.length || a.created - b.created);
-		return applicable.map((cookie) => `${cookie.name}=${cookie.value}`).join('; ');
+		return applicable;
 	}
 
 	/**
@@ -239,7 +272,7 @@ export class CookieJar {
 function parseSetCookie(
 	header: string,
 	origin: URL
-): Omit<StoredCookie, 'host' | 'created'> | string {
+): Omit<StoredCookie, 'host' | 'created' | 'setBy'> | string {
 	const [pair, ...rest] = header.split(';');
 	const equals = pair.indexOf('=');
 	// RFC 6265 §5.2: a set-cookie-string with no `=` in its name-value pair is

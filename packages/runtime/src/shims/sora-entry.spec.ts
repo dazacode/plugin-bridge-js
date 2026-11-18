@@ -368,3 +368,96 @@ function extractStreamUrl() { return JSON.stringify({ streams: ${JSON.stringify(
 		).toEqual(['mp4', 'dash', 'hls']);
 	});
 });
+
+/* ── a module that returns its failure as a value ───────────────────────── */
+
+describe('a module whose catch block returns its failure as the value', () => {
+	/** The module's sentinel, as one live module wrote it when its fetch was refused. */
+	const SENTINEL = 'Error: fetchv2 unavailable';
+
+	async function plugin(body: string): Promise<{
+		searchCatalog: (q: string, p: number, ctx: unknown) => Promise<{ entries: unknown[] }>;
+		listEpisodes: (id: string, ctx: unknown) => Promise<{ sourceEpisodeId: string }[]>;
+		resolve: (id: string, episode: unknown, ctx: unknown) => Promise<{ url: string }[]>;
+	}> {
+		return (await load(body))['default'] as never;
+	}
+
+	it('fails an episode list whose only href is that sentence, carrying it', async () => {
+		// `"Error: …"` reads as a scheme and was kept as an absolute address, so
+		// it became the episode's id and was handed back to the module to
+		// resolve — zero streams, and the reason nowhere.
+		const module = await plugin(`
+function searchResults() { return '[]'; }
+function extractEpisodes() { return JSON.stringify([{ href: ${JSON.stringify(SENTINEL)}, number: 1 }]); }
+function extractStreamUrl() { return ''; }`);
+		await expect(
+			module.listEpisodes('https://example.invalid/a/1', contextFor().ctx)
+		).rejects.toThrow(SENTINEL);
+	});
+
+	it('fails a stream that is that sentence, and a search that is that sentence', async () => {
+		const module = await plugin(`
+function searchResults() { return ${JSON.stringify(SENTINEL)}; }
+function extractEpisodes() { return '[]'; }
+function extractStreamUrl() { return ${JSON.stringify(SENTINEL)}; }`);
+		await expect(
+			module.resolve('https://example.invalid/e/1', null, contextFor().ctx)
+		).rejects.toThrow(SENTINEL);
+		// Not JSON and not empty: read as `[]` it said "returned nothing".
+		await expect(module.searchCatalog('x', 1, contextFor().ctx)).rejects.toThrow(SENTINEL);
+	});
+
+	it('keeps relative hrefs, absolute urls and an empty list as the data they are', async () => {
+		const module = await plugin(`
+function searchResults() { return JSON.stringify([{ title: 'One', href: 'watch/1' }]); }
+function extractEpisodes() {
+  return JSON.stringify([{ href: 'https://example.invalid/e/2', number: 2 }, { href: ${JSON.stringify(SENTINEL)}, number: 3 }]);
+}
+function extractStreamUrl() { return 'https://cdn.example.invalid/v/1.m3u8'; }`);
+		const ctx = contextFor().ctx;
+		expect((await module.searchCatalog('x', 1, ctx)).entries).toHaveLength(1);
+		// One real episode beside the failure: the failure is not an episode.
+		expect(
+			(await module.listEpisodes('https://example.invalid/a/1', ctx)).map((e) => e.sourceEpisodeId)
+		).toEqual(['https://example.invalid/e/2']);
+		expect(await module.resolve('https://example.invalid/e/2', null, ctx)).toHaveLength(1);
+
+		const empty = await plugin(`
+function searchResults() { return ''; }
+function extractEpisodes() { return '[]'; }
+function extractStreamUrl() { return ''; }`);
+		expect((await empty.searchCatalog('x', 1, ctx)).entries).toEqual([]);
+		expect(await empty.listEpisodes('https://example.invalid/a/1', ctx)).toEqual([]);
+	});
+});
+
+describe('a sentinel that stands for a refused request', () => {
+	it('keeps the refusal’s name and status, so a 429 still reads as rate-limited', async () => {
+		// The live case: the relay answered 429, `fetchv2` rejected with a
+		// `RateLimitedError` carrying the status, and the module's catch block
+		// returned a sentence instead — the status nowhere in it.
+		const module = (await load(`
+function searchResults() { return '[]'; }
+function extractEpisodes() { return '[]'; }
+async function extractStreamUrl(url) {
+  try { await fetchv2(url); return 'https://cdn.example.invalid/v/1.m3u8'; }
+  catch (e) { return 'Error: fetchv2 unavailable'; }
+}`)) as { default: { resolve: (id: string, e: unknown, ctx: unknown) => Promise<unknown> } };
+		const refused = Object.assign(new Error('The plugin proxy returned 429: too many requests'), {
+			name: 'RateLimitedError',
+			status: 429
+		});
+		const ctx = {
+			http: { send: async () => Promise.reject(refused) },
+			crypto: HOST_CRYPTO,
+			log: { debug() {}, warn() {} }
+		};
+		const failure = (await module.default
+			.resolve('https://example.invalid/e/1', null, ctx)
+			.catch((error: unknown) => error)) as Error & { status?: number };
+		expect(failure.message).toMatch(/fetchv2 unavailable/);
+		expect(failure.name).toBe('RateLimitedError');
+		expect(failure.status).toBe(429);
+	});
+});

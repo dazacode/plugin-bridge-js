@@ -25,11 +25,13 @@
  * ## What a built bundle still cannot do, stated rather than hidden
  *
  * `getCoverTransport` and `getPageTransport` hand the app a *client* for image
- * bytes. The ABI has no image-fetching plugin hook, so a source that gates an
- * image URL behind `this.covers.has(...)` is honoured for the URL and the host
- * fetches it plainly. Where an image needs a per-request header the source
- * declared on that transport, this build does not carry it yet, and the page
- * fails at the image rather than at the chapter.
+ * bytes. The ABI has no image-fetching plugin hook, so the client is run here
+ * with its image send recorded (`__throughTransport`): what it would have sent
+ * becomes the page's url and headers, which a host applies (§8.3, §9.1). Those
+ * headers usually name a CDN the run learned rather than one the bundle
+ * declared, so a host applies them by the sandbox's `imageGrant`, not by the
+ * manifest's hosts. What still cannot run is a response interceptor that reads
+ * the image's own bytes, and that page is refused by name.
  *
  * ## The source path
  *
@@ -41,14 +43,22 @@
  * would fail later somewhere unrelated.
  */
 
+import { BOOT_CONTEXT } from './boot-context';
+import { CHEERIO_SOURCE } from './cheerio';
+import { DIGESTS } from './digests';
+import { DOM_RUNTIME_SOURCE } from './generated/dom-source';
+import { JS_LIBRARIES_SOURCE } from './js-libraries';
 import { JS_RUNTIME } from './js-runtime';
 import { STREAM_GUARDS } from './stream-guards';
 
 export type ManaArtifact =
 	/** A built `.mana`: minified CommonJS ending in `globalThis.Target = …`. */
 	| { readonly kind: 'bundle'; readonly script: string }
-	/** A single TypeScript entry file, already stripped of its types. */
-	| { readonly kind: 'source'; readonly script: string };
+	/**
+	 * A source tree, already stripped and linked into one script, with the
+	 * third-party packages it imports that the runtime supplies.
+	 */
+	| { readonly kind: 'source'; readonly script: string; readonly packages?: readonly string[] };
 
 export interface ManaEntrypointOptions {
 	/** Must equal the manifest id, or the sandbox refuses to load the bundle. */
@@ -116,6 +126,170 @@ function __chapter(row, fallback) {
   return chapter;
 }
 
+/* --- the page transport, resolved before the host fetches ----------------- */
+
+/** The app's origin tags for an image request: 1 a cover, 2 a page. */
+var __ORIGIN_PAGE = 2;
+var __IMAGE_DISPATCH = Symbol.for('mana.http.image.v1');
+
+/**
+ * While set, an image request is recorded instead of sent.
+ *
+ * Only an image request — one the transport dispatches with a cover or page
+ * origin. A request a transport's own interceptor makes on the way (one
+ * source fetches a viewer page to learn the image's address) goes out for
+ * real, because its answer is what the image request is built from.
+ */
+var __capture = null;
+
+/** Headers the host owns on any request, never the page's to set. */
+var __HOST_HEADERS = { 'content-length': 1, host: 1, connection: 1, 'transfer-encoding': 1, 'accept-encoding': 1 };
+
+function __interceptorCount(list) { return Array.isArray(list) ? list.length : 0; }
+
+/**
+ * A page as the source's transport would have requested it.
+ *
+ * The app does not fetch a Mana page image itself: it hands the request to
+ * the client \`getPageTransport\` returns, whose request interceptors add a
+ * Referer, an Origin, a signed address — and the ABI's page carries headers to
+ * the byte fetch (§8.3) but cannot run a client. So the transport is run here,
+ * once per page, with its send intercepted: what it would have sent becomes
+ * the page's address and headers, and nothing is fetched twice.
+ *
+ * Response interceptors run too, on an empty stand-in for the image. One that
+ * passes an image response through untouched — the common case, a status
+ * check scoped to ordinary requests — costs nothing. One that **reads** the
+ * image's body is transforming or inspecting bytes the host will fetch and
+ * this code never sees, so the page is refused by name rather than handed to
+ * the reader untransformed.
+ */
+async function __throughTransport(source, result) {
+  if (typeof source.getPageTransport !== 'function') return result;
+  var pages = [];
+  for (var i = 0; i < result.pages.length; i++) {
+    var page = result.pages[i];
+    var transport = source.getPageTransport({ url: page.url, origin: __ORIGIN_PAGE });
+    if (!transport || typeof transport !== 'object') { pages.push(page); continue; }
+    var sent = await __dispatchImage(transport, page.url);
+    var resolved = { index: page.index, url: sent === null ? page.url : sent.url };
+    var headers = {};
+    var has = false;
+    var own = page.headers || {};
+    for (var key in own) { headers[key] = own[key]; has = true; }
+    if (sent !== null) {
+      var captured = __imageHeaders(sent.headers);
+      for (var name in captured) {
+        headers[name] = captured[name];
+        has = true;
+      }
+    }
+    if (has) resolved.headers = headers;
+    pages.push(resolved);
+  }
+  return { pages: pages };
+}
+
+var __ORIGIN_COVER = 1;
+
+/**
+ * Covers through the source's cover client, as headers the host applies.
+ *
+ * \`ABI.md\` §9.1 (level 3): a catalogue page may carry \`imageHeadersByHost\`,
+ * and a cover may carry its own \`posterImageHeaders\`. The client
+ * \`getCoverTransport\` returns is run once per cover host on that host's first
+ * cover, and what it would have sent becomes the host's entry — a page of
+ * thirty covers from one CDN costs one dry run, not thirty. Only where the
+ * client rewrites the address does each cover on that host get its own run.
+ *
+ * A cover is a nicety, not the content: a client that reads the image's own
+ * response, or that fails, leaves that host's covers without headers rather
+ * than failing the search a viewer asked for. Before level 3 a host ignores
+ * both fields, and is exactly where it was.
+ */
+async function __throughCoverTransport(source, page) {
+  if (typeof source.getCoverTransport !== 'function' || !page || !Array.isArray(page.entries)) return page;
+  var byHost = {};
+  var rewrites = {};
+  var tried = {};
+  for (var i = 0; i < page.entries.length; i++) {
+    var entry = page.entries[i];
+    var url = entry.posterImageUrl;
+    if (typeof url !== 'string' || url.indexOf('https://') !== 0) continue;
+    var host = __hostOf(url);
+    if (host === null) continue;
+    if (tried[host] === true && rewrites[host] !== true) continue;
+    tried[host] = true;
+    var sent = null;
+    try {
+      var transport = source.getCoverTransport({ url: url, origin: __ORIGIN_COVER });
+      if (transport && typeof transport === 'object') sent = await __dispatchImage(transport, url, __ORIGIN_COVER);
+    } catch (error) {
+      sent = null;
+    }
+    if (sent === null) continue;
+    var headers = __imageHeaders(sent.headers);
+    if (sent.url !== url) {
+      rewrites[host] = true;
+      entry.posterImageUrl = sent.url;
+      if (Object.keys(headers).length > 0) entry.posterImageHeaders = headers;
+    } else if (Object.keys(headers).length > 0) {
+      byHost[host] = headers;
+    }
+  }
+  if (Object.keys(byHost).length > 0) page.imageHeadersByHost = byHost;
+  return page;
+}
+
+function __hostOf(url) {
+  var text = String(url);
+  if (text.slice(0, 8).toLowerCase() !== 'https://') return null;
+  var host = text.slice(8).split(/[/?#:]/)[0].toLowerCase();
+  return host.length === 0 ? null : host;
+}
+
+/** A captured request's headers, without the ones the host owns. */
+function __imageHeaders(headers) {
+  var out = {};
+  for (var name in headers || {}) {
+    var lower = String(name).toLowerCase();
+    if (__HOST_HEADERS[lower] === 1 || lower.indexOf('proxy-') === 0) continue;
+    out[lower] = String(headers[name]);
+  }
+  return out;
+}
+
+/** What the transport would have sent for one page, or null if it sent nothing. */
+async function __dispatchImage(transport, url, origin) {
+  var as = origin === undefined ? __ORIGIN_PAGE : origin;
+  __capture = { request: null, bodyID: null, bodyRead: false };
+  try {
+    try {
+      if (typeof transport[__IMAGE_DISPATCH] === 'function') {
+        await transport[__IMAGE_DISPATCH]({ url: url, origin: as }, undefined);
+      } else if (typeof transport.__dispatchImage === 'function') {
+        await transport.__dispatchImage(url, as);
+      } else {
+        return null;
+      }
+    } catch (error) {
+      if (__capture.request === null) throw error;
+      throw __unreadable(String((error && error.message) || error));
+    }
+    if (__capture.bodyRead) throw __unreadable('it reads the image response itself');
+    return __capture.request;
+  } finally {
+    __capture = null;
+  }
+}
+
+function __unreadable(why) {
+  return new Error(
+    'This source loads its page images through a client that processes the image response (' + why + '). ' +
+    'The host fetches page images itself, so that step cannot run, and the page would arrive untransformed.'
+  );
+}
+
 /** One page list, from the shapes these sources return: strings or \`{url}\`. */
 function __pages(value) {
   var rows = __array(value && value.pages !== undefined ? value.pages : value);
@@ -161,7 +335,7 @@ export default {
     var asked = String(query === null || query === undefined ? '' : query);
     var wanted = Number(page) > 0 ? Number(page) : 1;
     __checkout(source);
-    return __search(source, asked, wanted);
+    return __throughCoverTransport(source, await __search(source, asked, wanted));
   },
 
   async listChapters(sourceMediaId, ctx) {
@@ -200,11 +374,10 @@ export default {
     await __prepare(source, String(sourceMediaId));
     // The older method is addressed by the chapter alone; the newer one by the
     // title and the chapter together, plus the row it handed out.
-    if (typeof source.getChapterDetails === 'function') {
-      return __pages(await source.getChapterDetails(target));
-    }
-    var data = await __call(source, ['getChapterData'], String(sourceMediaId), target, descriptor);
-    return __pages(data);
+    var data = typeof source.getChapterDetails === 'function'
+      ? await source.getChapterDetails(target)
+      : await __call(source, ['getChapterData'], String(sourceMediaId), target, descriptor);
+    return __throughTransport(source, __pages(data));
   }
 };
 `;
@@ -236,7 +409,8 @@ function __storeBody(bytes) {
   return id;
 }
 
-var __METHODS = ['GET', 'GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'];
+/** The published \`HttpMethod\` numbering: Get 0, Head 1, Post 2, and on. */
+var __METHODS = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'];
 
 /**
  * One bridge operation.
@@ -250,6 +424,18 @@ async function __bridgeSend(payload) {
 
   if (operation === 0) {
     var request = payload || {};
+    var origin = Number(request.origin);
+    if (__capture !== null && (origin === 1 || origin === 2)) {
+      __capture.request = {
+        url: String(request.url),
+        method: __METHODS[Number(request.method)] || String(request.method || 'GET'),
+        headers: request.headers && typeof request.headers === 'object' ? request.headers : {}
+      };
+      // An empty stand-in, so the transport completes. A response
+      // interceptor that reads it is noticed (operation 1, below).
+      __capture.bodyID = __storeBody(new Uint8Array(0));
+      return { status: 200, url: String(request.url), headers: {}, bodyID: __capture.bodyID, sessionID: '' };
+    }
     var init = {
       method: __METHODS[Number(request.method)] || 'GET',
       headers: request.headers && typeof request.headers === 'object' ? request.headers : {}
@@ -267,6 +453,7 @@ async function __bridgeSend(payload) {
   }
 
   if (operation === 1) {
+    if (__capture !== null && String(payload && payload.bodyID) === __capture.bodyID) __capture.bodyRead = true;
     var body = __bodies[String(payload && payload.bodyID)];
     if (body === undefined) throw new Error('This source read a response body that is no longer held.');
     // 1 is base64, 0 is text. The bundle reads images through the first.
@@ -296,55 +483,7 @@ globalThis.__manaHTTPBridge = {
   send: function (payload) { return __bridgeSend(payload); }
 };
 
-/* --- a context for the load itself --------------------------------------- */
-
-/**
- * Several sources decode a constant while the module evaluates — an obfuscated
- * API address, usually — and the host's own context only arrives with the first
- * call. So the runtime is given a boot context carrying the two codecs those
- * decodes need and nothing else. A request before the first call still fails by
- * name, because there is no transport in it.
- */
-const __B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-
-function __b64encode(bytes) {
-  var out = '';
-  for (var i = 0; i < bytes.length; i += 3) {
-    var a = bytes[i];
-    var b = i + 1 < bytes.length ? bytes[i + 1] : -1;
-    var c = i + 2 < bytes.length ? bytes[i + 2] : -1;
-    out += __B64.charAt(a >> 2);
-    out += __B64.charAt(((a & 3) << 4) | ((b < 0 ? 0 : b) >> 4));
-    out += b < 0 ? '=' : __B64.charAt(((b & 15) << 2) | ((c < 0 ? 0 : c) >> 6));
-    out += c < 0 ? '=' : __B64.charAt(c & 63);
-  }
-  return out;
-}
-
-function __b64decode(value) {
-  var clean = String(value).replace(/[^A-Za-z0-9+/]/g, '');
-  var out = new Uint8Array(Math.floor((clean.length * 3) / 4));
-  var at = 0;
-  var buffer = 0;
-  var bits = 0;
-  for (var i = 0; i < clean.length; i++) {
-    buffer = (buffer << 6) | __B64.indexOf(clean.charAt(i));
-    bits += 6;
-    if (bits >= 8) {
-      bits -= 8;
-      out[at++] = (buffer >> bits) & 0xff;
-    }
-  }
-  return out.slice(0, at);
-}
-
-__ctx = {
-  text: {
-    encode: function (value) { return new TextEncoder().encode(String(value)); },
-    decode: function (bytes) { return new TextDecoder().decode(bytes); }
-  },
-  bytes: { toBase64: __b64encode, fromBase64: __b64decode }
-};
+${BOOT_CONTEXT}
 
 /* --- the source --------------------------------------------------------- */
 
@@ -419,9 +558,20 @@ ${ABI}`;
  * client method called positionally and by object — both are read, because the
  * caller is whichever author wrote the file, not us.
  */
-function sourceEntrypoint(pluginId: string, script: string): string {
+function sourceEntrypoint(pluginId: string, script: string, packages: readonly string[]): string {
+	// The parser and the libraries over it are carried only when the source
+	// imports one of them: they are most of a bundle's size, and a source that
+	// reads JSON never reaches them.
+	const libraries =
+		packages.length === 0
+			? ''
+			: `${DOM_RUNTIME_SOURCE}
+${DIGESTS}
+${CHEERIO_SOURCE}
+${JS_LIBRARIES_SOURCE}`;
 	return `${JS_RUNTIME}
 ${STREAM_GUARDS}
+${libraries}
 const __PLUGIN_ID = ${JSON.stringify(pluginId)};
 
 /* --- @mana-app/types, as the values a source can use --------------------- */
@@ -455,12 +605,17 @@ function __manaEnum(names) {
   return value;
 }
 
-/** A response, in the shape these sources read: \`.text()\`, \`.json()\`, \`.ok\`. */
+var __HTTP_METHODS = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'];
+
+/**
+ * A response, in the shape these sources read: \`.text()\`, \`.json()\`, \`.ok\`,
+ * and headers they ask with \`.get(name)\` as the published client's answer.
+ */
 function __manaResponse(raw, request) {
   return {
     status: raw.status,
     url: raw.url,
-    headers: raw.headers,
+    headers: new __ManaHeaders(raw.headers || {}),
     request: request,
     get ok() { return raw.status >= 200 && raw.status < 300; },
     text: function () { return raw.text(); },
@@ -483,6 +638,74 @@ function __manaResponse(raw, request) {
  * than enforced here. Interceptors run in the order they were added, on every
  * request, because a source that installs one expects its headers to be there.
  */
+/**
+ * A request's headers, as the types package hands them to an interceptor.
+ *
+ * Both spellings a source writes work: the methods (\`headers.has\`,
+ * \`headers.set\`) the published \`HttpHeaders\` has, and plain property reads
+ * and writes, because that class keeps each header as an own property too.
+ * Names are matched case-insensitively and stored lowercased.
+ */
+/**
+ * A body as the published \`Body\` builders describe one — \`{ kind, value,
+ * contentType }\` — onto the wire, as the published client puts it there; a
+ * plain string or bytes as written; anything else as JSON, which is what the
+ * older sources hand \`request\` directly.
+ */
+function __wireBody(body, headers) {
+  if (typeof body === 'string' || body instanceof Uint8Array) return body;
+  if (body && typeof body === 'object' && typeof body.kind === 'number' && 'value' in body) {
+    if (body.contentType && !Object.keys(headers).some(function (name) { return name.toLowerCase() === 'content-type'; })) {
+      headers['content-type'] = body.contentType;
+    }
+    if (body.kind === 0) return JSON.stringify(body.value);
+    if (body.kind === 1) {
+      var pairs = [];
+      for (var key in body.value || {}) {
+        var values = Array.isArray(body.value[key]) ? body.value[key] : [body.value[key]];
+        for (var i = 0; i < values.length; i++) pairs.push(encodeURIComponent(key) + '=' + encodeURIComponent(String(values[i])));
+      }
+      return pairs.join('&');
+    }
+    if (body.kind === 2) return String(body.value);
+    if (body.kind === 3) return new Uint8Array(body.value);
+  }
+  return JSON.stringify(body);
+}
+
+/** The published body builders: a description the client puts on the wire. */
+var __manaBody = {
+  json: function (value) { return { kind: 0, value: JSON.parse(JSON.stringify(value)), contentType: 'application/json' }; },
+  form: function (value) { return { kind: 1, value: JSON.parse(JSON.stringify(value)), contentType: 'application/x-www-form-urlencoded' }; },
+  text: function (value, contentType) { return { kind: 2, value: value, contentType: contentType || 'text/plain; charset=utf-8' }; },
+  bytes: function (value, contentType) { return { kind: 3, value: new Uint8Array(value), contentType: contentType || 'application/octet-stream' }; }
+};
+
+class __ManaHeaders {
+  constructor(initial) {
+    var from = initial || {};
+    if (typeof from.toJSON === 'function') from = from.toJSON();
+    for (var key in from) if (from[key] !== undefined && from[key] !== null) this.set(key, from[key]);
+  }
+  get(name) { var value = this[String(name).toLowerCase()]; return value === undefined ? null : String(value); }
+  has(name) { return this.get(name) !== null; }
+  set(name, value) {
+    this.delete(name);
+    Object.defineProperty(this, String(name).toLowerCase(), { value: String(value), writable: true, enumerable: true, configurable: true });
+    return this;
+  }
+  setAll(headers) { for (var key in headers || {}) this.set(key, headers[key]); return this; }
+  delete(name) {
+    var wanted = String(name).toLowerCase();
+    for (var key of Object.keys(this)) if (key.toLowerCase() === wanted) delete this[key];
+    return this;
+  }
+  entries() { return Object.entries(this)[Symbol.iterator](); }
+  keys() { return Object.keys(this)[Symbol.iterator](); }
+  forEach(fn) { for (var key of Object.keys(this)) fn(this[key], key); }
+  toJSON() { return Object.assign({}, this); }
+}
+
 class HttpClient {
   constructor() {
     this.interceptors = [];
@@ -490,12 +713,22 @@ class HttpClient {
     this.headers = {};
   }
   setRateLimit() { return this; }
+  setRateLimiter() { return this; }
   setTimeoutMs() { return this; }
   setRetryPolicy() { return this; }
+  setRetry() { return this; }
+  setBaseURL(url) { this.baseURL = String(url); return this; }
+  addHeader(name, value) { this.headers[String(name)] = String(value); return this; }
+  removeHeader(name) {
+    for (var key in this.headers) if (key.toLowerCase() === String(name).toLowerCase()) delete this.headers[key];
+    return this;
+  }
   addHeaders(headers) { Object.assign(this.headers, headers || {}); return this; }
   setHeaders(headers) { this.headers = Object.assign({}, headers); return this; }
   addRequestInterceptor(fn) { if (typeof fn === 'function') this.interceptors.push(fn); return this; }
   addResponseInterceptor(fn) { if (typeof fn === 'function') this.responseInterceptors.push(fn); return this; }
+  removeRequestInterceptor(fn) { this.interceptors = this.interceptors.filter(function (one) { return one !== fn; }); return this; }
+  removeResponseInterceptor(fn) { this.responseInterceptors = this.responseInterceptors.filter(function (one) { return one !== fn; }); return this; }
   close() {}
 
   async request(a, b, c, d) {
@@ -508,32 +741,97 @@ class HttpClient {
       request = { url: a, method: typeof b === 'string' ? b : 'GET', headers: c, body: d };
     } else {
       request = Object.assign({}, a || {});
+      if (b && typeof b === 'object' && b.headers) request.headers = Object.assign({}, b.headers, request.headers || {});
     }
-    request.method = String(request.method || 'GET').toUpperCase();
-    request.headers = Object.assign({}, this.headers, request.headers || {});
+    return this.__execute(request, 0);
+  }
+
+  /**
+   * One request, through the interceptors in order.
+   *
+   * An interceptor may change the request in place or answer a new one, and
+   * may be async — the published client awaits each and takes what it
+   * answers; a version that called them synchronously and ignored the answer
+   * dropped every header an async interceptor set.
+   */
+  async __execute(input, origin) {
+    var request = Object.assign({}, input);
+    // A method stays as the source wrote it while its interceptors run — they
+    // compare it against the published enum (\`request.method !== HttpMethod.Get\`)
+    // — and becomes a name only on the wire. '0' on the wire, and an
+    // interceptor refusing 'GET' for not being 0, were the two ways to get this
+    // wrong.
+    if (request.method === undefined || request.method === null) request.method = 0;
+    if (this.baseURL && !/^[a-z][a-z0-9+.-]*:/i.test(String(request.url))) {
+      request.url = new URL(String(request.url), this.baseURL).toString();
+    }
+    request.headers = new __ManaHeaders(Object.assign({}, this.headers, (request.headers && typeof request.headers.toJSON === 'function') ? request.headers.toJSON() : (request.headers || {})));
+    var context = { origin: origin, attempt: 1, metadata: {} };
 
     for (var i = 0; i < this.interceptors.length; i++) {
-      this.interceptors[i](request);
+      var changed = await this.interceptors[i](request, context);
+      if (changed && typeof changed === 'object') request = changed;
+    }
+    var headers = request.headers && typeof request.headers.toJSON === 'function' ? request.headers.toJSON() : Object.assign({}, request.headers || {});
+    var method = typeof request.method === 'number'
+      ? (__HTTP_METHODS[request.method] || 'GET')
+      : String(request.method || 'GET').toUpperCase();
+
+    var response;
+    if (__capture !== null && (origin === 1 || origin === 2)) {
+      __capture.request = { url: String(request.url), method: method, headers: headers };
+      var capture = __capture;
+      var read = function (value) { return async function () { capture.bodyRead = true; return value; }; };
+      response = __manaResponse({ status: 200, url: String(request.url), headers: {}, text: read(''), json: read(null), bytes: read(new Uint8Array(0)) }, request);
+      for (var k = 0; k < this.responseInterceptors.length; k++) {
+        var passed = await this.responseInterceptors[k](response, context);
+        if (passed && typeof passed === 'object') response = passed;
+      }
+      return response;
     }
 
-    var init = { method: request.method, headers: request.headers };
+    var init = { method: method, headers: headers };
     if (request.body !== undefined && request.body !== null) {
-      init.body = typeof request.body === 'string' || request.body instanceof Uint8Array
-        ? request.body
-        : JSON.stringify(request.body);
+      init.body = __wireBody(request.body, headers);
     }
     var raw = await __host().http.send(String(request.url), init);
-    var response = __manaResponse(raw, request);
+    response = __manaResponse(raw, request);
     for (var j = 0; j < this.responseInterceptors.length; j++) {
-      this.responseInterceptors[j](response);
+      var answered = await this.responseInterceptors[j](response, context);
+      if (answered && typeof answered === 'object') response = answered;
     }
     return response;
   }
-  get(url, options) { return this.request({ url: url, method: 'GET', headers: options && options.headers }); }
+
+  /** The app's image path: a GET at a cover or page origin. */
+  __dispatchImage(url, origin) { return this.__execute({ url: url, method: 0 }, origin); }
+
+  // The published client's shorthands, which hand interceptors the enum.
+  get(url, options) { return this.request({ url: url, method: 0, headers: options && options.headers }); }
+  head(url, options) { return this.request({ url: url, method: 1, headers: options && options.headers }); }
   post(url, body, options) {
-    return this.request({ url: url, method: 'POST', body: body, headers: options && options.headers });
+    return this.request({ url: url, method: 2, body: body, headers: options && options.headers });
   }
 }
+
+/**
+ * \`ObjectStore\`, the app's per-source key-value store, as a global.
+ *
+ * Held for the isolate's lifetime. The app keeps it across launches; the ABI's
+ * persistent store is a permission a converted bundle does not ask for, so a
+ * cached catalogue or a remembered mirror is re-learned once per run instead
+ * — slower, never wrong, since every measured use is a cache in front of a
+ * request the source can make again.
+ */
+var __objectStore = new Map();
+globalThis.ObjectStore = {
+  get: async function (key) { return __objectStore.has(String(key)) ? __objectStore.get(String(key)) : null; },
+  set: async function (key, value) { __objectStore.set(String(key), value); },
+  remove: async function (key) { __objectStore.delete(String(key)); },
+  string: async function (key) { var v = __objectStore.get(String(key)); return typeof v === 'string' ? v : null; },
+  boolean: async function (key) { return __objectStore.get(String(key)) === true; },
+  number: async function (key) { var v = __objectStore.get(String(key)); return typeof v === 'number' ? v : null; }
+};
 
 /** The request manager the framework would have handed a source. */
 var __requestManager = {
@@ -599,6 +897,8 @@ class SourceInfo {
 
 const __manaKnown = {
   HttpClient: HttpClient,
+  HttpHeaders: __ManaHeaders,
+  Body: __manaBody,
   Source: Source,
   Manga: Manga,
   Chapter: Chapter,
@@ -611,16 +911,64 @@ const __manaKnown = {
   ContentType: __manaEnum(['MANGA', 'MANHWA', 'MANHUA', 'COMIC', 'NOVEL']),
   PublicationStatus: __manaEnum(['UNKNOWN', 'ONGOING', 'COMPLETED', 'HIATUS', 'CANCELLED']),
   ReadingMode: __manaEnum(['PAGED_MANGA', 'PAGED_COMIC', 'WEBTOON']),
-  HttpMethod: __manaEnum(['Get', 'Get', 'Post', 'Put', 'Patch', 'Delete', 'Options']),
+  HttpMethod: __manaEnum(['Get', 'Head', 'Post', 'Put', 'Patch', 'Delete', 'Options']),
+  // The published limiter factories. The client below hands pacing to the host
+  // rather than running a limiter, so these only need to build what a source
+  // passes to setRateLimiter.
+  RateLimit: {
+    spaced: function (options) { return { tryAcquire: function () { return { action: 0 }; }, options: options }; },
+    tokenBucket: function (options) { return { tryAcquire: function () { return { action: 0 }; }, options: options }; }
+  },
   SectionStyle: __manaEnum([
     'SimpleSingleRow', 'SimpleDoubleRow', 'SimpleHero', 'SimpleHeroPaged',
     'DetailedSingleRowPaged', 'DetailedDoubleRowPaged', 'DetailedVerticalList',
     'DetailedVerticalListGrouped'
   ]),
   AdditionalInfoType: __manaEnum(['Highlights', 'Tags', 'Staff', 'Links']),
+  // The search-form builders, as the published @mana-app/types defines them:
+  // each returns its props with a type tag (and a presentation for the menu
+  // and sheet spellings). They describe a filter form the ABI never draws —
+  // a search here is a query and a page — so the form is built and goes
+  // unread, exactly as it does when the same source runs from its built
+  // bundle, which carries these same factories.
+  FilterType: __manaEnum(['TOGGLE', 'SELECT', 'MULTISELECT', 'EXCLUDABLE_MULTISELECT', 'TEXT', 'STEPPER', 'DATEPICKER']),
+  SearchSectionType: __manaEnum(['LIST', 'TAGS', 'SORT']),
+  SearchToggle: function (props) { return Object.assign({}, props, { type: 0 }); },
+  SearchPicker: function (props) { return Object.assign({}, props, { type: 1 }); },
+  SearchMenuPicker: function (props) { return Object.assign({}, props, { type: 1, presentation: 'menu' }); },
+  SearchPickerSheet: function (props) { return Object.assign({}, props, { type: 1, presentation: 'sheet' }); },
+  SearchMultiPicker: function (props) { return Object.assign({}, props, { type: 2 }); },
+  SearchMultiPickerSheet: function (props) { return Object.assign({}, props, { type: 2, presentation: 'sheet' }); },
+  SearchExcludableMultiPicker: function (props) { return Object.assign({}, props, { type: 3 }); },
+  SearchExcludableMultiPickerSheet: function (props) { return Object.assign({}, props, { type: 3, presentation: 'sheet' }); },
+  SearchTextField: function (props) { return Object.assign({}, props, { type: 4 }); },
+  SearchStepper: function (props) { return Object.assign({}, props, { type: 5 }); },
+  SearchDatePicker: function (props) { return Object.assign({}, props, { type: 6 }); },
+  SearchGroup: function (props) {
+    if (!props || !props.children || props.children.length === 0) throw new Error('SearchGroup requires at least one child');
+    if (props.children.some(function (child) { return child && child.kind === 'group'; })) {
+      throw new Error('SearchGroup cannot contain another SearchGroup');
+    }
+    return Object.assign({}, props, { kind: 'group' });
+  },
+  SearchListSection: function (props) {
+    var children = [];
+    var groups = [];
+    for (var i = 0; i < props.children.length; i++) {
+      var item = props.children[i];
+      if (!(item && item.kind === 'group')) { children.push(item); continue; }
+      groups.push({ id: item.id, title: item.title, fieldIds: item.children.map(function (child) { return child.id; }) });
+      children.push.apply(children, item.children);
+    }
+    return Object.assign({ type: 0, header: props.header, footer: props.footer, children: children }, groups.length > 0 ? { groups: groups } : {});
+  },
+  SearchTagsSection: function (props) { return Object.assign({}, props, { type: 1 }); },
+  SearchSortSection: function (props) { return Object.assign({}, props || {}, { type: 2 }); },
   BasicAuthenticationUIIdentifier: __manaEnum(['EMAIL', 'USERNAME']),
   HttpBodyKind: __manaEnum(['Json', 'Form', 'Text', 'Bytes']),
-  RequestOrigin: __manaEnum(['Default', 'Cover', 'Page', 'Search']),
+  // The published numbering: General 0, Cover 1, Page 2. 'Default' is the
+  // older spelling of the first.
+  RequestOrigin: { General: 0, Default: 0, Cover: 1, Page: 2, 0: 'General', 1: 'Cover', 2: 'Page' },
   RateLimitAction: __manaEnum(['Allow', 'Wait']),
   // Error classes only need a name to be caught or constructed.
   CloudflareError: class extends Error {},
@@ -645,6 +993,9 @@ var __baseRequire = require;
 require = function (name) {
   var id = String(name);
   if (id.indexOf('@mana-app/types') === 0) return __manaTypes;
+  if (id === 'cheerio' && typeof __cheerio !== 'undefined') return __cheerio;
+  if (id === 'html-entities' && typeof __htmlEntities !== 'undefined') return __htmlEntities;
+  if (id === 'crypto-js' && typeof __cryptoJs !== 'undefined') return __cryptoJs;
   return __baseRequire(id);
 };
 
@@ -708,7 +1059,11 @@ async function __search(source, query, page) {
   if (typeof source.getSearchResults === 'function') {
     return __normalise(await source.getSearchResults(query, page));
   }
-  return __normalise(await __call(source, ['search'], query, page));
+  // The published \`search(request: SearchRequest)\` reads \`request.query\` and
+  // \`request.page\`. Handed the bare string, every one of them searched for
+  // \`undefined\` and answered its default listing — rows that read as results
+  // for whatever was typed.
+  return __normalise(await __call(source, ['search'], { query: query, page: page, filters: {} }));
 }
 
 ${ABI}`;
@@ -717,5 +1072,5 @@ ${ABI}`;
 export function manaEntrypoint(options: ManaEntrypointOptions): string {
 	return options.artifact.kind === 'bundle'
 		? bundleEntrypoint(options.pluginId, options.artifact.script)
-		: sourceEntrypoint(options.pluginId, options.artifact.script);
+		: sourceEntrypoint(options.pluginId, options.artifact.script, options.artifact.packages ?? []);
 }

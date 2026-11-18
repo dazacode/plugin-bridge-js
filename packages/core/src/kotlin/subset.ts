@@ -790,6 +790,10 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 	['lastOrNull', 'lastOrNull'],
 	['last', 'last'],
 	['find', 'find'],
+	// \`Regex.matches(input)\` and \`String.matches(regex)\` are one name with
+	// the receiver on either side. Passed through, the string half was
+	// \`id.matches(…)\` on a JavaScript string, which has no such method.
+	['matches', 'matches'],
 	['any', 'any'],
 	['all', 'all'],
 	['none', 'none'],
@@ -1017,6 +1021,8 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 	['maxOfOrNull', 'maxOfOrNull'],
 	['minByOrNull', 'minByOrNull'],
 	['maxByOrNull', 'maxByOrNull'],
+	['minBy', 'minBy'],
+	['maxBy', 'maxBy'],
 	['reduce', 'reduce'],
 	// `fold` is a list fold and a Result fold under one name; the receiver
 	// decides, because the emitter has no types to decide with.
@@ -1290,7 +1296,9 @@ export const ARGUMENT_LAMBDA_METHODS: ReadonlySet<string> = new Set([
 	'addCookie',
 	// Observable takes each block as a function of the value or error.
 	'doOnNext',
-	'onErrorReturn'
+	'onErrorReturn',
+	// android.os.Handler's `post { … }`: the block is the task, run later.
+	'post'
 ]);
 
 /**
@@ -1421,6 +1429,21 @@ export const RUNTIME_STATIC_REFERENCES: ReadonlyMap<string, ReadonlySet<string>>
  * is a deliberate cost rather than an oversight.
  */
 export const HOST_METHODS: ReadonlySet<string> = new Set([
+	// java.io.File's, on the path the runtime's `File(…)` builds — a path on a
+	// filesystem a plugin does not have, so every query answers "absent" and
+	// every write fails with an IOException the extension sees. See `__KFile`.
+	'exists',
+	'mkdirs',
+	'mkdir',
+	'walkTopDown',
+	'copyTo',
+	'renameTo',
+	'lastModified',
+	'setLastModified',
+	'outputStream',
+	'listFiles',
+	'createNewFile',
+	'delete',
 	// The one terminal of a `groupingBy { }` Grouping this runtime builds.
 	'eachCount',
 	// java.text.CharacterIterator's reads, on the one this runtime builds.
@@ -1811,6 +1834,10 @@ export const HOST_METHODS: ReadonlySet<string> = new Set([
 	// all, so the call is an acknowledgement of work already done.
 	'cookieJar',
 	'saveFromResponse',
+	// `.loadForRequest(url)` on the runtime's jar: the plugin's own cookies,
+	// read-only, from the host (ADR-0005 §3d). Reached only through the
+	// call-level exemption in `scanInto`; a declaration of it stays refused.
+	'loadForRequest',
 
 	// url building
 	'newBuilder',
@@ -1876,7 +1903,6 @@ export const HOST_METHODS: ReadonlySet<string> = new Set([
 	'findAll',
 	'matchEntire',
 	'containsMatchIn',
-	'matches',
 	'toPattern',
 
 	// strings that behave identically in both languages
@@ -2000,7 +2026,9 @@ export const AWAITED_HOST_METHODS: ReadonlySet<string> = new Set([
 	'sign',
 	'verify',
 	'generateKeyPair',
-	'proceed'
+	'proceed',
+	// The runtime jar's read, which asks the host — see `scanInto`.
+	'loadForRequest'
 ]);
 
 /**
@@ -2156,6 +2184,12 @@ export const FREE_FUNCTIONS: ReadonlyMap<string, string> = new Map([
 	// `require(x) { "…" }` and `requireNotNull(x) { "…" }`, which throw
 	['require', 'require'],
 	['requireNotNull', 'requireNotNull'],
+	// Kotlin's stdout, which here is the host's debug log. Bare, it fell to
+	// "a lowercase call is a member of the source" and came out as
+	// `this.println(…)` — and in a file-scope function `this` is undefined, so
+	// the first log line a shim or an extension wrote threw.
+	['println', 'println'],
+	['print', 'println'],
 	// …and their `check` siblings, which throw the same way for a state the
 	// extension did not expect rather than an argument it was handed.
 	['check', 'check'],
@@ -2269,10 +2303,11 @@ export const JSOUP_STATICS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
 	['Entities', new Set(['unescape'])],
 	['Evaluator', new Set(['Tag', 'Class', 'Id'])],
 	['TextNode', new Set<string>()],
-	// java.io.File, whose only member a plugin can honour is a temporary file
-	// handed to the player as a `data:` uri — see `__KTempFile` in the runtime.
-	// Not jsoup, but the same question: a capitalised receiver the runtime
-	// defines only in part. `File(path)` is refused in the emitter.
+	// java.io.File's statics: a temporary file handed to the player as a
+	// `data:` uri (`__KTempFile` in the runtime), or, given a directory, the
+	// failure a filesystem that is not there gives. Not jsoup, but the same
+	// question: a capitalised receiver the runtime defines only in part.
+	// `File(path)` itself is a path on that filesystem — see `__KFile`.
 	['File', new Set(['createTempFile'])]
 ]);
 
@@ -2488,8 +2523,15 @@ export const GLOBAL_NAMES: ReadonlySet<string> = new Set([
 	'PrimitiveKind',
 	'JsonNull',
 
-	/* java.io.File, as far as `File.createTempFile` goes: see `JSOUP_STATICS`. */
-	'File'
+	/* java.io.File: `File(path)` and `File.createTempFile`. See `JSOUP_STATICS`. */
+	'File',
+
+	/* kotlin.Result's two constructors, over the Result `runCatching` builds. */
+	'Result',
+
+	/* android.os.Handler on the main Looper: a block posted to run later. */
+	'Handler',
+	'Looper'
 ]);
 
 /**
@@ -2764,6 +2806,10 @@ export const SUPER_SUSPEND_MEMBERS: ReadonlySet<string> = new Set([
  */
 export const KNOWN_SIGNATURES: ReadonlyMap<string, readonly string[]> = new Map([
 	['GET', ['url', 'headers', 'cache']],
+	// kotlin.io's `File.copyTo(target, overwrite, bufferSize)`. `InputStream.
+	// copyTo(out, bufferSize)` shares the name and never takes `overwrite`, so
+	// the one spelling that is named here is the File one.
+	['copyTo', ['target', 'overwrite', 'bufferSize']],
 	['POST', ['url', 'headers', 'body', 'cache']],
 	// **The ext-lib 14 secondary constructor**, which is still what the
 	// overwhelming majority of the catalogue writes: 137 calls pass three
@@ -3206,7 +3252,17 @@ export const HOST_ENTRY_POINTS: ReadonlySet<string> = new Set([
 	'videoUrlParse',
 	'videoFromElement',
 	'videosFromElement',
-	'sortVideos'
+	'sortVideos',
+
+	// What the driver calls under its IReader dialect, and the coroutine
+	// spellings of the manga pair it calls under the others. Not roots, a
+	// template's own override of one of these — or of anything the base class
+	// reaches from one, like `getListRequest` — was pruned when it refused: a
+	// listing built on one template converted "complete", and its search went to the
+	// base class's request instead of the form post its template wrote.
+	'getMangaList',
+	'getChapterList',
+	'getPageList'
 ]);
 
 /* ── which refusals actually block ────────────────────────────────────────── */
@@ -3446,6 +3502,23 @@ function scanInto(node: KNode, memberName: string, found: Untranslatable[]): voi
 	// `ignoreUnknownKeys` and `explicitNulls = false`, which is what the
 	// runtime's decoder does. Anything else asked of Injekt stays refused.
 	if (INJECTED_JSON.test(node.text.replace(/\s+/g, ''))) return;
+
+	// The runtime jar's read, `client.cookieJar.loadForRequest(url)`: a
+	// plugin's own cookies for a host it declared, read-only, which the host
+	// answers through `ctx.http.cookies` (ADR-0005 §3d). Only the callee is
+	// forgiven, and only on a client's `cookieJar`: a class that *declares*
+	// `loadForRequest` — a jar of the extension's own — still reaches the leaf
+	// below and is refused, because the state is the host's and not the
+	// extension's to keep.
+	if (
+		node.type === 'call_expression' &&
+		/^[\w.()]*\bcookieJar\.loadForRequest\(/.test(node.text.replace(/\s+/g, ''))
+	) {
+		for (const child of node.children) {
+			if (child.type === 'call_suffix') scanInto(child, memberName, found);
+		}
+		return;
+	}
 
 	// And a fourth: `Thread.sleep(ms)`. The name table refuses `Thread` because
 	// a leaf cannot tell a pause from a thread (see the note on that entry),

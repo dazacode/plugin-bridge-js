@@ -698,6 +698,11 @@ function localRenames(
 			// imports the name from. Only when that is unambiguous — two same-named
 			// private declarations in reach is not something this can read, and
 			// guessing would bind a call to the wrong table.
+			// A star import (`import a.b.model.*`, read as `a.b.model.`) reaches
+			// it too — unless the file names the same identifier explicitly from
+			// somewhere else, which Kotlin ranks above any star. Left out, every
+			// `Text(it)` in a file importing the model package by star meant the
+			// runtime's `Text`, and a chapter's pages came back as filters.
 			const reachable = [...(owners.get(name) ?? [])].filter(
 				(path) =>
 					packages.get(path) === pkg ||
@@ -705,7 +710,9 @@ function localRenames(
 						(spec) =>
 							spec.endsWith(`.${name}`) &&
 							spec.slice(0, spec.length - name.length - 1) === packages.get(path)
-					)
+					) ||
+					(!imported.some((spec) => spec.endsWith(`.${name}`)) &&
+						imported.some((spec) => spec.endsWith('.') && spec.slice(0, -1) === packages.get(path)))
 			);
 			if (reachable.length !== 1) continue;
 			const renamed = perFile.get(reachable[0]);

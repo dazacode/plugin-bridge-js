@@ -43,6 +43,7 @@
  * before the source runs, so its own accessors find them.
  */
 
+import { BOOT_CONTEXT } from './boot-context';
 import { DIGESTS } from './digests';
 import { DOM_RUNTIME_SOURCE } from './generated/dom-source';
 import { JS_RUNTIME } from './js-runtime';
@@ -60,7 +61,15 @@ export interface SuwatteEntrypointOptions {
 		readonly id: string;
 		readonly key: string;
 		readonly type: string;
+		/** A stepper drawn as a select, for a host below level 3: read back as a number. */
+		readonly numeric?: boolean;
 	}[];
+	/**
+	 * A built `.stt`, carried verbatim in place of `modules`. It declares
+	 * `SourcePackage` at its top level, and its `bootstrap()` answers the
+	 * source instance.
+	 */
+	readonly bundle?: string;
 }
 
 /* ── the TypeScript stripper ─────────────────────────────────────────────── */
@@ -762,10 +771,41 @@ function moduleCode(module: SuwatteModule): string {
 
 /* ── the entry ───────────────────────────────────────────────────────────── */
 
+/** The source-tree half: every module registered, the entry's default export run. */
+function sourceTree(modules: readonly SuwatteModule[]): string {
+	return `${modules.map(moduleCode).join('\n\n')}
+
+var __module = __require(__ENTRY_URL);
+var __Ctor = __module.default;
+
+function __construct() {
+  if (typeof __Ctor !== 'function') {
+    throw new Error('This converted source has no default-exported runner class.');
+  }
+  return new __Ctor();
+}`;
+}
+
+/**
+ * The built half: the bundle at module scope, where its `var SourcePackage`
+ * has to be declared, then the instance its own `bootstrap()` makes.
+ */
+function builtBundle(bundle: string): string {
+	return `${bundle}
+
+function __construct() {
+  if (typeof SourcePackage !== 'object' || SourcePackage === null || typeof SourcePackage.bootstrap !== 'function') {
+    throw new Error('This converted bundle defines no SourcePackage to start.');
+  }
+  return SourcePackage.bootstrap();
+}`;
+}
+
 export function suwatteEntrypoint(options: SuwatteEntrypointOptions): string {
 	return `${DOM_RUNTIME_SOURCE}
 ${DIGESTS}
 ${JS_RUNTIME}
+${BOOT_CONTEXT}
 
 const __PLUGIN_ID = ${JSON.stringify(options.pluginId)};
 const __ENTRY_URL = ${JSON.stringify(options.entryUrl)};
@@ -806,7 +846,15 @@ function __plantSettings(ctx) {
     var value = null;
     if (ctx && ctx.settings) {
       if (setting.type === 'switch') value = ctx.settings.boolean(setting.id);
-      else if (setting.type === 'multiselect') value = ctx.settings.stringArray(setting.id);
+      // \`ctx.settings\` answers a list as \`list(id)\` (ABI §2); the source reads it
+      // back through \`ObjectStore.stringArray\`, which is the toolchain's name.
+      else if (setting.type === 'multiselect') value = ctx.settings.list(setting.id);
+      // A stepper: a number setting at level 3, or its values as a select below.
+      else if (setting.type === 'number') value = ctx.settings.number(setting.id);
+      else if (setting.numeric === true) {
+        var chosen = Number(ctx.settings.string(setting.id));
+        value = Number.isFinite(chosen) ? chosen : null;
+      }
       else value = ctx.settings.string(setting.id);
     }
     __objectStore.set(setting.key, value);
@@ -1282,10 +1330,7 @@ function __require(id) {
   return found.exports;
 }
 
-${options.modules.map(moduleCode).join('\n\n')}
-
-var __module = __require(__ENTRY_URL);
-var __Ctor = __module.default;
+${options.bundle === undefined ? sourceTree(options.modules) : builtBundle(options.bundle)}
 
 /* --- the ABI -------------------------------------------------------------- */
 
@@ -1293,10 +1338,7 @@ var __runner = null;
 
 async function __instance() {
   if (__runner !== null) return __runner;
-  if (typeof __Ctor !== 'function') {
-    throw new Error('This converted source has no default-exported runner class.');
-  }
-  __runner = new __Ctor();
+  __runner = __construct();
   if (typeof __runner.onLoad === 'function') await __runner.onLoad();
   if (typeof __runner.initialise === 'function') await __runner.initialise();
   return __runner;
@@ -1322,6 +1364,30 @@ function __page(value) {
   return { entries: entries, hasMore: decoded.isLastPage !== true && entries.length > 0 };
 }
 
+/**
+ * The Referer a source's \`SourceConfiguration\` asks its images be fetched with.
+ *
+ * The toolchain's own answer to the most common image failure — a CDN that
+ * answers 403 without one — and eighteen measured sources declare it rather
+ * than setting headers per page. The ABI's page carries headers to the byte
+ * fetch (§8.3), so it travels there; a header the page set itself wins.
+ */
+async function __imageReferer(runner) {
+  if (typeof runner.getConfiguration !== 'function') return '';
+  try {
+    var config = await runner.getConfiguration();
+    return config && typeof config.imageReferer === 'string' ? config.imageReferer : '';
+  } catch (error) {
+    return '';
+  }
+}
+
+function __hasHeader(headers, name) {
+  if (!headers) return false;
+  for (var key in headers) if (String(key).toLowerCase() === name) return true;
+  return false;
+}
+
 async function __imageRequest(page) {
   if (typeof page.willRequestImage !== 'function') return page;
   var request = { url: String(page.url || ''), headers: page.headers || {} };
@@ -1338,7 +1404,16 @@ export default {
     var runner = await __instance();
     if (typeof runner.getSearchResults !== 'function') return { entries: [] };
     var request = { query: String(query), filters: {}, sort: undefined };
-    return __page(await runner.getSearchResults(request, Math.max(1, Number(page) || 1)));
+    var found = __page(await runner.getSearchResults(request, Math.max(1, Number(page) || 1)));
+    // The configuration's image Referer applies to covers too (ABI §9.1,
+    // level 3); a host below that ignores the field, as before.
+    var referer = await __imageReferer(runner);
+    if (referer.length > 0) {
+      for (var i = 0; i < found.entries.length; i++) {
+        if (found.entries[i].posterImageUrl !== undefined) found.entries[i].posterImageHeaders = { Referer: referer };
+      }
+    }
+    return found;
   },
 
   async listChapters(sourceMediaId, ctx) {
@@ -1372,6 +1447,7 @@ export default {
     var chapterId = chapter && chapter.sourceChapterId ? String(chapter.sourceChapterId) : '';
     if (chapterId.length === 0) throw new Error('This chapter has no source id to read.');
     var rows = await runner.getChapterPages(String(sourceMediaId), chapterId);
+    var referer = await __imageReferer(runner);
     var pages = [];
     for (var i = 0; i < (rows || []).length; i++) {
       var row = rows[i];
@@ -1379,11 +1455,11 @@ export default {
       var request = await __imageRequest(row);
       var url = String(request.url || '');
       if (url.length === 0) continue;
-      pages.push({
-        index: pages.length,
-        url: url,
-        headers: request.headers && typeof request.headers === 'object' ? request.headers : undefined
-      });
+      var headers = request.headers && typeof request.headers === 'object' ? Object.assign({}, request.headers) : undefined;
+      if (referer.length > 0 && !__hasHeader(headers, 'referer')) {
+        headers = Object.assign(headers || {}, { Referer: referer });
+      }
+      pages.push({ index: pages.length, url: url, headers: headers });
     }
     var content = null;
     if (typeof runner.getContent === 'function') {

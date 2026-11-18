@@ -36,6 +36,7 @@ import { NetworkFailure, NotFoundFailure, ValidationFailure } from '@plugin-brid
 import { CookieJar } from './net/cookie-jar';
 import { hostMatches } from './host-match';
 import { plausibleTld } from './host-names';
+import type { ImageGrant } from './image-headers';
 import {
 	NO_LOG,
 	NO_NETWORK,
@@ -103,6 +104,17 @@ export const SERVED_PERMISSION = 'segment-transform-js';
 const MAX_SERVED_BYTES = 32 * 1024 * 1024;
 const MAX_CONCURRENT_SERVES = 6;
 const SERVE_TIMEOUT_MS = 30_000;
+
+/** The `Authorization` a plugin wrote on its own request, whatever its case, or null. */
+function pluginAuthorization(headers: Record<string, string> | undefined): string | null {
+	if (headers === undefined || headers === null || typeof headers !== 'object') return null;
+	for (const [name, value] of Object.entries(headers)) {
+		if (name.toLowerCase() === 'authorization' && typeof value === 'string' && value.length > 0) {
+			return value;
+		}
+	}
+	return null;
+}
 
 /** One request a player made to a served origin (`ABI.md`, `ServedRequest`). */
 export interface ServedRequest {
@@ -682,6 +694,20 @@ export class PluginSandbox {
 	}
 
 	/**
+	 * Where a host may send the headers this plugin sets on its images.
+	 *
+	 * The same set the sandbox lets the plugin reach — declared, plus what this
+	 * run learned — read at the moment the images are, since a chapter's CDN
+	 * is usually learned from the very document that lists its pages. Learned
+	 * hosts are exact and die with the run, as `learned` explains; a host
+	 * applying this must take it from the sandbox that produced the images, not
+	 * from the installed plugin's `hosts`, which never holds them.
+	 */
+	get imageGrant(): ImageGrant {
+		return { declared: this.plugin.hosts, learned: [...this.learned] };
+	}
+
+	/**
 	 * The hosts refused so far, for a caller reporting why a run came to
 	 * nothing. Empty for a plugin that stayed inside what it declared.
 	 */
@@ -759,7 +785,7 @@ export class PluginSandbox {
 					id: number;
 					ok: boolean;
 					value?: unknown;
-					error?: { name: string; message: string };
+					error?: { name: string; message: string; status?: unknown };
 			  };
 
 		if ('outbound' in data) {
@@ -802,19 +828,27 @@ export class PluginSandbox {
 		method: string;
 		args: unknown[];
 	}): Promise<void> {
-		const respond = (ok: boolean, value?: unknown, error?: string) =>
+		const respond = (ok: boolean, value?: unknown, error?: string, failure?: unknown) =>
 			this.worker?.postMessage({
 				inboundReply: true,
 				id: call.id,
 				ok,
 				value,
-				error
+				error,
+				// The status a failed request carried, and the ABI name for it, so
+				// the plugin's error — and, when the plugin does not catch it, the
+				// failure that comes back out — still says "slow down" rather than
+				// "failed". See `toFailure`.
+				...outboundFailureShape(failure)
 			});
 
 		try {
 			switch (call.method) {
 				case 'http':
 					respond(true, await this.fetchForPlugin(call.args[0] as string, call.args[1]));
+					return;
+				case 'httpCookies':
+					respond(true, this.cookiesForPlugin(call.args[0]));
 					return;
 				case 'httpPolicy':
 					// Re-read rather than trusted. The isolate validated it too, so
@@ -852,8 +886,34 @@ export class PluginSandbox {
 					respond(false, undefined, `unknown host call: ${call.method}`);
 			}
 		} catch (error) {
-			respond(false, undefined, (error as Error).message);
+			respond(false, undefined, (error as Error).message, error);
 		}
+	}
+
+	/**
+	 * The cookies this plugin may read for one URL (ADR-0005 §3d).
+	 *
+	 * Read-only, and only its own: a cookie a response to this plugin's own
+	 * request set, for a host it declared, by the same rules that would attach
+	 * it to a request for that URL. A plugin without the jar, a URL that is not
+	 * https, and a host it did not declare all answer nothing — never an error
+	 * that would tell it whether a cookie exists.
+	 */
+	private cookiesForPlugin(url: unknown): { name: string; value: string }[] {
+		if (this.cookies === null || typeof url !== 'string') return [];
+		let target: URL;
+		try {
+			target = new URL(url);
+		} catch {
+			return [];
+		}
+		if (target.protocol !== 'https:' || !this.declaredHost(target.hostname)) return [];
+		return this.cookies.readable(target, this.plugin.id);
+	}
+
+	/** Whether a host is one the plugin declared — not one learned at run time. */
+	private declaredHost(hostname: string): boolean {
+		return this.plugin.hosts.some((pattern) => hostMatches(hostname, pattern));
 	}
 
 	/**
@@ -928,6 +988,16 @@ export class PluginSandbox {
 		// again, and a policy that changed between the two would make the second
 		// one a different question.
 		const headers = this.gate.headersFor(host, options.headers ?? {});
+
+		// The plugin's own `Authorization`, and only for a host it *declared*
+		// (ADR-0005 §3c). Read from the request the plugin made, before the
+		// policy filled anything in, so it is never a value the host supplied;
+		// and dropped for a host the run only learned from a page, which the
+		// plugin never asked a viewer to trust it with. The relay then keeps it
+		// to this origin across redirects.
+		const authorization = this.declaredHost(target.hostname)
+			? pluginAuthorization(options.headers)
+			: null;
 		const attempt = async (): Promise<PluginResponse> => {
 			const response = await fetcher('/api/plugin-fetch', {
 				method: 'POST',
@@ -941,6 +1011,7 @@ export class PluginSandbox {
 					// a plugin without the permission gets the route's pre-jar
 					// behaviour exactly, including its response shape.
 					...(this.cookies === null ? {} : { cookies: cookie === '' ? {} : { send: cookie } }),
+					...(authorization === null ? {} : { authorization }),
 					// Only sent when the caller said no, so the route's default stays
 					// the route's own business rather than something every request
 					// restates.
@@ -989,10 +1060,15 @@ export class PluginSandbox {
 				// (`net/chain-repair.ts`, where the host running it has one) by the
 				// time it says this, and asking again would multiply a timeout by
 				// `attempts` inside a call racing a deadline.
+				//
+				// With its status: a relay that answered 429 is asking us to slow
+				// down, and `NetworkFailure.isRateLimited` reads exactly this. Left
+				// off, it reached the viewer as a generic network failure.
 				throw new NetworkFailure(
 					detail === undefined
 						? `The plugin proxy returned ${response.status}.`
-						: `The plugin proxy returned ${response.status}: ${detail}`
+						: `The plugin proxy returned ${response.status}: ${detail}`,
+					{ statusCode: response.status }
 				);
 			}
 			const answered = await readRelayReply(response);
@@ -1015,9 +1091,13 @@ export class PluginSandbox {
 			if (this.cookies !== null && Array.isArray(events) && events.length > 0) {
 				for (const event of events as { url?: unknown; headers?: unknown }[]) {
 					if (typeof event?.url !== 'string' || !Array.isArray(event.headers)) continue;
+					// Filed with this plugin's provenance: these arrived on its own
+					// request, which is the only way a cookie becomes readable to
+					// it (ADR-0005 §3d).
 					this.cookies.absorb(
 						event.url,
-						event.headers.filter((one): one is string => typeof one === 'string')
+						event.headers.filter((one): one is string => typeof one === 'string'),
+						this.plugin.id
 					);
 				}
 				this.log('took cookies from a response', {
@@ -1237,18 +1317,45 @@ function isAddressLiteral(host: string): boolean {
 	return /^\d{1,3}(\.\d{1,3}){3}$/.test(host) || host.includes(':');
 }
 
-/** Rebuilds a domain failure from what crossed the worker boundary. */
-function toFailure(error: { name: string; message: string }): Error {
+/**
+ * What the worker is told about a host call that failed, beyond its message.
+ *
+ * A request the relay refused carries the status it refused with; the worker
+ * puts it on the error the plugin sees, under the ABI's name for it (§5:
+ * `RateLimitedError` for a 429, `NetworkError` otherwise). Anything else adds
+ * nothing, and the plugin sees the plain error it always did.
+ */
+function outboundFailureShape(failure: unknown): { errorName?: string; status?: number } {
+	if (!(failure instanceof NetworkFailure) || failure.statusCode === undefined) return {};
+	return {
+		errorName: failure.isRateLimited ? 'RateLimitedError' : 'NetworkError',
+		status: failure.statusCode
+	};
+}
+
+/**
+ * Rebuilds a domain failure from what crossed the worker boundary.
+ *
+ * The status travels with it. `NetworkFailure.isRateLimited` is a reading of
+ * `statusCode`, and a failure rebuilt from a name and a message alone could
+ * never be rate-limited — so a relay's 429 surfaced as "could not reach", and
+ * a plugin's own `RateLimitedError` (ABI.md §5: "back off") did too. A
+ * `RateLimitedError` that names no status is a 429 by definition.
+ */
+function toFailure(error: { name: string; message: string; status?: unknown }): Error {
+	const status =
+		typeof error.status === 'number' && Number.isInteger(error.status) ? error.status : undefined;
 	switch (error.name) {
 		case 'NotFoundError':
 			return new NotFoundFailure(error.message);
+		case 'RateLimitedError':
+			return new NetworkFailure(error.message, { statusCode: status ?? 429 });
 		case 'SourceChangedError':
 		case 'NetworkError':
-		case 'RateLimitedError':
-			return new NetworkFailure(error.message);
+			return new NetworkFailure(error.message, { statusCode: status });
 		case 'UnsupportedError':
 			return new ValidationFailure(error.message);
 		default:
-			return new NetworkFailure(error.message);
+			return new NetworkFailure(error.message, { statusCode: status });
 	}
 }

@@ -147,6 +147,16 @@ export interface ConversionServices {
 	 * being granted instead.
 	 */
 	readonly loadWasm?: WasmLoader;
+	/**
+	 * The plugin API level of the host the bundle is being made for.
+	 *
+	 * Absent means the level this build implements. A conversion only reads it
+	 * where a construct has a level-3 spelling and an older one — a stepper is
+	 * a `number` setting at level 3 (`ABI.md` §9.2) and, when its values fit,
+	 * a `select` over them below it — so a host that cannot draw the first is
+	 * handed the second rather than a plugin it must refuse.
+	 */
+	readonly hostApiLevel?: number;
 }
 
 export interface ForeignAdapter {
@@ -548,6 +558,9 @@ const SHARED_SUFFIXES = new Set([
  * honest limit of reading rather than running, and it surfaces as a refusal
  * naming the host rather than as silence.
  */
+/** A line this long is a minified bundle's, not one a person wrote. */
+const MINIFIED_LINE = 2000;
+
 export function hostsInSource(source: string, limit = 24): string[] {
 	const found = new Set<string>();
 	// Comments first, and this is not a nicety. A real module carries a block
@@ -556,6 +569,7 @@ export function hostsInSource(source: string, limit = 24): string[] {
 	// consent screen as five hosts and five wildcards, next to the real ones,
 	// with nothing to tell a viewer which were which. Prose about a host is not
 	// a host.
+	const raw = source;
 	source = withoutComments(source);
 	const add = (raw: string | undefined): void => {
 		if (raw === undefined || found.size >= limit) return;
@@ -590,7 +604,26 @@ export function hostsInSource(source: string, limit = 24): string[] {
 	 * the call it sits inside, which is why this looks left rather than at the
 	 * string.
 	 */
-	const selectorCall = /\.\s*(?:select|selectFirst|closest|is|has|not|matches)\s*\($/;
+	const selectorCall =
+		/(?:\.\s*(?:select|selectFirst|closest|is|has|not|matches|find|children|parents?|siblings|next|prev|querySelector(?:All)?)|(?:^|[^\w$.])\$|\bquerySelector(?:All)?)\s*\($/;
+
+	/*
+	 * A built bundle's quoted addresses first, read from the text as written.
+	 *
+	 * A minified bundle is one line of several hundred kilobytes, and reading it
+	 * for comments a character at a time is a parse of JavaScript by heuristics:
+	 * one misread — a nested template, a regex after a keyword — and the rest of
+	 * the line is a "comment", every address in it lost, and the source refused
+	 * at request time for a host its own code names. A minifier leaves no
+	 * comments to strip, so on such a line a quoted absolute URL is code. They
+	 * come first because the scan is capped, and the noise later in a bundle's
+	 * polyfills must not crowd out the source's own API.
+	 */
+	const quotedUrl = new RegExp(`["'\`]https?:\\/\\/(${label}(?:\\.${label})+)`, 'gi');
+	for (const line of raw.split('\n')) {
+		if (line.length < MINIFIED_LINE) continue;
+		for (const match of line.matchAll(quotedUrl)) add(match[1]);
+	}
 
 	for (const match of source.matchAll(absolute)) {
 		add(literalTail(match[0].replace(/^https?:\/\//i, '')));
@@ -598,6 +631,7 @@ export function hostsInSource(source: string, limit = 24): string[] {
 	for (const match of source.matchAll(relative)) add(match[1]);
 	for (const match of source.matchAll(bare)) {
 		if (selectorCall.test(source.slice(Math.max(0, match.index - 24), match.index))) continue;
+		if (identifierPath(match[1])) continue;
 		add(match[1]);
 	}
 
@@ -612,6 +646,70 @@ export function hostsInSource(source: string, limit = 24): string[] {
 	}
 	return [...hosts].sort();
 }
+
+/**
+ * Whether a quoted dotted string is a name in code rather than a host.
+ *
+ * Only the bare pass asks this. An `https://` or a `//` in front of a string
+ * says what it is; a bare `"a.b.c"` says nothing, and code is full of them
+ * that are not addresses — a member path, a class name, a package id. The
+ * root-zone test (`plausibleTld`) refuses most, because their last label is
+ * no TLD; these are the ones it cannot, because it is one:
+ *
+ * - **Written with a capital.** A hostname in source is written lower-case,
+ *   by convention so universal that nothing in the measured corpus breaks it;
+ *   a member path almost never is — `"MUClient.search"`, `"G.Drive"`,
+ *   `"someSource.searchFilter.date"`. Lower-cased, each of those ends in a real
+ *   TLD (`.search`, `.drive`, `.date`).
+ * - **A reverse-domain package id.** `"com.example.android"` is an Android
+ *   application id sent as `X-Requested-With`, and `.android` is a TLD. A
+ *   host does not begin with `com.` or `org.`; a package id always does, as
+ *   does every Java and Kotlin namespace.
+ * - **A CSS selector the call-site test could not see.** `$("span",
+ *   "div.author")` passes its selector second, and a minified bundle renames
+ *   `$` to `e`, so `selectorCall` misses both — and `.author`, `.name` and
+ *   `.date` are TLDs. A first label that is a structural HTML tag is the
+ *   selector's own grammar; the tags that also name real subdomains (`a.`,
+ *   `img.`, `p.`, `video.`) are left out, because those are hosts too.
+ */
+function identifierPath(candidate: string): boolean {
+	if (/[A-Z]/.test(candidate)) return true;
+	const first = candidate.slice(0, candidate.indexOf('.'));
+	if (SELECTOR_TAGS.has(first)) return true;
+	return candidate.split('.').length >= 3 && PACKAGE_ROOTS.has(first);
+}
+
+/** Structural tags a selector starts with, and that no measured host does. */
+const SELECTOR_TAGS = new Set([
+	'div',
+	'span',
+	'li',
+	'ul',
+	'ol',
+	'td',
+	'tr',
+	'th',
+	'h1',
+	'h2',
+	'h3',
+	'h4',
+	'h5',
+	'h6',
+	'article',
+	'figure'
+]);
+
+/** The first labels of a package id or a JVM namespace, never of a host. */
+const PACKAGE_ROOTS = new Set([
+	'com',
+	'org',
+	'java',
+	'javax',
+	'kotlin',
+	'kotlinx',
+	'android',
+	'androidx'
+]);
 
 /**
  * The same source with its comments blanked out.
@@ -648,6 +746,43 @@ export function hostsInSource(source: string, limit = 24): string[] {
  * failure, which surfaces as a refusal naming the host, and is the direction
  * to be wrong in.
  */
+/** Whether a `/` after what has been emitted so far starts a regex, not a division. */
+function regexCanStart(emitted: readonly string[]): boolean {
+	for (let at = emitted.length - 1, seen = 0; at >= 0 && seen < 16; at -= 1, seen += 1) {
+		const char = emitted[at];
+		if (/\s/.test(char)) continue;
+		if (/[(,=:[!&|?{};+\-*%~^<>]/.test(char)) return true;
+		if (/[A-Za-z0-9_$]/.test(char)) {
+			let word = '';
+			for (let back = at; back >= 0 && /[A-Za-z0-9_$]/.test(emitted[back]); back -= 1)
+				word = emitted[back] + word;
+			return /^(?:return|typeof|case|in|of|void|throw|delete|yield|await|else|do)$/.test(word);
+		}
+		return false;
+	}
+	return true;
+}
+
+/** The index just past the regex literal starting at `from`, or `from` if there is none. */
+function regexEnd(line: string, from: number): number {
+	let inClass = false;
+	for (let at = from + 1; at < line.length; at += 1) {
+		const char = line[at];
+		if (char === '\\') {
+			at += 1;
+			continue;
+		}
+		if (char === '[') inClass = true;
+		else if (char === ']') inClass = false;
+		else if (char === '/' && !inClass) {
+			let end = at + 1;
+			while (end < line.length && /[a-z]/i.test(line[end])) end += 1;
+			return end;
+		}
+	}
+	return from;
+}
+
 function withoutComments(source: string): string {
 	const out: string[] = [];
 	// Carried across lines, because these two constructs really do span them.
@@ -708,6 +843,18 @@ function withoutComments(source: string): string {
 				inBlock = true;
 				i += 1;
 				continue;
+			}
+			// A regex literal is copied whole. Read a character at a time, a
+			// quote inside one (`/["']/`) opened a "string" that never closed,
+			// and on a minified bundle — one line — everything after it was
+			// lost: every address the source names, read as nothing.
+			if (char === '/' && regexCanStart(out)) {
+				const end = regexEnd(line, i);
+				if (end > i) {
+					for (const one of line.slice(i, end)) out.push(one);
+					i = end - 1;
+					continue;
+				}
 			}
 
 			out.push(char);

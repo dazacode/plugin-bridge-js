@@ -20,6 +20,8 @@
 
 import { describe, expect, it, vi } from 'vitest';
 
+import { NetworkFailure } from '@plugin-bridge/core/errors';
+
 import {
 	hostMatches,
 	PluginSandbox,
@@ -62,13 +64,28 @@ class FakeWorker implements Partial<Worker> {
 	postMessage(message: unknown): void {
 		const data = message as
 			| { id: number; kind: string; payload: unknown }
-			| { inboundReply: true; id: number; ok: boolean; value?: unknown; error?: string };
+			| {
+					inboundReply: true;
+					id: number;
+					ok: boolean;
+					value?: unknown;
+					error?: string;
+					errorName?: string;
+					status?: number;
+			  };
 
 		if ('inboundReply' in data) {
 			const pending = this.waiting.get(data.id);
 			this.waiting.delete(data.id);
-			if (data.ok) pending?.resolve(data.value);
-			else pending?.reject(new Error(data.error));
+			if (data.ok) {
+				pending?.resolve(data.value);
+				return;
+			}
+			// As `hostCallError` in `sandbox.worker.ts` builds it.
+			const failure = new Error(data.error) as Error & { status?: number };
+			if (data.errorName !== undefined) failure.name = data.errorName;
+			if (data.status !== undefined) failure.status = data.status;
+			pending?.reject(failure);
 			return;
 		}
 
@@ -85,11 +102,16 @@ class FakeWorker implements Partial<Worker> {
 				const value = await this.behaviour(data.kind, data.payload, host);
 				this.emit({ id: data.id, ok: true, value });
 			} catch (error) {
-				const failure = error as Error;
+				const failure = error as Error & { status?: unknown };
 				this.emit({
 					id: data.id,
 					ok: false,
-					error: { name: failure.name, message: failure.message }
+					// As `sandbox.worker.ts` sends it, status included.
+					error: {
+						name: failure.name,
+						message: failure.message,
+						...(typeof failure.status === 'number' ? { status: failure.status } : {})
+					}
 				});
 			}
 		})();
@@ -406,6 +428,67 @@ describe('what the proxy said about the requests that failed', () => {
 		// allowlist: every one of these was a host the plugin declared, so the
 		// two lists are describing genuinely different problems.
 		expect(running.refusedHosts).toEqual([]);
+	});
+});
+
+describe('a source that asks us to slow down', () => {
+	const relayRefusing = (status: number) =>
+		vi.fn<typeof fetch>(async () => Response.json({ error: 'too many requests' }, { status }));
+
+	it('surfaces a relay 429 as rate-limited, through a plugin that did not catch it', async () => {
+		// The relay's refusal was rebuilt from a message alone, on both sides of
+		// the worker, so `isRateLimited` could never be true and "try again
+		// shortly" became "could not reach the source".
+		const { sandbox } = start(
+			async (kind, _payload, host) => {
+				if (kind === 'load') return { id: PLUGIN.id };
+				return host('http', 'https://api.example.com/eps');
+			},
+			{ fetcher: relayRefusing(429) as unknown as typeof fetch }
+		);
+		const running = await sandbox;
+		const failure = await running.listEpisodes('demo').catch((error: unknown) => error);
+		expect(failure).toBeInstanceOf(NetworkFailure);
+		expect((failure as NetworkFailure).statusCode).toBe(429);
+		expect((failure as NetworkFailure).isRateLimited).toBe(true);
+	});
+
+	it('tells a plugin that catches it what it was, and keeps any other status', async () => {
+		const seen: { name: string; status?: number }[] = [];
+		const { sandbox } = start(
+			async (kind, _payload, host) => {
+				if (kind === 'load') return { id: PLUGIN.id };
+				try {
+					await host('http', 'https://api.example.com/eps');
+				} catch (error) {
+					const failure = error as Error & { status?: number };
+					seen.push({ name: failure.name, status: failure.status });
+					throw error;
+				}
+				return [];
+			},
+			{ fetcher: relayRefusing(502) as unknown as typeof fetch }
+		);
+		const running = await sandbox;
+		const failure = (await running.listEpisodes('demo').catch((e: unknown) => e)) as NetworkFailure;
+		expect(seen).toEqual([{ name: 'NetworkError', status: 502 }]);
+		expect(failure.statusCode).toBe(502);
+		expect(failure.isRateLimited).toBe(false);
+	});
+
+	it('reads a plugin’s own RateLimitedError as rate-limited', async () => {
+		// ABI.md §5: `RateLimitedError` means back off. It carries no status of
+		// its own, and is a 429 by definition.
+		const { sandbox } = start(async (kind) => {
+			if (kind === 'load') return { id: PLUGIN.id };
+			const error = new Error('The source asked us to wait.');
+			error.name = 'RateLimitedError';
+			throw error;
+		});
+		const running = await sandbox;
+		const failure = (await running.listEpisodes('demo').catch((e: unknown) => e)) as NetworkFailure;
+		expect(failure).toBeInstanceOf(NetworkFailure);
+		expect(failure.isRateLimited).toBe(true);
 	});
 });
 

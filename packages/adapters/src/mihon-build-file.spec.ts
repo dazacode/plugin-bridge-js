@@ -309,6 +309,56 @@ describe('readMihonBuildFile', () => {
 		});
 	});
 
+	describe('which block is the declaration', () => {
+		it('finds the declaration by its shape, whatever the block is named', () => {
+			// Each fork of the build plugin registers the block under its own
+			// name. Matching one spelling read one publisher and nothing out of
+			// any other, so the block is the first that holds a declaration.
+			const file = readMihonBuildFile(`plugins {
+    alias(example.plugins.extension)
+}
+
+android {
+    defaultConfig { versionCode = 99 }
+}
+
+someotherpublisher {
+    name = "A Source"
+    versionCode = 7
+    theme = "exampletheme"
+
+    source {
+        lang = "en"
+        baseUrl = "https://example.invalid"
+    }
+}
+
+dependencies {
+    implementation(project(":lib:examplelib"))
+}
+`);
+			expect(file.name).toBe('A Source');
+			expect(file.versionCode).toBe(7);
+			expect(file.theme).toBe('exampletheme');
+			expect(file.sources.map((one) => one.lang)).toEqual(['en']);
+			expect(file.libModules).toEqual(['examplelib']);
+		});
+
+		it('reads a template, which declares no sources, by the same rule', () => {
+			const file = readMihonBuildFile(`plugins {
+    alias(example.plugins.multisrc)
+}
+
+anotherpublisher {
+    baseVersionCode = 4
+    libVersion = "14"
+}
+`);
+			expect(file.libVersion).toBe('14');
+			expect(file.sources).toEqual([]);
+		});
+	});
+
 	describe('the rest of the module', () => {
 		it('reads the shared library modules a listing depends on', () => {
 			// ABI.md §8.4 has no vocabulary for these yet, so reading the

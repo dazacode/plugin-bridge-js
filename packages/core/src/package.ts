@@ -24,7 +24,11 @@
  */
 
 import type { ForeignOrigin } from './formats';
-import { parseSettingDescriptors, type SettingDescriptor } from '@plugin-bridge/core/settings';
+import {
+	parseSettingDescriptors,
+	settingsApiLevel,
+	type SettingDescriptor
+} from '@plugin-bridge/core/settings';
 import { measurementGrants } from './kotlin/grants';
 
 /** Kept well below `zip.ts`'s own caps, which apply when this is read back. */
@@ -206,8 +210,53 @@ const ENTRYPOINT = 'source';
  *     is reached with the class that extends it, so six bundles that loaded
  *     and sent every request to `undefined/…` are now refused by name.
  *     Reconvert every bundle made at 59 or earlier.
+ * 61: a Mana source published as a TypeScript tree is read with the modules
+ *     it imports from its own repository, where 60 refused every one of them
+ *     for importing a template; the stripper reads the type syntax those
+ *     templates write instead of leaving it in. A verdict stored at 60 for any
+ *     Mana source listing is a refusal this converter no longer gives.
+ *     Also at 61: a Paperback search reads the current toolchain's `items` and pages by
+ *     the source's own cursor, an instance-published source runs, and an
+ *     HTML chapter is a page — every Paperback bundle at 60 searched empty.
+ *     A file-scope reified function called from another file is given its
+ *     type, and a nested `object` read by its qualified name resolves, so an
+ *     IReader search no longer dies on `findInstance` or `Type.Search`; the
+ *     IReader shim's page rows are `mangas`. A Sora module's failure
+ *     returned as a value (`"Error: …"` where a URL belongs) is a failure
+ *     carrying its text rather than an episode id. Reconvert every bundle
+ *     made at 60 or earlier.
+ * 62: IReader's declarative base class runs (it answered every list empty);
+ *     a function-typed property is callable, named arguments with a trailing
+ *     block are placed, a call longer than its declaration goes to the base's
+ *     overload, `String.matches(Regex)` and `println` translate, and a
+ *     template's refused override of a driver-called member now blocks.
+ *     Reconvert every bundle made at 61 or earlier.
+ * 63: a generated `@Source` class gets its build file's name, language and
+ *     base URL; an Aniyomi driver request goes through the extension's own
+ *     client; java.io.File answers as a filesystem that is not there; a
+ *     helper object's own properties and suspending members, file-scope
+ *     overloads, a bare call to a reified member, an unbound
+ *     `Track::url`, a lazy reading a constructor parameter and a call the
+ *     grammar hands to a whole infix or `if` all translate faithfully; and
+ *     `mapTo` into a set, okhttp's reading of backslashes in a url, minBy,
+ *     Result, withTimeoutOrNull and a main-Looper Handler are supplied. Bundles
+ *     that refused, loaded and failed, or resolved nothing at 62 convert
+ *     differently. Reconvert every bundle made at 62 or earlier.
+ * 64: an IReader form posts its parameters and headers, the older parsed base
+ *     and the chapter choice exist, records copy by name, a star import
+ *     follows a renamed declaration, and jsoup's `Elements.first()` is null on
+ *     an empty selection. Reconvert every bundle made at 63 or earlier.
+ * 65: an OkHttp builder's live `interceptors()`, a response's `isRedirect`,
+ *     a read of the plugin's own cookies (`loadForRequest`, ADR-0005 §3d)
+ *     and `applicationContext` read unimported inside its own package are
+ *     supplied. Reconvert every bundle made at 64 or earlier.
+ * 66: a host read out of a module's code must end in a TLD that exists (the
+ *     root zone, or RFC 2606's test names) and must not be a name in code — a
+ *     capitalised member path, a package id, a selector — so manifests lose
+ *     `array.prototype.indexof`, `java.net.sockettimeoutexception` and their
+ *     `*.` siblings. Reconvert every bundle made at 65 or earlier.
  */
-export const CONVERTER_VERSION = 60;
+export const CONVERTER_VERSION = 66;
 
 export interface BundleInput {
 	readonly id: string;
@@ -401,7 +450,11 @@ export function convertedManifest(input: BundleInput): Record<string, unknown> {
 		// manifest would be asserting terms on their behalf.
 		license: spdx(input.license) ?? 'NOASSERTION',
 		...(httpUrl(input.repository) === null ? {} : { repository: httpUrl(input.repository) }),
-		yorozoPluginApi: 1,
+		// Level 3 only when the manifest needs it: a `number` setting is drawn by
+		// the host, and a host below level 3 must refuse the plugin rather than
+		// install it with a control missing (`ABI.md` §9.2). Optional level-3
+		// outputs — image headers — never raise it (§9.1).
+		yorozoPluginApi: settingsApiLevel(settings),
 		minimumYorozoVersion: '0.0.0',
 		platforms: ['android', 'ios', 'macos', 'windows', 'linux', 'web'],
 		capabilities: ['search', 'episodes', 'resolve'],

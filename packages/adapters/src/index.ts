@@ -72,6 +72,22 @@ export const FOREIGN_ADAPTERS: readonly ForeignAdapter[] = [
 	 */
 	shosetsuAdapter,
 	aidokuAdapter,
+	/*
+	 * **Ahead of both Kotlin siblings, on one ground.** A Tsundoku index is the
+	 * video sibling's array shape exactly, and the manga sibling's protobuf
+	 * schema exactly, so either sibling accepts it — the one listing a novel as
+	 * an anime, the other as manga, which is what a pasted novel `index.pb`
+	 * became. What separates them is the package name: this ecosystem's entries
+	 * are all under a `.novelextension.` segment, and both of its parses refuse
+	 * anything else. That check is narrow enough to be a negative for every
+	 * other format and accurate enough to be asked first; the cost is one extra
+	 * parse of a manga `index.pb`. The manga format's stub is refused by it on
+	 * the same check, so the stub still reaches the parser that answers it with
+	 * a sentence. Neither sibling's parse has anything equivalent, which is why
+	 * the video pair is declared ambiguous in `adapters.spec.ts` rather than
+	 * pretended apart.
+	 */
+	tsundokuAdapter,
 	// **Ahead of its sibling, deliberately.** It is the same ecosystem's manga
 	// half and its negative is the cheapest here — the index it reads is a
 	// gzipped protobuf, so a text document is refused on the magic bytes. But
@@ -82,17 +98,6 @@ export const FOREIGN_ADAPTERS: readonly ForeignAdapter[] = [
 	// with a sentence instead, and has to be asked first to get the chance.
 	mihonAdapter,
 	ireaderAdapter,
-	/*
-	 * **And ahead of the sibling, on a different ground.** A Tsundoku index is
-	 * the sibling array shape exactly, so the sibling accepts it and would list
-	 * a novel as an anime. What separates them is the package name: this
-	 * ecosystem's entries are all under a `.novelextension.` segment, and its
-	 * parse refuses anything else. That check is narrow enough to be a negative
-	 * for every other format and accurate enough to be asked first — the
-	 * sibling's parse has nothing equivalent, which is why the pair is declared
-	 * ambiguous in `adapters.spec.ts` rather than pretended apart.
-	 */
-	tsundokuAdapter,
 	aniyomiAdapter,
 	echoAdapter,
 	lnreaderAdapter,

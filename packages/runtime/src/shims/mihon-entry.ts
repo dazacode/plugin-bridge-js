@@ -321,6 +321,16 @@ function __both(response) {
  * header argues this at length and the argument is unchanged here.
  */
 const __super = {
+  /*
+   * keiyoushi's 'KeiSource.setSlugUrl(slugPath, href)', on a manga or a
+   * chapter: the url without its domain, then the slug the path keeps. An
+   * extension that declares its own one-argument 'setSlugUrl' calls this
+   * one by its second argument.
+   */
+  setSlugUrl: function (target, slugPath, href) {
+    target.setUrlWithoutDomain(href);
+    target.url = slugPath.slug(target.url);
+  },
   popularMangaParse: function (response) { return __parsePage('popularManga', response); },
   searchMangaParse: function (response) { return __parsePage('searchManga', response); },
   latestUpdatesParse: function (response) { return __parsePage('latestUpdates', response); },
@@ -670,6 +680,7 @@ function __chapterRef(sourceChapterId) {
       const memo = JSON.parse(decodeURIComponent(id.slice(at + __MEMO_MARK.length)));
       if (memo && typeof memo === 'object' && !Array.isArray(memo)) {
         chapter.url = id.slice(0, at);
+        chapter.key = chapter.url;
         chapter.memo = memo;
         return chapter;
       }
@@ -678,6 +689,9 @@ function __chapterRef(sourceChapterId) {
     }
   }
   chapter.url = id;
+  // IReader's chapter is addressed by \`key\`, as its manga is (\`__mangaRef\`).
+  // Left unset, every chapter it opened requested \`undefined\`.
+  chapter.key = id;
   return chapter;
 }
 

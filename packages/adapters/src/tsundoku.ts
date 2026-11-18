@@ -22,9 +22,13 @@
  * So a row that does not carry it is not this format's, and detection moves on
  * rather than claiming a manga catalogue and filing it as novels.
  *
- * `parseIndexBytes` has a second, stronger negative available and uses it: a
- * gzipped index must actually say `isNovel` on a row. A manga `index.pb` is
- * then refused for what it is rather than for its bytes.
+ * `parseIndexBytes` holds the binary index to the same negative. The schema is
+ * the sibling's and has no novel field, so the package is again the only
+ * thing that says what a row is: every row must be under `novelextension`, and
+ * a manga `index.pb` is refused for what it is rather than for its bytes.
+ * Without that this door accepted *any* sibling index and filed it as novels,
+ * and the sibling — which has no such negative — accepted every novel index
+ * and filed it as manga; whichever was asked first won.
  *
  * ## What converts, and what does not
  *
@@ -222,6 +226,10 @@ export const tsundokuAdapter: ForeignAdapter = {
 	 */
 	async parseIndexBytes(bytes: Uint8Array, indexUrl: string): Promise<RepositoryIndex> {
 		const index = await mihonAdapter.parseIndexBytes!(bytes, indexUrl);
+		const novel = index.plugins.every((listing) =>
+			NOVEL_PACKAGE.test(listing.origin?.foreignId ?? '')
+		);
+		if (!novel) throw new ForeignFormatError('not a Tsundoku extension index');
 		const plugins = index.plugins.map(asNovel);
 		if (plugins.length === 0) throw new ForeignFormatError('not a Tsundoku extension index');
 		return { ...index, plugins, filteredOut: 0, format: 'tsundoku' };

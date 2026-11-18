@@ -47,6 +47,7 @@ import {
 	type ForeignAdapter
 } from '@plugin-bridge/core/adapter';
 import { packageBundle } from '@plugin-bridge/core/package';
+import { walkRepositoryModules } from '@plugin-bridge/core/repository-modules';
 import { manaEntrypoint } from '@plugin-bridge/runtime/shims/mana-entry';
 import type { RepositoryIndex, RepositoryPlugin } from '@plugin-bridge/core/repository-index';
 import {
@@ -124,6 +125,9 @@ function artifactCandidates(row: Record<string, unknown>, indexUrl: string): str
 
 	return [built, ...source];
 }
+
+/** What a Mana row's `environment` may say: a source, or a tracker beside one. */
+const MANA_ENVIRONMENTS = new Set(['source', 'tracker']);
 
 /**
  * Hosts written as base64 in a bundle or a source.
@@ -205,14 +209,19 @@ export const manaAdapter: ForeignAdapter = {
 		}
 
 		// `path` (the build's folder name) plus a numeric `intents` mask is the
-		// pair no other ecosystem's entries carry.
+		// pair no other ecosystem's entries carry — and an `environment`, where
+		// a row states one, is one of this format's own two. Another format's
+		// built catalogue also writes `path` beside the runtime its bundle is
+		// for; read as this format, every such row was filed as a tracker and
+		// the repository answered with no listings and no error.
 		const rows = list.filter((entry): entry is Record<string, unknown> => {
 			if (typeof entry !== 'object' || entry === null) return false;
 			const row = entry as Record<string, unknown>;
 			return (
 				typeof row['id'] === 'string' &&
 				typeof row['name'] === 'string' &&
-				(typeof row['path'] === 'string' || typeof row['intents'] === 'number')
+				(typeof row['path'] === 'string' || typeof row['intents'] === 'number') &&
+				(row['environment'] === undefined || MANA_ENVIRONMENTS.has(String(row['environment'])))
 			);
 		});
 		if (rows.length === 0) throw new ForeignFormatError('not a Mana source index');
@@ -309,6 +318,7 @@ export const manaAdapter: ForeignAdapter = {
 			: [];
 
 		let text: string | null = null;
+		let textUrl = origin.artifactUrl;
 		let built = false;
 
 		// The built bundle first, and its failure is not fatal: a repository that
@@ -323,6 +333,7 @@ export const manaAdapter: ForeignAdapter = {
 			if (text !== null) break;
 			try {
 				text = await services.getText(candidate);
+				textUrl = candidate;
 			} catch {
 				text = null;
 			}
@@ -335,9 +346,28 @@ export const manaAdapter: ForeignAdapter = {
 			);
 		}
 
-		const script = built ? text : transpiledEntry(text, listing.name);
+		// Every file the bundle carries is scanned for hosts, not just the entry:
+		// a template three directories away is where the API address usually is.
+		let scanned = [text];
+		let script = text;
+		let packages: string[] = [];
+		if (!built) {
+			const linked = await linkedSource(
+				text,
+				textUrl,
+				String(detail['path'] ?? ''),
+				listing.name,
+				services
+			);
+			script = linked.script;
+			scanned = linked.sources;
+			packages = linked.packages;
+		}
 		const hosts = [
-			...new Set([...listing.hosts, ...hostsInSource(text), ...hostsInEncoded(text)])
+			...new Set([
+				...listing.hosts,
+				...scanned.flatMap((one) => [...hostsInSource(one), ...hostsInEncoded(one)])
+			])
 		].sort();
 
 		return packageBundle({
@@ -356,59 +386,282 @@ export const manaAdapter: ForeignAdapter = {
 				// Which half of the shim to emit. The bundle needs the host bridge
 				// and nothing else; a source file needs a base class, because in a
 				// single file nothing supplies one.
-				artifact: built ? { kind: 'bundle', script } : { kind: 'source', script }
+				artifact: built ? { kind: 'bundle', script } : { kind: 'source', script, packages }
 			})
 		});
 	}
 };
 
-/**
- * The source path: one TypeScript entry file, made runnable.
- *
- * Only reached for a repository with no build output, which is why it can be
- * this narrow. Every import is inspected rather than rewritten:
- *
- * - `@mana-app/types` becomes a destructure from the shim's module, because
- *   that package is a *types* package and exists at runtime only as the few
- *   enums and the HTTP client the published build would have baked in;
- * - anything else is refused by name.
- *
- * Leaving a relative import in place is not an option: a module inside a bundle
- * has no resolver behind it, so the emitted code parses and then dies with
- * "Cannot find module './MadaraApi'".
- */
-function transpiledEntry(text: string, name: string): string {
-	const refused: string[] = [];
-	for (const match of text.matchAll(
-		/^[ \t]*import\s+(?!type\b)[\s\S]*?\sfrom\s*['"]([^'"]+)['"]/gm
-	)) {
-		const specifier = match[1];
-		if (!specifier.startsWith('@mana-app/types')) refused.push(specifier);
-	}
+/** The source layouts a row's path is read at, as `artifactCandidates` spells them. */
+const SOURCE_LAYOUTS = [
+	(path: string) => `src/sources/${path}/index.ts`,
+	(path: string) => `src/${path}/main.ts`,
+	(path: string) => `src/${path}/index.ts`
+];
 
-	const relative = refused.filter((one) => one.startsWith('.'));
-	if (relative.length > 0) {
+/**
+ * The repository an entry file was read from: its URL with the layout removed.
+ *
+ * Recovered from the URL rather than stored on the listing, because the layout
+ * is one of three fixed spellings of the row's own path, and so a listing
+ * stored before this existed reads the same root.
+ */
+function sourceRoot(entryUrl: string, path: string): string | null {
+	for (const layout of SOURCE_LAYOUTS) {
+		const suffix = layout(path);
+		if (path.length > 0 && entryUrl.endsWith(`/${suffix}`)) {
+			return entryUrl.slice(0, entryUrl.length - suffix.length);
+		}
+	}
+	return null;
+}
+
+/** Imports that carry a value: not `import type`, not a list of types only. */
+function valueImports(source: string): { specifier: string; statement: string }[] {
+	const found: { specifier: string; statement: string }[] = [];
+	for (const match of source.matchAll(
+		/^[ \t]*(?:import|export)\s+(type\s+)?([^;'"]*?)\s*from\s*['"]([^'"]+)['"]|^[ \t]*import\s*['"]([^'"]+)['"]/gm
+	)) {
+		if (match[4] !== undefined) {
+			found.push({ specifier: match[4], statement: match[0] });
+			continue;
+		}
+		if (match[1] !== undefined) continue;
+		const clause = match[2].trim();
+		// `import { type A, type B }` is as empty at runtime as `import type`.
+		const list = /^\{([^}]*)\}$/.exec(clause);
+		if (
+			list !== null &&
+			list[1]
+				.split(',')
+				.map((one) => one.trim())
+				.filter((one) => one.length > 0)
+				.every((one) => /^type\s/.test(one))
+		) {
+			continue;
+		}
+		found.push({ specifier: match[3], statement: match[0] });
+	}
+	// A CommonJS `require('x')` reaches a module as surely as an import does,
+	// and one left in a bundle fails at load rather than at conversion.
+	for (const match of source.matchAll(
+		/(?:^|[^A-Za-z0-9_$.])require\s*\(\s*['"]([^'"]+)['"]\s*\)/gm
+	)) {
+		found.push({ specifier: match[1], statement: match[0] });
+	}
+	return found;
+}
+
+/**
+ * Where a TypeScript specifier may be read, best first.
+ *
+ * This ecosystem writes `../../lib/client.ts`, `../lib/books` and, once in a
+ * while, `./x.js` for a file that is `x.ts` — the three conventions a bundler
+ * resolves. Nothing past those: a specifier that names no file under any of
+ * them is missing, and refused as such.
+ */
+function typescriptCandidates(resolved: string): string[] {
+	if (/\.ts$/.test(resolved)) return [resolved];
+	if (/\.js$/.test(resolved)) return [resolved.replace(/\.js$/, '.ts'), resolved];
+	return [`${resolved}.ts`, `${resolved}/index.ts`, `${resolved}.js`, `${resolved}/index.js`];
+}
+
+/**
+ * How many sibling modules one source may carry, and how deep they may nest.
+ *
+ * Measured: the largest closure in the corpus is 25 files, three levels deep,
+ * from a repository whose sources all extend one shared template. The bound is
+ * above that with room, and below anything that would make one conversion an
+ * unreasonable number of requests.
+ */
+const MAX_SOURCE_MODULES = 40;
+
+/**
+ * The third-party packages a source tree may import, and what the shim answers
+ * each with.
+ *
+ * Measured: of 139 Mana entry closures, 116 import `cheerio`, 80
+ * `html-entities` and 52 `crypto-js`, and those three are the whole of what
+ * stood between most of the 120 refused for packages and a bundle. Each is
+ * answered by a compatible subset the runtime carries (`shims/cheerio.ts`,
+ * `shims/js-libraries.ts`), kept to the members the corpus calls; a member
+ * outside it fails by name. Anything else — `moment`, `simple-url`,
+ * `crypto-es` — is still refused.
+ */
+const SUPPLIED_PACKAGES: Readonly<Record<string, string>> = {
+	cheerio: '__cheerio',
+	'html-entities': '__htmlEntities',
+	'crypto-js': '__cryptoJs'
+};
+const MAX_SOURCE_DEPTH = 6;
+
+/**
+ * The source path: a TypeScript entry file and every sibling it imports, made
+ * runnable as one script.
+ *
+ * Only reached for a repository with no build output. The entry is the row's
+ * `main.ts` or `index.ts`; what it imports from its own repository — the
+ * template it extends, a client, a parser — is fetched with the same walker the
+ * Hayase adapter uses, and each module is stripped and wrapped in a function
+ * that returns its exports. Deepest first, so a module exists before whatever
+ * reads it. An import becomes a destructure of that module's object; the entry
+ * runs last, unwrapped, so its `Target` is what the shim finds.
+ *
+ * Every import is still inspected rather than guessed:
+ *
+ * - `@mana-app/types` becomes the shim's module, because that package is a
+ *   *types* package and exists at runtime only as the few enums and the HTTP
+ *   client the published build would have baked in;
+ * - a relative import that cannot be read, climbs out of the repository, closes
+ *   a cycle or lies past the bound is refused by name — a module inside a
+ *   bundle has no resolver behind it, and a missing one parses and then dies
+ *   with "Cannot find module" at the first call;
+ * - any other bare module, anywhere in the closure, is refused by name.
+ */
+async function linkedSource(
+	text: string,
+	entryUrl: string,
+	path: string,
+	name: string,
+	services: ConversionServices
+): Promise<{ script: string; sources: string[]; packages: string[] }> {
+	const relativeOf = (source: string): string[] =>
+		valueImports(source)
+			.map((one) => one.specifier)
+			.filter((one) => one.startsWith('.'));
+
+	const root = sourceRoot(entryUrl, path);
+	const entryRelative = relativeOf(text);
+	if (root === null && entryRelative.length > 0) {
 		throw new ForeignFormatError(
-			`"${name}" is published as source and imports ${relative
+			`"${name}" is published as source and imports ${entryRelative
 				.map((one) => `"${one}"`)
-				.join(', ')}. This build reads a single file, so the helpers it expects are not in ` +
-				'the bundle.',
+				.join(', ')}, from a file at no layout this format uses, so where its repository ` +
+				'begins is unknown.',
 			['relativeModuleImports']
 		);
 	}
-	if (refused.length > 0) {
+
+	const walk = await walkRepositoryModules(
+		{ source: text, url: entryUrl },
+		{
+			root: root ?? entryUrl,
+			getText: services.getText,
+			specifiers: relativeOf,
+			candidates: typescriptCandidates,
+			maxModules: MAX_SOURCE_MODULES,
+			maxDepth: MAX_SOURCE_DEPTH
+		}
+	);
+
+	const quoted = (list: readonly { specifier: string }[]): string =>
+		[...new Set(list.map((one) => `"${one.specifier}"`))].join(', ');
+	if (walk.escaped.length > 0) {
 		throw new ForeignFormatError(
-			`"${name}" is published as source and imports ${refused
+			`"${name}" imports ${quoted(walk.escaped)}, which resolves outside its own repository. ` +
+				'Code is read only from the repository the listing came from.',
+			['relativeModuleEscapes']
+		);
+	}
+	if (walk.missing.length > 0) {
+		throw new ForeignFormatError(
+			`"${name}" imports ${quoted(walk.missing)}, and no file at that path could be read from ` +
+				'its repository.',
+			['relativeModuleMissing']
+		);
+	}
+	if (walk.cycles.length > 0) {
+		throw new ForeignFormatError(
+			`"${name}" has modules that import each other (${quoted(walk.cycles)}). A cycle needs ` +
+				'live bindings, which a bundle linked in dependency order does not have.',
+			['relativeModuleCycle']
+		);
+	}
+	if (walk.truncated) {
+		throw new ForeignFormatError(
+			`"${name}" imports more of its repository than one conversion reads ` +
+				`(${MAX_SOURCE_MODULES} files, ${MAX_SOURCE_DEPTH} levels deep).`,
+			['relativeModuleBound']
+		);
+	}
+
+	const sources = [...walk.modules.map((one) => one.source), text];
+	const imported = [
+		...new Set(
+			sources.flatMap((one) =>
+				valueImports(one)
+					.map((found) => found.specifier)
+					.filter((found) => !found.startsWith('.') && !found.startsWith('@mana-app/types'))
+			)
+		)
+	];
+	const packages = imported.filter((one) => SUPPLIED_PACKAGES[one] !== undefined);
+	const bare = imported.filter((one) => SUPPLIED_PACKAGES[one] === undefined);
+	if (bare.length > 0) {
+		throw new ForeignFormatError(
+			`"${name}" is published as source and imports ${bare
 				.map((one) => `"${one}"`)
 				.join(', ')}, which a converted bundle cannot resolve.`,
 			['packageImports']
 		);
 	}
 
-	return stripTypescript(text, (specifier) =>
-		specifier.startsWith('@mana-app/types') ? '__manaTypes' : null
-	).code;
+	const variables = new Map<string, string>(
+		walk.modules.map((one, index) => [one.url, `__manaModule${index}`])
+	);
+	const linker = (imports: Readonly<Record<string, string>>) => (specifier: string) => {
+		if (specifier.startsWith('@mana-app/types')) return '__manaTypes';
+		if (SUPPLIED_PACKAGES[specifier] !== undefined) return SUPPLIED_PACKAGES[specifier];
+		if (!specifier.startsWith('.')) return null;
+		const url = imports[specifier];
+		const variable = url === undefined ? undefined : variables.get(url);
+		// Only a type-only import reaches here unwalked, and the stripper drops
+		// those before asking; anything else is a linker bug, refused loudly.
+		if (variable === undefined) {
+			throw new ForeignFormatError(
+				`"${name}" imports "${specifier}", which this build read but could not link.`,
+				['relativeModuleImports']
+			);
+		}
+		return variable;
+	};
+
+	const wrapped = walk.modules.map((one, index) => {
+		const stripped = stripTypescript(one.source, linker(one.imports));
+		// A bare local is read through `typeof`: `export { Options }` may name
+		// an interface, which has no value, and reading one would throw at load
+		// over something no caller can use anyway.
+		const own = stripped.bindings
+			.map((binding) => {
+				const value = /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(binding.local)
+					? `typeof ${binding.local} === 'undefined' ? undefined : ${binding.local}`
+					: binding.local;
+				return `${JSON.stringify(binding.exported)}: ${value}`;
+			})
+			.join(', ');
+		return (
+			`/* ${one.specifier} */\nvar __manaModule${index} = (function () {\n${stripped.code}\n` +
+			`return __manaLink([${stripped.spread.join(', ')}], { ${own} });\n})();`
+		);
+	});
+	const entry = stripTypescript(text, linker(walk.entryImports));
+	const script =
+		walk.modules.length === 0 ? entry.code : `${MANA_LINK}\n${wrapped.join('\n')}\n${entry.code}`;
+	return { script, sources, packages };
 }
+
+/**
+ * What a linked module returns: everything it re-exported wholesale, then its
+ * own exports over them. `default` is never carried by `export *`, as in ES.
+ */
+const MANA_LINK = `function __manaLink(spread, own) {
+  var all = {};
+  for (var i = 0; i < spread.length; i++) {
+    for (var key in spread[i]) if (key !== 'default') all[key] = spread[i][key];
+  }
+  for (var name in own) all[name] = own[name];
+  return all;
+}`;
 
 /** What a stripped module still declares, for a caller that needs to find it. */
 export interface StrippedModule {
@@ -417,6 +670,14 @@ export interface StrippedModule {
 	readonly exports: readonly string[];
 	/** The name behind `export default`, or null. */
 	readonly defaultName: string | null;
+	/**
+	 * Each export as the expression that reads it, for a linker: a local name,
+	 * or `<module>.<member>` for one re-exported from a module `moduleFor`
+	 * named. `default` is spelled as such.
+	 */
+	readonly bindings: readonly { readonly exported: string; readonly local: string }[];
+	/** Modules re-exported wholesale (`export * from`), as `moduleFor` named them. */
+	readonly spread: readonly string[];
 }
 
 const DECLARATORS = new Set(['const', 'let', 'var']);
@@ -429,6 +690,11 @@ const MEMBER_MODIFIERS = new Set([
 	'abstract',
 	'declare'
 ]);
+/** Text ending in a keyword that is followed by an operand, never by an operator. */
+const AFTER_KEYWORD =
+	/(?:^|[^A-Za-z0-9_$.])(?:return|typeof|case|in|of|void|throw|delete|yield|await|else|do)\s*$/;
+/** A type so far that still needs an operand: a union, an intersection, an operator. */
+const TYPE_OPERAND = /(?:[|&]|(?:^|[^A-Za-z0-9_$])(?:readonly|keyof|typeof|unique|is))$/;
 /** Type-position words that end the member a modifier belongs to. */
 const CLASS_KEYWORDS = new Set(['class', 'interface', 'function']);
 
@@ -462,6 +728,8 @@ export function stripTypescript(
 ): StrippedModule {
 	const out: string[] = [];
 	const names: string[] = [];
+	const bindings: { exported: string; local: string }[] = [];
+	const spread: string[] = [];
 	let defaultName: string | null = null;
 	cursor = 0;
 
@@ -550,21 +818,63 @@ export function stripTypescript(
 				at += 1;
 				continue;
 			}
-			if (char === '\n' && depth === 0) return at;
+			if (char === '\n' && depth === 0) {
+				// A type may start on the next line, or continue there with a
+				// union member: `x as\n  | A\n  | B`.
+				const next = forward(at);
+				const continues =
+					(next === '|' || next === '&') && source.charAt(source.indexOf(next, at) + 1) !== next;
+				if (started && !continues) return at;
+				at += 1;
+				continue;
+			}
 			if (/\s/.test(char)) {
 				at += 1;
 				continue;
+			}
+			// `x as unknown as T`: a second `as` ends the first type, and is read
+			// again by the caller as an assertion of its own.
+			if (
+				depth === 0 &&
+				started &&
+				char === 'a' &&
+				/^as\s/.test(source.slice(at, at + 3)) &&
+				!/[A-Za-z0-9_$]/.test(source.charAt(at - 1))
+			) {
+				return at;
+			}
+			// A function type's arrow is one token, and its `>` closes nothing.
+			// Inside brackets it is always the type's; at the top it is the
+			// type's only after a parameter list — `(a: T): R => …` is an arrow
+			// function whose return type ended at `R`.
+			if (char === '=' && source.charAt(at + 1) === '>') {
+				if (depth > 0 || source.slice(from, at).trimEnd().endsWith(')')) {
+					started = true;
+					at += 2;
+					continue;
+				}
+				return at;
 			}
 			if (char === '(' || char === '[' || char === '<') depth += 1;
 			else if (char === '{') {
 				// The first `{` of a type is an object type and belongs to it; a
 				// later one is the body of whatever declared the type.
-				if (depth === 0 && started) return at;
+				// …unless the type is still asking for an operand: `A | { b }`,
+				// `A & { b }` and `readonly { b }[]` are each one type, and the
+				// brace is the rest of it.
+				if (depth === 0 && started && !TYPE_OPERAND.test(source.slice(from, at).trimEnd())) {
+					return at;
+				}
 				depth += 1;
 			} else if (char === ')' || char === ']' || char === '}' || char === '>') {
 				if (depth === 0) return at;
 				depth -= 1;
-			} else if (depth === 0 && (char === ',' || char === ';' || char === '=' || char === '\n')) {
+			} else if (
+				depth === 0 &&
+				// A `:` at the top of a type ends it: `c ? x as T : y` is a
+				// ternary's else, and a type only holds a colon inside brackets.
+				(char === ',' || char === ';' || char === '=' || char === '\n' || char === ':')
+			) {
 				return at;
 			} else if (depth === 0 && char === '|' && source.charAt(at + 1) === '|') return at;
 			else if (depth === 0 && char === '&' && source.charAt(at + 1) === '&') return at;
@@ -612,12 +922,73 @@ export function stripTypescript(
 		return 'call';
 	};
 
+	/**
+	 * `const a = f(), b: T = []` — the second declarator of a list.
+	 *
+	 * The walk below stops at the first `=` it meets, which is the first
+	 * declarator's initializer, so `b: T` read as an object key and the type
+	 * stayed in. Here the name before the colon is followed back to a comma, and
+	 * from the comma, at the same bracket depth, to either a declaring keyword
+	 * (a declarator list) or an open bracket or `;` (anything else — an object
+	 * literal, an argument list).
+	 */
+	const declaratorAfterComma = (at: number): boolean => {
+		let scan = at - 1;
+		while (scan >= 0 && /\s/.test(source.charAt(scan))) scan -= 1;
+		if (scan >= 0 && (source.charAt(scan) === '}' || source.charAt(scan) === ']')) {
+			scan = matchingBack(scan) - 1;
+		} else {
+			if (!/[A-Za-z0-9_$]/.test(source.charAt(scan))) return false;
+			while (scan >= 0 && /[A-Za-z0-9_$]/.test(source.charAt(scan))) scan -= 1;
+		}
+		while (scan >= 0 && /\s/.test(source.charAt(scan))) scan -= 1;
+		if (source.charAt(scan) !== ',') return false;
+		for (let walk = scan - 1, guard = 0; walk >= 0 && guard < 4096; walk -= 1, guard += 1) {
+			const char = source.charAt(walk);
+			if (char === ')' || char === ']' || char === '}') {
+				const open = matchingBack(walk);
+				if (open < 0) return false;
+				walk = open;
+				continue;
+			}
+			if (char === '"' || char === "'" || char === '`') {
+				let open = walk - 1;
+				while (open >= 0 && !(source.charAt(open) === char && source.charAt(open - 1) !== '\\'))
+					open -= 1;
+				if (open < 0) return false;
+				walk = open;
+				continue;
+			}
+			if (char === '(' || char === '[' || char === '{' || char === ';') return false;
+			if (/[a-z]/.test(char) && !/[A-Za-z0-9_$]/.test(source.charAt(walk + 1))) {
+				const word = /([A-Za-z_$][A-Za-z0-9_$]*)$/.exec(
+					source.slice(Math.max(0, walk - 16), walk + 1)
+				);
+				if (
+					word !== null &&
+					DECLARATORS.has(word[1]) &&
+					!/[A-Za-z0-9_$.]/.test(source.charAt(walk - word[1].length)) &&
+					// `x as const, key: v` is an object literal; the `const` there
+					// is an assertion, not a declaration.
+					!/\bas\s*$/.test(
+						source.slice(Math.max(0, walk - word[1].length - 8), walk - word[1].length + 1)
+					)
+				) {
+					return true;
+				}
+			}
+		}
+		return false;
+	};
+
 	const colonIsType = (at: number): boolean => {
 		if (back(at) === '?') return true;
 		if ((ternaries[stack.length] ?? 0) > 0) return false;
 
 		const kind = innermost();
 		if (kind === 'params' || kind === 'class') return true;
+
+		if (declaratorAfterComma(at)) return true;
 
 		// `): T {` — a return position, so the close of a parameter list.
 		if (back(at) === ')') {
@@ -638,11 +1009,32 @@ export function stripTypescript(
 				at2 = open - 1;
 				continue;
 			}
+			// A string is skipped whole: `{ id: "letter", title: … }` holds the
+			// letters `let`, and they declare nothing.
+			if (char === '"' || char === "'" || char === '`') {
+				let open = at2 - 1;
+				while (open >= 0 && !(source.charAt(open) === char && source.charAt(open - 1) !== '\\')) {
+					open -= 1;
+				}
+				if (open < 0) return false;
+				at2 = open - 1;
+				continue;
+			}
 			if (char === '=' || char === ';' || char === '\n') return false;
-			const word = /([A-Za-z_$][A-Za-z0-9_$]*)\s*$/.exec(
-				source.slice(Math.max(0, at2 - 48), at2 + 1)
-			);
-			if (word !== null && DECLARATORS.has(word[1])) return true;
+			// …and a declarator is a whole word, not the start of `letters`,
+			// nor the `const` of an `as const` assertion.
+			if (!/[A-Za-z0-9_$]/.test(source.charAt(at2 + 1))) {
+				const word = /([A-Za-z_$][A-Za-z0-9_$]*)\s*$/.exec(
+					source.slice(Math.max(0, at2 - 48), at2 + 1)
+				);
+				if (
+					word !== null &&
+					DECLARATORS.has(word[1]) &&
+					!/\bas\s+[A-Za-z_$]+\s*$/.test(source.slice(Math.max(0, at2 - 64), at2 + 1))
+				) {
+					return true;
+				}
+			}
 			at2 -= 1;
 		}
 		return false;
@@ -653,9 +1045,29 @@ export function stripTypescript(
 		const before = back(at);
 		if (!/[A-Za-z0-9_$)\]]/.test(before)) return -1;
 		let depth = 0;
+		let parens = 0;
+		/** What the list holds, with object types and arrows taken out. */
+		let flat = '';
 		for (let scan = at; scan < source.length; scan += 1) {
 			const char = source.charAt(scan);
-			if (char === '<') depth += 1;
+			// An object type is opaque here: `Map<string, { at: number; v: T }>`
+			// has a `;` and maybe a newline that say nothing about the list.
+			if (char === '{') {
+				const close = matching(scan);
+				if (close < 0) return -1;
+				scan = close;
+				continue;
+			}
+			// A function type's arrow is one token; its `>` closes nothing.
+			if (char === '=' && source.charAt(scan + 1) === '>') {
+				scan += 1;
+				continue;
+			}
+			if (char === '(') parens += 1;
+			else if (char === ')') {
+				if (parens === 0) return -1;
+				parens -= 1;
+			} else if (char === '<') depth += 1;
 			else if (char === '>') {
 				depth -= 1;
 				if (depth === 0) {
@@ -663,9 +1075,46 @@ export function stripTypescript(
 					if (after !== '(' && after !== '{' && after !== '[') return -1;
 					const inside = source.slice(at + 1, scan);
 					if (inside.length === 0 || inside.length > 240) return -1;
-					return /&&|\|\||[;=]|\n/.test(inside) ? -1 : scan;
+					return /&&|\|\||[;=]|\n/.test(flat) ? -1 : scan;
 				}
-			} else if (char === ';' || char === '\n' || char === ')' || char === '=') return -1;
+			} else if (char === ';' || char === '\n' || char === '=') return -1;
+			if (scan > at) flat += char;
+		}
+		return -1;
+	};
+
+	/**
+	 * `<string>value` and `<T>(x) => …`: a type list where an *expression*
+	 * starts.
+	 *
+	 * Nothing can be compared there — a `<` with no left operand is not a
+	 * comparison — so a `<…>` holding only type characters, followed by the
+	 * start of an expression, is either an old-style assertion or a generic
+	 * arrow's type parameters, and in both the list goes and the rest stays.
+	 */
+	const prefixTypeList = (at: number): number => {
+		const before = back(at);
+		const word = /([A-Za-z_$][A-Za-z0-9_$]*)\s*$/.exec(source.slice(Math.max(0, at - 16), at));
+		const expressionStart =
+			/[=(,:[!&|?{};]/.test(before) ||
+			(word !== null && AFTER_KEYWORD.test(source.slice(Math.max(0, at - 16), at)));
+		if (!expressionStart || (/[A-Za-z0-9_$)\]]/.test(before) && word === null)) return -1;
+		let depth = 0;
+		for (let scan = at; scan < source.length && scan - at < 240; scan += 1) {
+			const char = source.charAt(scan);
+			if (char === '<') depth += 1;
+			else if (char === '>') {
+				depth -= 1;
+				if (depth === 0) {
+					const inside = source.slice(at + 1, scan);
+					if (
+						inside.trim().length === 0 ||
+						!/^[\w$.,\s|&'"[\]<>]*(?:\s+extends\s+[\w$.,\s|&'"[\]<>]*)?$/.test(inside)
+					)
+						return -1;
+					return /[A-Za-z0-9_$('"`[!-]/.test(forward(scan + 1)) ? scan : -1;
+				}
+			} else if (!/[\w$.,\s|&'"[\]]/.test(char)) return -1;
 		}
 		return -1;
 	};
@@ -676,6 +1125,18 @@ export function stripTypescript(
 		let depth = 0;
 		while (at < source.length) {
 			const char = source.charAt(at);
+			// A comment is opaque: its text is prose, and a line break inside a
+			// block comment between two union members is not the end of the type.
+			if (char === '/' && source.charAt(at + 1) === '*') {
+				const end = source.indexOf('*/', at + 2);
+				at = end < 0 ? source.length : end + 2;
+				continue;
+			}
+			if (char === '/' && source.charAt(at + 1) === '/') {
+				const end = source.indexOf('\n', at);
+				at = end < 0 ? source.length : end;
+				continue;
+			}
 			if (char === '"' || char === "'" || char === '`') {
 				at += 1;
 				while (at < source.length && source.charAt(at) !== char) {
@@ -688,16 +1149,20 @@ export function stripTypescript(
 				// A union or an intersection continues on the next line, so a
 				// line ending in one is not the end of the declaration.
 				const before = source.slice(0, at).trimEnd();
+				// The next thing that is not a comment: a union member may be
+				// documented on the lines above it.
 				const next = source
 					.slice(at + 1)
-					.trimStart()
+					.replace(/^(?:\s+|\/\/[^\n]*|\/\*[\s\S]*?\*\/)*/, '')
 					.charAt(0);
 				if (char === ';') return at + 1;
 				if (/[|&=,([<{]/.test(before.charAt(before.length - 1))) {
 					at += 1;
 					continue;
 				}
-				if (next === '|' || next === '&' || next === '}') {
+				// …and so does a line that closes a generic opened above it:
+				// `Pick<\n  Model,\n  "a" | "b"\n>;`.
+				if (next === '|' || next === '&' || next === '}' || next === '>') {
 					at += 1;
 					continue;
 				}
@@ -744,8 +1209,24 @@ export function stripTypescript(
 		const specifier = whole?.[3] ?? bare?.[1] ?? '';
 		// The expression the module is reached by: an object for a package this
 		// build supplies, a call for one the runtime registry holds.
-		const target = moduleFor(specifier) ?? `__manaRequire(${JSON.stringify(specifier)})`;
 		const clause = (whole?.[2] ?? '').trim();
+		// Asked only when the import carries a value: a list of nothing but types
+		// names no module at runtime, and a linker that never walked it — which it
+		// should not, there being nothing to read — must not be asked to link it.
+		const named = /\{([^}]*)\}/.exec(clause);
+		const onlyTypes =
+			named !== null &&
+			clause
+				.replace(/\{[^}]*\}/, '')
+				.replace(/,/g, '')
+				.trim().length === 0 &&
+			named[1]
+				.split(',')
+				.map((one) => one.trim())
+				.filter((one) => one.length > 0)
+				.every((one) => /^type\s/.test(one));
+		if (onlyTypes) return end;
+		const target = moduleFor(specifier) ?? `__manaRequire(${JSON.stringify(specifier)})`;
 		if (clause.length === 0) {
 			push(`${target};`);
 			return end;
@@ -758,14 +1239,16 @@ export function stripTypescript(
 		if (defaulted !== null && namespace === null) {
 			parts.push(`const ${defaulted[1]} = ${target}.default;`);
 		}
-		const named = /\{([^}]*)\}/.exec(clause);
 		if (named !== null) {
 			// An import renames with `as`; a destructuring renames with `:`, and
-			// the two spellings are not interchangeable.
+			// the two spellings are not interchangeable. A `type` field names
+			// nothing at runtime and is dropped, so a list of nothing but types
+			// imports nothing — as TypeScript itself elides it — rather than
+			// reaching for a module that may not be there.
 			const fields = named[1]
 				.split(',')
-				.map((one) => one.trim().replace(/^type\s+/, ''))
-				.filter((one) => one.length > 0)
+				.map((one) => one.trim())
+				.filter((one) => one.length > 0 && !/^type\s/.test(one))
 				.map((one) => one.replace(/\s+as\s+/, ': '));
 			if (fields.length > 0) parts.push(`const { ${fields.join(', ')} } = ${target};`);
 		}
@@ -783,6 +1266,7 @@ export function stripTypescript(
 			if (declaration !== null) {
 				defaultName = declaration[2];
 				names.push(declaration[2]);
+				bindings.push({ exported: 'default', local: declaration[2] });
 				return from + defaultDeclaration[0].length;
 			}
 			const reference = /^([A-Za-z_$][A-Za-z0-9_$]*)\s*;?/.exec(
@@ -794,6 +1278,7 @@ export function stripTypescript(
 				]);
 			}
 			defaultName = reference[1];
+			bindings.push({ exported: 'default', local: reference[1] });
 			return from + defaultDeclaration[0].length;
 		}
 
@@ -801,16 +1286,44 @@ export function stripTypescript(
 		if (/^export\s+type\b/.test(text)) return typeStatementEnd(from);
 		if (/^export\s+interface\b/.test(text)) return statementEnd(from);
 
-		const named = /^export\s*\{([^}]*)\}\s*(?:from\s*['"][^'"]*['"])?\s*;?/.exec(text);
+		const named = /^export\s*\{([^}]*)\}\s*(?:from\s*['"]([^'"]*)['"])?\s*;?/.exec(text);
 		if (named !== null) {
+			// Re-exported from elsewhere, the value is that module's member, and
+			// it is reached through the module rather than as a local name the
+			// file never declared.
+			const origin =
+				named[2] === undefined
+					? null
+					: (moduleFor(named[2]) ?? `__manaRequire(${JSON.stringify(named[2])})`);
 			for (const one of named[1].split(',')) {
-				const name = one
-					.trim()
-					.split(/\s+as\s+/)
-					.pop();
-				if (name !== undefined && name.length > 0) names.push(name);
+				const field = one.trim();
+				if (field.length === 0 || /^type\s/.test(field)) continue;
+				const [local, exported = local] = field.split(/\s+as\s+/).map((part) => part.trim());
+				names.push(exported);
+				bindings.push({ exported, local: origin === null ? local : `${origin}.${local}` });
 			}
 			return from + named[0].length;
+		}
+		const star =
+			/^export\s*\*\s*(?:as\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*)?from\s*['"]([^'"]*)['"]\s*;?/.exec(
+				text
+			);
+		if (star !== null) {
+			// Wholesale is only readable when the module behind it is one this
+			// build linked, because only then are its members known at runtime.
+			const target = moduleFor(star[2]);
+			if (target === null) {
+				throw new ForeignFormatError('This source re-exports another module wholesale.', [
+					'exportStar'
+				]);
+			}
+			if (star[1] !== undefined) {
+				names.push(star[1]);
+				bindings.push({ exported: star[1], local: target });
+			} else {
+				spread.push(target);
+			}
+			return from + star[0].length;
 		}
 		if (/^export\s+\*/.test(text)) {
 			throw new ForeignFormatError('This source re-exports another module wholesale.', [
@@ -819,21 +1332,36 @@ export function stripTypescript(
 		}
 
 		const declaration =
-			/^export\s+(?:abstract\s+)?(?:async\s+)?(class|function|const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)/.exec(
+			/^export\s+(?:abstract\s+)?(?:async\s+)?(class|function\*?|const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)/.exec(
 				text
 			);
 		if (declaration !== null) {
 			names.push(declaration[2]);
+			bindings.push({ exported: declaration[2], local: declaration[2] });
 			return from + 'export '.length;
+		}
+		if (/^export\s+(?:const|let|var)\s*[[{]/.test(text)) {
+			// A destructuring export declares names only its pattern knows, and a
+			// linker that missed one would hand an importer `undefined`.
+			throw new ForeignFormatError('This source exports a destructuring declaration.', [
+				'exportShape'
+			]);
 		}
 		// A declaration keyword outside the four — `export default` aside.
 		return from + 'export '.length;
 	};
 
+	const inserts = parameterProperties(source);
+
 	while (out.length >= 0) {
 		if (iAt() >= source.length) break;
 		const at = iAt();
 		const char = source.charAt(at);
+		const inserted = inserts.get(at);
+		if (inserted !== undefined) {
+			push(inserted);
+			inserts.delete(at);
+		}
 
 		if (char === '"' || char === "'" || char === '`') {
 			let scan = at + 1;
@@ -863,7 +1391,14 @@ export function stripTypescript(
 		}
 		// A regex literal, told from division by what came before it: an
 		// operator or an opening bracket can start one, a value cannot.
-		if (char === '/' && /[=(,[:!&|?{};>+\-*%^~]|return/.test(lastSignificant || ';')) {
+		if (
+			char === '/' &&
+			(/[=(,[:!&|?{};>+\-*%^~]/.test(lastSignificant || ';') ||
+				// `lastSignificant` is one character, so a keyword before the
+				// regex — `return /^https?:/.test(x)` — read as a value, and the
+				// pattern's `?:` as a ternary and a type.
+				AFTER_KEYWORD.test(source.slice(Math.max(0, at - 16), at)))
+		) {
 			let scan = at + 1;
 			let inClass = false;
 			while (scan < source.length) {
@@ -954,17 +1489,28 @@ export function stripTypescript(
 		// Modifiers carry no runtime meaning except `static`. They appear on
 		// class members and as parameter properties.
 		const modifier = /^[A-Za-z_$][A-Za-z0-9_$]*/.exec(rest);
-		if (modifier !== null && MEMBER_MODIFIERS.has(modifier[0])) {
+		if (
+			modifier !== null &&
+			MEMBER_MODIFIERS.has(modifier[0]) &&
+			!/[A-Za-z0-9_$.]/.test(source.charAt(at - 1))
+		) {
 			const after = forward(at + modifier[0].length);
 			const inTypePosition =
 				innermost() === 'class' || innermost() === 'params' || CLASS_KEYWORDS.has(modifier[0]);
-			const nextWord = /^(class|interface|function)$/.test(
+			// `abstract class X`, wherever it stands: anchored as a word, because
+			// the twelve characters after the modifier are `class X …`, never
+			// `class` alone.
+			const nextWord = /^(class|interface|function)\b/.test(
 				source.slice(at + modifier[0].length, at + modifier[0].length + 12).trim()
 			);
-			if (
-				inTypePosition &&
-				(nextWord || (after !== '(' && after !== ':' && after !== '=' && after !== ';'))
-			) {
+			const isMember = after !== '(' && after !== ':' && after !== '=' && after !== ';';
+			// An abstract member is a signature with no body, and a bare
+			// `name(): T;` left behind in a class body is a syntax error.
+			if (modifier[0] === 'abstract' && innermost() === 'class' && !nextWord && isMember) {
+				iSet(typeStatementEnd(at));
+				continue;
+			}
+			if (nextWord || (inTypePosition && isMember)) {
 				push(' ');
 				iSet(at + modifier[0].length);
 				continue;
@@ -993,9 +1539,14 @@ export function stripTypescript(
 		// A non-null assertion: `x!` before the next thing, not `!` before a value.
 		if (char === '!' && !['!', '='].includes(source.charAt(at + 1))) {
 			const after = forward(at + 1);
+			// JavaScript has no infix `!`, so one written hard against a value
+			// — `w[i]! + s` — can only be TypeScript's assertion.
+			const adjacent =
+				/[A-Za-z0-9_$)\]]/.test(source.charAt(at - 1)) &&
+				!AFTER_KEYWORD.test(source.slice(Math.max(0, at - 16), at));
 			if (
 				/[A-Za-z0-9_$)\]}'"`]/.test(lastSignificant) &&
-				['.', ')', ',', ';', ']', '}', ':', '=', '?', ''].includes(after)
+				(adjacent || ['.', ')', ',', ';', ']', '}', ':', '=', '?', ''].includes(after))
 			) {
 				iSet(at + 1);
 				continue;
@@ -1004,8 +1555,8 @@ export function stripTypescript(
 
 		// `x as T` and `x satisfies T` — the type is dropped, the value kept.
 		if (
-			(char === 'a' && rest.startsWith('as ')) ||
-			(char === 's' && rest.startsWith('satisfies '))
+			!/[A-Za-z0-9_$]/.test(source.charAt(at - 1)) &&
+			((char === 'a' && /^as\s/.test(rest)) || (char === 's' && /^satisfies\s/.test(rest)))
 		) {
 			if (rest.startsWith(char === 'a' ? 'as' : 'satisfies')) {
 				iSet(skipType(at + (char === 'a' ? 2 : 9)));
@@ -1017,6 +1568,11 @@ export function stripTypescript(
 			const close = genericList(at);
 			if (close > 0) {
 				iSet(close + 1);
+				continue;
+			}
+			const prefix = prefixTypeList(at);
+			if (prefix > 0) {
+				iSet(prefix + 1);
 				continue;
 			}
 		}
@@ -1034,6 +1590,14 @@ export function stripTypescript(
 			continue;
 		}
 
+		// `??` is one operator. Read a character at a time, its second `?`
+		// looked like a ternary that never closed, and the next `name: T` in
+		// the same block lost its type to it.
+		if (char === '?' && source.charAt(at + 1) === '?') {
+			push('??');
+			iSet(at + 2);
+			continue;
+		}
 		if (char === '?') {
 			const after = forward(at + 1);
 			// `a?: T` is an optional marker, which JavaScript does not have; the
@@ -1042,11 +1606,10 @@ export function stripTypescript(
 				iSet(at + 1);
 				continue;
 			}
-			if (after !== '.' && after !== '[' && after !== '?') {
-				ternaries[stack.length] = (ternaries[stack.length] ?? 0) + 1;
-			} else if (after === '[' && /\s/.test(source.charAt(at + 1))) {
-				// `a?[b]` indexes optionally; `a ? [b]` is a ternary whose second
-				// branch is an array, and only the spacing tells them apart.
+			// Optional indexing is spelled `a?.[b]`, so a `?` before `[` opens a
+			// ternary however it is spaced — `x?[y]:[]` included, which minified
+			// sources write and which used to lose its `: []` as a "type".
+			if (after !== '.' && after !== '?') {
 				ternaries[stack.length] = (ternaries[stack.length] ?? 0) + 1;
 			}
 			push(char);
@@ -1095,7 +1658,7 @@ export function stripTypescript(
 		iSet(at + 1);
 	}
 
-	return { code: out.join(''), exports: names, defaultName };
+	return { code: out.join(''), exports: names, defaultName, bindings, spread };
 
 	// `i` is threaded through these two so the loop body can `continue`.
 	function iAt(): number {
@@ -1104,6 +1667,88 @@ export function stripTypescript(
 	function iSet(value: number): void {
 		cursor = value;
 	}
+}
+
+/**
+ * TypeScript's parameter properties, as the assignments they compile to.
+ *
+ * `constructor(private readonly load: () => T)` declares a field *and* assigns
+ * it; strip the modifier and only the parameter is left, so `this.load` is
+ * `undefined` and the first call answers "this.load is not a function". The
+ * compiler emits `this.load = load;` at the top of the body — after `super(…)`
+ * when the class extends another, since `this` does not exist before it — and
+ * that is what is returned here: the source index to insert at, and the text.
+ */
+function parameterProperties(source: string): Map<number, string> {
+	const out = new Map<number, string>();
+	for (const match of source.matchAll(/\bconstructor\s*\(/g)) {
+		const open = match.index + match[0].length - 1;
+		let depth = 0;
+		let close = -1;
+		for (let at = open; at < source.length; at += 1) {
+			const char = source.charAt(at);
+			if (char === '(' || char === '[' || char === '{' || char === '<') depth += 1;
+			else if (
+				char === ')' ||
+				char === ']' ||
+				char === '}' ||
+				(char === '>' && source.charAt(at - 1) !== '=')
+			) {
+				depth -= 1;
+				if (depth === 0) {
+					close = at;
+					break;
+				}
+			}
+		}
+		if (close < 0) continue;
+		const names: string[] = [];
+		let start = open + 1;
+		depth = 0;
+		for (let at = open + 1; at <= close; at += 1) {
+			const char = source.charAt(at);
+			if (char === '(' || char === '[' || char === '{' || char === '<') depth += 1;
+			else if (
+				(char === ')' ||
+					char === ']' ||
+					char === '}' ||
+					(char === '>' && source.charAt(at - 1) !== '=')) &&
+				at !== close
+			)
+				depth -= 1;
+			if ((char === ',' && depth === 0) || at === close) {
+				const parameter =
+					/^\s*(?:(?:public|private|protected|readonly|override)\s+)+([A-Za-z_$][A-Za-z0-9_$]*)/.exec(
+						source.slice(start, at)
+					);
+				if (parameter !== null) names.push(parameter[1]);
+				start = at + 1;
+			}
+		}
+		if (names.length === 0) continue;
+		const body = source.indexOf('{', close);
+		if (body < 0) continue;
+		const assignments = names.map((name) => ` this.${name} = ${name};`).join('');
+		// After `super(…);` where the body opens with one.
+		const superCall = /^\s*super\s*\(/.exec(source.slice(body + 1));
+		if (superCall !== null) {
+			let depth2 = 0;
+			let at = body + 1 + superCall[0].length - 1;
+			for (; at < source.length; at += 1) {
+				const char = source.charAt(at);
+				if (char === '(') depth2 += 1;
+				else if (char === ')') {
+					depth2 -= 1;
+					if (depth2 === 0) break;
+				}
+			}
+			const semicolon = source.charAt(at + 1) === ';' ? at + 2 : at + 1;
+			out.set(semicolon, `;${assignments}`);
+		} else {
+			out.set(body + 1, assignments);
+		}
+	}
+	return out;
 }
 
 /** The scanner's position. Hoisted so the loop body can move it and `continue`. */

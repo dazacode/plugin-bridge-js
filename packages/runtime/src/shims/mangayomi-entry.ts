@@ -59,6 +59,7 @@
  */
 
 import { EPISODE_RECOGNITION_SOURCE } from '@plugin-bridge/core/episode-recognition';
+import { EPISODE_NUMBERING } from './episode-numbering';
 import { JS_RUNTIME } from './js-runtime';
 import { STREAM_GUARDS } from './stream-guards';
 import { DIGESTS } from './digests';
@@ -1251,96 +1252,16 @@ function __page(value) {
  * source sent.
  */
 function __numberEpisodes(showTitle, names) {
-  const count = names.length;
   const stated = [];
-  let firstStated = -1;
-  let lastStated = -1;
-
-  for (let i = 0; i < count; i += 1) {
+  for (let i = 0; i < names.length; i += 1) {
     const read = names[i].length > 0 ? __episodeNumber(showTitle, names[i]) : -1;
     stated.push(read >= 0 ? read : null);
-    if (read >= 0) {
-      if (firstStated === -1) firstStated = i;
-      lastStated = i;
-    }
   }
-
-  const numbers = [];
-
-  if (firstStated === -1) {
-    for (let i = 0; i < count; i += 1) numbers.push(count - i);
-    return numbers;
-  }
-
-  // Which way the stated numbers run in the list's own order: descending for a
-  // newest-first listing, ascending for the other kind. Read from the first and
-  // last statement rather than assumed, and falling back to newest-first when
-  // there is only one statement to read.
-  const step = stated[lastStated] > stated[firstStated] ? 1 : -1;
-
-  const taken = [];
-  for (let i = 0; i < count; i += 1) {
-    numbers.push(stated[i]);
-    if (stated[i] !== null) taken.push(stated[i]);
-  }
-
-  for (let i = 0; i < count; i += 1) {
-    if (stated[i] !== null) continue;
-
-    let before = -1;
-    for (let j = i - 1; j >= 0; j -= 1) {
-      if (stated[j] !== null) { before = j; break; }
-    }
-    let after = -1;
-    for (let j = i + 1; j < count; j += 1) {
-      if (stated[j] !== null) { after = j; break; }
-    }
-
-    let local;
-    let value;
-    if (before !== -1 && after !== -1) {
-      // Share the distance between two statements out by position, so a run of
-      // unnamed rows stays in order and stays between them.
-      let span = stated[after] - stated[before];
-      // Two rows claiming the same number. Still move, or the fill lands on it.
-      if (span === 0) span = step;
-      local = span / (after - before);
-      value = stated[before] + local * (i - before);
-    } else if (before !== -1) {
-      local = step;
-      value = stated[before] + step * (i - before);
-    } else {
-      local = step;
-      value = stated[after] - step * (after - i);
-    }
-
-    const placed = __freeEpisodeNumber(value, local, taken);
-    numbers[i] = placed;
-    taken.push(placed);
-  }
-
-  return numbers;
+  // Newest first is how these sites list, so a nameless list counts from the end.
+  return __placeEpisodeNumbers(stated, 'descending');
 }
 
-/**
- * \`value\`, moved off any number another row already has.
- *
- * Reachable only from a list the source made strange — two rows naming the same
- * episode with an unnamed one between them, say. The shift is halves of the
- * local step, so the row creeps toward the row after it without ever reaching
- * or passing it: each try is a new number, the sequence converges, and the
- * list's order survives the repair.
- */
-function __freeEpisodeNumber(value, local, taken) {
-  let candidate = value;
-  let shift = local / 2;
-  for (let guard = 0; guard < 24; guard += 1) {
-    if (taken.indexOf(candidate) === -1) return candidate;
-    candidate = candidate + shift;
-    shift = shift / 2;
-  }
-  return candidate;
-}
+${EPISODE_NUMBERING}
 
 /**
  * A height, only when the source actually stated one.

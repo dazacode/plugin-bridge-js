@@ -168,6 +168,18 @@ describe('parseIndex', () => {
 		});
 	});
 
+	it('reads a `sourceDir` of `main` as the source set inside the package’s module', () => {
+		// The current toolchain publishes Gradle's source set, not the module:
+		// `sources/en/demo/main/src/…`. Joined straight onto the language it
+		// was `sources/en/main`, and the row was "carries no Kotlin".
+		const row = { ...DOCUMENT.extensions[0], sourceDir: 'main' };
+		const index = ireaderAdapter.parseIndex(
+			JSON.stringify({ ...DOCUMENT, extensions: [row] }),
+			INDEX_URL
+		);
+		expect(index.plugins[0].origin?.detail?.['directory']).toBe('sources/en/demo/main');
+	});
+
 	it('reads the second documented shape, and the flat legacy array', () => {
 		const ios = ireaderAdapter.parseIndex(
 			JSON.stringify({
@@ -229,6 +241,406 @@ describe('convert', () => {
 		expect(bundle.entrypointSource).toContain('class SourceFactory');
 		expect(bundle.entrypointSource).toContain('getMangaList');
 		expect(bundle.entrypointSource).toContain('data:text/plain');
+	});
+
+	it('searches with the title filter and the nested search type the shim declares', async () => {
+		// The two shapes an ordinary listing member writes against the shim:
+		// `filters.findInstance<Filter.Title>()` (a reified extension declared
+		// in the shim's file) and `SourceFactory.Type.Search` (an `object`
+		// nested in the shim's base class). Both translated without a refusal
+		// and then failed at the first search — the first with "__recv is not
+		// iterable", the second reading `Search` off undefined.
+		const searching = KOTLIN.replace(
+			'import ireader.core.source.model.FilterList',
+			'import ireader.core.source.model.Filter\nimport ireader.core.source.model.FilterList'
+		).replace(
+			'MangasPageInfo(listOf(MangaInfo(key = "$baseUrl/m/1", title = "One")), false)',
+			'MangasPageInfo(listOf(MangaInfo(key = "$baseUrl/m/1", title = ' +
+				'(filters.findInstance<Filter.Title>()?.value ?: "none") + "/" + SourceFactory.Type.Search)), false)'
+		);
+		expect(searching).toContain('findInstance<Filter.Title>()');
+		const files = new Map([[`${DIRECTORY}/main/src/ireader/demo/Demo.kt`, searching]]);
+		const bundle = await openPluginArchive(
+			await ireaderAdapter.convert(listing(), services(files))
+		);
+
+		const { writeFileSync, mkdtempSync } = await import('node:fs');
+		const { tmpdir } = await import('node:os');
+		const { join } = await import('node:path');
+		const file = join(mkdtempSync(join(tmpdir(), 'yorozo-')), 'bundle.mjs');
+		writeFileSync(file, bundle.entrypointSource, 'utf8');
+		const module = (await import(/* @vite-ignore */ `file:///${file.replace(/\\/g, '/')}`))
+			.default as {
+			searchCatalog(
+				query: string,
+				page: number,
+				ctx: unknown
+			): Promise<{ entries: { title: string }[] }>;
+		};
+
+		const found = await module.searchCatalog('needle', 1, {
+			log: { debug() {}, warn() {} }
+		});
+		expect(found.entries.map((entry) => entry.title)).toEqual(['needle/Search']);
+	});
+
+	it('runs a source that declares only its fetchers, through the base class', async () => {
+		// The shape most of this ecosystem has: `exploreFetchers`,
+		// `chapterFetcher` and `contentFetcher` declared, nothing overridden —
+		// or `super.getMangaList` called. The base class is what turns those
+		// declarations into requests, and every one of its defaults answered
+		// an empty list, so these searched, listed and read nothing.
+		const declarative = `package ireader.demo
+
+import ireader.core.source.Dependencies
+import ireader.core.source.SourceFactory
+import ireader.core.source.model.FilterList
+import tachiyomix.annotations.Extension
+
+@Extension
+abstract class Demo(private val deps: Dependencies) : SourceFactory(deps = deps) {
+    override val lang: String get() = "en"
+    override val baseUrl: String get() = "https://read.example.invalid"
+    override val id: Long get() = DemoSourceId.ID
+    override val name: String get() = "Demo"
+
+    override val exploreFetchers: List<BaseExploreFetcher>
+        get() = listOf(
+            BaseExploreFetcher(
+                "Latest",
+                endpoint = "/latest/{page}",
+                selector = "li.book",
+                nameSelector = "a",
+                linkSelector = "a",
+                linkAtt = "href",
+                addBaseUrlToLink = true,
+                maxPage = 3
+            ),
+            BaseExploreFetcher(
+                "Search",
+                endpoint = "/search?q={query}&p={page}",
+                selector = "li.book",
+                nameSelector = "a",
+                linkSelector = "a",
+                linkAtt = "href",
+                addBaseUrlToLink = true,
+                onCover = { text, _ -> text },
+                type = SourceFactory.Type.Search
+            )
+        )
+
+    override val chapterFetcher: Chapters
+        get() = SourceFactory.Chapters(
+            selector = "ul.chapters a",
+            nameSelector = "span",
+            linkAtt = "href",
+            addBaseUrlToLink = true
+        )
+
+    override val contentFetcher: Content
+        get() = SourceFactory.Content(
+            pageTitleSelector = "h2",
+            pageContentSelector = "article p",
+            onContent = { paragraphs -> paragraphs.map { it.trim() } }
+        )
+
+    override suspend fun getMangaList(filters: FilterList, page: Int) = super.getMangaList(filters, page)
+}
+`;
+		const site: Record<string, string> = {
+			'https://read.example.invalid/search?q=needle&p=1':
+				'<ul><li class="book"><a href="/b/one">Needle One</a></li><li class="book"><a href="/b/two">Needle Two</a></li></ul>',
+			'https://read.example.invalid/latest/1':
+				'<ul><li class="book"><a href="/b/three">Shelf Three</a></li></ul>',
+			'https://read.example.invalid/b/one':
+				'<ul class="chapters"><a href="/b/one/2"><span>Chapter 2</span></a><a href="/b/one/1"><span>Chapter 1</span></a></ul>',
+			'https://read.example.invalid/b/one/1':
+				'<h2>Chapter 1</h2><article><p> First line. </p><p>Second line.</p></article>'
+		};
+		const files = new Map([[`${DIRECTORY}/main/src/ireader/demo/Demo.kt`, declarative]]);
+		const bundle = await openPluginArchive(
+			await ireaderAdapter.convert(listing(), services(files))
+		);
+		const { writeFileSync, mkdtempSync } = await import('node:fs');
+		const { tmpdir } = await import('node:os');
+		const { join } = await import('node:path');
+		const file = join(mkdtempSync(join(tmpdir(), 'yorozo-')), 'bundle.mjs');
+		writeFileSync(file, bundle.entrypointSource, 'utf8');
+		const module = (await import(/* @vite-ignore */ `file:///${file.replace(/\\/g, '/')}`))
+			.default as {
+			searchCatalog(
+				q: string,
+				p: number,
+				ctx: unknown
+			): Promise<{ entries: Entry[]; hasMore?: boolean }>;
+			browse(
+				shelf: string,
+				p: number,
+				ctx: unknown
+			): Promise<{ entries: Entry[]; hasMore?: boolean }>;
+			listChapters(
+				id: string,
+				ctx: unknown
+			): Promise<{ sourceChapterId: string; number: number }[]>;
+			readChapter(
+				id: string,
+				chapter: { number: number; sourceChapterId: string },
+				ctx: unknown
+			): Promise<{ pages: { url: string }[] }>;
+		};
+		type Entry = { sourceMediaId: string; title: string };
+		const requested: string[] = [];
+		const ctx = {
+			http: {
+				async send(url: string) {
+					requested.push(url);
+					const body = site[url] ?? '';
+					return { status: 200, url, headers: {}, text: async () => body, json: async () => ({}) };
+				}
+			},
+			log: { debug() {}, warn() {} },
+			settings: { string: () => '', boolean: () => false, list: () => [] }
+		};
+
+		const found = await module.searchCatalog('needle', 1, ctx);
+		expect(found.entries.map((entry) => [entry.title, entry.sourceMediaId])).toEqual([
+			['Needle One', 'https://read.example.invalid/b/one'],
+			['Needle Two', 'https://read.example.invalid/b/two']
+		]);
+		const shelf = await module.browse('popular', 1, ctx);
+		expect(shelf.entries.map((entry) => entry.title)).toEqual(['Shelf Three']);
+		expect(shelf.hasMore).toBe(true);
+
+		const chapters = await module.listChapters('https://read.example.invalid/b/one', ctx);
+		expect(chapters.map((chapter) => chapter.number)).toEqual([1, 2]);
+		const first = chapters[0];
+		expect(first.sourceChapterId).toBe('https://read.example.invalid/b/one/1');
+
+		const read = await module.readChapter('https://read.example.invalid/b/one', first, ctx);
+		const text = read.pages.map((page) =>
+			decodeURIComponent(page.url.split(',').slice(1).join(','))
+		);
+		expect(text).toEqual(['Chapter 1', 'First line.', 'Second line.']);
+	});
+
+	it('makes text pages with the base class’s `toPage()`', async () => {
+		// `"text".toPage()` and `paragraphs.toPage()` are members of the
+		// ecosystem's base class, and five listings' content parsers end in one.
+		const paging = KOTLIN.replace(
+			'listOf(Text("hello"))',
+			'listOf("one".toPage()) + listOf("two", "three").toPage()'
+		);
+		expect(paging).toContain('.toPage()');
+		const files = new Map([[`${DIRECTORY}/main/src/ireader/demo/Demo.kt`, paging]]);
+		const bundle = await openPluginArchive(
+			await ireaderAdapter.convert(listing(), services(files))
+		);
+		const { writeFileSync, mkdtempSync } = await import('node:fs');
+		const { tmpdir } = await import('node:os');
+		const { join } = await import('node:path');
+		const file = join(mkdtempSync(join(tmpdir(), 'yorozo-')), 'bundle.mjs');
+		writeFileSync(file, bundle.entrypointSource, 'utf8');
+		const module = (await import(/* @vite-ignore */ `file:///${file.replace(/\\/g, '/')}`))
+			.default as {
+			readChapter(
+				id: string,
+				chapter: { number: number; sourceChapterId: string },
+				ctx: unknown
+			): Promise<{ pages: { url: string }[] }>;
+		};
+		const read = await module.readChapter(
+			'https://read.example.invalid/m/1',
+			{ number: 1, sourceChapterId: 'https://read.example.invalid/m/1/1' },
+			{ log: { debug() {}, warn() {} } }
+		);
+		expect(
+			read.pages.map((page) => decodeURIComponent(page.url.split(',').slice(1).join(',')))
+		).toEqual(['one', 'two', 'three']);
+	});
+
+	it('posts a form with its parameters and the headers its block appends', async () => {
+		// `client.submitForm(url, Parameters.build { … }) { headersBuilder { … } }`
+		// is how a template posts its search. The shim sent an empty POST with
+		// no headers, so every such search found nothing — and the block itself
+		// was refused, which took eight listings of one template.
+		const posting = KOTLIN.replace(
+			'import ireader.core.source.model.FilterList',
+			'import ireader.core.source.model.Filter\nimport ireader.core.source.model.FilterList\nimport io.ktor.http.Parameters'
+		).replace(
+			'MangasPageInfo(listOf(MangaInfo(key = "$baseUrl/m/1", title = "One")), false)',
+			'MangasPageInfo(client.submitForm(url = "$baseUrl/search", formParameters = Parameters.build { ' +
+				'append("q", filters.findInstance<Filter.Title>()?.value ?: ""); append("kind", "a b") }) { ' +
+				'headersBuilder { append("Referer", "$baseUrl/") } }.asJsoup().select("a").map { ' +
+				'MangaInfo(key = it.attr("href"), title = it.text()) }, false)'
+		);
+		expect(posting).toContain('submitForm(');
+		const files = new Map([[`${DIRECTORY}/main/src/ireader/demo/Demo.kt`, posting]]);
+		const bundle = await openPluginArchive(
+			await ireaderAdapter.convert(listing(), services(files))
+		);
+		const { writeFileSync, mkdtempSync } = await import('node:fs');
+		const { tmpdir } = await import('node:os');
+		const { join } = await import('node:path');
+		const file = join(mkdtempSync(join(tmpdir(), 'yorozo-')), 'bundle.mjs');
+		writeFileSync(file, bundle.entrypointSource, 'utf8');
+		const module = (await import(/* @vite-ignore */ `file:///${file.replace(/\\/g, '/')}`))
+			.default as {
+			searchCatalog(q: string, p: number, ctx: unknown): Promise<{ entries: { title: string }[] }>;
+		};
+		const sent: { url: string; method: string; headers: Record<string, string>; body: string }[] =
+			[];
+		const ctx = {
+			http: {
+				async send(url: string, request: { method: string; headers?: unknown; body?: unknown }) {
+					const headers: Record<string, string> = {};
+					const raw = request.headers as Record<string, string> | [string, string][] | undefined;
+					if (Array.isArray(raw)) for (const [k, v] of raw) headers[k.toLowerCase()] = v;
+					else for (const [k, v] of Object.entries(raw ?? {})) headers[k.toLowerCase()] = String(v);
+					const body =
+						typeof request.body === 'string'
+							? request.body
+							: request.body instanceof Uint8Array
+								? new TextDecoder().decode(request.body)
+								: String((request.body as { text?: string } | null)?.text ?? '');
+					sent.push({ url, method: request.method, headers, body });
+					const page = '<a href="/m/7">Found</a>';
+					return { status: 200, url, headers: {}, text: async () => page, json: async () => ({}) };
+				}
+			},
+			log: { debug() {}, warn() {} }
+		};
+
+		const found = await module.searchCatalog('needle', 1, ctx);
+		expect(found.entries.map((entry) => entry.title)).toEqual(['Found']);
+		expect(sent).toHaveLength(1);
+		expect(sent[0].method).toBe('POST');
+		expect(sent[0].url).toBe('https://read.example.invalid/search');
+		expect(sent[0].body).toBe('q=needle&kind=a+b');
+		expect(sent[0].headers['referer']).toBe('https://read.example.invalid/');
+		expect(sent[0].headers['content-type'] ?? '').toContain('application/x-www-form-urlencoded');
+	});
+
+	it('runs a source on the older parsed base, with a chapter choice and record copies', async () => {
+		// A dozen of this ecosystem's sources extend `ParsedHttpSource`, which
+		// the shim did not declare, and offer `Command.Chapter.Select`. Any
+		// named `copy(key = …)` was refused besides, because the shim declared
+		// a `copy` on two models with different parameters.
+		const parsed = `package ireader.demo
+
+import com.fleeksoft.ksoup.nodes.Document
+import com.fleeksoft.ksoup.nodes.Element
+import ireader.core.source.Dependencies
+import ireader.core.source.ParsedHttpSource
+import ireader.core.source.findInstance
+import ireader.core.source.model.*
+import tachiyomix.annotations.Extension
+
+@Extension
+abstract class Demo(private val deps: Dependencies) : ParsedHttpSource(deps) {
+    override val lang: String get() = "en"
+    override val baseUrl: String get() = "https://read.example.invalid"
+    override val id: Long get() = DemoSourceId.ID
+    override val name: String get() = "Demo"
+
+    override fun getCommands(): CommandList = listOf(
+        Command.Chapter.Select("Get Chapters", options = arrayOf("None", "Last 25"), value = 0)
+    )
+
+    override suspend fun getMangaList(filters: FilterList, page: Int): MangasPageInfo {
+        val query = filters.findInstance<Filter.Title>()?.value ?: ""
+        val document = client.get(requestBuilder("$baseUrl/search?q=$query")).asJsoup()
+        return bookListParse(document, "li.book", null) { element ->
+            MangaInfo(key = element.select("a").attr("href"), title = element.text())
+        }
+    }
+
+    override suspend fun getChapterList(manga: MangaInfo, commands: List<Command<*>>): List<ChapterInfo> {
+        val document = client.get(requestBuilder(baseUrl + manga.key)).asJsoup()
+        return chaptersParse(document).map { it.copy(key = baseUrl + it.key) }
+    }
+
+    override fun chaptersSelector(): String = "ul.chapters a"
+
+    override fun chapterFromElement(element: Element): ChapterInfo =
+        ChapterInfo(name = element.text(), key = element.attr("href"))
+
+    override fun pageContentParse(document: Document): List<String> =
+        document.select("article p").map { it.text() }
+
+    override fun detailParse(document: Document): MangaInfo = MangaInfo(title = document.select("h1").text())
+}
+`;
+		const site: Record<string, string> = {
+			'https://read.example.invalid/search?q=needle':
+				'<ul><li class="book"><a href="/b/one">Needle One</a></li></ul>',
+			'https://read.example.invalid/b/one':
+				'<ul class="chapters"><a href="/b/one/1">Chapter 1</a></ul>',
+			'https://read.example.invalid/b/one/1': '<article><p>First.</p><p>Second.</p></article>'
+		};
+		const files = new Map([[`${DIRECTORY}/main/src/ireader/demo/Demo.kt`, parsed]]);
+		const bundle = await openPluginArchive(
+			await ireaderAdapter.convert(listing(), services(files))
+		);
+		const { writeFileSync, mkdtempSync } = await import('node:fs');
+		const { tmpdir } = await import('node:os');
+		const { join } = await import('node:path');
+		const file = join(mkdtempSync(join(tmpdir(), 'yorozo-')), 'bundle.mjs');
+		writeFileSync(file, bundle.entrypointSource, 'utf8');
+		const module = (await import(/* @vite-ignore */ `file:///${file.replace(/\\/g, '/')}`))
+			.default as {
+			searchCatalog(
+				q: string,
+				p: number,
+				ctx: unknown
+			): Promise<{ entries: { sourceMediaId: string }[] }>;
+			listChapters(
+				id: string,
+				ctx: unknown
+			): Promise<{ sourceChapterId: string; number: number }[]>;
+			readChapter(
+				id: string,
+				chapter: { number: number; sourceChapterId: string },
+				ctx: unknown
+			): Promise<{ pages: { url: string }[] }>;
+		};
+		const ctx = {
+			http: {
+				async send(url: string) {
+					const body = site[url] ?? '';
+					return { status: 200, url, headers: {}, text: async () => body, json: async () => ({}) };
+				}
+			},
+			log: { debug() {}, warn() {} }
+		};
+
+		const found = await module.searchCatalog('needle', 1, ctx);
+		expect(found.entries.map((entry) => entry.sourceMediaId)).toEqual(['/b/one']);
+		const chapters = await module.listChapters('/b/one', ctx);
+		expect(chapters.map((chapter) => chapter.sourceChapterId)).toEqual([
+			'https://read.example.invalid/b/one/1'
+		]);
+		const read = await module.readChapter('/b/one', chapters[0], ctx);
+		expect(
+			read.pages.map((page) => decodeURIComponent(page.url.split(',').slice(1).join(',')))
+		).toEqual(['First.', 'Second.']);
+	});
+
+	it('leaves a module’s test sources out of the bundle', async () => {
+		// A module's `src/test` sits beside its source set, and its
+		// backtick-named test functions are not JavaScript names: one such file
+		// in the listing made the bundle fail to load at all.
+		const files = new Map([
+			[`${DIRECTORY}/main/src/ireader/demo/Demo.kt`, KOTLIN],
+			[
+				`${DIRECTORY}/src/test/kotlin/ireader/demo/DemoTest.kt`,
+				'package ireader.demo\n\nclass DemoTest {\n    fun `reads the list`() {}\n}\n'
+			]
+		]);
+		const bundle = await openPluginArchive(
+			await ireaderAdapter.convert(listing(), services(files))
+		);
+		expect(bundle.entrypointSource).not.toContain('reads the list');
+		expect(bundle.entrypointSource).not.toContain('DemoTest');
 	});
 
 	it('refuses a directory that is Java, naming the file', async () => {

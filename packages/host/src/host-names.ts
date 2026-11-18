@@ -1,3 +1,5 @@
+import { ROOT_ZONE_TLDS } from './tlds';
+
 /**
  * Whether a string shaped like a hostname is worth treating as one.
  *
@@ -18,24 +20,36 @@
  * rediscovering it. The same argument as `host-match.ts`, one question along.
  *
  * Reading bare quoted strings means reading `"player.js"`, `"styles.css"` and
- * `"episode.mp4"`, all of which are shaped exactly like hostnames. A registry
- * lookup is not available and a full public-suffix list is not worth shipping
- * for this, so the test is the other way round: letters only, at least two of
- * them, and not one of the extensions a scraper's source is full of.
+ * `"episode.mp4"`, all of which are shaped exactly like hostnames — and, in a
+ * built bundle or a translated Kotlin module, `"Array.prototype.indexOf"`,
+ * `"nodejs.util.inspect.custom"` and `"java.net.SocketTimeoutException"`. The
+ * test used to be "letters only, and not a file extension", which let every
+ * one of those last three through: they reached the consent screen as hosts,
+ * with their `*.` siblings beside them (`*.c.staff` from a `j.c.staff`).
+ *
+ * So the last label has to be a top-level domain that exists: one in the root
+ * zone (`tlds.ts`, IANA's list, whole), or one of the names RFC 2606 reserves
+ * for tests and documentation, which resolve nowhere and are what this
+ * project's own fixtures are required to use. `localhost` is not among them:
+ * it resolves, to this machine. The file extensions are still refused where
+ * they are also TLDs (`.zip`, `.mov`), since `"episode.mov"` is a filename far
+ * more often than it is a host.
  */
 export function plausibleTld(host: string): boolean {
 	const tld = host.split('.').at(-1) ?? '';
-	if (!/^[a-z]{2,}$/.test(tld)) return false;
-	return !FILE_EXTENSIONS.has(tld);
+	if (FILE_EXTENSIONS.has(tld)) return false;
+	return ROOT_ZONE_TLDS.has(tld) || RESERVED_FOR_TESTS.has(tld);
 }
 
+/** RFC 2606 §2: names that will never be delegated, kept for tests and examples. */
+const RESERVED_FOR_TESTS = new Set(['test', 'example', 'invalid']);
+
 /**
- * Not exhaustive, and does not need to be. Missing one means one spurious host
- * on a consent screen; the cost of the whole approach is bounded by that.
- *
- * Anything with a digit in it — `mp4`, `m3u8`, `mp3` — is already excluded by
- * the letters-only rule above, since no TLD has ever had one, so those are not
- * listed here.
+ * Extensions that a quoted filename ends in. Most are not TLDs at all and the
+ * root-zone test already refuses them; the list matters for the ones that are
+ * both (`zip`, `mov`, `map`, and `md`, which is Moldova), and it stays whole so that
+ * a TLD delegated under a common extension later does not quietly start
+ * granting filenames.
  */
 const FILE_EXTENSIONS = new Set([
 	'js',

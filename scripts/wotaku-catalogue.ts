@@ -25,10 +25,20 @@ import { existsSync } from 'node:fs';
 import { join, relative } from 'node:path';
 
 import { FOREIGN_ADAPTERS } from '@plugin-bridge/adapters';
+import { ForeignFormatError } from '@plugin-bridge/core/adapter';
+import { openPluginArchive } from '@plugin-bridge/core/archive';
 import { refusalFor, type ForeignFormat } from '@plugin-bridge/core/formats';
 
-const CORPUS = new URL('../../../corpus/', import.meta.url).pathname;
-const MANIFEST = new URL('../../../manifest/repos.json', import.meta.url).pathname;
+/**
+ * The working set the corpus lives in.
+ *
+ * By default the layout this script was written in, where the repository is
+ * checked out at `<working set>/ref/plugin-bridge-js`. `WOTAKU_ROOT` names it
+ * directly for a checkout that lives anywhere else.
+ */
+const ROOT = process.env['WOTAKU_ROOT'] ?? new URL('../../../', import.meta.url).pathname;
+const CORPUS = join(ROOT, 'corpus/');
+const MANIFEST = join(ROOT, 'manifest/repos.json');
 
 /**
  * Where each ecosystem keeps its index, in preference order.
@@ -185,6 +195,111 @@ if (process.argv.includes('--json')) {
 		for (const one of refused) console.log(`  ! ${one.slug}: ${one.reason}`);
 	}
 }
+
+/**
+ * The source path, measured: every Mana entry file in the corpus, converted
+ * and loaded.
+ *
+ * Parsing says nothing about this path, because six of the seven Mana
+ * repositories publish no index on disk — their sources exist only as the
+ * TypeScript tree the toolchain would have built from. So each entry file is
+ * listed the way an unbuilt repository's own bare-array index would list it,
+ * `{ id, name, path }`, and handed to the adapter with the clone standing in
+ * for the network. A source is an entry file that declares `Target`, which is
+ * the class the ecosystem's own build exports; a shared helper directory that
+ * happens to have an `index.ts` is not one.
+ *
+ * *Loaded* means the bundle imported and identified as its manifest id. It
+ * is not a search, and nothing here reaches a live site.
+ */
+async function measureManaSources(): Promise<void> {
+	const adapter = FOREIGN_ADAPTERS.find((one) => one.format === 'mana');
+	if (adapter === undefined) return;
+
+	const slugs = manifest.filter((one) => one.ecosystem === 'mana').map((one) => one.slug);
+	const layouts: [string, string][] = [
+		['src/sources', 'index.ts'],
+		['src', 'main.ts'],
+		['src', 'index.ts']
+	];
+	let sources = 0;
+	let converted = 0;
+	let loaded = 0;
+	const refusals = new Map<string, number>();
+	const loadFailures = new Map<string, number>();
+
+	for (const slug of slugs) {
+		const root = join(CORPUS, slug);
+		const found = new Set<string>();
+		for (const [parent, file] of layouts) {
+			for (const dir of await only(join(root, parent), null)) {
+				const entry = join(dir, file);
+				const name = relative(join(root, parent), dir);
+				if (found.has(name) || !existsSync(entry)) continue;
+				if (!/^export\s+class\s+Target\b/m.test(await readFile(entry, 'utf8'))) continue;
+				found.add(name);
+			}
+		}
+
+		const base = `https://example.invalid/${slug}/`;
+		const local = (url: string): string => {
+			if (!url.startsWith(base)) throw new Error(`outside the clone: ${url}`);
+			const path = join(root, decodeURIComponent(url.slice(base.length)));
+			if (!existsSync(path)) throw new Error(`not in the clone: ${url}`);
+			return path;
+		};
+
+		for (const name of [...found].sort()) {
+			sources += 1;
+			const listing = adapter.parseIndex(
+				JSON.stringify([{ id: name, name, path: name }]),
+				`${base}sources.json`
+			).plugins[0];
+			let bytes: Uint8Array;
+			try {
+				bytes = await adapter.convert(listing, {
+					fetchArtifact: async (url) => new Uint8Array(await readFile(local(url))),
+					getText: async (url) => readFile(local(url), 'utf8'),
+					listFiles: () => {
+						throw new Error('nothing here lists');
+					}
+				});
+			} catch (error) {
+				const obstacles =
+					error instanceof ForeignFormatError && error.obstacles.length > 0
+						? error.obstacles.join('+')
+						: error instanceof Error
+							? error.message.slice(0, 80)
+							: String(error);
+				refusals.set(obstacles, (refusals.get(obstacles) ?? 0) + 1);
+				continue;
+			}
+			converted += 1;
+			try {
+				const opened = await openPluginArchive(bytes);
+				const url = `data:text/javascript;base64,${Buffer.from(opened.entrypointSource).toString('base64')}`;
+				const module = (await import(url)) as { default?: { id?: unknown } };
+				if (module.default?.id !== listing.id) throw new Error('identified as something else');
+				loaded += 1;
+			} catch (error) {
+				const message = (error instanceof Error ? error.message : String(error)).slice(0, 100);
+				loadFailures.set(message, (loadFailures.get(message) ?? 0) + 1);
+			}
+		}
+	}
+
+	console.log(
+		`\nmana source path: sources=${sources} converted=${converted} loaded=${loaded} refused=${sources - converted}`
+	);
+	for (const [why, count] of [...refusals].sort((a, b) => b[1] - a[1])) {
+		console.log(`  refused ${String(count).padStart(3)} ${why}`);
+	}
+	for (const [why, count] of [...loadFailures].sort((a, b) => b[1] - a[1])) {
+		console.log(`  load    ${String(count).padStart(3)} ${why}`);
+	}
+}
+
+if (!process.argv.includes('--json')) await measureManaSources();
 
 // Marks a clone the harness could not even stat, so a missing corpus is loud.
 if (!(await stat(CORPUS)).isDirectory()) {

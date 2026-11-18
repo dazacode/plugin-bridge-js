@@ -117,6 +117,31 @@ of 174 Tsundoku ones convert, the rest refused by name — and none of those tre
 is reachable from the catalogue link, because both ecosystems publish their index
 as a build artifact. Echo converts nothing by design; its extensions are APKs.
 
+### An IReader conversion count that went down, and why the lower one is true
+
+Counting the members the driver calls under its IReader dialect
+(`getMangaList`, `getChapterList`, `getPageList`) as reachable took the IReader
+conversions measured over the published index from 57 of 147 to 49. All eight
+listings that dropped were built on one template, and all eight were broken
+before they dropped: the template overrides `getListRequest` to post its search
+as a form, that override was refused, and the refusal was pruned as unreachable
+because nothing in the extension calls it — the base class does. So the eight
+converted "complete" and searched the base class's endpoint instead. Re-run
+against the sites with the earlier build, every one of them sent
+`GET /search/index.php` where the template posts to `/e/search/index.php`, and
+every one found nothing — three answered 404, two 403, two an empty page, one a
+certificate the host could not verify.
+
+So 49 was the honest number at that point and 57 overstated it by eight sources
+that could not have searched. The form post they needed was then implemented
+(`submitForm` with its parameters and headers, and the base class's request
+block), and the count is 63 of 147 with all eight converting again — now
+sending the template's own request. Three of them get search results back;
+every result links to the site's front page, because the template's search
+selector is written `a'`, which matches nothing in any selector engine. That is
+the template's bug, and it reads here as "listed no chapters" rather than as a
+conversion failure.
+
 ## What this pass does not claim
 
 - **A converted bundle is not a working source.** Nothing here has been run
@@ -131,3 +156,143 @@ as a build artifact. Echo converts nothing by design; its extensions are APKs.
   index lives on a build branch. A repository with no index is reported as
   `no-index` by the harness rather than counted as a failure, and the two numbers
   are kept apart for the same reason the check states are.
+
+## Closing the gaps the pass left
+
+The pass above stopped at four named gaps. This is what became of each, and
+what a live run of two of the formats found besides.
+
+### Mana sources published as a tree: 0 → 111 of 139 load
+
+Every Mana source in the corpus is published unbuilt, as a TypeScript entry
+that extends a template a directory or two away. The source path read the
+entry file alone and refused all 139 for `relativeModuleImports`.
+
+Three steps, each measured before the next:
+
+1. **The module walk.** The relative-import walker the Hayase adapter already
+   had is now shared (`core/repository-modules.ts`). Mana links the closure in
+   dependency order — each module wrapped and returning its exports, re-exports
+   and `export * from` included — and refuses by name a module that cannot be
+   read, climbs out of the repository, closes a cycle or lies past the bound.
+2. **The three packages the closures import.** `cheerio` (116 closures),
+   `html-entities` (80) and `crypto-js` (52) are answered by compatible
+   subsets over the runtime's own parser and digests (`shims/cheerio.ts`,
+   `shims/js-libraries.ts`), kept to the members the corpus calls. Every keyed
+   `crypto-js` operation — AES, the HMACs — throws naming itself: a key stays
+   on the host's asynchronous WebCrypto (`ABI.md` §2), so a source loads and
+   only a protected chapter fails, by name.
+3. **The published client.** The search-form builders, the `Body` builders,
+   `HttpHeaders`, the numbered `HttpMethod`, `RateLimit`, `ObjectStore`, a
+   `SearchRequest` for `search`, and interceptors that are awaited and handed
+   the enum — each a live failure on the trees, fixed as the published
+   `@mana-app/types` defines it.
+
+Each step exposed TypeScript the stripper read wrongly — twenty-three
+constructs in all, from a union member after a comment to a parameter
+property that must still assign its field. Each converted and then failed to
+parse or answered differently; each is fixed and pinned by a test that runs
+the stripped code.
+
+Measured with `bun scripts/wotaku-catalogue.ts`, which converts and loads every
+Mana entry file in the clones:
+
+|                                     | before | after |
+| ----------------------------------- | ------ | ----- |
+| Mana entry files (declare `Target`) | 139    | 139   |
+| refused `relativeModuleImports`     | 139    | 0     |
+| refused `packageImports`            | 0      | 28    |
+| convert                             | 0      | 111   |
+| convert and load                    | 0      | 111   |
+
+The 28 import `simple-url` (26), `moment` (2) or `crypto-es` (1), refused by
+name.
+
+Then live, each listing driven through search, its list, its pages and a fetch
+of a page image's bytes (real addresses on the command line only). _Works_
+means the image bytes arrived and were an image:
+
+|                                                    | listings | convert | load | search | list | pages | image bytes |
+| -------------------------------------------------- | -------- | ------- | ---- | ------ | ---- | ----- | ----------- |
+| Source trees from the clones, before               | 139      | 0       | 0    | 0      | 0    | 0     | 0           |
+| Source trees from the clones, after                | 139      | 111     | 111  | 42     | 28   | 27    | 26          |
+| Built bundles from three live repositories, before | 21       | 21      | 21   | 11     | 11   | 11    | 6           |
+| Built bundles from three live repositories, after  | 21       | 21      | 21   | 13     | 13   | 13    | 12          |
+
+What stops the rest after load is mostly the sites': a Cloudflare challenge, a
+search that finds nothing for the harness's probe title, a page that is gone,
+a server that wants settings only a viewer can give. Ten novel sources list no
+chapters, because a book source answers a different method.
+
+### Image transport: the source's own request path, then level 3
+
+A Mana source does not hand the app image URLs; it hands it a client
+(`getPageTransport`, `getCoverTransport`) whose interceptors add a Referer or
+rewrite the address. The shim now runs that client for each page — and once
+per cover host — with the image send intercepted: what it would have sent
+becomes the page's address and headers. A client that reads the image's own
+response refuses the chapter by name. Paperback's registered interceptors run
+the same way for each page.
+
+Page headers were already in the ABI (§8.3). Cover headers were not, and the
+contract's owner decided them: `ABI.md` §9.1, API level 3, adds
+`posterImageHeaders`, `imageHeadersByHost` and `headersByHost`, which the Mana
+cover path and the Suwatte `imageReferer` now emit.
+
+### A number: level 3
+
+`ABI.md` §9.2 adds `type: 'number'`, decided the same way. The Suwatte source
+with a `UIStepper` converts with it — and had in fact lost every setting, to
+ids written as module constants that parsed as nothing; those are resolved
+now. For a host below level 3 a stepper whose values fit a select's 64 is drawn
+as one; one that does not is refused by name.
+
+### Seanime: the AniList id, and unnumbered episodes
+
+- A torrent provider is now declared addressed by `anilist` (`ExternalIdKind`).
+  Seanime's `Media.id` is an AniList id, and a host that holds one already
+  hands an id-addressed source `anilist:<id>|<title>`; the shim reads it into
+  `media.id`. A host that binds by title still gets `0`, as before. The host is
+  asked for nothing new.
+- An episode with no number is placed between its numbered neighbours, with
+  the rule the Mangayomi shim already used, instead of by position, which could
+  land on a number another row held.
+
+### What a live run of Seanime and Suwatte found
+
+Converting is not running, so both formats were run against their live
+repositories with the catalogue harness (real addresses on the command line
+only). Each failure below converted, loaded or not, and failed on something
+the host hands a provider that this build did not:
+
+- **Seanime**: `LoadDoc`/`Doc` (the host's goquery document API, 81 call sites
+  in the corpus), `$getUserPreference` (67), `$store` (71). All three are now
+  supplied — the document API over the shared parser, following goquery where
+  it and jsoup disagree, and preferences from the manifest's `userConfig` as
+  manifest settings. A payload whose file is `.ts` is stripped whatever the
+  manifest says.
+- **Suwatte**: what a repository serves is the toolchain's built catalogue
+  (`sources.json`, `catalogVersion` 2, one `.stt` bundle per row), which the
+  adapter did not model and Mana's parser claimed, answering zero listings.
+  It is now read as Suwatte, Mana's positive match requires its own
+  `environment`, and a pasted repository link also asks the repository's
+  Pages site. Bundles load with the same boot context the Mana bundle path
+  uses, and the image Referer a source's configuration declares travels on its
+  pages.
+- **The headless host** threw `Buffer is not defined` on any bundle that read
+  `globalThis.Headers`, because Node defines it lazily over a client that needs
+  the `Buffer` the isolate deletes. Those classes are now pinned before the
+  sealing. No browser was affected.
+
+| Live, against the repository as published  | before                                                      | after                     |
+| ------------------------------------------ | ----------------------------------------------------------- | ------------------------- |
+| Suwatte catalogue, detected as             | Mana, 0 listings                                            | Suwatte, 120 listings     |
+| Suwatte repository link                    | not found                                                   | 120 listings              |
+| Suwatte, first six checked                 | —                                                           | 1 works; 5 fail past load |
+| Seanime, five listings that failed by name | 0 work, 5 fail at load/search on a missing global or a type | 1 works, 5 load           |
+| Seanime, a second marketplace's first six  | 1 works                                                     | 2 work                    |
+
+What still fails after load is the site's or the probe's, and is reported as
+such: a provider that needs its own local helper process, a search that
+answers nothing for the harness's title, a CDN that refuses the probe's own
+request shape while answering the same request without it.

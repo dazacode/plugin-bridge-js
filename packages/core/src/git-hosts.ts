@@ -28,8 +28,9 @@
  *
  * ## Rule 9
  *
- * No host is named here except the three forge *software* conventions and
- * GitHub's raw domain, which `repository-index.ts` already names. An unknown
+ * No host is named here except the three forge *software* conventions,
+ * GitHub's raw domain, which `repository-index.ts` already names, and GitHub's
+ * static-site suffix, which `adapter.ts` already names. An unknown
  * host is handled by trying both self-hostable shapes, not by recognising it —
  * which is the only approach that works for a forge nobody has heard of, and
  * the only one that keeps a hostname list out of this repository.
@@ -45,6 +46,46 @@
  */
 const GITHUB = 'https://github.com';
 const GITHUB_RAW_HOST = 'raw.githubusercontent.com';
+/**
+ * The suffix GitHub serves an account's static site under, `<owner>.github.io`.
+ *
+ * A forge host like the two above, and named for the same reason: it is a
+ * fact about where GitHub puts an account, and `adapter.ts` already lists it
+ * among the shared suffixes. Nothing here recognises a publisher by it.
+ */
+const GITHUB_PAGES_SUFFIX = '.github.io';
+
+/**
+ * The GitHub account a static-site URL belongs to, or null.
+ *
+ * `https://<owner>.github.io/...` is served from `<owner>`'s repositories, so
+ * the host alone names an owner even though the URL names no repository. A
+ * project site's first path segment is the repository it is served from;
+ * a user site's root names none, and `repo` is null for it.
+ *
+ * Only ever a *hint*: every caller of this verifies what it finds before
+ * trusting it, because "this account owns a site" says nothing about which of
+ * its repositories holds what.
+ */
+export function githubPagesOwner(url: URL): { owner: string; repo: string | null } | null {
+	const host = url.host.toLowerCase();
+	if (url.protocol !== 'https:' || !host.endsWith(GITHUB_PAGES_SUFFIX)) return null;
+	const owner = host.slice(0, -GITHUB_PAGES_SUFFIX.length);
+	if (owner.length === 0 || owner.includes('.')) return null;
+	const segments = url.pathname.split('/').filter((segment) => segment.length > 0);
+	// One segment is a file at the site root (`/index.min.json`), not a project.
+	return { owner, repo: segments.length >= 2 ? segments[0] : null };
+}
+
+/** True when a repository is on GitHub, however the URL that named it was spelled. */
+export function isGitHub(repository: GitRepository): boolean {
+	return repository.origin === GITHUB;
+}
+
+/** A repository on GitHub, by owner and name, on no particular branch. */
+export function githubRepository(owner: string, repo: string): GitRepository {
+	return { origin: GITHUB, owner, repo, ref: null };
+}
 
 /** Where a repository lives, in the parts every forge agrees on. */
 export interface GitRepository {
@@ -149,6 +190,21 @@ export function rawCandidates(
 		add(`${origin}/${owner}/${repo}/-/raw/${ref}/${path}`);
 	}
 	return out;
+}
+
+/**
+ * Where GitHub Pages serves one path of a repository's published site.
+ *
+ * Several ecosystems build their catalogue in CI and deploy it as a Pages
+ * artifact that never lands on any branch, so no raw-file candidate can reach
+ * it: the repository has the source, and only the site has the index. A pasted
+ * repository link then finds nothing unless the site is asked too. GitHub only,
+ * because that is the one forge whose site address is a function of the
+ * repository's name; the owner is lowercased because the site host is.
+ */
+export function pagesCandidates(repository: GitRepository, path: string): string[] {
+	if (repository.origin !== GITHUB) return [];
+	return [`https://${repository.owner.toLowerCase()}.github.io/${repository.repo}/${path}`];
 }
 
 /**

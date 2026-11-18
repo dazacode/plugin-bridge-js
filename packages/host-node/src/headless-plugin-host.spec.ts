@@ -53,7 +53,10 @@ const PLUGIN: RunnablePlugin = {
 const PROBE_SOURCE = `
 export default {
 	id: 'com.example.plugins.probe',
-	async searchCatalog(query) {
+	async searchCatalog(query, page, ctx) {
+		if (query === 'settings') {
+			return { entries: [], number: ctx.settings.number('n'), undeclared: ctx.settings.number('missing') };
+		}
 		if (query === 'globals') {
 			return {
 				entries: [],
@@ -68,6 +71,14 @@ export default {
 				window: typeof window,
 				ctxText: typeof arguments
 			};
+		}
+		if (query === 'web') {
+			try {
+				const headers = new Headers({ 'x-probe': 'yes' });
+				return { entries: [], header: headers.get('x-probe'), request: typeof Request, response: typeof Response };
+			} catch (error) {
+				return { entries: [], threw: String(error && error.message) };
+			}
 		}
 		if (query === 'node') {
 			try {
@@ -164,6 +175,28 @@ describe('the headless isolate', () => {
 		// the browser host runs.
 		expect(seen['self']).toBe('object');
 		expect(seen['window']).toBe('object');
+	}, 30_000);
+
+	it('hands over the web classes a browser Worker has, usable after the sealing', async () => {
+		const seen = await ask('web');
+
+		// Node defines these lazily, over an HTTP client that needs `Buffer`; read
+		// for the first time after `Buffer` was deleted, every one threw.
+		expect(seen['threw']).toBeUndefined();
+		expect(seen['header']).toBe('yes');
+		expect(seen['request']).toBe('function');
+		expect(seen['response']).toBe('function');
+	}, 30_000);
+
+	it('answers a number setting through ctx.settings.number (ABI section 9.2)', async () => {
+		const sandbox = await PluginSandbox.start(PLUGIN, PROBE_SOURCE, { n: 25 }, sandboxOptions());
+		try {
+			const seen = (await sandbox.searchCatalog('settings', 1)) as Record<string, unknown>;
+			expect(seen['number']).toBe(25);
+			expect(seen['undeclared']).toBe(0);
+		} finally {
+			sandbox.dispose();
+		}
 	}, 30_000);
 
 	it('refuses a plugin that reaches for a Node builtin', async () => {

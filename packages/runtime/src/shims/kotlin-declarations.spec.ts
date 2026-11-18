@@ -694,16 +694,426 @@ describe('a temporary file handed to the player', () => {
 		expect(decoded).toBe(text);
 	});
 
-	it('refuses every other use of File by name', () => {
+	it('refuses the uses of File this runtime does not answer, by name', () => {
 		expect(
 			refusalNames(
 				kt(
-					'fun a(): String = File("/etc/hosts").readText()',
 					'fun b(): String = File.separator',
 					'fun c(): Boolean = File.createTempFile("a", ".b").setReadable(true)'
 				)
 			)
-		).toEqual(['`File(…)`', '`File.separator`', '`.setReadable()`']);
+		).toEqual(['`File.separator`', '`.setReadable()`']);
+	});
+});
+
+describe('a path on the filesystem a plugin does not have', () => {
+	// A font cache written for a device: it asks the app for its directories,
+	// makes them, walks them to trim old files, and writes a download through a
+	// temporary file. A plugin has no filesystem, so every question answers
+	// "nothing there" and the first write throws the IOException the JVM would
+	// — which the extension's own catch-all handles. Nothing pretends a file
+	// was written, and the request for its bytes is never made.
+	const source = kt(
+		'import keiyoushi.utils.applicationContext',
+		'class Demo {',
+		'    var fetched = 0',
+		'    fun dirs(): String {',
+		'        val files = File(applicationContext.filesDir, "player/fonts").apply { mkdirs() }',
+		'        val cache = File(applicationContext.cacheDir, "fonts")',
+		'        return listOf(files.path, files.name, files.parentFile?.path ?: "-", cache.exists().toString(), files.isFile.toString()).joinToString("|")',
+		'    }',
+		'    fun walked(): Int = listOf(File("/a"), File("/b")).flatMap { it.walkTopDown().filter { f -> f.isFile }.toList() }.size',
+		'    fun sizes(): String = listOf(File("/a/x.ttf").length(), File("/a/x.ttf").lastModified()).joinToString(",")',
+		'    fun moved(): String = listOf(File("/a").mkdirs(), File("/a").delete(), File("/a").renameTo(File("/b")), File("/a").setLastModified(1L)).joinToString(",")',
+		'    fun cached(name: String): String {',
+		'        val target = File(File(applicationContext.cacheDir, "fonts"), name)',
+		'        if (target.length() <= 0) {',
+		'            try {',
+		'                val tmp = File.createTempFile("font_", ".tmp", target.parentFile)',
+		'                fetched += 1',
+		'                tmp.copyTo(target, overwrite = true)',
+		'            } catch (e: Exception) {',
+		'                return "failed: ${e.message}"',
+		'            }',
+		'        }',
+		'        return "kept"',
+		'    }',
+		'    fun read(): String = try { File("/a/x").readBytes().size.toString() } catch (e: Exception) { "unreadable" }',
+		'}'
+	);
+
+	it('names, joins and takes apart a path, under the app directories', async () => {
+		const d = await instantiate('Demo', source);
+		expect(d.dirs()).toBe('/app/files/player/fonts|fonts|/app/files/player|false|false');
+	});
+
+	it('answers that nothing is there, and that nothing was changed', async () => {
+		const d = await instantiate('Demo', source);
+		expect(d.walked()).toBe(0);
+		expect(d.sizes()).toBe('0,0');
+		expect(d.moved()).toBe('false,false,false,false');
+	});
+
+	it('fails the first write as storage that is not there fails, before anything is fetched', async () => {
+		const d = await instantiate('Demo', source);
+		expect(d.cached('x.ttf')).toMatch(/^failed: \/app\/cache\/fonts: .*no filesystem/);
+		expect(d.fetched).toBe(0);
+		expect(d.read()).toBe('unreadable');
+	});
+});
+
+describe('the injected Application, read inside the package that declares it', () => {
+	it('is the runtime’s, with no import to say so', async () => {
+		// keiyoushi's shared helper file reads `applicationContext` from its own
+		// package, so it has no import line for it. Read as a member it was
+		// `this.applicationContext`, undefined, at the first preference read.
+		const d = await instantiate(
+			'Demo',
+			kt('package keiyoushi.utils', 'fun appFiles(): String = applicationContext.filesDir.path'),
+			kt(
+				'import keiyoushi.utils.appFiles',
+				'class Demo {',
+				'    fun files(): String = appFiles()',
+				'}'
+			)
+		);
+		expect(d.files()).toBe('/app/files');
+	});
+});
+
+describe('an object reading its own properties and calling its own suspending members', () => {
+	// The shape a helper `object` has: a pattern held as a private property and
+	// used as a receiver two lines below, and one suspending member calling
+	// another bare. The receiver was refused as a module this build never read;
+	// the call went out unawaited, so the caller returned first and a failure
+	// in the callee was a rejection nobody held.
+	const source = kt(
+		'object Helper {',
+		'    private val FONT_REGEX = Regex("/fonts/([a-z]+)\\\\.ttf")',
+		'    val log = mutableListOf<String>()',
+		'    fun names(text: String): List<String> = FONT_REGEX.findAll(text).map { it.groupValues[1] }.toList()',
+		'    suspend fun outer(): String {',
+		'        log.clear()',
+		'        try {',
+		'            inner()',
+		'        } catch (e: Exception) {',
+		'            log.add("caught " + e.message)',
+		'        }',
+		'        log.add("after")',
+		'        return log.joinToString(",")',
+		'    }',
+		'    private suspend fun inner() {',
+		'        delay(1)',
+		'        log.add("inner")',
+		'        throw Exception("boom")',
+		'    }',
+		'}',
+		'class Demo {',
+		'    fun names(text: String): List<String> = Helper.names(text)',
+		'    suspend fun run(): String = Helper.outer()',
+		'}'
+	);
+
+	it('reads the property through the object', async () => {
+		const d = await instantiate('Demo', source);
+		expect(d.names('a /fonts/one.ttf b /fonts/two.ttf')).toEqual(['one', 'two']);
+	});
+
+	it('awaits the member it calls, so its failure reaches the catch around it', async () => {
+		const d = await instantiate('Demo', source);
+		expect(await d.run()).toBe('inner,caught boom,after');
+	});
+});
+
+describe('an unbound reference to a field of a video model', () => {
+	it('reads the field, rather than calling it on the constructor', async () => {
+		// PlaylistUtils groups an HLS master's audio and subtitle renditions with
+		// `.distinctBy(Track::url)`. Emitted as `Track.url(…)` it threw inside
+		// every extraction that had renditions, and the catch around the
+		// extraction answered no videos at all.
+		const d = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    fun unique(): List<String> = listOf(Track("u1", "a"), Track("u1", "b"), Track("u2", "c")).distinctBy(Track::url).map(Track::lang)',
+				'}'
+			)
+		);
+		expect(d.unique()).toEqual(['a', 'c']);
+	});
+});
+
+describe('file-scope functions that share a name', () => {
+	// Kotlin resolves these by the receiver's static type, or by the
+	// parameters; each is a function of its own. Emitted under one name they
+	// were two `function` declarations in one module — a SyntaxError at load,
+	// the whole bundle lost to one overload.
+	it('dispatches extension functions by the class of their receiver', async () => {
+		// A listing's two DTO shapes, each with its own `toEntry`.
+		const d = await instantiate(
+			'Demo',
+			kt(
+				'@Serializable',
+				'class Flat(val url: String, val title: String)',
+				'@Serializable',
+				'class Wrapped(val inner: Flat, val note: String? = null)',
+				'fun Flat.toEntry(prefix: String): String = prefix + title + "@" + url',
+				'fun Wrapped.toEntry(prefix: String): String = prefix + "wrapped " + inner.title',
+				'class Demo {',
+				'    fun both(): List<String> = listOf(Flat("/a", "A").toEntry(">"), Wrapped(Flat("/b", "B")).toEntry(">"))',
+				'    fun decoded(): List<String> = """[{"inner":{"url":"/c","title":"C"}}]""".parseAs<List<Wrapped>>().map { it.toEntry("~") }',
+				'}'
+			)
+		);
+		expect(d.both()).toEqual(['>A@/a', '>wrapped B']);
+		expect(d.decoded()).toEqual(['~wrapped C']);
+	});
+
+	it('tells an extension from a plain function of the same name, as a shared helper file declares them', async () => {
+		// The shape of a helper file shared across a whole extension
+		// repository: `fun Source.prefs(migration)` for the source to call,
+		// and `fun prefs(id: Long)` underneath it doing the work.
+		const d = await instantiate(
+			'Demo',
+			kt(
+				'open class Source(val id: Long)',
+				'fun Source.prefs(suffix: String = ""): String = prefs(id) + suffix',
+				'fun prefs(sourceId: Long): String = "store_$sourceId"',
+				'class Demo : Source(7L) {',
+				'    fun mine(): String = prefs("!")',
+				'    fun theirs(): String = prefs(9L)',
+				'}'
+			)
+		);
+		expect(d.mine()).toBe('store_7!');
+		expect(d.theirs()).toBe('store_9');
+	});
+});
+
+describe('a member with a reified type parameter, called bare', () => {
+	it('passes the type, including one with commas of its own', async () => {
+		// `extract<Dto>(text, "items")` from inside the class. The member is
+		// emitted as `extract(__type_T, text, key)`, and the bare call passed
+		// only `(text, key)`: the text became the type, the key the text, and
+		// the member's own catch answered null — a list read as empty. A type
+		// argument such as `Map<String, Map<String, String>>` was split at its
+		// inner commas and refused for arity.
+		const d = await instantiate(
+			'Demo',
+			kt(
+				'class Item(val name: String)',
+				'class Demo {',
+				'    private inline fun <reified T> extract(text: String, key: String): T? =',
+				'        try { text.substringAfter("$key=").parseAs<T>() } catch (e: Exception) { null }',
+				'    fun items(text: String): List<String> = extract<List<Item>>(text, "items")?.map { it.name } ?: emptyList()',
+				'    fun nested(text: String): Int = extract<Map<String, Map<String, String>>>(text, "dict")?.size ?: -1',
+				'}'
+			)
+		);
+		expect(d.items('items=[{"name":"x"},{"name":"y"}]')).toEqual(['x', 'y']);
+		expect(d.nested('dict={"a":{"b":"c"},"d":{}}')).toBe(2);
+	});
+
+	it('infers the type from what the call is returned as', async () => {
+		// `return executeRequest(payload)` in a function declared to return
+		// `Resp` — Kotlin infers T from the return type. The grammar splits
+		// that `return` from its call, and the expected type was looked for on
+		// the bare `return` and not found, so the call was refused.
+		const d = await instantiate(
+			'Demo',
+			kt(
+				'@Serializable',
+				'class Resp(val a: String)',
+				'class Demo {',
+				'    private inline fun <reified T> executeRequest(text: String): T = text.parseAs<T>()',
+				'    suspend fun search(text: String): Resp {',
+				'        val payload = text.trim()',
+				'        return executeRequest(payload)',
+				'    }',
+				'    suspend fun first(text: String): String = search(text).a',
+				'}'
+			)
+		);
+		expect(await d.first(' {"a":"x"} ')).toBe('x');
+	});
+
+	it('decodes a class handed through the type parameter by its serializer, defaults and all', async () => {
+		// The same class decoded through a generic helper and decoded directly
+		// must agree: by shape alone, a field's default and its `with = …`
+		// serializer were skipped, and the first read of it found null.
+		const d = await instantiate(
+			'Demo',
+			kt(
+				'@Serializable',
+				'class Row(val url: String, @SerialName("title_list") val titles: Map<String, String> = emptyMap())',
+				'class Demo {',
+				'    private inline fun <reified T> read(text: String): T = text.parseAs<T>()',
+				'    fun viaHelper(): String = read<Row>("""{"url":"/x"}""").titles["1"] ?: "none"',
+				'    fun direct(): String = """{"url":"/x"}""".parseAs<Row>().titles["1"] ?: "none"',
+				'}'
+			)
+		);
+		expect(d.direct()).toBe('none');
+		expect(d.viaHelper()).toBe('none');
+	});
+});
+
+describe('two collection and url behaviours a listing depended on', () => {
+	it('maps into a set, not only into a list', async () => {
+		// `episodes.mapTo(mutableSetOf()) { it.url }` — the urls already seen.
+		const d = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    fun seen(): Int = listOf("a", "b", "a").mapTo(mutableSetOf()) { it }.size',
+				'}'
+			)
+		);
+		expect(d.seen()).toBe(2);
+	});
+
+	it('reads backslashes in an http url as okhttp does', async () => {
+		// An address copied out of a JSON string whose slashes were escaped.
+		// okhttp reads `https:\/\/host\/a/b` as `https://host/a/b`; read here
+		// with no host, every relative resolution against it kept the
+		// backslashes and the stream it named was not a url at all.
+		const d = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    fun resolved(base: String): String = base.toHttpUrl().resolve("v/720.m3u8").toString()',
+				'    fun host(base: String): String = base.toHttpUrl().host',
+				'}'
+			)
+		);
+		const escaped = 'https:\\/\\/cdn.example.invalid\\/id\\/master.m3u8';
+		expect(d.host(escaped)).toBe('cdn.example.invalid');
+		// Each backslash-slash pair is two separators to okhttp, so the empty
+		// segments between them are kept, exactly as okhttp keeps them.
+		expect(d.resolved(escaped)).toBe('https://cdn.example.invalid//id//v/720.m3u8');
+		expect(d.resolved('https://cdn.example.invalid/id/master.m3u8?a=\\b')).toBe(
+			'https://cdn.example.invalid/id/v/720.m3u8'
+		);
+	});
+});
+
+describe('a call the grammar hands to the whole expression before it', () => {
+	// `"tags" to filters.getText<TagFilter>()` and `if (ok) set("K", v)` parse
+	// with the argument list attached to the whole infix, or the whole `if`,
+	// rather than to its last operand. Kotlin cannot call either of those
+	// without parentheses, so the call is the operand's — and both were
+	// refused as "a call through" something with no name.
+	it('applies the call to the last operand of an infix', async () => {
+		const d = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    private inline fun <reified T> List<Any>.firstOf(): String = firstOrNull { it is T }?.toString() ?: "-"',
+				'    fun pairs(items: List<Any>): String = listOf("s" to items.firstOf<String>(), "n" to items.firstOf<Int>()).joinToString { it.first + "=" + it.second }',
+				'}'
+			)
+		);
+		expect(d.pairs([3, 'x'])).toBe('s=x, n=3');
+		expect(d.pairs(['y'])).toBe('s=y, n=-');
+	});
+
+	it('applies the call to the body of an `if` with no braces, `set` included', async () => {
+		const d = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    fun built(ok: Boolean): String {',
+				'        val h = Headers.Builder().apply {',
+				'            if (ok) set("X-Token", "t")',
+				'            set("Accept", "*/*")',
+				'        }.build()',
+				'        return (h["X-Token"] ?: "none") + "|" + h["Accept"]',
+				'    }',
+				'}'
+			)
+		);
+		expect(d.built(true)).toBe('t|*/*');
+		expect(d.built(false)).toBe('none|*/*');
+	});
+});
+
+describe('a lazy property that reads a constructor parameter', () => {
+	it('reads the parameter the lambda captured', async () => {
+		// `class SearchInterceptor(client: OkHttpClient, baseUrl: String) {
+		// private val token by lazy { client.newCall(GET(baseUrl)) … } }`. A
+		// getter on the prototype cannot see a constructor's parameters, so the
+		// first read threw "client is not defined" — inside the source's own
+		// `runCatching`, which answered an empty token.
+		const d = await instantiate(
+			'Demo',
+			kt(
+				'class Holder(prefix: String, private val base: String) {',
+				'    private val token: String by lazy { runCatching { prefix + "@" + base }.getOrElse { "" } }',
+				'    val upper: String by lazy { base.uppercase() }',
+				'    fun read(): String = token + "|" + upper',
+				'}',
+				'class Demo {',
+				'    fun go(): String = Holder("p", "b").read()',
+				'}'
+			)
+		);
+		expect(d.go()).toBe('p@b|B');
+	});
+});
+
+describe('four pieces of the standard library a WebView resolver is built from', () => {
+	// None of these needs a WebView, and each refused its member by name.
+	const source = kt(
+		'class Demo {',
+		'    var log = mutableListOf<String>()',
+		'    fun cheapest(items: List<Pair<String, Int>>): String = items.minBy { it.second }.first',
+		'    fun dearest(items: List<Pair<String, Int>>): String = items.maxBy { it.second }.first',
+		'    fun emptyMin(): String = emptyList<Pair<String, Int>>().minBy { it.second }.first',
+		'    fun outcome(ok: Boolean): String {',
+		'        val result: Result<String> = if (ok) Result.success("yes") else Result.failure(IllegalStateException("no"))',
+		'        return result.getOrNull() ?: ("failed: " + result.exceptionOrNull()?.message)',
+		'    }',
+		'    suspend fun quick(): String? = withTimeoutOrNull(1000) { delay(1); "done" }',
+		'    suspend fun slow(): String? = withTimeoutOrNull(5) { delay(200); "late" }',
+		'    suspend fun posted(): String {',
+		'        val handler = Handler(Looper.getMainLooper())',
+		'        log.clear()',
+		'        handler.post { log.add("posted") }',
+		'        log.add("first")',
+		'        delay(10)',
+		'        return log.joinToString(",")',
+		'    }',
+		'}'
+	);
+
+	it('picks the first extreme, and throws on an empty collection', async () => {
+		const d = await instantiate('Demo', source);
+		const items = [
+			{ first: 'a', second: 3 },
+			{ first: 'b', second: 1 },
+			{ first: 'c', second: 1 },
+			{ first: 'd', second: 9 }
+		];
+		expect(d.cheapest(items)).toBe('b');
+		expect(d.dearest(items)).toBe('d');
+		expect(() => d.emptyMin()).toThrow(/empty collection/);
+	});
+
+	it('builds a Result either way', async () => {
+		const d = await instantiate('Demo', source);
+		expect(d.outcome(true)).toBe('yes');
+		expect(d.outcome(false)).toBe('failed: no');
+	});
+
+	it('answers the block, or null when it is too slow', async () => {
+		const d = await instantiate('Demo', source);
+		expect(await d.quick()).toBe('done');
+		expect(await d.slow()).toBeNull();
+	});
+
+	it('runs a posted block after the work that posted it', async () => {
+		const d = await instantiate('Demo', source);
+		expect(await d.posted()).toBe('first,posted');
 	});
 });
 

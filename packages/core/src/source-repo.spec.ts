@@ -12,7 +12,7 @@
  * https.
  */
 
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 
 import { TreeError } from './git-trees';
 
@@ -22,9 +22,12 @@ import {
 	MAX_LIB_MODULES,
 	MAX_SOURCE_BYTES,
 	MAX_SOURCE_FILES,
+	MAX_SOURCE_CANDIDATES,
 	MAX_THEME_FILES,
+	discoverSourceRepository,
 	extensionDirectory,
 	fetchExtensionSource,
+	forgetLearnedLayouts,
 	fetchSharedSources,
 	libDependencies,
 	libDirectory,
@@ -33,6 +36,7 @@ import {
 	newSharedCache,
 	newSourceBudget,
 	readBuildGradle,
+	sourceRepositoryCandidates,
 	sourceRepositoryOf,
 	themeDirectory,
 	type SourceLocation
@@ -373,6 +377,31 @@ describe('fetching one located extension', () => {
 		// Keyed relative to the extension directory, and nothing that is not
 		// Kotlin was fetched.
 		expect(asked).not.toContain(`${dir}res/icon.png`);
+	});
+
+	it('asks the branch and the build-file name the repository answered with first', async () => {
+		// A repository on `master` and the `.kts` layout. The first read finds
+		// both by trying the guesses in order; the second asks the answer first.
+		forgetLearnedLayouts();
+		const onMaster = `${RAW}/master/src/en/`;
+		const { getText, listFiles, asked } = fakeRepository({
+			[`${onMaster}one/build.gradle.kts`]: 'keiyoushi {\n    name = "One"\n}\n',
+			[`${onMaster}one/src/A.kt`]: kotlin,
+			[`${onMaster}two/build.gradle.kts`]: 'keiyoushi {\n    name = "Two"\n}\n',
+			[`${onMaster}two/src/B.kt`]: kotlin
+		});
+		const at = (directory: string): SourceLocation => ({
+			repositoryUrl: REPO,
+			lang: 'en',
+			directory
+		});
+
+		await fetchExtensionSource(at('one'), listFiles, getText);
+		const firstRead = asked.length;
+		await fetchExtensionSource(at('two'), listFiles, getText);
+		const buildProbes = asked.slice(firstRead).filter((url) => /build\.gradle/.test(url));
+
+		expect(buildProbes).toEqual([`${onMaster}two/build.gradle.kts`]);
 	});
 
 	it('reads the i18n messages beside the Kotlin, and no other asset', async () => {
@@ -953,5 +982,189 @@ describe('a listing that failed, rather than a directory that is empty', () => {
 		const source = await fetchExtensionSource(location, listFiles, getText);
 
 		expect(source.kotlinFiles.size).toBe(0);
+	});
+});
+
+/* ── finding the source repository when the metadata names a homepage ────── */
+
+/**
+ * A publisher whose index lives on one repository and whose source lives on a
+ * sibling under the same owner, with nothing in the metadata linking the two.
+ * Every name here is invented; the hosts are the forge's own, because that is
+ * what the URLs this module builds are made of.
+ */
+const PUBLISHER = 'example-publisher';
+const PUBLISHED_INDEX = `https://raw.githubusercontent.com/${PUBLISHER}/widget-repo/repo/index.min.json`;
+const SIBLING_RAW = `https://raw.githubusercontent.com/${PUBLISHER}/widget-extensions/HEAD/`;
+const SAMPLE_PKG = 'org.example.animeextension.en.example';
+
+/** The newer extension block: a named DSL block, keys inside it, no `ext`. */
+function dslBuildFile(versionCode: number, theme: string | null = null): string {
+	return `
+plugins {
+    alias(kei.plugins.extension)
+}
+
+publisher {
+    name = "Example"
+    versionCode = ${versionCode}
+    libVersion = "16"
+${theme === null ? '' : `    theme = "${theme}"\n`}
+    source {
+        lang = "en"
+        baseUrl = "https://watch.example.invalid"
+    }
+}
+`;
+}
+
+/** A fetcher over one map of absolute URLs, recording every request. */
+function served(files: Record<string, string>, fetched: string[] = []) {
+	return async (url: string): Promise<string> => {
+		fetched.push(url);
+		const body = files[url];
+		if (body === undefined) throw new Error(`nothing at ${url}`);
+		return body;
+	};
+}
+
+beforeEach(() => forgetLearnedLayouts());
+
+describe('candidate source repositories beside an index', () => {
+	it('starts at the index’s own repository, then its siblings, all under one owner', () => {
+		const candidates = sourceRepositoryCandidates(PUBLISHED_INDEX, null, ['extensions-source']);
+		expect(candidates.map((repository) => `${repository.owner}/${repository.repo}`)).toEqual([
+			`${PUBLISHER}/widget-repo`,
+			`${PUBLISHER}/widget-extensions`,
+			`${PUBLISHER}/widget-extensions-source`,
+			`${PUBLISHER}/extensions-source`
+		]);
+		// The published branch is not where source lives; the default branch is.
+		expect(candidates.every((repository) => repository.ref === null)).toBe(true);
+	});
+
+	it('takes an owner from a static-site website when the index names none', () => {
+		const candidates = sourceRepositoryCandidates(
+			'https://cdn.example.invalid/listing/index.min.json',
+			`https://${PUBLISHER}.github.io`,
+			['extensions-source']
+		);
+		expect(candidates.map((repository) => `${repository.owner}/${repository.repo}`)).toEqual([
+			`${PUBLISHER}/extensions-source`
+		]);
+	});
+
+	it('names nothing for an index on a plain web host with no forge path', () => {
+		// Any two-segment path parses as *some* repository; probing it would be
+		// requests aimed at a host that serves no forge shape at all.
+		expect(
+			sourceRepositoryCandidates('https://cdn.example.invalid/a/b/index.min.json', null, ['x'])
+		).toEqual([]);
+	});
+
+	it('is bounded however many names it is given', () => {
+		const names = Array.from({ length: 20 }, (_, n) => `name-${n}`);
+		expect(sourceRepositoryCandidates(PUBLISHED_INDEX, null, names)).toHaveLength(
+			MAX_SOURCE_CANDIDATES
+		);
+	});
+});
+
+describe('believing a candidate only when it proves itself', () => {
+	// Discoveries and learned layouts are remembered for the session; each case
+	// here is a different world and must not inherit the last one's answer.
+	beforeEach(() => forgetLearnedLayouts());
+
+	const samples = [{ pkg: SAMPLE_PKG, versionCode: 3 }];
+
+	it('accepts a sibling holding the listing at the version the index published', async () => {
+		const getText = served({
+			[`${SIBLING_RAW}settings.gradle.kts`]: 'include(":core")',
+			[`${SIBLING_RAW}src/en/example/build.gradle.kts`]: dslBuildFile(3)
+		});
+		expect(await discoverSourceRepository(PUBLISHED_INDEX, null, samples, getText)).toBe(
+			`https://github.com/${PUBLISHER}/widget-extensions`
+		);
+	});
+
+	it('refuses a sibling whose build file declares a different version', async () => {
+		const getText = served({
+			[`${SIBLING_RAW}settings.gradle.kts`]: 'include(":core")',
+			[`${SIBLING_RAW}src/en/example/build.gradle.kts`]: dslBuildFile(4)
+		});
+		expect(await discoverSourceRepository(PUBLISHED_INDEX, null, samples, getText)).toBeNull();
+	});
+
+	it('refuses a sibling that exists but does not hold the listing', async () => {
+		const getText = served({ [`${SIBLING_RAW}settings.gradle.kts`]: 'include(":core")' });
+		expect(await discoverSourceRepository(PUBLISHED_INDEX, null, samples, getText)).toBeNull();
+	});
+
+	it('adds a themed listing’s own code to its template’s base, as the build does', async () => {
+		const getText = served({
+			[`${SIBLING_RAW}settings.gradle.kts`]: 'include(":core")',
+			[`${SIBLING_RAW}src/en/example/build.gradle.kts`]: dslBuildFile(2, 'exampletheme'),
+			[`${SIBLING_RAW}lib-multisrc/exampletheme/build.gradle.kts`]:
+				'publisher {\n    baseVersionCode = 5\n    libVersion = "14"\n}'
+		});
+		expect(
+			await discoverSourceRepository(
+				PUBLISHED_INDEX,
+				null,
+				[{ pkg: SAMPLE_PKG, versionCode: 7 }],
+				getText
+			)
+		).toBe(`https://github.com/${PUBLISHER}/widget-extensions`);
+		// The extension's own number alone is not what was published. (A fresh
+		// session: a discovery is remembered per index.)
+		forgetLearnedLayouts();
+		expect(
+			await discoverSourceRepository(
+				PUBLISHED_INDEX,
+				null,
+				[{ pkg: SAMPLE_PKG, versionCode: 2 }],
+				getText
+			)
+		).toBeNull();
+	});
+
+	it('reads the older `ext` block too', async () => {
+		const getText = served({
+			[`${SIBLING_RAW}settings.gradle.kts`]: 'include(":core")',
+			[`${SIBLING_RAW}src/en/example/build.gradle`]:
+				"ext {\n    extName = 'Example'\n    extClass = '.Example'\n    extVersionCode = 3\n}"
+		});
+		expect(await discoverSourceRepository(PUBLISHED_INDEX, null, samples, getText)).toBe(
+			`https://github.com/${PUBLISHER}/widget-extensions`
+		);
+	});
+
+	it('costs at most two requests per candidate when there is nothing to find', async () => {
+		const fetched: string[] = [];
+		expect(
+			await discoverSourceRepository(PUBLISHED_INDEX, null, samples, served({}, fetched), [
+				'extensions-source'
+			])
+		).toBeNull();
+		expect(fetched.length).toBeLessThanOrEqual(2 * MAX_SOURCE_CANDIDATES);
+		// Raw files only: nothing here draws on the forge API's rate limit.
+		expect(fetched.every((url) => url.startsWith('https://raw.githubusercontent.com/'))).toBe(true);
+	});
+
+	it('names the branch when the forge has no spelling for the default one', async () => {
+		const forge = 'https://forge.example.invalid';
+		const raw = `${forge}/${PUBLISHER}/widget-extensions/raw/branch/main/`;
+		const getText = served({
+			[`${raw}settings.gradle.kts`]: 'include(":core")',
+			[`${raw}src/en/example/build.gradle.kts`]: dslBuildFile(3)
+		});
+		expect(
+			await discoverSourceRepository(
+				`${forge}/${PUBLISHER}/widget-repo/raw/branch/repo/index.min.json`,
+				null,
+				samples,
+				getText
+			)
+		).toBe(`${forge}/${PUBLISHER}/widget-extensions/tree/main`);
 	});
 });

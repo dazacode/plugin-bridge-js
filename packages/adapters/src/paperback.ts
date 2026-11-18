@@ -308,7 +308,11 @@ export const paperbackAdapter: ForeignAdapter = {
 			author: listing.author,
 			hosts,
 			origin,
-			entrypointSource: paperbackEntrypoint({ pluginId: listing.id, script: raw })
+			entrypointSource: paperbackEntrypoint({
+				pluginId: listing.id,
+				foreignId: origin.foreignId,
+				script: raw
+			})
 		});
 	}
 };
