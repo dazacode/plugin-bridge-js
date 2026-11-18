@@ -42,14 +42,21 @@
  */
 
 import { BOOT_CONTEXT } from './boot-context';
+import { CHEERIO_SOURCE } from './cheerio';
+import { DIGESTS } from './digests';
+import { DOM_RUNTIME_SOURCE } from './generated/dom-source';
+import { JS_LIBRARIES_SOURCE } from './js-libraries';
 import { JS_RUNTIME } from './js-runtime';
 import { STREAM_GUARDS } from './stream-guards';
 
 export type ManaArtifact =
 	/** A built `.mana`: minified CommonJS ending in `globalThis.Target = …`. */
 	| { readonly kind: 'bundle'; readonly script: string }
-	/** A single TypeScript entry file, already stripped of its types. */
-	| { readonly kind: 'source'; readonly script: string };
+	/**
+	 * A source tree, already stripped and linked into one script, with the
+	 * third-party packages it imports that the runtime supplies.
+	 */
+	| { readonly kind: 'source'; readonly script: string; readonly packages?: readonly string[] };
 
 export interface ManaEntrypointOptions {
 	/** Must equal the manifest id, or the sandbox refuses to load the bundle. */
@@ -372,9 +379,20 @@ ${ABI}`;
  * client method called positionally and by object — both are read, because the
  * caller is whichever author wrote the file, not us.
  */
-function sourceEntrypoint(pluginId: string, script: string): string {
+function sourceEntrypoint(pluginId: string, script: string, packages: readonly string[]): string {
+	// The parser and the libraries over it are carried only when the source
+	// imports one of them: they are most of a bundle's size, and a source that
+	// reads JSON never reaches them.
+	const libraries =
+		packages.length === 0
+			? ''
+			: `${DOM_RUNTIME_SOURCE}
+${DIGESTS}
+${CHEERIO_SOURCE}
+${JS_LIBRARIES_SOURCE}`;
 	return `${JS_RUNTIME}
 ${STREAM_GUARDS}
+${libraries}
 const __PLUGIN_ID = ${JSON.stringify(pluginId)};
 
 /* --- @mana-app/types, as the values a source can use --------------------- */
@@ -571,6 +589,45 @@ const __manaKnown = {
     'DetailedVerticalListGrouped'
   ]),
   AdditionalInfoType: __manaEnum(['Highlights', 'Tags', 'Staff', 'Links']),
+  // The search-form builders, as the published @mana-app/types defines them:
+  // each returns its props with a type tag (and a presentation for the menu
+  // and sheet spellings). They describe a filter form the ABI never draws —
+  // a search here is a query and a page — so the form is built and goes
+  // unread, exactly as it does when the same source runs from its built
+  // bundle, which carries these same factories.
+  FilterType: __manaEnum(['TOGGLE', 'SELECT', 'MULTISELECT', 'EXCLUDABLE_MULTISELECT', 'TEXT', 'STEPPER', 'DATEPICKER']),
+  SearchSectionType: __manaEnum(['LIST', 'TAGS', 'SORT']),
+  SearchToggle: function (props) { return Object.assign({}, props, { type: 0 }); },
+  SearchPicker: function (props) { return Object.assign({}, props, { type: 1 }); },
+  SearchMenuPicker: function (props) { return Object.assign({}, props, { type: 1, presentation: 'menu' }); },
+  SearchPickerSheet: function (props) { return Object.assign({}, props, { type: 1, presentation: 'sheet' }); },
+  SearchMultiPicker: function (props) { return Object.assign({}, props, { type: 2 }); },
+  SearchMultiPickerSheet: function (props) { return Object.assign({}, props, { type: 2, presentation: 'sheet' }); },
+  SearchExcludableMultiPicker: function (props) { return Object.assign({}, props, { type: 3 }); },
+  SearchExcludableMultiPickerSheet: function (props) { return Object.assign({}, props, { type: 3, presentation: 'sheet' }); },
+  SearchTextField: function (props) { return Object.assign({}, props, { type: 4 }); },
+  SearchStepper: function (props) { return Object.assign({}, props, { type: 5 }); },
+  SearchDatePicker: function (props) { return Object.assign({}, props, { type: 6 }); },
+  SearchGroup: function (props) {
+    if (!props || !props.children || props.children.length === 0) throw new Error('SearchGroup requires at least one child');
+    if (props.children.some(function (child) { return child && child.kind === 'group'; })) {
+      throw new Error('SearchGroup cannot contain another SearchGroup');
+    }
+    return Object.assign({}, props, { kind: 'group' });
+  },
+  SearchListSection: function (props) {
+    var children = [];
+    var groups = [];
+    for (var i = 0; i < props.children.length; i++) {
+      var item = props.children[i];
+      if (!(item && item.kind === 'group')) { children.push(item); continue; }
+      groups.push({ id: item.id, title: item.title, fieldIds: item.children.map(function (child) { return child.id; }) });
+      children.push.apply(children, item.children);
+    }
+    return Object.assign({ type: 0, header: props.header, footer: props.footer, children: children }, groups.length > 0 ? { groups: groups } : {});
+  },
+  SearchTagsSection: function (props) { return Object.assign({}, props, { type: 1 }); },
+  SearchSortSection: function (props) { return Object.assign({}, props || {}, { type: 2 }); },
   BasicAuthenticationUIIdentifier: __manaEnum(['EMAIL', 'USERNAME']),
   HttpBodyKind: __manaEnum(['Json', 'Form', 'Text', 'Bytes']),
   RequestOrigin: __manaEnum(['Default', 'Cover', 'Page', 'Search']),
@@ -598,6 +655,9 @@ var __baseRequire = require;
 require = function (name) {
   var id = String(name);
   if (id.indexOf('@mana-app/types') === 0) return __manaTypes;
+  if (id === 'cheerio' && typeof __cheerio !== 'undefined') return __cheerio;
+  if (id === 'html-entities' && typeof __htmlEntities !== 'undefined') return __htmlEntities;
+  if (id === 'crypto-js' && typeof __cryptoJs !== 'undefined') return __cryptoJs;
   return __baseRequire(id);
 };
 
@@ -670,5 +730,5 @@ ${ABI}`;
 export function manaEntrypoint(options: ManaEntrypointOptions): string {
 	return options.artifact.kind === 'bundle'
 		? bundleEntrypoint(options.pluginId, options.artifact.script)
-		: sourceEntrypoint(options.pluginId, options.artifact.script);
+		: sourceEntrypoint(options.pluginId, options.artifact.script, options.artifact.packages ?? []);
 }

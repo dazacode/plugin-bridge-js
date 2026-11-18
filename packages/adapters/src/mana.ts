@@ -350,6 +350,7 @@ export const manaAdapter: ForeignAdapter = {
 		// a template three directories away is where the API address usually is.
 		let scanned = [text];
 		let script = text;
+		let packages: string[] = [];
 		if (!built) {
 			const linked = await linkedSource(
 				text,
@@ -360,6 +361,7 @@ export const manaAdapter: ForeignAdapter = {
 			);
 			script = linked.script;
 			scanned = linked.sources;
+			packages = linked.packages;
 		}
 		const hosts = [
 			...new Set([
@@ -384,7 +386,7 @@ export const manaAdapter: ForeignAdapter = {
 				// Which half of the shim to emit. The bundle needs the host bridge
 				// and nothing else; a source file needs a base class, because in a
 				// single file nothing supplies one.
-				artifact: built ? { kind: 'bundle', script } : { kind: 'source', script }
+				artifact: built ? { kind: 'bundle', script } : { kind: 'source', script, packages }
 			})
 		});
 	}
@@ -473,6 +475,24 @@ function typescriptCandidates(resolved: string): string[] {
  * unreasonable number of requests.
  */
 const MAX_SOURCE_MODULES = 40;
+
+/**
+ * The third-party packages a source tree may import, and what the shim answers
+ * each with.
+ *
+ * Measured: of 139 Mana entry closures, 116 import `cheerio`, 80
+ * `html-entities` and 52 `crypto-js`, and those three are the whole of what
+ * stood between most of the 120 refused for packages and a bundle. Each is
+ * answered by a compatible subset the runtime carries (`shims/cheerio.ts`,
+ * `shims/js-libraries.ts`), kept to the members the corpus calls; a member
+ * outside it fails by name. Anything else — `moment`, `simple-url`,
+ * `crypto-es` — is still refused.
+ */
+const SUPPLIED_PACKAGES: Readonly<Record<string, string>> = {
+	cheerio: '__cheerio',
+	'html-entities': '__htmlEntities',
+	'crypto-js': '__cryptoJs'
+};
 const MAX_SOURCE_DEPTH = 6;
 
 /**
@@ -504,7 +524,7 @@ async function linkedSource(
 	path: string,
 	name: string,
 	services: ConversionServices
-): Promise<{ script: string; sources: string[] }> {
+): Promise<{ script: string; sources: string[]; packages: string[] }> {
 	const relativeOf = (source: string): string[] =>
 		valueImports(source)
 			.map((one) => one.specifier)
@@ -566,7 +586,7 @@ async function linkedSource(
 	}
 
 	const sources = [...walk.modules.map((one) => one.source), text];
-	const bare = [
+	const imported = [
 		...new Set(
 			sources.flatMap((one) =>
 				valueImports(one)
@@ -575,6 +595,8 @@ async function linkedSource(
 			)
 		)
 	];
+	const packages = imported.filter((one) => SUPPLIED_PACKAGES[one] !== undefined);
+	const bare = imported.filter((one) => SUPPLIED_PACKAGES[one] === undefined);
 	if (bare.length > 0) {
 		throw new ForeignFormatError(
 			`"${name}" is published as source and imports ${bare
@@ -589,6 +611,7 @@ async function linkedSource(
 	);
 	const linker = (imports: Readonly<Record<string, string>>) => (specifier: string) => {
 		if (specifier.startsWith('@mana-app/types')) return '__manaTypes';
+		if (SUPPLIED_PACKAGES[specifier] !== undefined) return SUPPLIED_PACKAGES[specifier];
 		if (!specifier.startsWith('.')) return null;
 		const url = imports[specifier];
 		const variable = url === undefined ? undefined : variables.get(url);
@@ -624,7 +647,7 @@ async function linkedSource(
 	const entry = stripTypescript(text, linker(walk.entryImports));
 	const script =
 		walk.modules.length === 0 ? entry.code : `${MANA_LINK}\n${wrapped.join('\n')}\n${entry.code}`;
-	return { script, sources };
+	return { script, sources, packages };
 }
 
 /**
@@ -671,7 +694,7 @@ const MEMBER_MODIFIERS = new Set([
 const AFTER_KEYWORD =
 	/(?:^|[^A-Za-z0-9_$.])(?:return|typeof|case|in|of|void|throw|delete|yield|await|else|do)\s*$/;
 /** A type so far that still needs an operand: a union, an intersection, an operator. */
-const TYPE_OPERAND = /(?:[|&]|(?:^|[^A-Za-z0-9_$])(?:readonly|keyof|typeof|unique))$/;
+const TYPE_OPERAND = /(?:[|&]|(?:^|[^A-Za-z0-9_$])(?:readonly|keyof|typeof|unique|is))$/;
 /** Type-position words that end the member a modifier belongs to. */
 const CLASS_KEYWORDS = new Set(['class', 'interface', 'function']);
 
@@ -795,10 +818,30 @@ export function stripTypescript(
 				at += 1;
 				continue;
 			}
-			if (char === '\n' && depth === 0) return at;
+			if (char === '\n' && depth === 0) {
+				// A type may start on the next line, or continue there with a
+				// union member: `x as\n  | A\n  | B`.
+				const next = forward(at);
+				const continues =
+					(next === '|' || next === '&') && source.charAt(source.indexOf(next, at) + 1) !== next;
+				if (started && !continues) return at;
+				at += 1;
+				continue;
+			}
 			if (/\s/.test(char)) {
 				at += 1;
 				continue;
+			}
+			// `x as unknown as T`: a second `as` ends the first type, and is read
+			// again by the caller as an assertion of its own.
+			if (
+				depth === 0 &&
+				started &&
+				char === 'a' &&
+				/^as\s/.test(source.slice(at, at + 3)) &&
+				!/[A-Za-z0-9_$]/.test(source.charAt(at - 1))
+			) {
+				return at;
 			}
 			// A function type's arrow is one token, and its `>` closes nothing.
 			// Inside brackets it is always the type's; at the top it is the
@@ -826,7 +869,12 @@ export function stripTypescript(
 			} else if (char === ')' || char === ']' || char === '}' || char === '>') {
 				if (depth === 0) return at;
 				depth -= 1;
-			} else if (depth === 0 && (char === ',' || char === ';' || char === '=' || char === '\n')) {
+			} else if (
+				depth === 0 &&
+				// A `:` at the top of a type ends it: `c ? x as T : y` is a
+				// ternary's else, and a type only holds a colon inside brackets.
+				(char === ',' || char === ';' || char === '=' || char === '\n' || char === ':')
+			) {
 				return at;
 			} else if (depth === 0 && char === '|' && source.charAt(at + 1) === '|') return at;
 			else if (depth === 0 && char === '&' && source.charAt(at + 1) === '&') return at;
@@ -874,12 +922,73 @@ export function stripTypescript(
 		return 'call';
 	};
 
+	/**
+	 * `const a = f(), b: T = []` — the second declarator of a list.
+	 *
+	 * The walk below stops at the first `=` it meets, which is the first
+	 * declarator's initializer, so `b: T` read as an object key and the type
+	 * stayed in. Here the name before the colon is followed back to a comma, and
+	 * from the comma, at the same bracket depth, to either a declaring keyword
+	 * (a declarator list) or an open bracket or `;` (anything else — an object
+	 * literal, an argument list).
+	 */
+	const declaratorAfterComma = (at: number): boolean => {
+		let scan = at - 1;
+		while (scan >= 0 && /\s/.test(source.charAt(scan))) scan -= 1;
+		if (scan >= 0 && (source.charAt(scan) === '}' || source.charAt(scan) === ']')) {
+			scan = matchingBack(scan) - 1;
+		} else {
+			if (!/[A-Za-z0-9_$]/.test(source.charAt(scan))) return false;
+			while (scan >= 0 && /[A-Za-z0-9_$]/.test(source.charAt(scan))) scan -= 1;
+		}
+		while (scan >= 0 && /\s/.test(source.charAt(scan))) scan -= 1;
+		if (source.charAt(scan) !== ',') return false;
+		for (let walk = scan - 1, guard = 0; walk >= 0 && guard < 4096; walk -= 1, guard += 1) {
+			const char = source.charAt(walk);
+			if (char === ')' || char === ']' || char === '}') {
+				const open = matchingBack(walk);
+				if (open < 0) return false;
+				walk = open;
+				continue;
+			}
+			if (char === '"' || char === "'" || char === '`') {
+				let open = walk - 1;
+				while (open >= 0 && !(source.charAt(open) === char && source.charAt(open - 1) !== '\\'))
+					open -= 1;
+				if (open < 0) return false;
+				walk = open;
+				continue;
+			}
+			if (char === '(' || char === '[' || char === '{' || char === ';') return false;
+			if (/[a-z]/.test(char) && !/[A-Za-z0-9_$]/.test(source.charAt(walk + 1))) {
+				const word = /([A-Za-z_$][A-Za-z0-9_$]*)$/.exec(
+					source.slice(Math.max(0, walk - 16), walk + 1)
+				);
+				if (
+					word !== null &&
+					DECLARATORS.has(word[1]) &&
+					!/[A-Za-z0-9_$.]/.test(source.charAt(walk - word[1].length)) &&
+					// `x as const, key: v` is an object literal; the `const` there
+					// is an assertion, not a declaration.
+					!/\bas\s*$/.test(
+						source.slice(Math.max(0, walk - word[1].length - 8), walk - word[1].length + 1)
+					)
+				) {
+					return true;
+				}
+			}
+		}
+		return false;
+	};
+
 	const colonIsType = (at: number): boolean => {
 		if (back(at) === '?') return true;
 		if ((ternaries[stack.length] ?? 0) > 0) return false;
 
 		const kind = innermost();
 		if (kind === 'params' || kind === 'class') return true;
+
+		if (declaratorAfterComma(at)) return true;
 
 		// `): T {` — a return position, so the close of a parameter list.
 		if (back(at) === ')') {
@@ -912,12 +1021,19 @@ export function stripTypescript(
 				continue;
 			}
 			if (char === '=' || char === ';' || char === '\n') return false;
-			// …and a declarator is a whole word, not the start of `letters`.
+			// …and a declarator is a whole word, not the start of `letters`,
+			// nor the `const` of an `as const` assertion.
 			if (!/[A-Za-z0-9_$]/.test(source.charAt(at2 + 1))) {
 				const word = /([A-Za-z_$][A-Za-z0-9_$]*)\s*$/.exec(
 					source.slice(Math.max(0, at2 - 48), at2 + 1)
 				);
-				if (word !== null && DECLARATORS.has(word[1])) return true;
+				if (
+					word !== null &&
+					DECLARATORS.has(word[1]) &&
+					!/\bas\s+[A-Za-z_$]+\s*$/.test(source.slice(Math.max(0, at2 - 64), at2 + 1))
+				) {
+					return true;
+				}
 			}
 			at2 -= 1;
 		}
@@ -963,6 +1079,42 @@ export function stripTypescript(
 				}
 			} else if (char === ';' || char === '\n' || char === '=') return -1;
 			if (scan > at) flat += char;
+		}
+		return -1;
+	};
+
+	/**
+	 * `<string>value` and `<T>(x) => …`: a type list where an *expression*
+	 * starts.
+	 *
+	 * Nothing can be compared there — a `<` with no left operand is not a
+	 * comparison — so a `<…>` holding only type characters, followed by the
+	 * start of an expression, is either an old-style assertion or a generic
+	 * arrow's type parameters, and in both the list goes and the rest stays.
+	 */
+	const prefixTypeList = (at: number): number => {
+		const before = back(at);
+		const word = /([A-Za-z_$][A-Za-z0-9_$]*)\s*$/.exec(source.slice(Math.max(0, at - 16), at));
+		const expressionStart =
+			/[=(,:[!&|?{};]/.test(before) ||
+			(word !== null && AFTER_KEYWORD.test(source.slice(Math.max(0, at - 16), at)));
+		if (!expressionStart || (/[A-Za-z0-9_$)\]]/.test(before) && word === null)) return -1;
+		let depth = 0;
+		for (let scan = at; scan < source.length && scan - at < 240; scan += 1) {
+			const char = source.charAt(scan);
+			if (char === '<') depth += 1;
+			else if (char === '>') {
+				depth -= 1;
+				if (depth === 0) {
+					const inside = source.slice(at + 1, scan);
+					if (
+						inside.trim().length === 0 ||
+						!/^[\w$.,\s|&'"[\]<>]*(?:\s+extends\s+[\w$.,\s|&'"[\]<>]*)?$/.test(inside)
+					)
+						return -1;
+					return /[A-Za-z0-9_$('"`[!-]/.test(forward(scan + 1)) ? scan : -1;
+				}
+			} else if (!/[\w$.,\s|&'"[\]]/.test(char)) return -1;
 		}
 		return -1;
 	};
@@ -1057,8 +1209,24 @@ export function stripTypescript(
 		const specifier = whole?.[3] ?? bare?.[1] ?? '';
 		// The expression the module is reached by: an object for a package this
 		// build supplies, a call for one the runtime registry holds.
-		const target = moduleFor(specifier) ?? `__manaRequire(${JSON.stringify(specifier)})`;
 		const clause = (whole?.[2] ?? '').trim();
+		// Asked only when the import carries a value: a list of nothing but types
+		// names no module at runtime, and a linker that never walked it — which it
+		// should not, there being nothing to read — must not be asked to link it.
+		const named = /\{([^}]*)\}/.exec(clause);
+		const onlyTypes =
+			named !== null &&
+			clause
+				.replace(/\{[^}]*\}/, '')
+				.replace(/,/g, '')
+				.trim().length === 0 &&
+			named[1]
+				.split(',')
+				.map((one) => one.trim())
+				.filter((one) => one.length > 0)
+				.every((one) => /^type\s/.test(one));
+		if (onlyTypes) return end;
+		const target = moduleFor(specifier) ?? `__manaRequire(${JSON.stringify(specifier)})`;
 		if (clause.length === 0) {
 			push(`${target};`);
 			return end;
@@ -1071,7 +1239,6 @@ export function stripTypescript(
 		if (defaulted !== null && namespace === null) {
 			parts.push(`const ${defaulted[1]} = ${target}.default;`);
 		}
-		const named = /\{([^}]*)\}/.exec(clause);
 		if (named !== null) {
 			// An import renames with `as`; a destructuring renames with `:`, and
 			// the two spellings are not interchangeable. A `type` field names
@@ -1381,8 +1548,8 @@ export function stripTypescript(
 
 		// `x as T` and `x satisfies T` — the type is dropped, the value kept.
 		if (
-			(char === 'a' && rest.startsWith('as ')) ||
-			(char === 's' && rest.startsWith('satisfies '))
+			!/[A-Za-z0-9_$]/.test(source.charAt(at - 1)) &&
+			((char === 'a' && /^as\s/.test(rest)) || (char === 's' && /^satisfies\s/.test(rest)))
 		) {
 			if (rest.startsWith(char === 'a' ? 'as' : 'satisfies')) {
 				iSet(skipType(at + (char === 'a' ? 2 : 9)));
@@ -1394,6 +1561,11 @@ export function stripTypescript(
 			const close = genericList(at);
 			if (close > 0) {
 				iSet(close + 1);
+				continue;
+			}
+			const prefix = prefixTypeList(at);
+			if (prefix > 0) {
+				iSet(prefix + 1);
 				continue;
 			}
 		}

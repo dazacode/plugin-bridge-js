@@ -235,6 +235,7 @@ describe('a Mana source that imports its own repository', () => {
 		[ENTRY]: `
 import { ContentRating, type SourceInfo } from '@mana-app/types';
 import type { ClientOptions } from '../../lib/client.ts';
+import { type ReaderOptions } from '../../lib/reader.ts';
 import { TemplateSource } from '../../lib/source.ts';
 import { tidy, LABEL } from '../../lib/forms';
 import shout from './shout.js';
@@ -335,6 +336,7 @@ export default function shout(value: string): string {
 		const asked: string[] = [];
 		await manaAdapter.convert(sourceListing(), served(FILES, asked));
 		expect(asked).not.toContain(`${REPO}lib/client.ts`);
+		expect(asked).not.toContain(`${REPO}lib/reader.ts`);
 	});
 
 	it('refuses a sibling that climbs out of the repository, without fetching it', async () => {
@@ -368,11 +370,11 @@ export default function shout(value: string): string {
 		};
 		const imported = {
 			...FILES,
-			[`${REPO}lib/text.ts`]: `import { load } from 'cheerio';\nexport const tidy = load;\nexport const LABEL = 'x';`
+			[`${REPO}lib/text.ts`]: `import moment from 'moment';\nexport const tidy = moment;\nexport const LABEL = 'x';`
 		};
 		for (const [files, name] of [
 			[required, 'left-pad'],
-			[imported, 'cheerio']
+			[imported, 'moment']
 		] as const) {
 			const failure = await manaAdapter
 				.convert(sourceListing(), served(files))
@@ -380,6 +382,44 @@ export default function shout(value: string): string {
 			expect((failure as ForeignFormatError).obstacles).toEqual(['packageImports']);
 			expect((failure as ForeignFormatError).message).toContain(`"${name}"`);
 		}
+	});
+
+	it("answers the three packages the corpus imports with the runtime's own", async () => {
+		const files = {
+			...FILES,
+			[`${REPO}lib/text.ts`]: `
+import { load } from 'cheerio';
+import { decode } from 'html-entities';
+import CryptoJS from 'crypto-js';
+export function tidy(value: string): string {
+  const $ = load('<p class="t"> ' + value + ' &amp; <b>x</b></p>');
+  return decode($('p.t').text().trim()) + ':' + CryptoJS.SHA256('abc').toString().slice(0, 8);
+}
+export const LABEL = 'one';`
+		};
+		const module = await load(files);
+		const page = await module.searchCatalog('q', 1, { http: {} });
+		// Text as written: the two spaces either side of the entity both survive.
+		expect(page.entries[0].sourceMediaId).toBe('one  & x:ba7816bf');
+	});
+
+	it('loads a source that builds its search form at module scope', async () => {
+		const files = {
+			...FILES,
+			[`${REPO}lib/text.ts`]: `
+import { SearchMenuPicker, SearchMultiPicker, SearchPicker, SearchListSection } from '@mana-app/types';
+const FORM = SearchListSection({ children: [
+  SearchMenuPicker({ id: 'sort', title: 'Sort', options: [] }),
+  SearchMultiPicker({ id: 'genre', title: 'Genre', options: [] }),
+  SearchPicker({ id: 'status', title: 'Status', options: [] })
+] });
+export const tidy = (value: string) => value.trim() + ':' + FORM.children.map((one: { type: number; presentation?: string }) => one.type + (one.presentation ?? '')).join(',');
+export const LABEL = 'x';`
+		};
+		const module = await load(files);
+		const page = await module.searchCatalog('q', 1, { http: {} });
+		// The published factories' own tags: SELECT is 1, MULTISELECT 2.
+		expect(page.entries[0].sourceMediaId).toBe('one:1menu,2,1');
 	});
 
 	it('scans every module it carries for the hosts it reaches', async () => {
@@ -523,6 +563,64 @@ const hit = store.get<{
 const parsed = JSON.parse<{ status: number; result: string }>('{"status":1}');
 const result = [hit.value, parsed.status];`)
 		).toEqual(['k', 1]);
+	});
+
+	it('strips the type of a second declarator in a list', () => {
+		expect(
+			run(`const seen = new Set<string>(), items: string[] = [], total: number | undefined = 2;
+const result = [items.length, total];`)
+		).toEqual([0, 2]);
+	});
+
+	it('keeps an object literal whose key follows an `as const`', () => {
+		expect(
+			run(`const author = { href: '', name: 'n' };
+const result = { type: 'staff' as const, id: author.href || author.name };`)
+		).toEqual({ type: 'staff', id: 'n' });
+	});
+
+	it('reads a type that continues on the next line after `as`', () => {
+		expect(
+			run(`const filters: Record<string, unknown> = { a: { included: [1] } };
+const value = filters['a'] as
+  | { included?: unknown[] }
+  | undefined;
+const result = value?.included;`)
+		).toEqual([1]);
+	});
+
+	it('ends an assertion at a ternary colon, and chains `as unknown as T`', () => {
+		expect(
+			run(`const item: unknown = { a: 1 };
+const page = item ? item as { a: number } : {};
+const scope = globalThis as unknown as {
+  nothing: string;
+};
+const result = [page, typeof scope];`)
+		).toEqual([{ a: 1 }, 'object']);
+	});
+
+	it('does not read `as` inside a longer name', () => {
+		expect(
+			run(`const sourceCanvas = 3;
+let resultCanvas = sourceCanvas;
+const result = resultCanvas;`)
+		).toBe(3);
+	});
+
+	it('strips a type predicate', () => {
+		expect(
+			run(`const rows = [{ title: 'a' }, null].filter((row): row is { title: string } => row !== null);
+const result = rows.length;`)
+		).toBe(1);
+	});
+
+	it('strips an angle-bracket assertion and a generic arrow', () => {
+		expect(
+			run(`const variables: Record<string, unknown> = { a: 'x' };
+const first = <T>(list: T[]): T => list[0];
+const result = [(<string>variables['a']).length, first<number>([4])];`)
+		).toEqual([1, 4]);
 	});
 
 	it('does not read the letters of a string as a declarator', () => {
