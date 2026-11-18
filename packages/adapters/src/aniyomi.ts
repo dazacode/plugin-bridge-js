@@ -63,7 +63,9 @@ import {
 	fetchExtensionSource,
 	locationCandidates,
 	newSharedCache,
+	BUILD_FILES,
 	discoverSourceRepository,
+	forgetLearnedLayouts,
 	readBuildGradle,
 	sourceRepositoryOf,
 	sourceRepositoryOfUrl,
@@ -915,11 +917,21 @@ async function readExtensionSource(
 	});
 
 	for (const location of candidates) {
+		// With the tree in hand, the build file this directory actually has is
+		// known, so it is the only name asked for — and on the branch the tree
+		// was read from, which the URL carries. Without it every listing paid
+		// a 404 for `build.gradle` on each branch before `build.gradle.kts`.
+		const prefix = `${extensionDirectory(location)}/`;
+		const known =
+			index === null
+				? {}
+				: { buildFiles: BUILD_FILES.filter((name) => index.paths.includes(`${prefix}${name}`)) };
 		const found = await fetchExtensionSource(
 			location,
 			services.listFiles,
 			services.getText,
-			sharedCacheFor(repositoryUrl)
+			sharedCacheFor(repositoryUrl),
+			known
 		);
 		if (found.kotlinFiles.size === 0) continue;
 
@@ -1195,6 +1207,7 @@ function sharedCacheFor(repositoryUrl: string): SharedCache {
 
 /** Drops the memo. For specs, which must not leak a repository between cases. */
 export function forgetCachedLicences(): void {
+	forgetLearnedLayouts();
 	LICENCES.clear();
 	REPOSITORY_FILES.clear();
 	SHARED.clear();

@@ -164,7 +164,59 @@ const CORE_ROOT = 'core';
  * exists because a fork that migrated to the Kotlin DSL is still the same
  * layout, and one extra miss is cheaper than not finding the theme.
  */
-const BUILD_FILES = ['build.gradle', 'build.gradle.kts'] as const;
+export const BUILD_FILES = ['build.gradle', 'build.gradle.kts'] as const;
+
+/**
+ * What one source repository has already answered with, this session: the
+ * branch its files were found on and the build-file name its modules use.
+ *
+ * Every read of a module probed both names on every ref in a fixed order, so a
+ * repository on the newer `build.gradle.kts` layout paid a 404 for
+ * `build.gradle` on each ref before the right name answered — per listing, and
+ * again on every load. A repository's layout is one fact, so the first answer
+ * is remembered and asked first after that. Only the *order* changes: the
+ * other name and the other refs are still tried when the remembered ones miss,
+ * so a repository mixing both layouts reads exactly as it did.
+ *
+ * Keyed by origin, owner and repo, never by branch, and bounded like the other
+ * per-repository memos; a forgotten entry costs the old probes, nothing more.
+ */
+const LEARNED_LAYOUT = new Map<string, { ref: string | null; filename: string | null }>();
+const MAX_LEARNED_LAYOUTS = 64;
+
+function layoutKey(repository: GitRepository): string {
+	return `${repository.origin}/${repository.owner}/${repository.repo}`.toLowerCase();
+}
+
+function learnLayout(
+	repository: GitRepository,
+	found: { ref?: string | null; filename?: string | null }
+): void {
+	const key = layoutKey(repository);
+	const known = LEARNED_LAYOUT.get(key) ?? { ref: null, filename: null };
+	if (!LEARNED_LAYOUT.has(key) && LEARNED_LAYOUT.size >= MAX_LEARNED_LAYOUTS) {
+		const oldest = LEARNED_LAYOUT.keys().next();
+		if (oldest.done !== true) LEARNED_LAYOUT.delete(oldest.value);
+	}
+	LEARNED_LAYOUT.set(key, {
+		ref: found.ref ?? known.ref,
+		filename: found.filename ?? known.filename
+	});
+}
+
+/** The build-file names to try for a repository, the one it is known to use first. */
+function buildFileOrder(repository: GitRepository): readonly string[] {
+	const learned = LEARNED_LAYOUT.get(layoutKey(repository))?.filename ?? null;
+	return learned === null
+		? BUILD_FILES
+		: [learned, ...BUILD_FILES.filter((name) => name !== learned)];
+}
+
+/** Forgets every learned layout and discovery. For specs, which must not share them. */
+export function forgetLearnedLayouts(): void {
+	LEARNED_LAYOUT.clear();
+	DISCOVERED.clear();
+}
 
 /**
  * How many `.kt` files one extension may cost.
@@ -550,10 +602,12 @@ async function firstBuildFile(
 	directory: string,
 	getText: TextFetcher
 ): Promise<string | null> {
-	for (const filename of BUILD_FILES) {
+	for (const filename of buildFileOrder(repository)) {
 		for (const url of rawCandidates(repository, `${directory}/${filename}`, [ref])) {
 			try {
-				return await getText(url);
+				const body = await getText(url);
+				learnLayout(repository, { filename });
+				return body;
 			} catch {
 				// A missing file is the ordinary case for one of the two names.
 			}
@@ -594,6 +648,14 @@ async function verifyCandidate(
 		// rather than two per sampled listing.
 		const settings = await firstFile(repository, ref, SETTINGS_FILES, getText);
 		if (settings === null) continue;
+		// A Kotlin-DSL root is the newer layout, whose modules are `.kts` too:
+		// asked first, unless a module has already said otherwise.
+		if (
+			settings.name === 'settings.gradle.kts' &&
+			LEARNED_LAYOUT.get(layoutKey(repository))?.filename == null
+		) {
+			learnLayout(repository, { filename: 'build.gradle.kts' });
+		}
 
 		const themeFiles = new Map<string, Promise<string | null>>();
 		const readTheme = (theme: string): Promise<string | null> => {
@@ -626,11 +688,11 @@ async function firstFile(
 	ref: string,
 	names: readonly string[],
 	getText: TextFetcher
-): Promise<string | null> {
+): Promise<{ name: string; body: string } | null> {
 	for (const name of names) {
 		for (const url of rawCandidates(repository, name, [ref])) {
 			try {
-				return await getText(url);
+				return { name, body: await getText(url) };
 			} catch {
 				// Absent under this name; the next one may answer.
 			}
@@ -661,6 +723,14 @@ export async function discoverSourceRepository(
 	conventionalNames: readonly string[] = []
 ): Promise<string | null> {
 	if (samples.length === 0) return null;
+	// Picked once per index this session. A client loads an index again for
+	// every check and every install, and each load re-probed the candidates the
+	// first one had already ruled out — the publish repository's missing
+	// settings file first, every time. Only an answer is remembered: an index
+	// whose source was not found is asked again, so a publisher who adds one
+	// is not held to the first miss.
+	const known = DISCOVERED.get(indexUrl);
+	if (known !== undefined) return known;
 	for (const candidate of sourceRepositoryCandidates(indexUrl, website, conventionalNames)) {
 		let ref: string | null;
 		try {
@@ -671,10 +741,19 @@ export async function discoverSourceRepository(
 		if (ref === null) continue;
 		// `HEAD` is what "the default branch" is spelled as, not a branch, so it
 		// is left implicit; a branch that had to be named is carried.
-		return canonicalUrl(ref === 'HEAD' ? candidate : { ...candidate, ref });
+		const found = canonicalUrl(ref === 'HEAD' ? candidate : { ...candidate, ref });
+		if (DISCOVERED.size >= MAX_LEARNED_LAYOUTS) {
+			const oldest = DISCOVERED.keys().next();
+			if (oldest.done !== true) DISCOVERED.delete(oldest.value);
+		}
+		DISCOVERED.set(indexUrl, found);
+		return found;
 	}
 	return null;
 }
+
+/** Each index's discovered source repository, this session. See `discoverSourceRepository`. */
+const DISCOVERED = new Map<string, string>();
 
 /** The path of one extension's directory, relative to the repository root. */
 export function extensionDirectory(location: SourceLocation): string {
@@ -1366,7 +1445,15 @@ export async function fetchExtensionSource(
 	 * keeping any. Null reads every template and module afresh, which is right
 	 * for one conversion and wrong for a catalogue of them.
 	 */
-	cache: SharedCache | null = null
+	cache: SharedCache | null = null,
+	/**
+	 * What the caller already knows about this directory. `buildFiles` is the
+	 * build-file names the repository's own file list shows in it, in the
+	 * order to read them — empty when it shows neither, so no name is probed
+	 * for a file the tree says is not there. Absent, the names are guessed,
+	 * the one this repository is known to use first.
+	 */
+	known: { readonly buildFiles?: readonly string[] } = {}
 ): Promise<ExtensionSource> {
 	const repository = repositoryOf(location.repositoryUrl);
 	if (repository === null) return EMPTY_SOURCE;
@@ -1378,8 +1465,19 @@ export async function fetchExtensionSource(
 	let directoryUrl: string | null = null;
 	let resolvedRef: string | null = null;
 
-	for (const filename of BUILD_FILES) {
-		for (const candidate of refCandidates(repository, `${directory}/${filename}`)) {
+	// The branch this repository answered on before goes first, when the URL
+	// names none; the others are still tried behind it.
+	const learnedRef = LEARNED_LAYOUT.get(layoutKey(repository))?.ref ?? null;
+	const refsFirst = (candidates: { ref: string; url: string }[]) =>
+		repository.ref !== null || learnedRef === null
+			? candidates
+			: [
+					...candidates.filter((one) => one.ref === learnedRef),
+					...candidates.filter((one) => one.ref !== learnedRef)
+				];
+
+	for (const filename of known.buildFiles ?? buildFileOrder(repository)) {
+		for (const candidate of refsFirst(refCandidates(repository, `${directory}/${filename}`))) {
 			try {
 				buildGradle = await getText(candidate.url);
 			} catch {
@@ -1387,6 +1485,7 @@ export async function fetchExtensionSource(
 			}
 			directoryUrl = directoryOf(candidate.url, filename);
 			resolvedRef = candidate.ref;
+			learnLayout(repository, { ref: candidate.ref, filename });
 			break;
 		}
 		if (directoryUrl !== null) break;
