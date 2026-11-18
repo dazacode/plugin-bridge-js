@@ -707,6 +707,68 @@ describe('a temporary file handed to the player', () => {
 	});
 });
 
+describe('an object reading its own properties and calling its own suspending members', () => {
+	// The shape a helper `object` has: a pattern held as a private property and
+	// used as a receiver two lines below, and one suspending member calling
+	// another bare. The receiver was refused as a module this build never read;
+	// the call went out unawaited, so the caller returned first and a failure
+	// in the callee was a rejection nobody held.
+	const source = kt(
+		'object Helper {',
+		'    private val FONT_REGEX = Regex("/fonts/([a-z]+)\\\\.ttf")',
+		'    val log = mutableListOf<String>()',
+		'    fun names(text: String): List<String> = FONT_REGEX.findAll(text).map { it.groupValues[1] }.toList()',
+		'    suspend fun outer(): String {',
+		'        log.clear()',
+		'        try {',
+		'            inner()',
+		'        } catch (e: Exception) {',
+		'            log.add("caught " + e.message)',
+		'        }',
+		'        log.add("after")',
+		'        return log.joinToString(",")',
+		'    }',
+		'    private suspend fun inner() {',
+		'        delay(1)',
+		'        log.add("inner")',
+		'        throw Exception("boom")',
+		'    }',
+		'}',
+		'class Demo {',
+		'    fun names(text: String): List<String> = Helper.names(text)',
+		'    suspend fun run(): String = Helper.outer()',
+		'}'
+	);
+
+	it('reads the property through the object', async () => {
+		const d = await instantiate('Demo', source);
+		expect(d.names('a /fonts/one.ttf b /fonts/two.ttf')).toEqual(['one', 'two']);
+	});
+
+	it('awaits the member it calls, so its failure reaches the catch around it', async () => {
+		const d = await instantiate('Demo', source);
+		expect(await d.run()).toBe('inner,caught boom,after');
+	});
+});
+
+describe('an unbound reference to a field of a video model', () => {
+	it('reads the field, rather than calling it on the constructor', async () => {
+		// PlaylistUtils groups an HLS master's audio and subtitle renditions with
+		// `.distinctBy(Track::url)`. Emitted as `Track.url(…)` it threw inside
+		// every extraction that had renditions, and the catch around the
+		// extraction answered no videos at all.
+		const d = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    fun unique(): List<String> = listOf(Track("u1", "a"), Track("u1", "b"), Track("u2", "c")).distinctBy(Track::url).map(Track::lang)',
+				'}'
+			)
+		);
+		expect(d.unique()).toEqual(['a', 'c']);
+	});
+});
+
 describe('a reference to a member the template declares', () => {
 	it('binds it to the inherited value, not to the argument', async () => {
 		// DooPlay's `protected open val episodeNumberRegex`, read by a subclass

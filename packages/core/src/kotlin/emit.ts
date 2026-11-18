@@ -2369,6 +2369,10 @@ class Emitter {
 			this.declaredTypes.has(name) ||
 			this.moduleNames.has(name) ||
 			this.declaredObjects.has(name) ||
+			// A property of an `object` in this unit, read from inside it —
+			// `private val FONT_REGEX = Regex(…)` used as `FONT_REGEX.findAll(…)`
+			// two lines below. `read` resolves it; this has to agree.
+			this.objectMembers.has(name) ||
 			this.qualifiedTypes.has(name) ||
 			GLOBAL_NAMES.has(name) ||
 			BASE_CONSTANTS.has(name) ||
@@ -3851,6 +3855,22 @@ class Emitter {
 
 			const outerOwner = this.owner;
 			const outerSelf = this.selfClass;
+			// The object's own suspending members, decided the way a class's are
+			// (`suspend`, then `BLOCKING_CALLS` to a fixpoint). Left as whatever
+			// the enclosing scope had, a bare `download(…)` from one member of an
+			// `object` to its own `suspend fun download` was emitted unawaited:
+			// the caller went on before it finished, and a failure inside it
+			// was a rejected promise nobody held — which kills the isolate.
+			const outerSuspends = this.suspendMembers;
+			this.suspendMembers = new Set(
+				members
+					.filter(
+						(child) => child.type === 'function_declaration' && this.hasModifier(child, 'suspend')
+					)
+					.map((child) => this.nameOf(child))
+					.filter((found): found is string => found !== null)
+			);
+			for (const blocking of this.blockingMembers(members)) this.suspendMembers.add(blocking);
 			this.owner = name;
 			const dispatched = new Set<string>();
 			// An `object` is its own only instance.
@@ -3949,6 +3969,7 @@ class Emitter {
 			} finally {
 				this.owner = outerOwner;
 				this.selfClass = outerSelf;
+				this.suspendMembers = outerSuspends;
 			}
 
 			// The object's plain names, resolved against the object itself
@@ -8207,6 +8228,21 @@ class Emitter {
 		) {
 			return `(__recv) => __recv.${member.text}`;
 		}
+		// `distinctBy(Track::url)` and `sortedBy(Video::quality)` — the same
+		// unbound property reference, to a field of one of the video models
+		// the runtime builds as plain records. The bound branch below read
+		// `Track` as a value and emitted `Track.url(…)`, a call on the
+		// constructor, which threw inside every HLS extraction that grouped
+		// its audio or subtitle tracks — and the catch around that answered no
+		// videos at all, with nothing refused.
+		if (
+			named &&
+			RUNTIME_RECORD_PROPERTIES.get(owner.text)?.has(member.text) === true &&
+			!this.declaredTypes.has(owner.text) &&
+			!this.moduleNames.has(owner.text)
+		) {
+			return `(__recv) => __recv.${member.text}`;
+		}
 		// `File::deleteOnExit` — a type the runtime defines by name, referenced
 		// unbound: the argument is the receiver. Read through `isValueName`, a
 		// global is a value, and the member was called on the type itself.
@@ -9199,8 +9235,13 @@ class Emitter {
 		) {
 			this.refuse(receiver, `\`${receiver.text}\``);
 		}
+		// An object's own property goes through `read`, which knows to reach it
+		// as `Holder.NAME` (or the hoisted const while the object is still
+		// being built); the bare name is not bound at module scope.
 		const receiverText =
-			receiver.type === 'simple_identifier' && /^[A-Z]/.test(receiver.text)
+			receiver.type === 'simple_identifier' &&
+			/^[A-Z]/.test(receiver.text) &&
+			!(this.objectMembers.has(receiver.text) && this.lookup(receiver.text) === null)
 				? this.safe(receiver.text)
 				: this.expr(receiver);
 
@@ -12412,6 +12453,29 @@ const TAGGED_EXCEPTIONS: ReadonlySet<string> = new Set(['IllegalStateException']
 
 /** The framework's model types, whose fields `MODEL_FIELDS` lists. */
 const MODEL_TYPES: ReadonlySet<string> = new Set(MODEL_FIELDS.keys());
+
+/**
+ * The video models' fields, as the runtime's constructors set them, for an
+ * unbound `Type::field` reference. Only fields the runtime assigns as plain
+ * properties: a name missing here is still refused rather than guessed.
+ */
+const RUNTIME_RECORD_PROPERTIES: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+	['Track', new Set(['url', 'lang'])],
+	[
+		'Video',
+		new Set([
+			'url',
+			'quality',
+			'videoUrl',
+			'videoTitle',
+			'resolution',
+			'bitrate',
+			'headers',
+			'preferred'
+		])
+	],
+	['Hoster', new Set(['hosterUrl', 'hosterName', 'internalData'])]
+]);
 
 /** Properties the framework declares, for an unbound `Type::name` reference to one. */
 const FRAMEWORK_PROPERTIES: ReadonlySet<string> = new Set([...ANY_MODEL_FIELD, 'state', 'values']);
