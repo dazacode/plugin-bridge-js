@@ -126,6 +126,9 @@ function artifactCandidates(row: Record<string, unknown>, indexUrl: string): str
 	return [built, ...source];
 }
 
+/** What a Mana row's `environment` may say: a source, or a tracker beside one. */
+const MANA_ENVIRONMENTS = new Set(['source', 'tracker']);
+
 /**
  * Hosts written as base64 in a bundle or a source.
  *
@@ -206,14 +209,19 @@ export const manaAdapter: ForeignAdapter = {
 		}
 
 		// `path` (the build's folder name) plus a numeric `intents` mask is the
-		// pair no other ecosystem's entries carry.
+		// pair no other ecosystem's entries carry — and an `environment`, where
+		// a row states one, is one of this format's own two. Another format's
+		// built catalogue also writes `path` beside the runtime its bundle is
+		// for; read as this format, every such row was filed as a tracker and
+		// the repository answered with no listings and no error.
 		const rows = list.filter((entry): entry is Record<string, unknown> => {
 			if (typeof entry !== 'object' || entry === null) return false;
 			const row = entry as Record<string, unknown>;
 			return (
 				typeof row['id'] === 'string' &&
 				typeof row['name'] === 'string' &&
-				(typeof row['path'] === 'string' || typeof row['intents'] === 'number')
+				(typeof row['path'] === 'string' || typeof row['intents'] === 'number') &&
+				(row['environment'] === undefined || MANA_ENVIRONMENTS.has(String(row['environment'])))
 			);
 		});
 		if (rows.length === 0) throw new ForeignFormatError('not a Mana source index');

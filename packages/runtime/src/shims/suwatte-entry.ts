@@ -61,6 +61,12 @@ export interface SuwatteEntrypointOptions {
 		readonly key: string;
 		readonly type: string;
 	}[];
+	/**
+	 * A built `.stt`, carried verbatim in place of `modules`. It declares
+	 * `SourcePackage` at its top level, and its `bootstrap()` answers the
+	 * source instance.
+	 */
+	readonly bundle?: string;
 }
 
 /* ── the TypeScript stripper ─────────────────────────────────────────────── */
@@ -762,6 +768,36 @@ function moduleCode(module: SuwatteModule): string {
 
 /* ── the entry ───────────────────────────────────────────────────────────── */
 
+/** The source-tree half: every module registered, the entry's default export run. */
+function sourceTree(modules: readonly SuwatteModule[]): string {
+	return `${modules.map(moduleCode).join('\n\n')}
+
+var __module = __require(__ENTRY_URL);
+var __Ctor = __module.default;
+
+function __construct() {
+  if (typeof __Ctor !== 'function') {
+    throw new Error('This converted source has no default-exported runner class.');
+  }
+  return new __Ctor();
+}`;
+}
+
+/**
+ * The built half: the bundle at module scope, where its `var SourcePackage`
+ * has to be declared, then the instance its own `bootstrap()` makes.
+ */
+function builtBundle(bundle: string): string {
+	return `${bundle}
+
+function __construct() {
+  if (typeof SourcePackage !== 'object' || SourcePackage === null || typeof SourcePackage.bootstrap !== 'function') {
+    throw new Error('This converted bundle defines no SourcePackage to start.');
+  }
+  return SourcePackage.bootstrap();
+}`;
+}
+
 export function suwatteEntrypoint(options: SuwatteEntrypointOptions): string {
 	return `${DOM_RUNTIME_SOURCE}
 ${DIGESTS}
@@ -1282,10 +1318,7 @@ function __require(id) {
   return found.exports;
 }
 
-${options.modules.map(moduleCode).join('\n\n')}
-
-var __module = __require(__ENTRY_URL);
-var __Ctor = __module.default;
+${options.bundle === undefined ? sourceTree(options.modules) : builtBundle(options.bundle)}
 
 /* --- the ABI -------------------------------------------------------------- */
 
@@ -1293,10 +1326,7 @@ var __runner = null;
 
 async function __instance() {
   if (__runner !== null) return __runner;
-  if (typeof __Ctor !== 'function') {
-    throw new Error('This converted source has no default-exported runner class.');
-  }
-  __runner = new __Ctor();
+  __runner = __construct();
   if (typeof __runner.onLoad === 'function') await __runner.onLoad();
   if (typeof __runner.initialise === 'function') await __runner.initialise();
   return __runner;

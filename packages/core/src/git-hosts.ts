@@ -152,6 +152,21 @@ export function rawCandidates(
 }
 
 /**
+ * Where GitHub Pages serves one path of a repository's published site.
+ *
+ * Several ecosystems build their catalogue in CI and deploy it as a Pages
+ * artifact that never lands on any branch, so no raw-file candidate can reach
+ * it: the repository has the source, and only the site has the index. A pasted
+ * repository link then finds nothing unless the site is asked too. GitHub only,
+ * because that is the one forge whose site address is a function of the
+ * repository's name; the owner is lowercased because the site host is.
+ */
+export function pagesCandidates(repository: GitRepository, path: string): string[] {
+	if (repository.origin !== GITHUB) return [];
+	return [`https://${repository.owner.toLowerCase()}.github.io/${repository.repo}/${path}`];
+}
+
+/**
  * The branch names to try when the pasted URL named none.
  *
  * Ordered by how likely they are, which is worth doing: each miss is a request

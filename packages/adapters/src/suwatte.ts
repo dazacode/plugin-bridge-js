@@ -47,6 +47,7 @@ import type { RepositoryIndex, RepositoryPlugin } from '@plugin-bridge/core/repo
 import {
 	DEFAULT_REFS,
 	looksLikeFile,
+	pagesCandidates,
 	parseRepositoryUrl,
 	rawCandidates
 } from '@plugin-bridge/core/git-hosts';
@@ -239,6 +240,69 @@ function declaredSettings(modules: Map<string, string>): SettingDescriptor[] {
 	return out;
 }
 
+/**
+ * A row of the built catalogue: `sources.json`, `catalogVersion` 2.
+ *
+ * The toolchain's build publishes one bundle per row at `sources/<path>.stt`
+ * beside the catalogue, and marks the row with the runtime that bundle is for,
+ * `environment: "jsc"`. That pair is the positive test, and it is this
+ * format's alone: a Mana row also carries `path`, with an environment of
+ * `source` or `tracker`, which is why the source-tree rows below exclude
+ * `path` outright and these are let through only by naming their runtime.
+ */
+function builtRow(row: Record<string, unknown>): boolean {
+	return (
+		typeof row['id'] === 'string' &&
+		typeof row['name'] === 'string' &&
+		typeof row['path'] === 'string' &&
+		row['path'].length > 0 &&
+		row['environment'] === 'jsc'
+	);
+}
+
+/**
+ * The catalogue's rating, which the build writes as the toolchain's
+ * `ContentRating` ordinal rather than its name.
+ *
+ * Read from the corpus rather than assumed: the one source declaring
+ * `SUGGESTIVE` publishes 1 and the seventeen declaring `MATURE` publish 2. So
+ * 2 and above is what the named form already flagged — `MATURE`, `ADULT` — and
+ * 1 is not.
+ */
+function builtIsNsfw(rating: unknown): boolean {
+	return typeof rating === 'number' && rating >= 2;
+}
+
+function builtListing(row: Record<string, unknown>, indexUrl: string): RepositoryPlugin {
+	const id = String(row['id']);
+	const path = String(row['path']).replace(/^\/+|\/+$/g, '');
+	const artifactUrl = new URL(`sources/${path}.stt`, directoryOf(indexUrl)).toString();
+	const version = String(row['version'] ?? '0');
+	const website = typeof row['website'] === 'string' ? row['website'] : null;
+	return foreignListing({
+		id: convertedPluginId('suwatte', id),
+		name: String(row['name']),
+		description: String(row['description'] ?? ''),
+		version,
+		author: '',
+		language:
+			Array.isArray(row['languages']) && typeof row['languages'][0] === 'string'
+				? row['languages'][0]
+				: null,
+		hosts: hostsFromUrls([website]),
+		origin: {
+			format: 'suwatte',
+			artifactUrl,
+			foreignId: id,
+			foreignVersion: version,
+			mediaKind: 'manga',
+			mediaKinds: ['manga'],
+			isNsfw: builtIsNsfw(row['rating']),
+			detail: { layout: 'bundle', path }
+		}
+	});
+}
+
 export const suwatteAdapter: ForeignAdapter = {
 	format: 'suwatte',
 
@@ -248,9 +312,15 @@ export const suwatteAdapter: ForeignAdapter = {
 		const repository = parseRepositoryUrl(pasted);
 		if (repository === null) return [];
 
-		return ['src/index.json', 'index.json', 'dist/index.json'].flatMap((path) =>
-			rawCandidates(repository, path, DEFAULT_REFS)
-		);
+		// The source tree's own index on a branch, then the built catalogue,
+		// which a repository deploys to its site from CI and never commits —
+		// so a repository link reaches it only by asking the site.
+		return [
+			...['src/index.json', 'index.json', 'dist/index.json'].flatMap((path) =>
+				rawCandidates(repository, path, DEFAULT_REFS)
+			),
+			...pagesCandidates(repository, 'sources.json')
+		];
 	},
 
 	parseIndex(body: string, indexUrl: string): RepositoryIndex {
@@ -289,6 +359,7 @@ export const suwatteAdapter: ForeignAdapter = {
 		const rows = raw.filter((entry): entry is Record<string, unknown> => {
 			if (typeof entry !== 'object' || entry === null) return false;
 			const row = entry as Record<string, unknown>;
+			if (builtRow(row)) return true;
 			return (
 				typeof row['id'] === 'string' &&
 				typeof row['name'] === 'string' &&
@@ -314,6 +385,10 @@ export const suwatteAdapter: ForeignAdapter = {
 
 		const plugins: RepositoryPlugin[] = [];
 		for (const row of rows) {
+			if (builtRow(row)) {
+				plugins.push(builtListing(row, indexUrl));
+				continue;
+			}
 			const id = String(row['id']);
 			const plan = planOf(id, indexUrl);
 			const version = String(row['version'] ?? '0');
@@ -372,6 +447,8 @@ export const suwatteAdapter: ForeignAdapter = {
 		if (origin === undefined || origin.format !== 'suwatte') {
 			throw new ForeignFormatError('That listing did not come from a Suwatte repository.');
 		}
+
+		if (origin.detail?.['layout'] === 'bundle') return convertBuilt(listing, services);
 
 		const entryUrl = origin.artifactUrl;
 		const directory = entryUrl.replace(/[^/]*$/, '');
@@ -501,3 +578,58 @@ export const suwatteAdapter: ForeignAdapter = {
 		});
 	}
 };
+
+/**
+ * A built `.stt`: the toolchain has already compiled and flattened the source,
+ * so the bundle is carried byte for byte and the shim supplies only the host
+ * globals it reaches for — the same ones the source-tree path supplies — and
+ * calls the `bootstrap()` the build appended.
+ *
+ * Settings are not read out of a bundle. The form builders are compiled into
+ * it beside every view the toolchain defines, so scanning its text would find
+ * views the source never uses; the source reads its own preferences through
+ * `ObjectStore` and gets its own defaults, which is what a viewer who never
+ * opened the form gets.
+ */
+async function convertBuilt(
+	listing: RepositoryPlugin,
+	services: ConversionServices
+): Promise<Uint8Array> {
+	const origin = listing.origin!;
+	let bundle: string;
+	try {
+		bundle = new TextDecoder().decode(await services.fetchArtifact(origin.artifactUrl));
+	} catch {
+		throw new ForeignFormatError(
+			`${listing.name} is listed with a built bundle, and none was published at its path.`,
+			['suwatte:missing-bundle']
+		);
+	}
+	if (!/\bvar\s+SourcePackage\s*=/.test(bundle) || !/\bbootstrap\b/.test(bundle)) {
+		throw new ForeignFormatError(
+			`${listing.name}'s bundle does not define the SourcePackage the toolchain builds, so there ` +
+				'is no source in it to start.',
+			['suwatte:not-a-bundle']
+		);
+	}
+
+	const hosts = [...new Set([...listing.hosts, ...hostsInSource(bundle)])].sort();
+	return packageBundle({
+		id: listing.id,
+		name: listing.name,
+		description:
+			listing.description.length > 0
+				? `Converted Suwatte source. ${listing.description}`
+				: 'Converted Suwatte source.',
+		version: listing.version,
+		author: '',
+		hosts,
+		origin,
+		entrypointSource: suwatteEntrypoint({
+			pluginId: listing.id,
+			entryUrl: origin.artifactUrl,
+			modules: [],
+			bundle
+		})
+	});
+}

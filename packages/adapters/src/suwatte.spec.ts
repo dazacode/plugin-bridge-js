@@ -184,3 +184,146 @@ describe('what a converted Suwatte bundle declares', () => {
 		);
 	});
 });
+
+/**
+ * The catalogue a Suwatte repository actually serves: built by the toolchain in
+ * CI, deployed to the repository's site, one `.stt` bundle per row. It shares a
+ * row field with Mana's index (`path`), which is why both directions of the
+ * claim are pinned.
+ */
+describe('a built Suwatte catalogue', () => {
+	const SITE = 'https://owner.example.invalid/catalogue/';
+	const CATALOGUE_URL = `${SITE}sources.json`;
+	const CATALOGUE = JSON.stringify({
+		catalogVersion: 2,
+		generatedAt: '2026-01-01T00:00:00.000Z',
+		listName: 'Example Sources',
+		sources: [
+			{
+				id: 'en.example.alpha',
+				name: 'Alpha',
+				version: 1.6,
+				website: 'https://site.example.invalid',
+				languages: ['en'],
+				rating: 2,
+				thumbnail: 'alpha.png',
+				path: 'alpha',
+				variantId: 'en.example.alpha',
+				sourceId: 'alpha',
+				environment: 'jsc'
+			},
+			{
+				id: 'en.example.beta',
+				name: 'Beta',
+				version: 1,
+				website: 'https://beta.example.invalid',
+				languages: ['en'],
+				rating: 1,
+				path: 'beta',
+				environment: 'jsc'
+			}
+		]
+	});
+
+	/** A bundle in the shape the toolchain's build emits, cut to what the shim touches. */
+	const STT = `"use httpclient";
+var global = globalThis;
+"use strict";
+var SourcePackage = (() => {
+  class Alpha {
+    constructor() { this.client = new HttpClient({ baseUrl: 'https://api.example.invalid' }); }
+    async getSearchResults(request, page) {
+      return { items: [{ id: 'one', title: 'Found ' + request.query, coverImage: 'https://img.example.invalid/1.jpg' }], isLastPage: true };
+    }
+  }
+  return {
+    SourceMetadata: { id: 'en.example.alpha', name: 'Alpha', version: 1.6 },
+    SourceConfiguration: null,
+    bootstrap: function bootstrap() { return new Alpha(); }
+  };
+})();
+`;
+
+	it('lists each row at the bundle beside the catalogue', () => {
+		const parsed = suwatteAdapter.parseIndex(CATALOGUE, CATALOGUE_URL);
+		expect(parsed.plugins.map((one) => one.origin?.artifactUrl)).toEqual([
+			`${SITE}sources/alpha.stt`,
+			`${SITE}sources/beta.stt`
+		]);
+		expect(parsed.plugins[0].hosts).toContain('site.example.invalid');
+		// The build writes the toolchain's rating ordinal: MATURE is 2.
+		expect(parsed.plugins.map((one) => one.origin?.isNsfw)).toEqual([true, false]);
+	});
+
+	it('is not claimed by Mana, whose rows also carry a path', async () => {
+		const { manaAdapter } = await import('./mana');
+		expect(() => manaAdapter.parseIndex(CATALOGUE, CATALOGUE_URL)).toThrow(ForeignFormatError);
+	});
+
+	it('still leaves a Mana index alone', () => {
+		const mana = JSON.stringify({
+			repositoryName: 'Example',
+			sources: [
+				{
+					id: 'Example',
+					name: 'Example',
+					version: '1.0.0',
+					path: 'Example',
+					environment: 'source',
+					intents: 1
+				}
+			]
+		});
+		expect(() => suwatteAdapter.parseIndex(mana, CATALOGUE_URL)).toThrow(ForeignFormatError);
+	});
+
+	it('runs the bundle the row names, through the shim', async () => {
+		const listing = suwatteAdapter.parseIndex(CATALOGUE, CATALOGUE_URL).plugins[0];
+		const bundle = await suwatteAdapter.convert(listing, {
+			fetchArtifact: async (url) => {
+				if (url !== `${SITE}sources/alpha.stt`) throw new Error(url);
+				return new TextEncoder().encode(STT);
+			},
+			getText: async (url) => {
+				throw new Error(`nothing else is read: ${url}`);
+			},
+			listFiles: () => {
+				throw new Error('nothing here lists');
+			}
+		});
+		const opened = await openPluginArchive(bundle);
+		expect(opened.hosts).toContain('api.example.invalid');
+
+		const url = `data:text/javascript;base64,${Buffer.from(opened.entrypointSource).toString('base64')}`;
+		const module = (await import(/* @vite-ignore */ url)).default as {
+			searchCatalog(
+				query: string,
+				page: number,
+				ctx: unknown
+			): Promise<{ entries: { sourceMediaId: string; title: string }[] }>;
+		};
+		const page = await module.searchCatalog('x', 1, { settings: undefined });
+		expect(page.entries.map((one) => [one.sourceMediaId, one.title])).toEqual([['one', 'Found x']]);
+	});
+
+	it('refuses a file at the bundle path that is not a toolchain bundle', async () => {
+		const listing = suwatteAdapter.parseIndex(CATALOGUE, CATALOGUE_URL).plugins[0];
+		const failure = await suwatteAdapter
+			.convert(listing, {
+				fetchArtifact: async () => new TextEncoder().encode('<html>not found</html>'),
+				getText: async () => '',
+				listFiles: async () => []
+			})
+			.catch((error: unknown) => error);
+		expect((failure as ForeignFormatError).obstacles).toEqual(['suwatte:not-a-bundle']);
+	});
+
+	it("asks a GitHub repository's site for the catalogue it deploys there", () => {
+		const candidates = suwatteAdapter.candidates(new URL('https://github.com/Owner/repo'));
+		expect(candidates).toContain('https://owner.github.io/repo/sources.json');
+		// A forge whose site address is not a function of the repository asks no site.
+		expect(
+			suwatteAdapter.candidates(new URL('https://forge.example.invalid/owner/repo'))
+		).not.toContain('https://owner.github.io/repo/sources.json');
+	});
+});
