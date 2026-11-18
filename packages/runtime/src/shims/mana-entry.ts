@@ -337,7 +337,8 @@ function __storeBody(bytes) {
   return id;
 }
 
-var __METHODS = ['GET', 'GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'];
+/** The published \`HttpMethod\` numbering: Get 0, Head 1, Post 2, and on. */
+var __METHODS = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'];
 
 /**
  * One bridge operation.
@@ -532,12 +533,17 @@ function __manaEnum(names) {
   return value;
 }
 
-/** A response, in the shape these sources read: \`.text()\`, \`.json()\`, \`.ok\`. */
+var __HTTP_METHODS = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'];
+
+/**
+ * A response, in the shape these sources read: \`.text()\`, \`.json()\`, \`.ok\`,
+ * and headers they ask with \`.get(name)\` as the published client's answer.
+ */
 function __manaResponse(raw, request) {
   return {
     status: raw.status,
     url: raw.url,
-    headers: raw.headers,
+    headers: new __ManaHeaders(raw.headers || {}),
     request: request,
     get ok() { return raw.status >= 200 && raw.status < 300; },
     text: function () { return raw.text(); },
@@ -635,9 +641,16 @@ class HttpClient {
     this.headers = {};
   }
   setRateLimit() { return this; }
+  setRateLimiter() { return this; }
   setTimeoutMs() { return this; }
   setRetryPolicy() { return this; }
   setRetry() { return this; }
+  setBaseURL(url) { this.baseURL = String(url); return this; }
+  addHeader(name, value) { this.headers[String(name)] = String(value); return this; }
+  removeHeader(name) {
+    for (var key in this.headers) if (key.toLowerCase() === String(name).toLowerCase()) delete this.headers[key];
+    return this;
+  }
   addHeaders(headers) { Object.assign(this.headers, headers || {}); return this; }
   setHeaders(headers) { this.headers = Object.assign({}, headers); return this; }
   addRequestInterceptor(fn) { if (typeof fn === 'function') this.interceptors.push(fn); return this; }
@@ -671,7 +684,14 @@ class HttpClient {
    */
   async __execute(input, origin) {
     var request = Object.assign({}, input);
-    request.method = String(request.method || 'GET').toUpperCase();
+    // A method is the published enum's number or a name; '0' on the wire is
+    // what a number read as a name became.
+    request.method = typeof request.method === 'number'
+      ? (__HTTP_METHODS[request.method] || 'GET')
+      : String(request.method || 'GET').toUpperCase();
+    if (this.baseURL && !/^[a-z][a-z0-9+.-]*:/i.test(String(request.url))) {
+      request.url = new URL(String(request.url), this.baseURL).toString();
+    }
     request.headers = new __ManaHeaders(Object.assign({}, this.headers, (request.headers && typeof request.headers.toJSON === 'function') ? request.headers.toJSON() : (request.headers || {})));
     var context = { origin: origin, attempt: 1, metadata: {} };
 
@@ -715,6 +735,25 @@ class HttpClient {
     return this.request({ url: url, method: 'POST', body: body, headers: options && options.headers });
   }
 }
+
+/**
+ * \`ObjectStore\`, the app's per-source key-value store, as a global.
+ *
+ * Held for the isolate's lifetime. The app keeps it across launches; the ABI's
+ * persistent store is a permission a converted bundle does not ask for, so a
+ * cached catalogue or a remembered mirror is re-learned once per run instead
+ * — slower, never wrong, since every measured use is a cache in front of a
+ * request the source can make again.
+ */
+var __objectStore = new Map();
+globalThis.ObjectStore = {
+  get: async function (key) { return __objectStore.has(String(key)) ? __objectStore.get(String(key)) : null; },
+  set: async function (key, value) { __objectStore.set(String(key), value); },
+  remove: async function (key) { __objectStore.delete(String(key)); },
+  string: async function (key) { var v = __objectStore.get(String(key)); return typeof v === 'string' ? v : null; },
+  boolean: async function (key) { return __objectStore.get(String(key)) === true; },
+  number: async function (key) { var v = __objectStore.get(String(key)); return typeof v === 'number' ? v : null; }
+};
 
 /** The request manager the framework would have handed a source. */
 var __requestManager = {
@@ -794,7 +833,14 @@ const __manaKnown = {
   ContentType: __manaEnum(['MANGA', 'MANHWA', 'MANHUA', 'COMIC', 'NOVEL']),
   PublicationStatus: __manaEnum(['UNKNOWN', 'ONGOING', 'COMPLETED', 'HIATUS', 'CANCELLED']),
   ReadingMode: __manaEnum(['PAGED_MANGA', 'PAGED_COMIC', 'WEBTOON']),
-  HttpMethod: __manaEnum(['Get', 'Get', 'Post', 'Put', 'Patch', 'Delete', 'Options']),
+  HttpMethod: __manaEnum(['Get', 'Head', 'Post', 'Put', 'Patch', 'Delete', 'Options']),
+  // The published limiter factories. The client below hands pacing to the host
+  // rather than running a limiter, so these only need to build what a source
+  // passes to setRateLimiter.
+  RateLimit: {
+    spaced: function (options) { return { tryAcquire: function () { return { action: 0 }; }, options: options }; },
+    tokenBucket: function (options) { return { tryAcquire: function () { return { action: 0 }; }, options: options }; }
+  },
   SectionStyle: __manaEnum([
     'SimpleSingleRow', 'SimpleDoubleRow', 'SimpleHero', 'SimpleHeroPaged',
     'DetailedSingleRowPaged', 'DetailedDoubleRowPaged', 'DetailedVerticalList',

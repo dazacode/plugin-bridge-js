@@ -1351,10 +1351,17 @@ export function stripTypescript(
 		return from + 'export '.length;
 	};
 
+	const inserts = parameterProperties(source);
+
 	while (out.length >= 0) {
 		if (iAt() >= source.length) break;
 		const at = iAt();
 		const char = source.charAt(at);
+		const inserted = inserts.get(at);
+		if (inserted !== undefined) {
+			push(inserted);
+			inserts.delete(at);
+		}
 
 		if (char === '"' || char === "'" || char === '`') {
 			let scan = at + 1;
@@ -1660,6 +1667,88 @@ export function stripTypescript(
 	function iSet(value: number): void {
 		cursor = value;
 	}
+}
+
+/**
+ * TypeScript's parameter properties, as the assignments they compile to.
+ *
+ * `constructor(private readonly load: () => T)` declares a field *and* assigns
+ * it; strip the modifier and only the parameter is left, so `this.load` is
+ * `undefined` and the first call answers "this.load is not a function". The
+ * compiler emits `this.load = load;` at the top of the body — after `super(…)`
+ * when the class extends another, since `this` does not exist before it — and
+ * that is what is returned here: the source index to insert at, and the text.
+ */
+function parameterProperties(source: string): Map<number, string> {
+	const out = new Map<number, string>();
+	for (const match of source.matchAll(/\bconstructor\s*\(/g)) {
+		const open = match.index + match[0].length - 1;
+		let depth = 0;
+		let close = -1;
+		for (let at = open; at < source.length; at += 1) {
+			const char = source.charAt(at);
+			if (char === '(' || char === '[' || char === '{' || char === '<') depth += 1;
+			else if (
+				char === ')' ||
+				char === ']' ||
+				char === '}' ||
+				(char === '>' && source.charAt(at - 1) !== '=')
+			) {
+				depth -= 1;
+				if (depth === 0) {
+					close = at;
+					break;
+				}
+			}
+		}
+		if (close < 0) continue;
+		const names: string[] = [];
+		let start = open + 1;
+		depth = 0;
+		for (let at = open + 1; at <= close; at += 1) {
+			const char = source.charAt(at);
+			if (char === '(' || char === '[' || char === '{' || char === '<') depth += 1;
+			else if (
+				(char === ')' ||
+					char === ']' ||
+					char === '}' ||
+					(char === '>' && source.charAt(at - 1) !== '=')) &&
+				at !== close
+			)
+				depth -= 1;
+			if ((char === ',' && depth === 0) || at === close) {
+				const parameter =
+					/^\s*(?:(?:public|private|protected|readonly|override)\s+)+([A-Za-z_$][A-Za-z0-9_$]*)/.exec(
+						source.slice(start, at)
+					);
+				if (parameter !== null) names.push(parameter[1]);
+				start = at + 1;
+			}
+		}
+		if (names.length === 0) continue;
+		const body = source.indexOf('{', close);
+		if (body < 0) continue;
+		const assignments = names.map((name) => ` this.${name} = ${name};`).join('');
+		// After `super(…);` where the body opens with one.
+		const superCall = /^\s*super\s*\(/.exec(source.slice(body + 1));
+		if (superCall !== null) {
+			let depth2 = 0;
+			let at = body + 1 + superCall[0].length - 1;
+			for (; at < source.length; at += 1) {
+				const char = source.charAt(at);
+				if (char === '(') depth2 += 1;
+				else if (char === ')') {
+					depth2 -= 1;
+					if (depth2 === 0) break;
+				}
+			}
+			const semicolon = source.charAt(at + 1) === ';' ? at + 2 : at + 1;
+			out.set(semicolon, `;${assignments}`);
+		} else {
+			out.set(body + 1, assignments);
+		}
+	}
+	return out;
 }
 
 /** The scanner's position. Hoisted so the loop body can move it and `continue`. */

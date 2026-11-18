@@ -623,6 +623,19 @@ const result = [(<string>variables['a']).length, first<number>([4])];`)
 		).toEqual([1, 4]);
 	});
 
+	it('assigns a parameter property, before and after super', () => {
+		expect(
+			run(`class Base { constructor(protected readonly name: string) {} }
+class Cache extends Base {
+  constructor(private readonly load: () => number, name: string) {
+    super(name);
+  }
+  read() { return this.load() + ':' + this.name; }
+}
+const result = new Cache(() => 7, 'n').read();`)
+		).toBe('7:n');
+	});
+
 	it('does not read the letters of a string as a declarator', () => {
 		expect(
 			run(`const result: { id: string; title: string }[] = [
@@ -646,15 +659,18 @@ const result: { id: string; title: string }[] = [
  * here so that what it would have sent travels on the page (ABI §8.3).
  */
 describe('a Mana page transport', () => {
-	const sent: { url: string; headers: Record<string, string> }[] = [];
+	const sent: { url: string; headers: Record<string, string>; method?: string }[] = [];
 	const sentBodies: unknown[] = [];
 	function context() {
 		sent.length = 0;
 		sentBodies.length = 0;
 		return {
 			http: {
-				send: async (url: string, init: { headers?: Record<string, string>; body?: unknown }) => {
-					sent.push({ url, headers: init.headers ?? {} });
+				send: async (
+					url: string,
+					init: { headers?: Record<string, string>; body?: unknown; method?: string }
+				) => {
+					sent.push({ url, headers: init.headers ?? {}, method: init.method });
 					sentBodies.push(init.body);
 					const body = url.includes('/viewer/')
 						? `<img id="img" src="https://img.example.invalid${url.slice(url.indexOf('/viewer/') + 7)}.jpg">`
@@ -662,7 +678,7 @@ describe('a Mana page transport', () => {
 					return {
 						status: 200,
 						url,
-						headers: {},
+						headers: { 'content-type': 'text/html' },
 						text: async () => body,
 						json: async () => ({}),
 						bytes: async () => new TextEncoder().encode(body)
@@ -811,5 +827,63 @@ export class Target {
 				headers: { referer: 'https://site.example.invalid/' }
 			}
 		]);
+	});
+
+	it('speaks the published client: numeric methods, a base URL, header methods, ObjectStore', async () => {
+		const REPO = 'https://repo.example.invalid/mana/main/';
+		const entry = `
+import { HttpClient, HttpMethod } from '@mana-app/types';
+export class Target {
+  info = { id: 'Example', name: 'Example', version: '1.0.0', website: 'https://site.example.invalid' };
+  client = new HttpClient().setBaseURL('https://api.example.invalid/v1/').addHeader('x-key', 'k');
+  async getSearchResults(query: string) {
+    const response = await this.client.request({ url: 'search', method: HttpMethod.Post });
+    await ObjectStore.set('seen', response.headers.get('Content-Type'));
+    return [{ id: 'one', title: String(await ObjectStore.get('seen')) }];
+  }
+}`;
+		const sourceListing = manaAdapter.parseIndex(
+			JSON.stringify([
+				{ id: 'Example', name: 'Example', path: 'Example', website: 'https://site.example.invalid' }
+			]),
+			`${REPO}sources.json`
+		).plugins[0];
+		const opened = await openPluginArchive(
+			await manaAdapter.convert(
+				sourceListing,
+				services({
+					getText: async (url) =>
+						url === `${REPO}src/Example/main.ts` ? entry : Promise.reject(new Error(url))
+				})
+			)
+		);
+		const url = `data:text/javascript;base64,${Buffer.from(opened.entrypointSource).toString('base64')}`;
+		const module = (await import(/* @vite-ignore */ url)).default as {
+			searchCatalog(q: string, p: number, ctx: unknown): Promise<{ entries: { title: string }[] }>;
+		};
+		const page = await module.searchCatalog('q', 1, context());
+		expect(sent[0]).toEqual({
+			url: 'https://api.example.invalid/v1/search',
+			method: 'POST',
+			headers: { 'x-key': 'k' }
+		});
+		expect(page.entries[0].title).toBe('text/html');
+	});
+
+	it('sends a built bundle’s numbered method by the published numbering', async () => {
+		const module = (await loadBundle(`
+class Target {
+  constructor() { this.info = { id: 'Example', name: 'Example', version: '1.0.0', website: 'https://site.example.invalid' }; }
+  async search() {
+    await globalThis.__manaHTTPBridge.send({ operation: 0, url: 'https://site.example.invalid/a', method: 1, headers: {}, origin: 0 });
+    await globalThis.__manaHTTPBridge.send({ operation: 0, url: 'https://site.example.invalid/b', method: 2, headers: {}, origin: 0 });
+    return { results: [], isLastPage: true };
+  }
+}
+globalThis.Target = Target;
+`)) as unknown as { searchCatalog(q: string, p: number, ctx: unknown): Promise<unknown> };
+		await module.searchCatalog('q', 1, context());
+		// 1 is Head and 2 is Post; an older table here sent 1 as a GET.
+		expect(sent.map((one) => one.method)).toEqual(['HEAD', 'POST']);
 	});
 });
