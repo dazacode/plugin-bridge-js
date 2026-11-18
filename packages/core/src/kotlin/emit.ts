@@ -2335,6 +2335,9 @@ class Emitter {
 	 */
 	private initialiserOnlyParams: readonly string[] = [];
 
+	/** The file's `package`, as written, or null for none. */
+	private filePackage: string | null = null;
+
 	/** File-scope functions declared more than once under one name, and how far emission got. */
 	private readonly moduleOverloads = new Map<
 		string,
@@ -2590,6 +2593,9 @@ class Emitter {
 		this.registerImports(kids(root).find((child) => child.type === 'import_list'));
 
 		const top = kids(root);
+		const header = top.find((child) => child.type === 'package_header');
+		this.filePackage =
+			header === undefined ? null : header.text.replace(/^\s*package\s+/, '').replace(/\s+/g, '');
 		// File-scope functions sharing a name — overloads, most often extension
 		// functions on different receivers. Each is emitted under its own name
 		// and the shared one becomes a dispatcher; see `moduleOverload`.
@@ -11832,9 +11838,13 @@ class Emitter {
 		// filesystem a plugin does not have (see `__KFile`). Read as a member it
 		// was `this.applicationContext`, undefined, and the first `.filesDir`
 		// threw a TypeError that only a catch-all happened to swallow.
+		// The same name read inside `keiyoushi.utils` itself, where the helper
+		// file that declares it needs no import — but not from the file that
+		// declares it, whose own declaration is the module name it reads.
 		if (
 			name === 'applicationContext' &&
-			this.keiyoushiImports.get(name) === 'keiyoushi.utils' &&
+			(this.keiyoushiImports.get(name) === 'keiyoushi.utils' ||
+				(this.filePackage === 'keiyoushi.utils' && !this.moduleNames.has(name))) &&
 			!this.classMembers.has(name)
 		) {
 			return 'Application';

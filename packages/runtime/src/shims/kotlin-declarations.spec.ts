@@ -762,6 +762,25 @@ describe('a path on the filesystem a plugin does not have', () => {
 	});
 });
 
+describe('the injected Application, read inside the package that declares it', () => {
+	it('is the runtime’s, with no import to say so', async () => {
+		// keiyoushi's shared helper file reads `applicationContext` from its own
+		// package, so it has no import line for it. Read as a member it was
+		// `this.applicationContext`, undefined, at the first preference read.
+		const d = await instantiate(
+			'Demo',
+			kt('package keiyoushi.utils', 'fun appFiles(): String = applicationContext.filesDir.path'),
+			kt(
+				'import keiyoushi.utils.appFiles',
+				'class Demo {',
+				'    fun files(): String = appFiles()',
+				'}'
+			)
+		);
+		expect(d.files()).toBe('/app/files');
+	});
+});
+
 describe('an object reading its own properties and calling its own suspending members', () => {
 	// The shape a helper `object` has: a pattern held as a private property and
 	// used as a receiver two lines below, and one suspending member calling
