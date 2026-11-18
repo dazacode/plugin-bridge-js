@@ -49,6 +49,8 @@ converter no longer gives.
 - A Seanime episode with no number is placed between its numbered neighbours,
   not numbered by position, which could collide with a stated number.
 - A Seanime payload whose file is `.ts` is stripped whatever its manifest says.
+- A Suwatte multiselect setting is read with `ctx.settings.list`, the accessor
+  the ABI defines; the shim called a `stringArray` no host provides.
 
 ### Detection
 

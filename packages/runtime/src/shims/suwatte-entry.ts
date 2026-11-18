@@ -844,7 +844,9 @@ function __plantSettings(ctx) {
     var value = null;
     if (ctx && ctx.settings) {
       if (setting.type === 'switch') value = ctx.settings.boolean(setting.id);
-      else if (setting.type === 'multiselect') value = ctx.settings.stringArray(setting.id);
+      // \`ctx.settings\` answers a list as \`list(id)\` (ABI §2); the source reads it
+      // back through \`ObjectStore.stringArray\`, which is the toolchain's name.
+      else if (setting.type === 'multiselect') value = ctx.settings.list(setting.id);
       else value = ctx.settings.string(setting.id);
     }
     __objectStore.set(setting.key, value);

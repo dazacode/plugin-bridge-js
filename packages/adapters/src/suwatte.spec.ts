@@ -172,6 +172,40 @@ describe('what a converted Suwatte bundle declares', () => {
 		await expect(suwatteAdapter.convert(listing, servicesFor(files))).rejects.toThrow(/UIStepper/);
 	});
 
+	it("hands a multiselect setting to the source through the ABI's own list accessor", async () => {
+		const files = sourceFiles();
+		files[`${BASE}/alpha/settings.ts`] = `
+import { UISelect } from "@suwatte/toolchain";
+export function form() {
+  return UISelect({ id: "genres", title: "Genres", options: [{ id: "a", title: "A" }, { id: "b", title: "B" }], defaultValue: { include: [], exclude: [] } });
+}`;
+		files[`${BASE}/alpha/index.ts`] = `
+import { form } from "./settings";
+export default class Alpha {
+  async getSearchResults(request: { query: string }, page: number) {
+    const genres = await ObjectStore.stringArray("genres");
+    return { items: [{ id: "one", title: genres.join("+") }], isLastPage: true };
+  }
+}`;
+		const listing = suwatteAdapter.parseIndex(
+			JSON.stringify([
+				{ id: 'alpha', name: 'Alpha', version: '1.0.0', website: 'https://site.example.invalid' }
+			]),
+			INDEX_URL
+		).plugins[0];
+		const opened = await openPluginArchive(
+			await suwatteAdapter.convert(listing, servicesFor(files))
+		);
+		const url = `data:text/javascript;base64,${Buffer.from(opened.entrypointSource).toString('base64')}`;
+		const module = (await import(/* @vite-ignore */ url)).default as {
+			searchCatalog(q: string, p: number, ctx: unknown): Promise<{ entries: { title: string }[] }>;
+		};
+		// Only the three accessors the ABI defines.
+		const settings = { string: () => '', boolean: () => false, list: () => ['a', 'b'] };
+		const page = await module.searchCatalog('x', 1, { settings });
+		expect(page.entries[0].title).toBe('a+b');
+	});
+
 	it('refuses a missing sibling by the address', async () => {
 		const files = sourceFiles();
 		delete files[`${BASE}/alpha/constants.ts`];
