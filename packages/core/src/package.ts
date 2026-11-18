@@ -222,8 +222,12 @@ const ENTRYPOINT = 'source';
  *     overload, `String.matches(Regex)` and `println` translate, and a
  *     template's refused override of a driver-called member now blocks.
  *     Reconvert every bundle made at 61 or earlier.
+ * 63: an IReader form posts its parameters and headers, the older parsed base
+ *     and the chapter choice exist, records copy by name, a star import
+ *     follows a renamed declaration, and jsoup's `Elements.first()` is null on
+ *     an empty selection. Reconvert every bundle made at 62 or earlier.
  */
-export const CONVERTER_VERSION = 62;
+export const CONVERTER_VERSION = 63;
 
 export interface BundleInput {
 	readonly id: string;
