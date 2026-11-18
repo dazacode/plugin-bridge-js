@@ -12,7 +12,7 @@
  * https.
  */
 
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 
 import { TreeError } from './git-trees';
 
@@ -27,6 +27,7 @@ import {
 	discoverSourceRepository,
 	extensionDirectory,
 	fetchExtensionSource,
+	forgetLearnedLayouts,
 	fetchSharedSources,
 	libDependencies,
 	libDirectory,
@@ -376,6 +377,31 @@ describe('fetching one located extension', () => {
 		// Keyed relative to the extension directory, and nothing that is not
 		// Kotlin was fetched.
 		expect(asked).not.toContain(`${dir}res/icon.png`);
+	});
+
+	it('asks the branch and the build-file name the repository answered with first', async () => {
+		// A repository on `master` and the `.kts` layout. The first read finds
+		// both by trying the guesses in order; the second asks the answer first.
+		forgetLearnedLayouts();
+		const onMaster = `${RAW}/master/src/en/`;
+		const { getText, listFiles, asked } = fakeRepository({
+			[`${onMaster}one/build.gradle.kts`]: 'keiyoushi {\n    name = "One"\n}\n',
+			[`${onMaster}one/src/A.kt`]: kotlin,
+			[`${onMaster}two/build.gradle.kts`]: 'keiyoushi {\n    name = "Two"\n}\n',
+			[`${onMaster}two/src/B.kt`]: kotlin
+		});
+		const at = (directory: string): SourceLocation => ({
+			repositoryUrl: REPO,
+			lang: 'en',
+			directory
+		});
+
+		await fetchExtensionSource(at('one'), listFiles, getText);
+		const firstRead = asked.length;
+		await fetchExtensionSource(at('two'), listFiles, getText);
+		const buildProbes = asked.slice(firstRead).filter((url) => /build\.gradle/.test(url));
+
+		expect(buildProbes).toEqual([`${onMaster}two/build.gradle.kts`]);
 	});
 
 	it('reads the i18n messages beside the Kotlin, and no other asset', async () => {
@@ -1002,6 +1028,8 @@ function served(files: Record<string, string>, fetched: string[] = []) {
 	};
 }
 
+beforeEach(() => forgetLearnedLayouts());
+
 describe('candidate source repositories beside an index', () => {
 	it('starts at the index’s own repository, then its siblings, all under one owner', () => {
 		const candidates = sourceRepositoryCandidates(PUBLISHED_INDEX, null, ['extensions-source']);
@@ -1043,6 +1071,10 @@ describe('candidate source repositories beside an index', () => {
 });
 
 describe('believing a candidate only when it proves itself', () => {
+	// Discoveries and learned layouts are remembered for the session; each case
+	// here is a different world and must not inherit the last one's answer.
+	beforeEach(() => forgetLearnedLayouts());
+
 	const samples = [{ pkg: SAMPLE_PKG, versionCode: 3 }];
 
 	it('accepts a sibling holding the listing at the version the index published', async () => {
@@ -1083,7 +1115,9 @@ describe('believing a candidate only when it proves itself', () => {
 				getText
 			)
 		).toBe(`https://github.com/${PUBLISHER}/widget-extensions`);
-		// The extension's own number alone is not what was published.
+		// The extension's own number alone is not what was published. (A fresh
+		// session: a discovery is remembered per index.)
+		forgetLearnedLayouts();
 		expect(
 			await discoverSourceRepository(
 				PUBLISHED_INDEX,

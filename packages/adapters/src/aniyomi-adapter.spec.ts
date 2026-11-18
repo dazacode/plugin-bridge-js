@@ -781,6 +781,118 @@ describe('a publisher whose metadata names a homepage', () => {
 	}, 60_000);
 });
 
+describe('what reading a repository of several listings costs', () => {
+	// The publisher above, with three listings on the newer `.kts` layout. A
+	// client loads the index again for every check and every install, and
+	// converts each listing; every probe that cannot succeed is a 404 in the
+	// viewer's console. What is learned once — which repository is the source,
+	// which branch answers, which build-file name it uses — is asked first after
+	// that, and what the repository's own file list already says is not asked.
+	const NAMES = ['alpha', 'beta', 'gamma'];
+	const files = new Map<string, string>([
+		['LICENSE', LICENCE],
+		['settings.gradle.kts', 'include(":core")\n']
+	]);
+	for (const name of NAMES) {
+		files.set(`src/en/${name}/build.gradle.kts`, newLayoutBuildFile(3));
+		files.set(
+			`src/en/${name}/src/ExampleAnime.kt`,
+			GENERATOR_INPUT_KT.replace(
+				`package ${PACKAGE}`,
+				`package org.example.animeextension.en.${name}`
+			)
+		);
+	}
+	const body = JSON.stringify(
+		NAMES.map((name) => ({
+			...JSON.parse(HOMEPAGE_INDEX_BODY)[0],
+			name: `Aniyomi: ${name}`,
+			pkg: `org.example.animeextension.en.${name}`
+		}))
+	);
+
+	it('never guesses a build-file name the repository’s file list has already answered', async () => {
+		// A publisher whose metadata names its source repository outright, so
+		// nothing was learned on the way in. The first listing read used to
+		// probe `build.gradle` on each branch before `build.gradle.kts`.
+		const named = JSON.stringify({ meta: { name: 'Example extensions', website: SIBLING } });
+		const index = await aniyomiAdapter.loadIndex!(body, HOMEPAGE_INDEX_URL, async (url: string) => {
+			if (url === new URL('repo.json', HOMEPAGE_INDEX_URL).toString()) return named;
+			throw new Error(`nothing at ${url}`);
+		});
+		const shared = services(files, [], SIBLING_RAW);
+		const missed: string[] = [];
+		const watched = {
+			...shared,
+			getText: async (url: string) => {
+				try {
+					return await shared.getText(url);
+				} catch (error) {
+					missed.push(url);
+					throw error;
+				}
+			}
+		};
+		for (const listing of index.plugins) await aniyomiAdapter.convert(listing, watched);
+		expect(missed).toEqual([]);
+	}, 60_000);
+
+	it('asks each question once, and nothing the file list has already answered', async () => {
+		const fetched: string[] = [];
+		const missed: string[] = [];
+		const getText = homepageFetcher(files, fetched);
+		const counting = async (url: string) => {
+			try {
+				return await getText(url);
+			} catch (error) {
+				missed.push(url);
+				throw error;
+			}
+		};
+
+		const first = await aniyomiAdapter.loadIndex!(body, HOMEPAGE_INDEX_URL, counting);
+		expect(first.plugins.every((one) => one.origin?.detail?.['sourceRepository'] === SIBLING)).toBe(
+			true
+		);
+		const firstLoad = fetched.length;
+		// repo.json, the publish repository's two settings names (it is not the
+		// source), the sibling's `settings.gradle.kts` — and then the sampled
+		// build file under the name a Kotlin-DSL root implies, first time.
+		expect(firstLoad).toBe(5);
+
+		const second = await aniyomiAdapter.loadIndex!(body, HOMEPAGE_INDEX_URL, counting);
+		expect(second.plugins.map((one) => one.origin?.detail?.['sourceRepository'])).toEqual(
+			first.plugins.map((one) => one.origin?.detail?.['sourceRepository'])
+		);
+		// Only the metadata: the source repository was picked by the first load.
+		expect(fetched.slice(firstLoad)).toEqual([new URL('repo.json', HOMEPAGE_INDEX_URL).toString()]);
+
+		const shared = services(files, [], SIBLING_RAW);
+		const converting: string[] = [];
+		const convertMissed: string[] = [];
+		const watched = {
+			...shared,
+			getText: async (url: string) => {
+				converting.push(url);
+				try {
+					return await shared.getText(url);
+				} catch (error) {
+					convertMissed.push(url);
+					throw error;
+				}
+			}
+		};
+		for (const listing of second.plugins) {
+			await aniyomiAdapter.convert(listing, watched);
+		}
+		// The tree says each directory holds `build.gradle.kts` and nothing else,
+		// so no other name and no other branch is asked for.
+		expect(convertMissed).toEqual([]);
+		expect(converting.filter((url) => url.endsWith('/build.gradle'))).toEqual([]);
+		expect(missed.filter((url) => url.startsWith(SIBLING_RAW))).toEqual([]);
+	}, 60_000);
+});
+
 describe('an extension that translates', () => {
 	it('produces a bundle the ordinary archive reader opens', async () => {
 		const one = await listing();
