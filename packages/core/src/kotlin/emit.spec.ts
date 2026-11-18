@@ -70,6 +70,9 @@ const nullish = (value: Any): boolean => value === null || value === undefined;
 /** The classpath, as far as a fixture needs one. */
 const stubLoader = { getResourceAsStream: () => null };
 
+/** Every line `println` was handed, in order. */
+const printed: string[] = [];
+
 /** Every value `toByteArray` was handed, in order. See the helper. */
 const encodedTexts: string[] = [];
 
@@ -448,6 +451,10 @@ const helpers: Record<string, (...args: never[]) => unknown> = {
 
 	unsupported: (message?: string) => {
 		throw new Error(message ?? 'not supported');
+	},
+	// Recorded rather than written, so a test can see what reached the log.
+	println: (value: Any) => {
+		printed.push(String(value));
 	},
 	error: (message?: string) => {
 		throw new Error(message ?? 'error');
@@ -3086,6 +3093,60 @@ describe('a name declared somewhere the emitter had not looked', () => {
 		// And each class still builds its own shape: `Other.Row` has no `name`,
 		// so a reference that leaked to the first one would answer undefined.
 		expect(instantiate(source).build()).toBe('outerother');
+	});
+
+	it('calls a property that holds a function, as the method it is in JavaScript', () => {
+		// `contentFetcher.onContent(paragraphs)`: a `val` of a function type,
+		// invoked. It was refused as a method nothing declares, which took every
+		// listing whose template transforms what it scraped.
+		const source = kt(
+			'class Fetcher(val onLink: (String) -> String = { it })',
+			'',
+			'class Demo : Source() {',
+			'    fun link(): String = Fetcher({ it + "!" }).onLink("x")',
+			'}'
+		);
+		expect(instantiate(source).link()).toBe('x!');
+	});
+
+	it('places named arguments and a trailing block on a property the base class typed', () => {
+		// `client.submitForm(url = …, formParameters = …) { … }` in a template
+		// whose base declares `var client: Ktor`. Named arguments with a
+		// trailing block were refused outright, and the receiver's type was
+		// looked up on the calling class alone, which does not declare it.
+		const source = kt(
+			'class Demo : Base() {',
+			'    fun run(): String = client.send(tag = "t", url = "u") { it + "!" }',
+			'}',
+			'',
+			'class Http {',
+			'    fun send(url: String, tag: String = "-", block: (String) -> String = { it }): String = block(url + tag)',
+			'}',
+			'',
+			'abstract class Base {',
+			'    var client: Http = Http()',
+			'}'
+		);
+		expect(evaluate(source, 'new Demo().run()')).toBe('ut!');
+	});
+
+	it('prints from a file-scope function to the runtime, not to `this`', () => {
+		// Bare, `println` fell to "a lowercase call is a member of the source"
+		// and came out `this.println(…)`. In a file-scope function `this` is
+		// undefined, so the first log line threw "reading 'println'".
+		const source = kt(
+			'fun note(text: String): String {',
+			'    println("noted " + text)',
+			'    return text',
+			'}',
+			'',
+			'class Demo : Source() {',
+			'    fun run(): String = note("one")',
+			'}'
+		);
+		printed.length = 0;
+		expect(instantiate(source).run()).toBe('one');
+		expect(printed).toEqual(['noted one']);
 	});
 
 	it('reads a member of a nested `object` written by its qualified name', () => {

@@ -715,6 +715,87 @@ describe('a file-scope declaration in the file next door', () => {
 	});
 });
 
+describe('a template member the driver calls by name', () => {
+	it('blocks when it refused, though the extension itself never calls it', async () => {
+		// The driver calls `getMangaList`, `getChapterList` and `getPageList`
+		// itself under its IReader dialect. Not roots, a template's refused
+		// override of one was pruned as unreachable: the listing converted
+		// "complete" and ran the base class's version instead of its own.
+		const entry = kt(
+			'package com.example.demo',
+			'',
+			'class Demo : Template() {',
+			'    override val name = "Demo"',
+			'    override val baseUrl = "https://example.invalid"',
+			'    override val lang = "en"',
+			'    override val supportsLatest = false',
+			'',
+			'    override fun popularAnimeRequest(page: Int) = GET("$baseUrl/$page", headers)',
+			'}'
+		);
+		const template = kt(
+			'package com.example.demo.template',
+			'',
+			'abstract class Template : ParsedAnimeHttpSource() {',
+			'    suspend fun getMangaList(filters: List<String>, page: Int): List<String> = filters.frobnicate()',
+			'}'
+		);
+
+		const result = await convertKotlin(
+			[
+				{ path: 'Demo.kt', source: entry },
+				{ path: 'Template.kt', source: template }
+			],
+			{ parser }
+		);
+
+		expect(result.blocking.map((one) => one.member)).toContain('getMangaList');
+		expect(result.complete).toBe(false);
+	});
+});
+
+describe('a property the base class next door typed', () => {
+	it('places named arguments and a trailing block on it', async () => {
+		// `client.submitForm(url = …, formParameters = …) { … }` in a template
+		// whose base, in another file, declares `var client: Ktor`. The
+		// receiver's type was looked up on the calling class alone.
+		const entry = kt(
+			'package com.example.demo',
+			'',
+			'class Demo : Base() {',
+			'    override val name = "Demo"',
+			'    override val baseUrl = "https://example.invalid"',
+			'    override val lang = "en"',
+			'    override val supportsLatest = false',
+			'',
+			'    override fun popularAnimeRequest(page: Int) = GET(transport.send(tag = "t", url = "u") { it }, headers)',
+			'}'
+		);
+		const base = kt(
+			'package com.example.demo.base',
+			'',
+			'class Http {',
+			'    fun send(url: String, tag: String = "-", block: (String) -> String = { it }): String = block(url + tag)',
+			'}',
+			'',
+			'abstract class Base : ParsedAnimeHttpSource() {',
+			'    var transport: Http = Http()',
+			'}'
+		);
+
+		const result = await convertKotlin(
+			[
+				{ path: 'Demo.kt', source: entry },
+				{ path: 'Base.kt', source: base }
+			],
+			{ parser }
+		);
+
+		expect(result.refusals).toEqual([]);
+		expect(result.js).toMatch(/transport\.send\('u', 't', /);
+	});
+});
+
 describe('Kotlin the vendored grammar cannot read, repaired before it is parsed', () => {
 	it('assigns through a call result, in the branch it was written in', async () => {
 		// `episodes.first().name = "x"` is an ERROR in this grammar, and the

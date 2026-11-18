@@ -2156,6 +2156,12 @@ export const FREE_FUNCTIONS: ReadonlyMap<string, string> = new Map([
 	// `require(x) { "…" }` and `requireNotNull(x) { "…" }`, which throw
 	['require', 'require'],
 	['requireNotNull', 'requireNotNull'],
+	// Kotlin's stdout, which here is the host's debug log. Bare, it fell to
+	// "a lowercase call is a member of the source" and came out as
+	// `this.println(…)` — and in a file-scope function `this` is undefined, so
+	// the first log line a shim or an extension wrote threw.
+	['println', 'println'],
+	['print', 'println'],
 	// …and their `check` siblings, which throw the same way for a state the
 	// extension did not expect rather than an argument it was handed.
 	['check', 'check'],
@@ -3206,7 +3212,17 @@ export const HOST_ENTRY_POINTS: ReadonlySet<string> = new Set([
 	'videoUrlParse',
 	'videoFromElement',
 	'videosFromElement',
-	'sortVideos'
+	'sortVideos',
+
+	// What the driver calls under its IReader dialect, and the coroutine
+	// spellings of the manga pair it calls under the others. Not roots, a
+	// template's own override of one of these — or of anything the base class
+	// reaches from one, like `getListRequest` — was pruned when it refused: a
+	// listing built on one template converted "complete", and its search went to the
+	// base class's request instead of the form post its template wrote.
+	'getMangaList',
+	'getChapterList',
+	'getPageList'
 ]);
 
 /* ── which refusals actually block ────────────────────────────────────────── */

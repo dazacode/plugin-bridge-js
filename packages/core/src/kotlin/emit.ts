@@ -2189,6 +2189,14 @@ class Emitter {
 						if (param.type !== null) typed.set(param.name, param.type);
 					}
 				}
+				// A property that holds a function is called like a method —
+				// `contentFetcher.onContent(paragraphs)` — and in JavaScript it is
+				// one: the call reads the property and calls what it holds. The
+				// passthrough allowlist knew only declared `fun`s, so every such
+				// call was refused as a method nothing declares.
+				for (const held of this.functionTypedProperties(child, body)) {
+					this.declaredMethods.add(held);
+				}
 				const getters = this.classGetterIndex.get(name) ?? new Set<string>();
 				const bodyMembers = kids(body);
 				for (const [at, member] of bodyMembers.entries()) {
@@ -5485,6 +5493,28 @@ class Emitter {
 		const params = reifiedParams(declaration);
 		if (params.length === 0) return;
 		this.moduleReified.set(name, { params, from: reifiedFromOf(declaration) });
+	}
+
+	/** The properties a class declares with a function type, constructor ones included. */
+	private functionTypedProperties(node: KNode, body: KNode | undefined): string[] {
+		const held: string[] = [];
+		const primary = kids(node).find((child) => child.type === 'primary_constructor');
+		const wrapped = kids(primary).find((child) => child.type === 'class_parameters');
+		for (const param of wrapped === undefined ? kids(primary) : kids(wrapped)) {
+			if (param.type !== 'class_parameter') continue;
+			if (!kids(param).some((child) => child.type === 'binding_pattern_kind')) continue;
+			if (!holdsFunction(kids(param))) continue;
+			const name = kids(param).find((child) => child.type === 'simple_identifier')?.text;
+			if (name !== undefined) held.push(name);
+		}
+		for (const member of kids(body)) {
+			if (member.type !== 'property_declaration') continue;
+			const declared = kids(member).find((part) => part.type === 'variable_declaration');
+			if (!holdsFunction(kids(declared))) continue;
+			const name = this.propertyName(member);
+			if (name !== null) held.push(name);
+		}
+		return held;
 	}
 
 	/** Notes which of these declarations are extension functions, before use. */
@@ -10086,12 +10116,28 @@ class Emitter {
 		lambda: KNode,
 		labelled: string | null
 	): string[] | null {
-		if (args.some((arg) => arg.allChildren.some((child) => child.type === '='))) return null;
 		const owner = this.receiverTypeOf(receiver);
 		if (owner === null) return null;
 		const signature = this.qualifiedSignatures.get(`${owner}.${name}`);
 		if (signature === undefined || signature.length === 0) return null;
 		if (args.length > signature.length - 1) return null;
+		if (args.some((arg) => arg.allChildren.some((child) => child.type === '='))) {
+			// `client.submitForm(url = …, formParameters = …) { headers }` — named
+			// arguments *and* a trailing block. The named ones are placed by the
+			// declaring class's signature, as any named call on a typed receiver
+			// is, and the block takes the last slot. Refused before, which took
+			// every listing of a template that posts its search form with it.
+			// A block named among the arguments has no trailing slot to take.
+			const placed = this.plainArguments(name, args, owner);
+			if (placed.length > signature.length - 1) return null;
+			const block = this.callArguments(name, [], lambda, labelled, false);
+			const skipped = signature.length - 1 - placed.length;
+			return [
+				...placed,
+				...Array.from({ length: skipped }, () => 'undefined'),
+				block[block.length - 1]
+			];
+		}
 		const out = this.callArguments(name, args, lambda, labelled, false);
 		const given = out.slice(0, -1);
 		if (given.length !== args.length || given.some((one) => one.startsWith('...'))) {
@@ -10244,7 +10290,19 @@ class Emitter {
 					: null;
 		if (named === null) return null;
 		const known = this.propertyTypes.get(named);
-		return known !== undefined && this.declaredTypes.has(known) ? known : null;
+		if (known !== undefined) return this.declaredTypes.has(known) ? known : null;
+		// A property the class inherits, typed where its base declares it:
+		// `client.submitForm(…)` in a template whose base holds `var client:
+		// Ktor`. Only for a bare name no local shadows.
+		if (receiver.type !== 'simple_identifier' || this.lookup(named) !== null) return null;
+		const seen = new Set<string>();
+		for (let at = this.owner ?? undefined; at !== undefined && !seen.has(at);) {
+			seen.add(at);
+			const typed = this.classPropertyTypes.get(at)?.get(named);
+			if (typed !== undefined && typed !== '') return this.declaredTypes.has(typed) ? typed : null;
+			at = this.classBaseIndex.get(at);
+		}
+		return null;
 	}
 
 	/** The name a named argument was written under, or null for a positional one. */
@@ -13737,6 +13795,22 @@ function receiverOf(node: KNode): string | null {
  * member through the named class, and a guess at which class a spelling means
  * is the wrong member called.
  */
+/** Whether a declaration's type, as written, is a function type (nullable or not). */
+function holdsFunction(children: readonly KNode[]): boolean {
+	let type = children.find(
+		(child) => child.type === 'function_type' || child.type === 'nullable_type'
+	);
+	if (type?.type === 'nullable_type') {
+		type = kids(type).find(
+			(child) => child.type === 'function_type' || child.type === 'parenthesized_type'
+		);
+		if (type?.type === 'parenthesized_type') {
+			type = kids(type).find((child) => child.type === 'function_type');
+		}
+	}
+	return type?.type === 'function_type';
+}
+
 function declaredTypeName(children: readonly KNode[]): string | null {
 	let type = children.find((child) => child.type === 'user_type' || child.type === 'nullable_type');
 	if (type?.type === 'nullable_type') type = kids(type).find((child) => child.type === 'user_type');

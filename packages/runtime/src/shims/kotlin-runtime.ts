@@ -6989,6 +6989,22 @@ var __k = {
    * The message is a lambda in Kotlin so it costs nothing when the check
    * passes, and it is called only when it does not.
    */
+  /**
+   * Kotlin's stdout, as a debug line in the host log. Guarded like \`Log\`: a
+   * diagnostic that can throw is worse than none.
+   */
+  println: function (value) {
+    try {
+      var host = __host();
+      if (host.log && typeof host.log.debug === 'function') {
+        host.log.debug(value === undefined ? '' : __str(value));
+      }
+    } catch (ignored) {
+      // Outside a plugin call, or a host with no logger.
+    }
+    return undefined;
+  },
+
   require: function (value, lazyMessage) {
     if (value) return undefined;
     throw __kTagged(new Error(
