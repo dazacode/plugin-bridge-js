@@ -2136,6 +2136,42 @@ describe('okhttp, over the host', () => {
 		expect(response.code).toBe(200);
 	});
 
+	it('hands a builder its interceptors as a live list an extension edits', async () => {
+		// A token client is the source's own client with its auth interceptor
+		// taken back off — `newBuilder().apply { interceptors().removeAll { it
+		// is Auth } }` — so the token request does not recurse into the
+		// interceptor that wants the token. Missing, `interceptors()` threw, the
+		// token fetch answered null, and every API call went out unauthorised.
+		const { ctx, sent } = context();
+		runtime.enter(ctx);
+		const tagging = (tag: string) =>
+			function (chain: Chain) {
+				return chain.proceed(
+					chain
+						.request()
+						.newBuilder()
+						.header('X-' + tag, '1')
+						.build()
+				);
+			};
+		const auth = tagging('Auth');
+		const full = runtime.client
+			.newBuilder()
+			.addInterceptor(auth)
+			.addInterceptor(tagging('Other'))
+			.build();
+		const builder = full.newBuilder();
+		const live = builder.interceptors() as unknown[];
+		live.splice(live.indexOf(auth), 1);
+		const tokenClient = builder.build();
+
+		await tokenClient.newCall(runtime.globals.GET('https://example.invalid/token')).execute();
+		const headers = sent.at(-1)?.headers as Record<string, string>;
+		expect(headers['X-Auth']).toBeUndefined();
+		expect(headers['X-Other']).toBe('1');
+		expect(full.interceptors).toHaveLength(2);
+	});
+
 	it('reads one response header by name, as okhttp does', async () => {
 		// `response.header("Server") !in SERVER_CHECK` is how an interceptor
 		// tells a challenge from an answer. Missing, it was a TypeError on every

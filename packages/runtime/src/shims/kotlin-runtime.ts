@@ -10046,6 +10046,15 @@ function __clientBuilder(follow, inherited, inheritedCookies, inheritedNetwork) 
     /* Kept in written order, which is the order okhttp runs them in: the first
        one added is the outermost, and it sees the request before the ones
        after it and the response after them. */
+    /*
+     * okhttp's live lists of the interceptors this builder will install, which
+     * an extension edits in place: a client for fetching a token is the
+     * source's own client with its auth interceptor taken back off —
+     * 'newBuilder().apply { interceptors().removeAll { it is Auth } }' — so the
+     * token request does not recurse into the interceptor that wants it.
+     */
+    interceptors: function () { return chain; },
+    networkInterceptors: function () { return network; },
     addInterceptor: function (interceptor) {
       if (interceptor === null || interceptor === undefined) return builder;
       if (typeof interceptor !== 'function' && typeof interceptor.intercept !== 'function') {
