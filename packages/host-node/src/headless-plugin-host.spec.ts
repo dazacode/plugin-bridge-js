@@ -69,6 +69,14 @@ export default {
 				ctxText: typeof arguments
 			};
 		}
+		if (query === 'web') {
+			try {
+				const headers = new Headers({ 'x-probe': 'yes' });
+				return { entries: [], header: headers.get('x-probe'), request: typeof Request, response: typeof Response };
+			} catch (error) {
+				return { entries: [], threw: String(error && error.message) };
+			}
+		}
 		if (query === 'node') {
 			try {
 				const fs = await import('node:fs');
@@ -164,6 +172,17 @@ describe('the headless isolate', () => {
 		// the browser host runs.
 		expect(seen['self']).toBe('object');
 		expect(seen['window']).toBe('object');
+	}, 30_000);
+
+	it('hands over the web classes a browser Worker has, usable after the sealing', async () => {
+		const seen = await ask('web');
+
+		// Node defines these lazily, over an HTTP client that needs `Buffer`; read
+		// for the first time after `Buffer` was deleted, every one threw.
+		expect(seen['threw']).toBeUndefined();
+		expect(seen['header']).toBe('yes');
+		expect(seen['request']).toBe('function');
+		expect(seen['response']).toBe('function');
 	}, 30_000);
 
 	it('refuses a plugin that reaches for a Node builtin', async () => {
