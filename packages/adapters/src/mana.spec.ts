@@ -950,4 +950,43 @@ globalThis.Target = Target;
 			['https://img.example.invalid/2.jpg', { referer: 'https://site.example.invalid/' }]
 		]);
 	});
+
+	it('hands search a SearchRequest, and interceptors the method as the enum', async () => {
+		const REPO = 'https://repo.example.invalid/mana/main/';
+		const entry = `
+import { HttpClient, HttpMethod } from '@mana-app/types';
+export class Target {
+  info = { id: 'Example', name: 'Example', version: '1.0.0', website: 'https://site.example.invalid' };
+  client = new HttpClient().addRequestInterceptor((request: any) => {
+    if (request.method !== HttpMethod.Get) throw new Error('not the enum: ' + String(request.method));
+    return request;
+  });
+  async search(request: { query: string; page: number }) {
+    await this.client.get('https://api.example.invalid/q');
+    return { results: [{ id: 'one', title: request.query + ':' + request.page }], isLastPage: true };
+  }
+}`;
+		const sourceListing = manaAdapter.parseIndex(
+			JSON.stringify([
+				{ id: 'Example', name: 'Example', path: 'Example', website: 'https://site.example.invalid' }
+			]),
+			`${REPO}sources.json`
+		).plugins[0];
+		const opened = await openPluginArchive(
+			await manaAdapter.convert(
+				sourceListing,
+				services({
+					getText: async (url) =>
+						url === `${REPO}src/Example/main.ts` ? entry : Promise.reject(new Error(url))
+				})
+			)
+		);
+		const url = `data:text/javascript;base64,${Buffer.from(opened.entrypointSource).toString('base64')}`;
+		const module = (await import(/* @vite-ignore */ url)).default as {
+			searchCatalog(q: string, p: number, ctx: unknown): Promise<{ entries: { title: string }[] }>;
+		};
+		const page = await module.searchCatalog('needle', 2, context());
+		expect(page.entries[0].title).toBe('needle:2');
+		expect(sent[0].method).toBe('GET');
+	});
 });

@@ -754,11 +754,12 @@ class HttpClient {
    */
   async __execute(input, origin) {
     var request = Object.assign({}, input);
-    // A method is the published enum's number or a name; '0' on the wire is
-    // what a number read as a name became.
-    request.method = typeof request.method === 'number'
-      ? (__HTTP_METHODS[request.method] || 'GET')
-      : String(request.method || 'GET').toUpperCase();
+    // A method stays as the source wrote it while its interceptors run — they
+    // compare it against the published enum (\`request.method !== HttpMethod.Get\`)
+    // — and becomes a name only on the wire. '0' on the wire, and an
+    // interceptor refusing 'GET' for not being 0, were the two ways to get this
+    // wrong.
+    if (request.method === undefined || request.method === null) request.method = 0;
     if (this.baseURL && !/^[a-z][a-z0-9+.-]*:/i.test(String(request.url))) {
       request.url = new URL(String(request.url), this.baseURL).toString();
     }
@@ -770,10 +771,13 @@ class HttpClient {
       if (changed && typeof changed === 'object') request = changed;
     }
     var headers = request.headers && typeof request.headers.toJSON === 'function' ? request.headers.toJSON() : Object.assign({}, request.headers || {});
+    var method = typeof request.method === 'number'
+      ? (__HTTP_METHODS[request.method] || 'GET')
+      : String(request.method || 'GET').toUpperCase();
 
     var response;
     if (__capture !== null && (origin === 1 || origin === 2)) {
-      __capture.request = { url: String(request.url), method: request.method, headers: headers };
+      __capture.request = { url: String(request.url), method: method, headers: headers };
       var capture = __capture;
       var read = function (value) { return async function () { capture.bodyRead = true; return value; }; };
       response = __manaResponse({ status: 200, url: String(request.url), headers: {}, text: read(''), json: read(null), bytes: read(new Uint8Array(0)) }, request);
@@ -784,7 +788,7 @@ class HttpClient {
       return response;
     }
 
-    var init = { method: request.method, headers: headers };
+    var init = { method: method, headers: headers };
     if (request.body !== undefined && request.body !== null) {
       init.body = __wireBody(request.body, headers);
     }
@@ -798,11 +802,13 @@ class HttpClient {
   }
 
   /** The app's image path: a GET at a cover or page origin. */
-  __dispatchImage(url, origin) { return this.__execute({ url: url, method: 'GET' }, origin); }
+  __dispatchImage(url, origin) { return this.__execute({ url: url, method: 0 }, origin); }
 
-  get(url, options) { return this.request({ url: url, method: 'GET', headers: options && options.headers }); }
+  // The published client's shorthands, which hand interceptors the enum.
+  get(url, options) { return this.request({ url: url, method: 0, headers: options && options.headers }); }
+  head(url, options) { return this.request({ url: url, method: 1, headers: options && options.headers }); }
   post(url, body, options) {
-    return this.request({ url: url, method: 'POST', body: body, headers: options && options.headers });
+    return this.request({ url: url, method: 2, body: body, headers: options && options.headers });
   }
 }
 
@@ -1051,7 +1057,11 @@ async function __search(source, query, page) {
   if (typeof source.getSearchResults === 'function') {
     return __normalise(await source.getSearchResults(query, page));
   }
-  return __normalise(await __call(source, ['search'], query, page));
+  // The published \`search(request: SearchRequest)\` reads \`request.query\` and
+  // \`request.page\`. Handed the bare string, every one of them searched for
+  // \`undefined\` and answered its default listing — rows that read as results
+  // for whatever was typed.
+  return __normalise(await __call(source, ['search'], { query: query, page: page, filters: {} }));
 }
 
 ${ABI}`;
