@@ -137,51 +137,90 @@ as a build artifact. Echo converts nothing by design; its extensions are APKs.
 The pass above stopped at four named gaps. This is what became of each, and
 what a live run of two of the formats found besides.
 
-### Mana sources published as a tree: 0 → 19 of 139 convert
+### Mana sources published as a tree: 0 → 111 of 139 load
 
 Every Mana source in the corpus is published unbuilt, as a TypeScript entry
 that extends a template a directory or two away. The source path read the
 entry file alone and refused all 139 for `relativeModuleImports`.
 
-The relative-import walker the Hayase adapter already had is now shared
-(`core/repository-modules.ts`). Mana links the closure in dependency order —
-each module wrapped and returning its exports, re-exports and `export * from`
-included — and refuses by name a module that cannot be read, climbs out of the
-repository, closes a cycle or lies past the bound. Running the linked trees
-found eleven pieces of type syntax the stripper mishandled, each a bundle that
-converted and then failed to parse or returned a different value; each is
-fixed and pinned.
+Three steps, each measured before the next:
 
-Measured with `bun scripts/wotaku-catalogue.ts`, which now converts and loads
-every Mana entry file in the clones:
+1. **The module walk.** The relative-import walker the Hayase adapter already
+   had is now shared (`core/repository-modules.ts`). Mana links the closure in
+   dependency order — each module wrapped and returning its exports, re-exports
+   and `export * from` included — and refuses by name a module that cannot be
+   read, climbs out of the repository, closes a cycle or lies past the bound.
+2. **The three packages the closures import.** `cheerio` (116 closures),
+   `html-entities` (80) and `crypto-js` (52) are answered by compatible
+   subsets over the runtime's own parser and digests (`shims/cheerio.ts`,
+   `shims/js-libraries.ts`), kept to the members the corpus calls. Every keyed
+   `crypto-js` operation — AES, the HMACs — throws naming itself: a key stays
+   on the host's asynchronous WebCrypto (`ABI.md` §2), so a source loads and
+   only a protected chapter fails, by name.
+3. **The published client.** The search-form builders, the `Body` builders,
+   `HttpHeaders`, the numbered `HttpMethod`, `RateLimit`, `ObjectStore`, a
+   `SearchRequest` for `search`, and interceptors that are awaited and handed
+   the enum — each a live failure on the trees, fixed as the published
+   `@mana-app/types` defines it.
 
-|                                           | before | after |
-| ----------------------------------------- | ------ | ----- |
-| Mana entry files (declare `Target`)       | 139    | 139   |
-| refused `relativeModuleImports`           | 139    | 0     |
-| refused `packageImports`                  | 0      | 120   |
-| convert                                   | 0      | 19    |
-| convert and load                          | 0      | 9     |
-| load stops at a `@mana-app/types` builder | —      | 10    |
+Each step exposed TypeScript the stripper read wrongly — twenty-three
+constructs in all, from a union member after a comment to a parameter
+property that must still assign its field. Each converted and then failed to
+parse or answered differently; each is fixed and pinned by a test that runs
+the stripped code.
 
-The 120 are the honest next obstacle, not a regression: they import `cheerio`
-(116 closures), `html-entities` (80) or `crypto-js` (52), which a converted
-bundle has no copy of. The ten that convert and stop at load call a search-form
-builder (`SearchMenuPicker`, `SearchMultiPicker`, `SearchPicker`) at module
-scope, which the shim names rather than approximates.
+Measured with `bun scripts/wotaku-catalogue.ts`, which converts and loads every
+Mana entry file in the clones:
 
-### Image transport: written up, not built
+|                                     | before | after |
+| ----------------------------------- | ------ | ----- |
+| Mana entry files (declare `Target`) | 139    | 139   |
+| refused `relativeModuleImports`     | 139    | 0     |
+| refused `packageImports`            | 0      | 28    |
+| convert                             | 0      | 111   |
+| convert and load                    | 0      | 111   |
 
-A Mana source that serves page images through `getPageTransport` is honoured
-for the URL only. 109 of the 139 entry files carry a page transport in their
-closure. Carrying it is an ABI decision and is left to the contract's owner.
+The 28 import `simple-url` (26), `moment` (2) or `crypto-es` (1), refused by
+name.
 
-### A numeric setting: written up, not built
+Then live, each listing driven through search, its list, its pages and a fetch
+of a page image's bytes (real addresses on the command line only). _Works_
+means the image bytes arrived and were an image:
 
-The one Suwatte source refused for settings uses `UIStepper`. The manifest
-schema's setting types are `select`, `multiselect`, `switch` and `text`, and
-`ctx.settings` answers strings, booleans and lists, so a number is an ABI
-change rather than an adapter one.
+|                                                    | listings | convert | load | search | list | pages | image bytes |
+| -------------------------------------------------- | -------- | ------- | ---- | ------ | ---- | ----- | ----------- |
+| Source trees from the clones, before               | 139      | 0       | 0    | 0      | 0    | 0     | 0           |
+| Source trees from the clones, after                | 139      | 111     | 111  | 42     | 28   | 27    | 26          |
+| Built bundles from three live repositories, before | 21       | 21      | 21   | 11     | 11   | 11    | 6           |
+| Built bundles from three live repositories, after  | 21       | 21      | 21   | 13     | 13   | 13    | 12          |
+
+What stops the rest after load is mostly the sites': a Cloudflare challenge, a
+search that finds nothing for the harness's probe title, a page that is gone,
+a server that wants settings only a viewer can give. Ten novel sources list no
+chapters, because a book source answers a different method.
+
+### Image transport: the source's own request path, then level 3
+
+A Mana source does not hand the app image URLs; it hands it a client
+(`getPageTransport`, `getCoverTransport`) whose interceptors add a Referer or
+rewrite the address. The shim now runs that client for each page — and once
+per cover host — with the image send intercepted: what it would have sent
+becomes the page's address and headers. A client that reads the image's own
+response refuses the chapter by name. Paperback's registered interceptors run
+the same way for each page.
+
+Page headers were already in the ABI (§8.3). Cover headers were not, and the
+contract's owner decided them: `ABI.md` §9.1, API level 3, adds
+`posterImageHeaders`, `imageHeadersByHost` and `headersByHost`, which the Mana
+cover path and the Suwatte `imageReferer` now emit.
+
+### A number: level 3
+
+`ABI.md` §9.2 adds `type: 'number'`, decided the same way. The Suwatte source
+with a `UIStepper` converts with it — and had in fact lost every setting, to
+ids written as module constants that parsed as nothing; those are resolved
+now. For a host below level 3 a stepper whose values fit a select's 64 is drawn
+as one; one that does not is refused by name.
 
 ### Seanime: the AniList id, and unnumbered episodes
 

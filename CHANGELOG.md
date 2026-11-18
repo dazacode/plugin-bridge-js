@@ -22,11 +22,27 @@ converter no longer gives.
 
 ### Capabilities
 
+- **API level 3** (`ABI.md` §9), decided by the contract's owner and argued
+  there first:
+  - **Image headers the host applies**: `posterImageHeaders` on a catalogue
+    entry, `imageHeadersByHost` on a catalogue page, `headersByHost` on a
+    chapter — `StreamPipeline` §4.1's rules, optional outputs a lower host
+    ignores. `host/image-headers.ts` is the host's reader.
+  - **A number setting**: `type: 'number'` with `min`, `max`, `step`, and
+    `ctx.settings.number(id)`. A manifest with one declares level 3.
+  - Vectors for both in `contract/fixtures/level-3/`.
 - **A Mana source tree converts with the modules it imports from its own
-  repository.** The Hayase adapter's relative-import walker is shared
-  (`core/repository-modules.ts`) and reports what it could not follow instead
-  of skipping it. _Corpus: 0 → 19 of 139 Mana entry files convert, 9 load;
-  the other 120 now stop at a named third-party package._
+  repository**, the three packages its closure imports (`cheerio`,
+  `html-entities`, keyless `crypto-js`), and the published client's surface.
+  The Hayase adapter's relative-import walker is shared
+  (`core/repository-modules.ts`). _Corpus: 0 → 111 of 139 Mana entry files
+  convert and load; 28 stop at a named package._
+- **A Mana page or cover image goes out as the source's own client would send
+  it**: the client's interceptors run with the image send intercepted, and a
+  client that reads the image's response refuses by name. Paperback's
+  interceptors run for each page the same way.
+- **A Suwatte `UIStepper` converts** as a level-3 number, or as a select of
+  its values for a host below level 3 (`ConversionServices.hostApiLevel`).
 - **Seanime providers get `LoadDoc`/`Doc`, `$getUserPreference` and `$store`.**
   The document API follows goquery over the shared parser; `userConfig`
   becomes manifest settings.
@@ -51,6 +67,17 @@ converter no longer gives.
 - A Seanime payload whose file is `.ts` is stripped whatever its manifest says.
 - A Suwatte multiselect setting is read with `ctx.settings.list`, the accessor
   the ABI defines; the shim called a `stringArray` no host provides.
+- A Suwatte setting whose id is a module constant was dropped without a word;
+  the constant is resolved.
+- A Mana source tree's `search` is handed a `SearchRequest`, not a bare string
+  it read as `undefined` and answered with its default listing; interceptors
+  see the method as the published enum; async interceptors are awaited.
+- Twelve more stripper constructs, among them a second declarator's type,
+  `as` before a line break or a ternary colon, `<T>` assertions and generic
+  arrows, type predicates, and parameter properties that must assign.
+- The host scan read past a regex literal holding a quote; on a minified bundle
+  it lost every address after one, and two sources were refused for an API
+  host written plainly in their code.
 
 ### Detection
 
@@ -64,11 +91,12 @@ converter no longer gives.
   before deleting `Buffer`; Node's lazy definitions of them threw
   `Buffer is not defined` on first read.
 
-### Left for a decision, on purpose
+### Left on purpose
 
-- **Image transport** (a page or cover image fetched through the source's own
-  client) and **a numeric setting** (`UIStepper`) are ABI changes and are
-  written up, not built.
+- **A keyed `crypto-js` call** (AES, HMAC) throws by name: a key is the host's.
+- **An image client that reads its response** refuses the chapter by name, and
+  a Paperback interceptor that rewrites image bytes cannot run on a
+  host-fetched page.
 
 ## Unreleased — served playback: a plugin's own local server, without the socket
 
