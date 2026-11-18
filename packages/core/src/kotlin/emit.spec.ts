@@ -70,6 +70,9 @@ const nullish = (value: Any): boolean => value === null || value === undefined;
 /** The classpath, as far as a fixture needs one. */
 const stubLoader = { getResourceAsStream: () => null };
 
+/** Every line `println` was handed, in order. */
+const printed: string[] = [];
+
 /** Every value `toByteArray` was handed, in order. See the helper. */
 const encodedTexts: string[] = [];
 
@@ -448,6 +451,10 @@ const helpers: Record<string, (...args: never[]) => unknown> = {
 
 	unsupported: (message?: string) => {
 		throw new Error(message ?? 'not supported');
+	},
+	// Recorded rather than written, so a test can see what reached the log.
+	println: (value: Any) => {
+		printed.push(String(value));
 	},
 	error: (message?: string) => {
 		throw new Error(message ?? 'error');
@@ -3086,6 +3093,111 @@ describe('a name declared somewhere the emitter had not looked', () => {
 		// And each class still builds its own shape: `Other.Row` has no `name`,
 		// so a reference that leaked to the first one would answer undefined.
 		expect(instantiate(source).build()).toBe('outerother');
+	});
+
+	it('calls a property that holds a function, as the method it is in JavaScript', () => {
+		// `contentFetcher.onContent(paragraphs)`: a `val` of a function type,
+		// invoked. It was refused as a method nothing declares, which took every
+		// listing whose template transforms what it scraped.
+		const source = kt(
+			'class Fetcher(val onLink: (String) -> String = { it })',
+			'',
+			'class Demo : Source() {',
+			'    fun link(): String = Fetcher({ it + "!" }).onLink("x")',
+			'}'
+		);
+		expect(instantiate(source).link()).toBe('x!');
+	});
+
+	it('places named arguments and a trailing block on a property the base class typed', () => {
+		// `client.submitForm(url = …, formParameters = …) { … }` in a template
+		// whose base declares `var client: Ktor`. Named arguments with a
+		// trailing block were refused outright, and the receiver's type was
+		// looked up on the calling class alone, which does not declare it.
+		const source = kt(
+			'class Demo : Base() {',
+			'    fun run(): String = client.send(tag = "t", url = "u") { it + "!" }',
+			'}',
+			'',
+			'class Http {',
+			'    fun send(url: String, tag: String = "-", block: (String) -> String = { it }): String = block(url + tag)',
+			'}',
+			'',
+			'abstract class Base {',
+			'    var client: Http = Http()',
+			'}'
+		);
+		expect(evaluate(source, 'new Demo().run()')).toBe('ut!');
+	});
+
+	it('sends a call with more arguments than its own declaration takes to the base', () => {
+		// `private fun SManga.setSlugUrl(href) = setSlugUrl(mangaPath, href)`:
+		// Kotlin resolves the inner call to the base class's two-argument
+		// overload. Emitted on `this`, it called itself, and the first search
+		// ended in "Maximum call stack size exceeded".
+		const source = kt(
+			'class Demo : Source() {',
+			'    private val mangaPath = "/p/"',
+			'    private fun SManga.setSlugUrl(href: String) = setSlugUrl(mangaPath, href)',
+			'    fun build(href: String): String = SManga.create().apply { setSlugUrl(href) }.url',
+			'}'
+		);
+		const base = {
+			setSlugUrl: (target: { url?: string }, path: string, href: string) => {
+				target.url = path + href;
+			}
+		};
+		expect(
+			instantiate(source, {}, { __super: base, SManga: { create: () => ({}) } }).build('x')
+		).toBe('/p/x');
+	});
+
+	it('sends `String.matches(Regex)` to the runtime, which knows which side the regex is', () => {
+		const js = translate(
+			inClass('    fun ok(id: String): Boolean = id.matches(Regex("[a-f0-9]{24}"))')
+		).js;
+		expect(js).toContain('__k.matches(id, ');
+		expect(js).not.toContain('id.matches(');
+	});
+
+	it('prints from a file-scope function to the runtime, not to `this`', () => {
+		// Bare, `println` fell to "a lowercase call is a member of the source"
+		// and came out `this.println(…)`. In a file-scope function `this` is
+		// undefined, so the first log line threw "reading 'println'".
+		const source = kt(
+			'fun note(text: String): String {',
+			'    println("noted " + text)',
+			'    return text',
+			'}',
+			'',
+			'class Demo : Source() {',
+			'    fun run(): String = note("one")',
+			'}'
+		);
+		printed.length = 0;
+		expect(instantiate(source).run()).toBe('one');
+		expect(printed).toEqual(['noted one']);
+	});
+
+	it('reads a member of a nested `object` written by its qualified name', () => {
+		// `SourceFactory.Type.Search`, where `Type` is an `object` nested in an
+		// abstract base. The object is hoisted to module scope and the class
+		// that held it is emitted without it, so the read went
+		// `Holder.Kind` → undefined → "Cannot read properties of undefined
+		// (reading 'Search')", at the first search, with nothing refused.
+		const source = kt(
+			'abstract class Holder {',
+			'    object Kind {',
+			'        val Search: Int = 7',
+			'    }',
+			'}',
+			'',
+			'class Demo : Source() {',
+			'    fun kind(): Int = Holder.Kind.Search',
+			'}'
+		);
+
+		expect(instantiate(source).kind()).toBe(7);
 	});
 
 	it('lets `ifEmpty { return@map … }` jump out of the lambda it was written in', () => {

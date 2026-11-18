@@ -759,7 +759,7 @@ export class PluginSandbox {
 					id: number;
 					ok: boolean;
 					value?: unknown;
-					error?: { name: string; message: string };
+					error?: { name: string; message: string; status?: unknown };
 			  };
 
 		if ('outbound' in data) {
@@ -802,13 +802,18 @@ export class PluginSandbox {
 		method: string;
 		args: unknown[];
 	}): Promise<void> {
-		const respond = (ok: boolean, value?: unknown, error?: string) =>
+		const respond = (ok: boolean, value?: unknown, error?: string, failure?: unknown) =>
 			this.worker?.postMessage({
 				inboundReply: true,
 				id: call.id,
 				ok,
 				value,
-				error
+				error,
+				// The status a failed request carried, and the ABI name for it, so
+				// the plugin's error — and, when the plugin does not catch it, the
+				// failure that comes back out — still says "slow down" rather than
+				// "failed". See `toFailure`.
+				...outboundFailureShape(failure)
 			});
 
 		try {
@@ -852,7 +857,7 @@ export class PluginSandbox {
 					respond(false, undefined, `unknown host call: ${call.method}`);
 			}
 		} catch (error) {
-			respond(false, undefined, (error as Error).message);
+			respond(false, undefined, (error as Error).message, error);
 		}
 	}
 
@@ -989,10 +994,15 @@ export class PluginSandbox {
 				// (`net/chain-repair.ts`, where the host running it has one) by the
 				// time it says this, and asking again would multiply a timeout by
 				// `attempts` inside a call racing a deadline.
+				//
+				// With its status: a relay that answered 429 is asking us to slow
+				// down, and `NetworkFailure.isRateLimited` reads exactly this. Left
+				// off, it reached the viewer as a generic network failure.
 				throw new NetworkFailure(
 					detail === undefined
 						? `The plugin proxy returned ${response.status}.`
-						: `The plugin proxy returned ${response.status}: ${detail}`
+						: `The plugin proxy returned ${response.status}: ${detail}`,
+					{ statusCode: response.status }
 				);
 			}
 			const answered = await readRelayReply(response);
@@ -1237,18 +1247,45 @@ function isAddressLiteral(host: string): boolean {
 	return /^\d{1,3}(\.\d{1,3}){3}$/.test(host) || host.includes(':');
 }
 
-/** Rebuilds a domain failure from what crossed the worker boundary. */
-function toFailure(error: { name: string; message: string }): Error {
+/**
+ * What the worker is told about a host call that failed, beyond its message.
+ *
+ * A request the relay refused carries the status it refused with; the worker
+ * puts it on the error the plugin sees, under the ABI's name for it (§5:
+ * `RateLimitedError` for a 429, `NetworkError` otherwise). Anything else adds
+ * nothing, and the plugin sees the plain error it always did.
+ */
+function outboundFailureShape(failure: unknown): { errorName?: string; status?: number } {
+	if (!(failure instanceof NetworkFailure) || failure.statusCode === undefined) return {};
+	return {
+		errorName: failure.isRateLimited ? 'RateLimitedError' : 'NetworkError',
+		status: failure.statusCode
+	};
+}
+
+/**
+ * Rebuilds a domain failure from what crossed the worker boundary.
+ *
+ * The status travels with it. `NetworkFailure.isRateLimited` is a reading of
+ * `statusCode`, and a failure rebuilt from a name and a message alone could
+ * never be rate-limited — so a relay's 429 surfaced as "could not reach", and
+ * a plugin's own `RateLimitedError` (ABI.md §5: "back off") did too. A
+ * `RateLimitedError` that names no status is a 429 by definition.
+ */
+function toFailure(error: { name: string; message: string; status?: unknown }): Error {
+	const status =
+		typeof error.status === 'number' && Number.isInteger(error.status) ? error.status : undefined;
 	switch (error.name) {
 		case 'NotFoundError':
 			return new NotFoundFailure(error.message);
+		case 'RateLimitedError':
+			return new NetworkFailure(error.message, { statusCode: status ?? 429 });
 		case 'SourceChangedError':
 		case 'NetworkError':
-		case 'RateLimitedError':
-			return new NetworkFailure(error.message);
+			return new NetworkFailure(error.message, { statusCode: status });
 		case 'UnsupportedError':
 			return new ValidationFailure(error.message);
 		default:
-			return new NetworkFailure(error.message);
+			return new NetworkFailure(error.message, { statusCode: status });
 	}
 }

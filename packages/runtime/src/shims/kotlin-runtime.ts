@@ -3710,6 +3710,10 @@ var __k = {
    * element legitimately IS null is answered rather than reported as empty.
    */
   first: function (list, predicate) {
+    // jsoup's 'Elements.first()' is a member, and Kotlin calls a member before
+    // the stdlib extension of the same name: null on an empty selection, not
+    // a throw. 'select(…).first()?.text()' is written for exactly that.
+    if (typeof predicate !== 'function' && list instanceof __KElements) return list.first();
     var items = __arr(list);
     if (typeof predicate !== 'function') {
       if (items.length === 0) {
@@ -3757,6 +3761,17 @@ var __k = {
    * They mean entirely different things — a matching element, and a MatchResult
    * — and the emitter has no types to disambiguate with, so the receiver does.
    */
+  /**
+   * A whole-input match, with the regex on either side: 'Regex.matches(input)'
+   * and 'String.matches(regex)', the second also as Java's pattern string.
+   */
+  matches: function (receiver, other) {
+    if (receiver && receiver.__isRegex === true) return receiver.matches(other);
+    if (other && other.__isRegex === true) return other.matches(__str(receiver));
+    if (typeof other === 'string') return __k.regex(other).matches(__str(receiver));
+    throw new Error('matches() was given neither a Regex nor a pattern.');
+  },
+
   find: function (list, predicate, startIndex) {
     if (list && list.__isRegex === true) return list.find(predicate, startIndex);
     return __k.firstOrNull(list, predicate);
@@ -6989,6 +7004,22 @@ var __k = {
    * The message is a lambda in Kotlin so it costs nothing when the check
    * passes, and it is called only when it does not.
    */
+  /**
+   * Kotlin's stdout, as a debug line in the host log. Guarded like \`Log\`: a
+   * diagnostic that can throw is worse than none.
+   */
+  println: function (value) {
+    try {
+      var host = __host();
+      if (host.log && typeof host.log.debug === 'function') {
+        host.log.debug(value === undefined ? '' : __str(value));
+      }
+    } catch (ignored) {
+      // Outside a plugin call, or a host with no logger.
+    }
+    return undefined;
+  },
+
   require: function (value, lazyMessage) {
     if (value) return undefined;
     throw __kTagged(new Error(

@@ -123,6 +123,22 @@ export function detectionCandidates(
 	for (const adapter of adapters) {
 		for (const candidate of adapter.candidates(url)) add(candidate);
 	}
+
+	// **What was pasted, as given, ahead of everything derived from it** —
+	// when anything here offers it as given at all, which is an adapter saying
+	// "that names my index file". Native-first is not lost by this: every body
+	// is offered to the native parser before any adapter, whichever URL it came
+	// from. What was lost without it was the paste itself. An `index.pb` URL is
+	// not a `.json` file to the native resolver, so twenty paths derived from
+	// the repository were fetched before it — and one of them, a sibling
+	// format's stub beside the real index, stopped detection before the URL
+	// the person pasted was ever requested.
+	const pastedAsGiven = url.toString();
+	const at = candidates.indexOf(pastedAsGiven);
+	if (at > 0) {
+		candidates.splice(at, 1);
+		candidates.unshift(pastedAsGiven);
+	}
 	return { url, candidates };
 }
 
@@ -164,8 +180,10 @@ export async function detectRepository(
 	adapters: readonly ForeignAdapter[],
 	getBytes?: ArtifactFetcher
 ): Promise<DetectedRepository> {
-	const { candidates } = detectionCandidates(pasted, adapters);
+	const { url, candidates } = detectionCandidates(pasted, adapters);
 	const attempted: string[] = [];
+	/** The first answer an adapter gave about a document nobody pasted. */
+	let derivedRefusal: ForeignIndexError | null = null;
 
 	for (const candidate of candidates) {
 		attempted.push(candidate);
@@ -218,14 +236,23 @@ export async function detectRepository(
 			} catch (error) {
 				// Same rule as the native parser above: an adapter that recognised
 				// the body and then found it broken is answering the question, and
-				// trying the next adapter can only bury that answer under "nothing
-				// found there".
-				if (error instanceof ForeignIndexError) throw error;
-				continue;
+				// trying the next adapter on *this body* can only bury that answer
+				// under "nothing found there" — or worse, let a sibling read it.
+				if (!(error instanceof ForeignIndexError)) continue;
+				// About the document that was pasted, it is the answer.
+				if (candidate === url.toString()) throw error;
+				// About one this function derived, it is an answer about the
+				// wrong document: a sibling format's stub beside the real index
+				// is recognised and refused here, and that must not stop the
+				// candidates after it — the real index among them — from being
+				// fetched. Kept, and given if nothing else is found.
+				derivedRefusal ??= error;
+				break;
 			}
 		}
 	}
 
+	if (derivedRefusal !== null) throw derivedRefusal;
 	throw new NotFoundFailure(
 		`No plugin repository was found there. Tried:\n${attempted.map((url) => `  ${url}`).join('\n')}`
 	);

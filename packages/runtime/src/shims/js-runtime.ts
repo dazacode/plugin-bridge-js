@@ -187,9 +187,25 @@ function __response(raw, charset) {
   };
 }
 
+/**
+ * The last request the host refused, kept for the adapter's sake.
+ *
+ * Modules catch their own request failures and return a sentence in place of
+ * the value — the request's status gone with the error object. An adapter
+ * that recognises the sentence can put the status back from here, so a relay
+ * that answered 429 is still "slow down" when it reaches the viewer.
+ */
+var __lastHostFailure = null;
+
 async function fetchv2(url, a, b, c, d, e) {
   var asked = __request(url, a, b, c, d, e);
-  var raw = await __host().http.send(String(url), asked.request);
+  var raw;
+  try {
+    raw = await __host().http.send(String(url), asked.request);
+  } catch (error) {
+    __lastHostFailure = error;
+    throw error;
+  }
   return __response(raw, asked.charset);
 }
 

@@ -156,6 +156,7 @@ export const RUNTIME_HELPERS = [
 	'lastOrNull',
 	'last',
 	'find',
+	'matches',
 	'any',
 	'all',
 	'none',
@@ -635,6 +636,8 @@ export const RUNTIME_HELPERS = [
 	   page through and report a source with nothing on it. */
 	'require',
 	'requireNotNull',
+	/* `println(x)`, to the host's debug log. */
+	'println',
 	'check',
 	'checkNotNull',
 

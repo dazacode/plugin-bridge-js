@@ -11,7 +11,7 @@
 import { FOREIGN_ADAPTERS } from '@plugin-bridge/adapters';
 import { describe, expect, it } from 'vitest';
 
-import { ForeignFormatError, type ForeignAdapter } from './adapter';
+import { ForeignFormatError, ForeignIndexError, type ForeignAdapter } from './adapter';
 
 import fixtures from '../../../fixtures/indexes.json';
 import { detectRepository, detectionCandidates } from './detect';
@@ -251,5 +251,106 @@ describe('an index that is not text', () => {
 
 		expect(seen.bytes).toBeUndefined();
 		expect(seen.text).toBe('[]');
+	});
+});
+
+describe('an index file pasted beside a sibling format’s stub', () => {
+	const PASTED = 'https://raw.example.invalid/owner/novels/repo/index.pb';
+	const STUB = 'https://raw.example.invalid/owner/novels/repo/index.min.json';
+
+	/** A format that derives a sibling `index.min.json` and recognises it as a stub. */
+	const stubbed: ForeignAdapter = {
+		format: 'mihon',
+		candidates: (pasted) => [new URL('index.min.json', pasted).toString()],
+		parseIndex(body) {
+			if (body.includes('placeholder')) {
+				throw new ForeignIndexError('This is the deprecated stub; the real index is beside it.');
+			}
+			throw new ForeignFormatError('not this format');
+		},
+		convert: () => Promise.reject(new Error('not used'))
+	};
+
+	/** A format whose index is the binary file itself, offered as pasted. */
+	const binary: ForeignAdapter = {
+		format: 'tsundoku',
+		candidates: (pasted) => (pasted.pathname.endsWith('.pb') ? [pasted.toString()] : []),
+		parseIndexBytes(bytes, indexUrl) {
+			if (bytes[0] !== 0x1f) throw new ForeignFormatError('not gzip');
+			return {
+				name: 'The real index',
+				description: '',
+				updatedAt: '',
+				signingKey: null,
+				plugins: [],
+				format: 'tsundoku',
+				indexUrl
+			} as never;
+		},
+		parseIndex() {
+			throw new ForeignFormatError('not text');
+		},
+		convert: () => Promise.reject(new Error('not used'))
+	};
+
+	it('fetches the pasted file first, before anything derived from the repository', async () => {
+		// The pasted `index.pb` was the twenty-first URL tried: not a `.json`,
+		// so the native resolver derived paths under it, and other formats
+		// derived theirs from the repository — one of them the stub, whose
+		// refusal ended detection before the pasted URL was requested at all.
+		expect(detectionCandidates(PASTED, FOREIGN_ADAPTERS).candidates[0]).toBe(PASTED);
+
+		const fetched: string[] = [];
+		const found = await detectRepository(
+			PASTED,
+			() => Promise.reject(new Error('text is decoded from the bytes')),
+			[stubbed, binary],
+			async (url) => {
+				fetched.push(url);
+				if (url === PASTED) return new Uint8Array([0x1f, 0x8b, 0x08, 0x00]);
+				if (url === STUB) return new TextEncoder().encode('["placeholder"]');
+				throw new Error(`nothing at ${url}`);
+			}
+		);
+
+		expect(found.indexUrl).toBe(PASTED);
+		expect(found.index.name).toBe('The real index');
+		expect(fetched).toEqual([PASTED]);
+	});
+
+	it('keeps looking past a stub it derived, and finds the real index after it', async () => {
+		// A repository pasted bare. The stub is recognised and refused by the
+		// format it belongs to — and that refusal is about a document nobody
+		// asked for, so it no longer stops the candidates after it.
+		const repository = 'https://github.com/owner/novels';
+		const stub = 'https://raw.githubusercontent.com/owner/novels/main/index.min.json';
+		const real = 'https://raw.githubusercontent.com/owner/novels/repo/index.min.json';
+		const { candidates } = detectionCandidates(repository, FOREIGN_ADAPTERS);
+		expect(candidates.indexOf(stub)).toBeLessThan(candidates.indexOf(real));
+
+		const found = await detectRepository(
+			repository,
+			serve({ [stub]: catalogue['mihon'].body, [real]: catalogue['tsundoku'].body }),
+			FOREIGN_ADAPTERS
+		);
+
+		expect(found.indexUrl).toBe(real);
+		expect(found.index.format).toBe('tsundoku');
+	});
+
+	it('still gives the stub’s sentence when nothing else is there', async () => {
+		// Not loosened: the stub is still never read as a catalogue, and with
+		// no real index found its refusal is the answer rather than "nothing".
+		const stub = 'https://raw.githubusercontent.com/owner/novels/main/index.min.json';
+		await expect(
+			detectRepository(
+				'https://github.com/owner/novels',
+				serve({ [stub]: catalogue['mihon'].body }),
+				FOREIGN_ADAPTERS
+			)
+		).rejects.toThrow(/index\.pb/);
+		await expect(
+			detectRepository(stub, serve({ [stub]: catalogue['mihon'].body }), FOREIGN_ADAPTERS)
+		).rejects.toThrow(ForeignIndexError);
 	});
 });

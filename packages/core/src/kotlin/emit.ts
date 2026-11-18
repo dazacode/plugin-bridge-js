@@ -1020,6 +1020,18 @@ export function emitKotlin(
 	return new Emitter(neighbours, renames, entryFile, declaredAs).file(tree.root);
 }
 
+/** Where a call that names no type argument reads it from. See `Emitter.reifiedFrom`. */
+export interface ReifiedFrom {
+	readonly returns: boolean;
+	readonly receiver: boolean;
+}
+
+/** A file-scope reified function, as the files beside it see it. */
+export interface ModuleReified {
+	readonly params: readonly string[];
+	readonly from: ReifiedFrom | null;
+}
+
 /**
  * The types and methods one file declares, for the files beside it.
  *
@@ -1156,6 +1168,22 @@ export interface Declared {
 	 * file has to know to pass it, or `it is R` asks about a type called "R".
 	 */
 	readonly reified: ReadonlyMap<string, readonly string[]>;
+	/**
+	 * File-scope functions with `reified` type parameters, by bare name.
+	 *
+	 * `reified` above is keyed by the declaring class, and a file-scope
+	 * `inline fun <reified T> List<*>.findInstance(): T?` has none. Every
+	 * emitted file joins one module, so the function is in scope by its own
+	 * spelling in the file next door — and that file has to know to pass the
+	 * type it names. Left out, `filters.findInstance<Filter.Title>()` came out
+	 * as `findInstance(filters)`: the list arrived as the type, the receiver
+	 * as `undefined`, and the first search died with "__recv is not iterable".
+	 *
+	 * `from` is `reifiedFrom` for the same function, so a call that leaves
+	 * the argument to inference reads it off the same written-down type it
+	 * would in the declaring file.
+	 */
+	readonly moduleReified: ReadonlyMap<string, ModuleReified>;
 	/**
 	 * Every signature a class member function is declared with, by name.
 	 *
@@ -1312,6 +1340,7 @@ const EMPTY_DECLARED: Declared = {
 	qualifiedSignatures: new Map(),
 	objects: new Set(),
 	reified: new Map(),
+	moduleReified: new Map(),
 	overloads: new Map(),
 	classFunctions: new Map(),
 	receiverLambdas: new Map(),
@@ -1343,6 +1372,8 @@ export function mergeDeclared(parts: readonly Declared[]): Declared {
 	const qualifiedSignatures = new Map<string, readonly string[]>();
 	const objects = new Set<string>();
 	const reified = new Map<string, readonly string[]>();
+	const moduleReified = new Map<string, ModuleReified>();
+	const ambiguousReified = new Set<string>();
 	const classMembers = new Map<string, Set<string>>();
 	const classFields = new Map<string, Set<string>>();
 	const classBases = new Map<string, string>();
@@ -1417,6 +1448,17 @@ export function mergeDeclared(parts: readonly Declared[]): Declared {
 		}
 		for (const name of part.objects) objects.add(name);
 		for (const [name, params] of part.reified) reified.set(name, params);
+		for (const [name, shape] of part.moduleReified) {
+			// Two files declaring the same name with different type parameters
+			// are two functions, and a call cannot say which: neither is carried.
+			if (ambiguousReified.has(name)) continue;
+			const known = moduleReified.get(name);
+			if (known === undefined) moduleReified.set(name, shape);
+			else if (known.params.join(',') !== shape.params.join(',')) {
+				moduleReified.delete(name);
+				ambiguousReified.add(name);
+			}
+		}
 		for (const [name, shape] of part.qualifiedSignatures) qualifiedSignatures.set(name, shape);
 		for (const name of part.extensions) extensions.add(name);
 		for (const name of part.moduleExtensions) moduleExtensions.add(name);
@@ -1456,6 +1498,7 @@ export function mergeDeclared(parts: readonly Declared[]): Declared {
 		qualifiedSignatures,
 		objects,
 		reified,
+		moduleReified,
 		overloads: new Map([...overloads].map(([name, shapes]) => [name, [...shapes.values()]])),
 		classFunctions,
 		receiverLambdas,
@@ -1533,6 +1576,13 @@ class Emitter {
 			mergeReceiverSlots(this.receiverLambdas, name, slots);
 		}
 		for (const [name, params] of neighbours.reified) this.reifiedMembers.set(name, params);
+		// This file's own declarations replace these when it is surveyed
+		// (`registerExtensions`, `registerExpectedTypes`), as Kotlin's nearer
+		// scope would.
+		for (const [name, shape] of neighbours.moduleReified) {
+			this.reifiedFunctions.set(name, shape.params);
+			if (shape.from !== null) this.reifiedFrom.set(name, shape.from);
+		}
 		for (const [owner, members] of neighbours.classMembers) {
 			const into = this.classMemberIndex.get(owner) ?? new Set<string>();
 			for (const member of members) into.add(member);
@@ -1886,6 +1936,10 @@ class Emitter {
 	private reifiedTypes: ReadonlyMap<string, string> | null = null;
 	/** See `Declared.reified`. */
 	private readonly reifiedMembers = new Map<string, readonly string[]>();
+	/** See `Declared.moduleReified`. */
+	private readonly moduleReified = new Map<string, ModuleReified>();
+	/** Parameters an extension function this file declares takes; null if it varies. */
+	private readonly extensionArity = new Map<string, number | null>();
 	/**
 	 * The enum whose body is being emitted, and its entries' names.
 	 *
@@ -1935,7 +1989,7 @@ class Emitter {
 	 * return type or receiver that *is* the parameter, written bare, is kept:
 	 * `List<T>` would need unifying, and that is a type checker.
 	 */
-	private readonly reifiedFrom = new Map<string, { returns: boolean; receiver: boolean }>();
+	private readonly reifiedFrom = new Map<string, ReifiedFrom>();
 	/**
 	 * The type a call's value is going to, where the source writes it down.
 	 *
@@ -2039,6 +2093,7 @@ class Emitter {
 			qualifiedSignatures: this.qualifiedSignatures,
 			objects: this.declaredObjects,
 			reified: this.reifiedMembers,
+			moduleReified: this.moduleReified,
 			classMembers: this.classMemberIndex,
 			classFields: this.classFieldIndex,
 			classBases: this.classBaseIndex,
@@ -2135,6 +2190,14 @@ class Emitter {
 						fields.add(param.name);
 						if (param.type !== null) typed.set(param.name, param.type);
 					}
+				}
+				// A property that holds a function is called like a method —
+				// `contentFetcher.onContent(paragraphs)` — and in JavaScript it is
+				// one: the call reads the property and calls what it holds. The
+				// passthrough allowlist knew only declared `fun`s, so every such
+				// call was refused as a method nothing declares.
+				for (const held of this.functionTypedProperties(child, body)) {
+					this.declaredMethods.add(held);
 				}
 				const getters = this.classGetterIndex.get(name) ?? new Set<string>();
 				const bodyMembers = kids(body);
@@ -4939,6 +5002,7 @@ class Emitter {
 					const declared = this.nameOf(child);
 					if (declared === null) continue;
 					this.declaredModuleExtensions.add(declared);
+					this.noteModuleReified(declared, child);
 					if (this.hasModifier(child, 'suspend') || BLOCKING_CALLS.test(child.text)) {
 						this.moduleSuspends.add(declared);
 					}
@@ -4947,6 +5011,7 @@ class Emitter {
 				if (child.type === 'function_declaration' && receiverOf(child) === null) {
 					const declared = this.nameOf(child);
 					if (declared === null) continue;
+					this.noteModuleReified(declared, child);
 					this.moduleNames.add(declared);
 					this.moduleValues.add(declared);
 					// Kotlin's `suspend` is invisible at the call site and a
@@ -5425,6 +5490,46 @@ class Emitter {
 		}
 	}
 
+	/** See `Declared.moduleReified`. */
+	private noteModuleReified(name: string, declaration: KNode): void {
+		const params = reifiedParams(declaration);
+		if (params.length === 0) return;
+		this.moduleReified.set(name, { params, from: reifiedFromOf(declaration) });
+	}
+
+	/** The properties a class declares with a function type, constructor ones included. */
+	private functionTypedProperties(node: KNode, body: KNode | undefined): string[] {
+		const held: string[] = [];
+		const primary = kids(node).find((child) => child.type === 'primary_constructor');
+		const wrapped = kids(primary).find((child) => child.type === 'class_parameters');
+		for (const param of wrapped === undefined ? kids(primary) : kids(wrapped)) {
+			if (param.type !== 'class_parameter') continue;
+			if (!kids(param).some((child) => child.type === 'binding_pattern_kind')) continue;
+			if (!holdsFunction(kids(param))) continue;
+			const name = kids(param).find((child) => child.type === 'simple_identifier')?.text;
+			if (name !== undefined) held.push(name);
+		}
+		for (const member of kids(body)) {
+			if (member.type !== 'property_declaration') continue;
+			const declared = kids(member).find((part) => part.type === 'variable_declaration');
+			if (!holdsFunction(kids(declared))) continue;
+			const name = this.propertyName(member);
+			if (name !== null) held.push(name);
+		}
+		return held;
+	}
+
+	/** 'method' when a base class next door declares `name` as a member extension. */
+	private inheritedExtension(name: string): 'method' | undefined {
+		const seen = new Set<string>();
+		for (let at = this.ownerBase ?? undefined; at !== undefined && !seen.has(at);) {
+			seen.add(at);
+			if (this.neighbourExtensions.has(`${at}.${name}`)) return 'method';
+			at = this.classBaseIndex.get(at);
+		}
+		return undefined;
+	}
+
 	/** Notes which of these declarations are extension functions, before use. */
 	private registerExtensions(
 		declarations: readonly KNode[],
@@ -5438,6 +5543,11 @@ class Emitter {
 			const reified = reifiedParams(child);
 			if (reified.length > 0) this.reifiedFunctions.set(name, reified);
 			if (receiverOf(child) === null) continue;
+			// How many it takes, past its receiver — null once two declarations
+			// of the name disagree. See the over-long call in \`bareCall\`.
+			const arity = this.parameterNames(child).length;
+			const known = this.extensionArity.get(name);
+			this.extensionArity.set(name, known === undefined || known === arity ? arity : null);
 			this.extensionFunctions.set(name, shape);
 			if (owner !== null) this.extensionOwners.set(name, owner);
 		}
@@ -5505,14 +5615,8 @@ class Emitter {
 			if (node.type === 'function_declaration') {
 				note(this.nameOf(node), parameterTypesOf(kids(node).find(isValueParameters)));
 				const name = this.nameOf(node);
-				const reified = reifiedParams(node);
-				if (name !== null && reified.length === 1) {
-					const [only] = reified;
-					this.reifiedFrom.set(name, {
-						returns: returnTypeText(node) === only,
-						receiver: receiverOf(node) === only && !/[<?]/.test(receiverText(node) ?? '')
-					});
-				}
+				const from = reifiedFromOf(node);
+				if (name !== null && from !== null) this.reifiedFrom.set(name, from);
 			} else if (node.type === 'class_declaration') {
 				const constructor = kids(node).find((child) => child.type === 'primary_constructor');
 				const parameters = kids(constructor).find((child) => child.type === 'class_parameters');
@@ -9696,7 +9800,39 @@ class Emitter {
 		// emits `this.isValidUrl('data-src')` — dropping the receiver, so
 		// `__recv` took the first argument's value and the argument took
 		// undefined. Nothing threw; the wrong attribute was read.
-		const declaredExtension = lambda === null ? this.extensionFunctions.get(name) : undefined;
+		// A block is let through for one shape: an extension the class itself
+		// declares, whose declaration has a slot for it — `headersBuilder { … }`
+		// inside a request block is the base class's `HttpRequestBuilder
+		// .headersBuilder(block)`, and on the member path it lost its receiver.
+		//
+		// And one declared on a base class in the file next door — the same
+		// method on the prototype chain, reached the same way: in a request
+		// block, `headersBuilder()` went to the driver's own namesake instead.
+		const knownExtension = this.extensionFunctions.get(name) ?? this.inheritedExtension(name);
+		const blockArity = this.extensionArity.get(name);
+		const blockSlot =
+			lambda !== null &&
+			knownExtension === 'method' &&
+			(typeof blockArity === 'number' ? args.length < blockArity : args.length === 0);
+		const declaredExtension = lambda === null || blockSlot ? knownExtension : undefined;
+		// More arguments than the one declaration in reach takes: Kotlin chose
+		// another overload, and the only other place one can be is the base the
+		// driver supplies. `private fun SManga.setSlugUrl(href) =
+		// setSlugUrl(mangaPath, href)` calls keiyoushi's two-argument
+		// `setSlugUrl`; emitted on `this` it called itself until the stack ran
+		// out, at the first search. The driver's base answers it, or says by
+		// name that it does not.
+		const declaredArity = this.extensionArity.get(name) ?? undefined;
+		if (
+			implicit !== null &&
+			declaredExtension === 'method' &&
+			declaredArity !== undefined &&
+			tail.length > declaredArity &&
+			!tail.some((one) => one.startsWith('...'))
+		) {
+			const call = `__super.${name}(${[implicit, ...tail].join(', ')})`;
+			return this.suspendMembers.has(name) ? this.awaited(call) : call;
+		}
 		if (implicit !== null && declaredExtension !== undefined) {
 			const owner = this.extensionOwners.get(name);
 			const target =
@@ -9706,7 +9842,9 @@ class Emitter {
 						? this.safe(name)
 						: `${this.safe(owner)}.${name}`;
 			const types = this.reifiedArguments(callee, name, typeArgument, expected);
-			const call = `${target}(${[...types, implicit, ...tail].join(', ')})`;
+			const passed =
+				lambda === null ? tail : this.callArguments(name, args, lambda, labelled, false);
+			const call = `${target}(${[...types, implicit, ...passed].join(', ')})`;
 			return this.suspendMembers.has(name) ? this.awaited(call) : call;
 		}
 
@@ -10030,12 +10168,28 @@ class Emitter {
 		lambda: KNode,
 		labelled: string | null
 	): string[] | null {
-		if (args.some((arg) => arg.allChildren.some((child) => child.type === '='))) return null;
 		const owner = this.receiverTypeOf(receiver);
 		if (owner === null) return null;
 		const signature = this.qualifiedSignatures.get(`${owner}.${name}`);
 		if (signature === undefined || signature.length === 0) return null;
 		if (args.length > signature.length - 1) return null;
+		if (args.some((arg) => arg.allChildren.some((child) => child.type === '='))) {
+			// `client.submitForm(url = …, formParameters = …) { headers }` — named
+			// arguments *and* a trailing block. The named ones are placed by the
+			// declaring class's signature, as any named call on a typed receiver
+			// is, and the block takes the last slot. Refused before, which took
+			// every listing of a template that posts its search form with it.
+			// A block named among the arguments has no trailing slot to take.
+			const placed = this.plainArguments(name, args, owner);
+			if (placed.length > signature.length - 1) return null;
+			const block = this.callArguments(name, [], lambda, labelled, false);
+			const skipped = signature.length - 1 - placed.length;
+			return [
+				...placed,
+				...Array.from({ length: skipped }, () => 'undefined'),
+				block[block.length - 1]
+			];
+		}
 		const out = this.callArguments(name, args, lambda, labelled, false);
 		const given = out.slice(0, -1);
 		if (given.length !== args.length || given.some((one) => one.startsWith('...'))) {
@@ -10188,7 +10342,19 @@ class Emitter {
 					: null;
 		if (named === null) return null;
 		const known = this.propertyTypes.get(named);
-		return known !== undefined && this.declaredTypes.has(known) ? known : null;
+		if (known !== undefined) return this.declaredTypes.has(known) ? known : null;
+		// A property the class inherits, typed where its base declares it:
+		// `client.submitForm(…)` in a template whose base holds `var client:
+		// Ktor`. Only for a bare name no local shadows.
+		if (receiver.type !== 'simple_identifier' || this.lookup(named) !== null) return null;
+		const seen = new Set<string>();
+		for (let at = this.owner ?? undefined; at !== undefined && !seen.has(at);) {
+			seen.add(at);
+			const typed = this.classPropertyTypes.get(at)?.get(named);
+			if (typed !== undefined && typed !== '') return this.declaredTypes.has(typed) ? typed : null;
+			at = this.classBaseIndex.get(at);
+		}
+		return null;
 	}
 
 	/** The name a named argument was written under, or null for a positional one. */
@@ -10756,6 +10922,24 @@ class Emitter {
 		const name = kids(suffix).find((child) => child.type === 'simple_identifier')?.text ?? null;
 		if (name === null) this.refuse(node, 'a property access with no name');
 		const safe = suffix.allChildren[0]?.type === '?.';
+
+		// `SourceFactory.Type.Search` — a nested `object` (or class) read by its
+		// qualified name. It is hoisted to module scope, and the class that held
+		// it is emitted without it, so `SourceFactory.Type` read off the class
+		// was undefined and the `.Search` after it threw on the first search.
+		// The call form (`Filters.TypeFilter()`) already resolved this way; a
+		// plain read did not. A local of the owner's name is not the type.
+		const ownerText = receiver.text.replace(/\s+/g, '');
+		const nested = this.qualifiedTypes.get(`${ownerText}.${name}`);
+		if (
+			nested !== undefined &&
+			!safe &&
+			this.moduleNames.has(nested) &&
+			(receiver.type === 'simple_identifier' || receiver.type === 'navigation_expression') &&
+			this.lookup(ownerText.split('.')[0] ?? ownerText) === null
+		) {
+			return this.safe(nested);
+		}
 
 		// `this::filterList.isInitialized` — Kotlin asking whether a `lateinit`
 		// has been assigned yet. It is the guard in front of every lazily-built
@@ -13663,6 +13847,22 @@ function receiverOf(node: KNode): string | null {
  * member through the named class, and a guess at which class a spelling means
  * is the wrong member called.
  */
+/** Whether a declaration's type, as written, is a function type (nullable or not). */
+function holdsFunction(children: readonly KNode[]): boolean {
+	let type = children.find(
+		(child) => child.type === 'function_type' || child.type === 'nullable_type'
+	);
+	if (type?.type === 'nullable_type') {
+		type = kids(type).find(
+			(child) => child.type === 'function_type' || child.type === 'parenthesized_type'
+		);
+		if (type?.type === 'parenthesized_type') {
+			type = kids(type).find((child) => child.type === 'function_type');
+		}
+	}
+	return type?.type === 'function_type';
+}
+
 function declaredTypeName(children: readonly KNode[]): string | null {
 	let type = children.find((child) => child.type === 'user_type' || child.type === 'nullable_type');
 	if (type?.type === 'nullable_type') type = kids(type).find((child) => child.type === 'user_type');
@@ -13958,6 +14158,17 @@ function reifiedParams(node: KNode): string[] {
 /** A name the emitter builds for itself, with nothing in it JavaScript cannot take. */
 function plainName(name: string): string {
 	return fieldName(name).replace(/[^\w$]/g, '_');
+}
+
+/** See `Emitter.reifiedFrom`: null unless there is exactly one reified parameter. */
+function reifiedFromOf(node: KNode): ReifiedFrom | null {
+	const reified = reifiedParams(node);
+	if (reified.length !== 1) return null;
+	const [only] = reified;
+	return {
+		returns: returnTypeText(node) === only,
+		receiver: receiverOf(node) === only && !/[<?]/.test(receiverText(node) ?? '')
+	};
 }
 
 /** The argument name a reified type parameter is carried in. */

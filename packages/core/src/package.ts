@@ -215,9 +215,24 @@ const ENTRYPOINT = 'source';
  *     for importing a template; the stripper reads the type syntax those
  *     templates write instead of leaving it in. A verdict stored at 60 for any
  *     Mana source listing is a refusal this converter no longer gives.
- *     Reconvert every bundle made at 60 or earlier.
+ *     Also at 61: a Paperback search reads the current toolchain's `items` and pages by
+ *     the source's own cursor, an instance-published source runs, and an
+ *     HTML chapter is a page — every Paperback bundle at 60 searched empty.
+ *     A file-scope reified function called from another file is given its
+ *     type, and a nested `object` read by its qualified name resolves, so an
+ *     IReader search no longer dies on `findInstance` or `Type.Search`; the
+ *     IReader shim's page rows are `mangas`. A Sora module's failure
+ *     returned as a value (`"Error: …"` where a URL belongs) is a failure
+ *     carrying its text rather than an episode id. Reconvert every bundle
+ *     made at 60 or earlier.
+ * 62: IReader's declarative base class runs (it answered every list empty);
+ *     a function-typed property is callable, named arguments with a trailing
+ *     block are placed, a call longer than its declaration goes to the base's
+ *     overload, `String.matches(Regex)` and `println` translate, and a
+ *     template's refused override of a driver-called member now blocks.
+ *     Reconvert every bundle made at 61 or earlier.
  */
-export const CONVERTER_VERSION = 61;
+export const CONVERTER_VERSION = 62;
 
 export interface BundleInput {
 	readonly id: string;

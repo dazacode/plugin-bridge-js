@@ -1075,6 +1075,28 @@ describe('the helpers that must dispatch on their receiver', () => {
 		expect(k.find(k.regex('x'), 'e12')).toBeNull();
 	});
 
+	it('answers null for the first of an empty jsoup selection, as its member does', () => {
+		// `select(…).first()?.text()` is written for jsoup's `Elements.first()`,
+		// which is null on an empty selection. The stdlib's list `first()` threw
+		// "took the first item of an empty list" in its place.
+		const document = runtime.globals.Jsoup.parse(
+			'<ul><li class="row">One</li></ul>',
+			'https://example.invalid/'
+		);
+		expect(k.first(document.select('li.none'))).toBeNull();
+		expect(k.first(document.select('li.row'))?.text()).toBe('One');
+		expect(() => k.first([])).toThrow(/empty list/);
+	});
+
+	it('matches a whole input with the regex on either side', () => {
+		// `String.matches(Regex)` was passed through as a method on a
+		// JavaScript string, which has none: "id.matches is not a function".
+		expect(k.matches('a1f', k.regex('[a-f0-9]{3}'))).toBe(true);
+		expect(k.matches('a1fz', k.regex('[a-f0-9]{3}'))).toBe(false);
+		expect(k.matches(k.regex('[a-f0-9]{3}'), 'a1f')).toBe(true);
+		expect(k.matches('ab', 'a.')).toBe(true);
+	});
+
 	it('replaces through a string receiver or a regex one', () => {
 		expect(k.replaceString('a-b-c', '-', '_')).toBe('a_b_c');
 		expect(k.replaceString(k.regex('[0-9]+'), 'e1 e2', 'x')).toBe('ex ex');

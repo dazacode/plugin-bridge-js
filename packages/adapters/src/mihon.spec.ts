@@ -15,7 +15,10 @@
 import { describe, expect, it } from 'vitest';
 
 import { ForeignFormatError, ForeignIndexError } from '@plugin-bridge/core/adapter';
+import { detectRepository } from '@plugin-bridge/core/detect';
+import { FOREIGN_ADAPTERS } from './index';
 import { mihonAdapter } from './mihon';
+import { tsundokuAdapter } from './tsundoku';
 
 /**
  * The binary door, bound once.
@@ -491,5 +494,40 @@ describe('convert', () => {
 					url === directory ? [`${directory}src/Renamed.kt`, `${directory}build.gradle.kts`] : []
 			})
 		).rejects.toThrow(/builds a different extension/);
+	});
+});
+
+describe('a novel index in this schema', () => {
+	// The novel sibling publishes this exact schema; only its package names say
+	// what a row is. With the manga parser asked first and no negative on
+	// either side, a pasted novel `index.pb` was detected as manga.
+	const NOVEL_URL = 'https://raw.githubusercontent.com/owner/novels/repo/index.pb';
+	const novelExtension = (): number[] =>
+		demoExtension({ packageName: 'eu.kanade.tachiyomi.novelextension.en.demo' });
+
+	it('is claimed by the novel format, and a manga index is still this one', async () => {
+		const novel = await gzip(indexBytes({ extensions: [novelExtension()] }));
+		const manga = await gzip(indexBytes({ extensions: [demoExtension()] }));
+		const bytesAt = (body: Uint8Array) => async (url: string) => {
+			if (url === NOVEL_URL) return body;
+			throw new Error(`nothing at ${url}`);
+		};
+		const noText = () => Promise.reject(new Error('text is decoded from the bytes'));
+
+		const asNovel = await detectRepository(NOVEL_URL, noText, FOREIGN_ADAPTERS, bytesAt(novel));
+		expect(asNovel.index.format).toBe('tsundoku');
+		expect(asNovel.index.plugins[0].origin?.mediaKind).toBe('novel');
+
+		const asManga = await detectRepository(NOVEL_URL, noText, FOREIGN_ADAPTERS, bytesAt(manga));
+		expect(asManga.index.format).toBe('mihon');
+	});
+
+	it('is the only binary index the novel format accepts', async () => {
+		// Its negative, which this door claimed in its documentation and did
+		// not apply: any index in the schema was re-tagged as novels.
+		const manga = await gzip(indexBytes({ extensions: [demoExtension(), novelExtension()] }));
+		await expect(tsundokuAdapter.parseIndexBytes!(manga, NOVEL_URL)).rejects.toThrow(
+			ForeignFormatError
+		);
 	});
 });

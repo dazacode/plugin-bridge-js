@@ -238,3 +238,122 @@ describe('what a converted Paperback bundle declares', () => {
 		]);
 	});
 });
+
+/* ── what a converted Paperback bundle does when it is searched ─────────── */
+
+interface SearchPage {
+	entries: { sourceMediaId: string; title: string }[];
+	hasMore?: boolean;
+}
+
+/** Converts `script` under the fixture's listing and imports the module. */
+async function loadSearch(script: string): Promise<{
+	searchCatalog(query: string, page: number, ctx: unknown): Promise<SearchPage>;
+}> {
+	const listing = paperbackAdapter.parseIndex(registration(ONE), INDEX_URL).plugins[0];
+	// A host for the manifest to declare; none of these sources requests it.
+	const hosted = `var __site='https://api.example.invalid/';\n${script}`;
+	const opened = await openPluginArchive(await paperbackAdapter.convert(listing, services(hosted)));
+	const { writeFileSync, mkdtempSync } = await import('node:fs');
+	const { tmpdir } = await import('node:os');
+	const { join } = await import('node:path');
+	const file = join(mkdtempSync(join(tmpdir(), 'paperback-')), 'bundle.mjs');
+	writeFileSync(file, opened.entrypointSource, 'utf8');
+	return (await import(/* @vite-ignore */ `file:///${file.replace(/\\/g, '/')}`)).default;
+}
+
+const CONTEXT = { log: { debug() {}, warn() {} } };
+
+describe('a converted Paperback source, searched', () => {
+	it('reads the rows of a page this toolchain names `items`', async () => {
+		// The current toolchain's page is `{ items, metadata }`. Only the older
+		// `results` was read, so every search of every source answered empty.
+		const module = await loadSearch(`
+			var source=(function(e){
+				var x=class{async getSearchResults(q,m){
+					return {items:[{mangaId:'m1',title:'Found '+q.title,imageUrl:''}],metadata:{page:2}};
+				}};
+				return e.AlphaExtension=x,e
+			})({});
+		`);
+		const page = await module.searchCatalog('one', 1, CONTEXT);
+		expect(page.entries.map((entry) => entry.title)).toEqual(['Found one']);
+		expect(page.entries[0].sourceMediaId).toBe('m1');
+		expect(page.hasMore).toBe(true);
+	});
+
+	it('asks for page one with no cursor, and for each next page with the cursor before it', async () => {
+		// A source reads `metadata?.page ?? 1`, or sends the cursor to its API
+		// as it is. A made-up `{ offset: 0 }` on the first page went straight
+		// into one source's GraphQL `$page` and the server refused it.
+		const module = await loadSearch(`
+			var seen=[];
+			globalThis.__paperbackSeen=seen;
+			var source=(function(e){
+				var x=class{async getSearchResults(q,m){
+					seen.push(m===undefined?'undefined':JSON.stringify(m));
+					var page=m&&m.page?m.page:1;
+					return {items:[{mangaId:'m'+page,title:'Page '+page}],metadata:page<3?{page:page+1}:undefined};
+				}};
+				return e.AlphaExtension=x,e
+			})({});
+		`);
+		const seen = (globalThis as unknown as { __paperbackSeen: string[] }).__paperbackSeen;
+
+		expect((await module.searchCatalog('q', 1, CONTEXT)).entries[0].title).toBe('Page 1');
+		expect((await module.searchCatalog('q', 2, CONTEXT)).entries[0].title).toBe('Page 2');
+		expect(seen).toEqual(['undefined', '{"page":2}']);
+
+		// Out of order under a new query: walked to from page one.
+		seen.length = 0;
+		const third = await module.searchCatalog('other', 3, CONTEXT);
+		expect(third.entries[0].title).toBe('Page 3');
+		expect(third.hasMore).toBe(false);
+		expect(seen).toEqual(['undefined', '{"page":2}', '{"page":3}']);
+
+		// Past the last page there is no cursor to ask with.
+		expect((await module.searchCatalog('other', 4, CONTEXT)).entries).toEqual([]);
+	});
+
+	it('runs the instance the bundle published under its id, as it was constructed', async () => {
+		// A template-built source is published as an instance whose constructor
+		// passes the template its site. There is no class export to build, and
+		// building one with no arguments would lose the site regardless.
+		const module = await loadSearch(`
+			var source=(function(e){
+				var Base=class{constructor(o){this.domain=o&&o.domain}
+					async getSearchResults(q,m){return {items:[{mangaId:'m1',title:String(this.domain)}]}}};
+				return e.Alpha=new class extends Base{constructor(){super({domain:'configured'})}},e
+			})({});
+		`);
+		const page = await module.searchCatalog('x', 1, CONTEXT);
+		expect(page.entries.map((entry) => entry.title)).toEqual(['configured']);
+	});
+});
+
+describe('a converted Paperback source, read', () => {
+	it('carries an HTML chapter as one text page rather than as no pages', async () => {
+		// A novel source answers a chapter with `{ type: 'html', html }` and no
+		// `pages`. Only `pages` was read, so every chapter opened empty.
+		const module = (await loadSearch(`
+			var source=(function(e){
+				var x=class{
+					async getSearchResults(){return {items:[]}}
+					async getChapters(){return [{chapterId:'c1',chapNum:1}]}
+					async getChapterDetails(c){return {id:c.chapterId,mangaId:c.sourceManga.mangaId,type:'html',html:'<p>Once</p>'}}
+				};
+				return e.AlphaExtension=x,e
+			})({});
+		`)) as unknown as {
+			readChapter(
+				id: string,
+				chapter: { number: number; sourceChapterId: string },
+				ctx: unknown
+			): Promise<{ pages: { index: number; url: string }[] }>;
+		};
+		const read = await module.readChapter('m1', { number: 1, sourceChapterId: 'c1' }, CONTEXT);
+		expect(read.pages).toHaveLength(1);
+		expect(decodeURIComponent(read.pages[0].url.split(',').slice(1).join(','))).toBe('<p>Once</p>');
+		expect(read.pages[0].url.startsWith('data:text/html')).toBe(true);
+	});
+});
