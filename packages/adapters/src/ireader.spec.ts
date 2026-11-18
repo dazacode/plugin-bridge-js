@@ -231,6 +231,47 @@ describe('convert', () => {
 		expect(bundle.entrypointSource).toContain('data:text/plain');
 	});
 
+	it('searches with the title filter and the nested search type the shim declares', async () => {
+		// The two shapes an ordinary listing member writes against the shim:
+		// `filters.findInstance<Filter.Title>()` (a reified extension declared
+		// in the shim's file) and `SourceFactory.Type.Search` (an `object`
+		// nested in the shim's base class). Both translated without a refusal
+		// and then failed at the first search — the first with "__recv is not
+		// iterable", the second reading `Search` off undefined.
+		const searching = KOTLIN.replace(
+			'import ireader.core.source.model.FilterList',
+			'import ireader.core.source.model.Filter\nimport ireader.core.source.model.FilterList'
+		).replace(
+			'MangasPageInfo(listOf(MangaInfo(key = "$baseUrl/m/1", title = "One")), false)',
+			'MangasPageInfo(listOf(MangaInfo(key = "$baseUrl/m/1", title = ' +
+				'(filters.findInstance<Filter.Title>()?.value ?: "none") + "/" + SourceFactory.Type.Search)), false)'
+		);
+		expect(searching).toContain('findInstance<Filter.Title>()');
+		const files = new Map([[`${DIRECTORY}/main/src/ireader/demo/Demo.kt`, searching]]);
+		const bundle = await openPluginArchive(
+			await ireaderAdapter.convert(listing(), services(files))
+		);
+
+		const { writeFileSync, mkdtempSync } = await import('node:fs');
+		const { tmpdir } = await import('node:os');
+		const { join } = await import('node:path');
+		const file = join(mkdtempSync(join(tmpdir(), 'yorozo-')), 'bundle.mjs');
+		writeFileSync(file, bundle.entrypointSource, 'utf8');
+		const module = (await import(/* @vite-ignore */ `file:///${file.replace(/\\/g, '/')}`))
+			.default as {
+			searchCatalog(
+				query: string,
+				page: number,
+				ctx: unknown
+			): Promise<{ entries: { title: string }[] }>;
+		};
+
+		const found = await module.searchCatalog('needle', 1, {
+			log: { debug() {}, warn() {} }
+		});
+		expect(found.entries.map((entry) => entry.title)).toEqual(['needle/0']);
+	});
+
 	it('refuses a directory that is Java, naming the file', async () => {
 		const files = new Map([
 			[`${DIRECTORY}/main/src/ireader/demo/Demo.java`, 'package ireader.demo;\n']

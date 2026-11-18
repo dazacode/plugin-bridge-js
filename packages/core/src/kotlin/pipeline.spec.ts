@@ -665,6 +665,54 @@ describe('a file-scope declaration in the file next door', () => {
 		expect(result.refusals).toEqual([]);
 		expect(result.js).toContain('await fetchBody(');
 	});
+
+	it('passes the type argument a reified extension next door is called with', async () => {
+		// `filters.findInstance<Filter.Title>()` against a file-scope
+		// `inline fun <reified T> List<*>.findInstance()` one file over. Only a
+		// reified *member* of a class crossed the file boundary, so the call
+		// came out as `findInstance(filters)`: the list landed in the type slot,
+		// the receiver was undefined, and the search died with "__recv is not
+		// iterable" — three listings of four in one catalogue.
+		const caller = kt(
+			'package com.example.demo',
+			'',
+			'class Demo : ParsedAnimeHttpSource() {',
+			'    override val name = "Demo"',
+			'    override val baseUrl = "https://example.invalid"',
+			'    override val lang = "en"',
+			'    override val supportsLatest = false',
+			'',
+			'    override fun popularAnimeRequest(page: Int) = GET("$baseUrl/$page", headers)',
+			'',
+			'    override fun searchAnimeRequest(page: Int, query: String, filters: AnimeFilterList): Request {',
+			'        val picked = filters.firstOf<Wanted>()',
+			'        return GET("$baseUrl/" + picked?.state, headers)',
+			'    }',
+			'}',
+			'',
+			'class Wanted : AnimeFilter.Text("w")'
+		);
+		const lib = kt(
+			'package com.example.demo.lib',
+			'',
+			'inline fun <reified T> List<*>.firstOf(): T? {',
+			'    for (item in this) if (item is T) return item',
+			'    return null',
+			'}'
+		);
+
+		const result = await convertKotlin(
+			[
+				{ path: 'Demo.kt', source: caller },
+				{ path: 'Lib.kt', source: lib }
+			],
+			{ parser }
+		);
+
+		expect(result.refusals).toEqual([]);
+		expect(result.js).toContain('function firstOf(__type_T, __recv)');
+		expect(result.js).toMatch(/firstOf\(Wanted, filters\)/);
+	});
 });
 
 describe('Kotlin the vendored grammar cannot read, repaired before it is parsed', () => {

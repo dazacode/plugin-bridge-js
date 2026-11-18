@@ -854,7 +854,10 @@ open class MangaInfo(
     }
 }
 
-class MangasPageInfo(val list: List<MangaInfo>, val hasNextPage: Boolean)
+// \`mangas\`, as the ecosystem's own model and the driver's \`__normalisePage\`
+// both spell it. Declared \`list\`, every page reached the driver with no
+// \`mangas\` on it and every search answered empty.
+class MangasPageInfo(val mangas: List<MangaInfo>, val hasNextPage: Boolean)
 
 open class ChapterInfo(
     var name: String = "",

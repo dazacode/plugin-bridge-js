@@ -3088,6 +3088,27 @@ describe('a name declared somewhere the emitter had not looked', () => {
 		expect(instantiate(source).build()).toBe('outerother');
 	});
 
+	it('reads a member of a nested `object` written by its qualified name', () => {
+		// `SourceFactory.Type.Search`, where `Type` is an `object` nested in an
+		// abstract base. The object is hoisted to module scope and the class
+		// that held it is emitted without it, so the read went
+		// `Holder.Kind` → undefined → "Cannot read properties of undefined
+		// (reading 'Search')", at the first search, with nothing refused.
+		const source = kt(
+			'abstract class Holder {',
+			'    object Kind {',
+			'        val Search: Int = 7',
+			'    }',
+			'}',
+			'',
+			'class Demo : Source() {',
+			'    fun kind(): Int = Holder.Kind.Search',
+			'}'
+		);
+
+		expect(instantiate(source).kind()).toBe(7);
+	});
+
 	it('lets `ifEmpty { return@map … }` jump out of the lambda it was written in', () => {
 		// `ifEmpty` and `ifBlank` are *inline* in Kotlin, so a `return@mapNotNull`
 		// written inside one returns from the enclosing `mapNotNull` lambda. As a

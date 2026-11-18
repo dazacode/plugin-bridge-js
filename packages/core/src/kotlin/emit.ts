@@ -1020,6 +1020,18 @@ export function emitKotlin(
 	return new Emitter(neighbours, renames, entryFile, declaredAs).file(tree.root);
 }
 
+/** Where a call that names no type argument reads it from. See `Emitter.reifiedFrom`. */
+export interface ReifiedFrom {
+	readonly returns: boolean;
+	readonly receiver: boolean;
+}
+
+/** A file-scope reified function, as the files beside it see it. */
+export interface ModuleReified {
+	readonly params: readonly string[];
+	readonly from: ReifiedFrom | null;
+}
+
 /**
  * The types and methods one file declares, for the files beside it.
  *
@@ -1156,6 +1168,22 @@ export interface Declared {
 	 * file has to know to pass it, or `it is R` asks about a type called "R".
 	 */
 	readonly reified: ReadonlyMap<string, readonly string[]>;
+	/**
+	 * File-scope functions with `reified` type parameters, by bare name.
+	 *
+	 * `reified` above is keyed by the declaring class, and a file-scope
+	 * `inline fun <reified T> List<*>.findInstance(): T?` has none. Every
+	 * emitted file joins one module, so the function is in scope by its own
+	 * spelling in the file next door — and that file has to know to pass the
+	 * type it names. Left out, `filters.findInstance<Filter.Title>()` came out
+	 * as `findInstance(filters)`: the list arrived as the type, the receiver
+	 * as `undefined`, and the first search died with "__recv is not iterable".
+	 *
+	 * `from` is `reifiedFrom` for the same function, so a call that leaves
+	 * the argument to inference reads it off the same written-down type it
+	 * would in the declaring file.
+	 */
+	readonly moduleReified: ReadonlyMap<string, ModuleReified>;
 	/**
 	 * Every signature a class member function is declared with, by name.
 	 *
@@ -1312,6 +1340,7 @@ const EMPTY_DECLARED: Declared = {
 	qualifiedSignatures: new Map(),
 	objects: new Set(),
 	reified: new Map(),
+	moduleReified: new Map(),
 	overloads: new Map(),
 	classFunctions: new Map(),
 	receiverLambdas: new Map(),
@@ -1343,6 +1372,8 @@ export function mergeDeclared(parts: readonly Declared[]): Declared {
 	const qualifiedSignatures = new Map<string, readonly string[]>();
 	const objects = new Set<string>();
 	const reified = new Map<string, readonly string[]>();
+	const moduleReified = new Map<string, ModuleReified>();
+	const ambiguousReified = new Set<string>();
 	const classMembers = new Map<string, Set<string>>();
 	const classFields = new Map<string, Set<string>>();
 	const classBases = new Map<string, string>();
@@ -1417,6 +1448,17 @@ export function mergeDeclared(parts: readonly Declared[]): Declared {
 		}
 		for (const name of part.objects) objects.add(name);
 		for (const [name, params] of part.reified) reified.set(name, params);
+		for (const [name, shape] of part.moduleReified) {
+			// Two files declaring the same name with different type parameters
+			// are two functions, and a call cannot say which: neither is carried.
+			if (ambiguousReified.has(name)) continue;
+			const known = moduleReified.get(name);
+			if (known === undefined) moduleReified.set(name, shape);
+			else if (known.params.join(',') !== shape.params.join(',')) {
+				moduleReified.delete(name);
+				ambiguousReified.add(name);
+			}
+		}
 		for (const [name, shape] of part.qualifiedSignatures) qualifiedSignatures.set(name, shape);
 		for (const name of part.extensions) extensions.add(name);
 		for (const name of part.moduleExtensions) moduleExtensions.add(name);
@@ -1456,6 +1498,7 @@ export function mergeDeclared(parts: readonly Declared[]): Declared {
 		qualifiedSignatures,
 		objects,
 		reified,
+		moduleReified,
 		overloads: new Map([...overloads].map(([name, shapes]) => [name, [...shapes.values()]])),
 		classFunctions,
 		receiverLambdas,
@@ -1533,6 +1576,13 @@ class Emitter {
 			mergeReceiverSlots(this.receiverLambdas, name, slots);
 		}
 		for (const [name, params] of neighbours.reified) this.reifiedMembers.set(name, params);
+		// This file's own declarations replace these when it is surveyed
+		// (`registerExtensions`, `registerExpectedTypes`), as Kotlin's nearer
+		// scope would.
+		for (const [name, shape] of neighbours.moduleReified) {
+			this.reifiedFunctions.set(name, shape.params);
+			if (shape.from !== null) this.reifiedFrom.set(name, shape.from);
+		}
 		for (const [owner, members] of neighbours.classMembers) {
 			const into = this.classMemberIndex.get(owner) ?? new Set<string>();
 			for (const member of members) into.add(member);
@@ -1886,6 +1936,8 @@ class Emitter {
 	private reifiedTypes: ReadonlyMap<string, string> | null = null;
 	/** See `Declared.reified`. */
 	private readonly reifiedMembers = new Map<string, readonly string[]>();
+	/** See `Declared.moduleReified`. */
+	private readonly moduleReified = new Map<string, ModuleReified>();
 	/**
 	 * The enum whose body is being emitted, and its entries' names.
 	 *
@@ -1935,7 +1987,7 @@ class Emitter {
 	 * return type or receiver that *is* the parameter, written bare, is kept:
 	 * `List<T>` would need unifying, and that is a type checker.
 	 */
-	private readonly reifiedFrom = new Map<string, { returns: boolean; receiver: boolean }>();
+	private readonly reifiedFrom = new Map<string, ReifiedFrom>();
 	/**
 	 * The type a call's value is going to, where the source writes it down.
 	 *
@@ -2039,6 +2091,7 @@ class Emitter {
 			qualifiedSignatures: this.qualifiedSignatures,
 			objects: this.declaredObjects,
 			reified: this.reifiedMembers,
+			moduleReified: this.moduleReified,
 			classMembers: this.classMemberIndex,
 			classFields: this.classFieldIndex,
 			classBases: this.classBaseIndex,
@@ -4939,6 +4992,7 @@ class Emitter {
 					const declared = this.nameOf(child);
 					if (declared === null) continue;
 					this.declaredModuleExtensions.add(declared);
+					this.noteModuleReified(declared, child);
 					if (this.hasModifier(child, 'suspend') || BLOCKING_CALLS.test(child.text)) {
 						this.moduleSuspends.add(declared);
 					}
@@ -4947,6 +5001,7 @@ class Emitter {
 				if (child.type === 'function_declaration' && receiverOf(child) === null) {
 					const declared = this.nameOf(child);
 					if (declared === null) continue;
+					this.noteModuleReified(declared, child);
 					this.moduleNames.add(declared);
 					this.moduleValues.add(declared);
 					// Kotlin's `suspend` is invisible at the call site and a
@@ -5425,6 +5480,13 @@ class Emitter {
 		}
 	}
 
+	/** See `Declared.moduleReified`. */
+	private noteModuleReified(name: string, declaration: KNode): void {
+		const params = reifiedParams(declaration);
+		if (params.length === 0) return;
+		this.moduleReified.set(name, { params, from: reifiedFromOf(declaration) });
+	}
+
 	/** Notes which of these declarations are extension functions, before use. */
 	private registerExtensions(
 		declarations: readonly KNode[],
@@ -5505,14 +5567,8 @@ class Emitter {
 			if (node.type === 'function_declaration') {
 				note(this.nameOf(node), parameterTypesOf(kids(node).find(isValueParameters)));
 				const name = this.nameOf(node);
-				const reified = reifiedParams(node);
-				if (name !== null && reified.length === 1) {
-					const [only] = reified;
-					this.reifiedFrom.set(name, {
-						returns: returnTypeText(node) === only,
-						receiver: receiverOf(node) === only && !/[<?]/.test(receiverText(node) ?? '')
-					});
-				}
+				const from = reifiedFromOf(node);
+				if (name !== null && from !== null) this.reifiedFrom.set(name, from);
 			} else if (node.type === 'class_declaration') {
 				const constructor = kids(node).find((child) => child.type === 'primary_constructor');
 				const parameters = kids(constructor).find((child) => child.type === 'class_parameters');
@@ -10757,6 +10813,24 @@ class Emitter {
 		if (name === null) this.refuse(node, 'a property access with no name');
 		const safe = suffix.allChildren[0]?.type === '?.';
 
+		// `SourceFactory.Type.Search` — a nested `object` (or class) read by its
+		// qualified name. It is hoisted to module scope, and the class that held
+		// it is emitted without it, so `SourceFactory.Type` read off the class
+		// was undefined and the `.Search` after it threw on the first search.
+		// The call form (`Filters.TypeFilter()`) already resolved this way; a
+		// plain read did not. A local of the owner's name is not the type.
+		const ownerText = receiver.text.replace(/\s+/g, '');
+		const nested = this.qualifiedTypes.get(`${ownerText}.${name}`);
+		if (
+			nested !== undefined &&
+			!safe &&
+			this.moduleNames.has(nested) &&
+			(receiver.type === 'simple_identifier' || receiver.type === 'navigation_expression') &&
+			this.lookup(ownerText.split('.')[0] ?? ownerText) === null
+		) {
+			return this.safe(nested);
+		}
+
 		// `this::filterList.isInitialized` — Kotlin asking whether a `lateinit`
 		// has been assigned yet. It is the guard in front of every lazily-built
 		// filter list in this ecosystem, and it has exactly one meaning.
@@ -13958,6 +14032,17 @@ function reifiedParams(node: KNode): string[] {
 /** A name the emitter builds for itself, with nothing in it JavaScript cannot take. */
 function plainName(name: string): string {
 	return fieldName(name).replace(/[^\w$]/g, '_');
+}
+
+/** See `Emitter.reifiedFrom`: null unless there is exactly one reified parameter. */
+function reifiedFromOf(node: KNode): ReifiedFrom | null {
+	const reified = reifiedParams(node);
+	if (reified.length !== 1) return null;
+	const [only] = reified;
+	return {
+		returns: returnTypeText(node) === only,
+		receiver: receiverOf(node) === only && !/[<?]/.test(receiverText(node) ?? '')
+	};
 }
 
 /** The argument name a reified type parameter is carried in. */
