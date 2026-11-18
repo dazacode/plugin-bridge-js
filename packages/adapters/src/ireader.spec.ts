@@ -520,6 +520,111 @@ abstract class Demo(private val deps: Dependencies) : SourceFactory(deps = deps)
 		expect(sent[0].headers['content-type'] ?? '').toContain('application/x-www-form-urlencoded');
 	});
 
+	it('runs a source on the older parsed base, with a chapter choice and record copies', async () => {
+		// A dozen of this ecosystem's sources extend `ParsedHttpSource`, which
+		// the shim did not declare, and offer `Command.Chapter.Select`. Any
+		// named `copy(key = …)` was refused besides, because the shim declared
+		// a `copy` on two models with different parameters.
+		const parsed = `package ireader.demo
+
+import com.fleeksoft.ksoup.nodes.Document
+import com.fleeksoft.ksoup.nodes.Element
+import ireader.core.source.Dependencies
+import ireader.core.source.ParsedHttpSource
+import ireader.core.source.findInstance
+import ireader.core.source.model.*
+import tachiyomix.annotations.Extension
+
+@Extension
+abstract class Demo(private val deps: Dependencies) : ParsedHttpSource(deps) {
+    override val lang: String get() = "en"
+    override val baseUrl: String get() = "https://read.example.invalid"
+    override val id: Long get() = DemoSourceId.ID
+    override val name: String get() = "Demo"
+
+    override fun getCommands(): CommandList = listOf(
+        Command.Chapter.Select("Get Chapters", options = arrayOf("None", "Last 25"), value = 0)
+    )
+
+    override suspend fun getMangaList(filters: FilterList, page: Int): MangasPageInfo {
+        val query = filters.findInstance<Filter.Title>()?.value ?: ""
+        val document = client.get(requestBuilder("$baseUrl/search?q=$query")).asJsoup()
+        return bookListParse(document, "li.book", null) { element ->
+            MangaInfo(key = element.select("a").attr("href"), title = element.text())
+        }
+    }
+
+    override suspend fun getChapterList(manga: MangaInfo, commands: List<Command<*>>): List<ChapterInfo> {
+        val document = client.get(requestBuilder(baseUrl + manga.key)).asJsoup()
+        return chaptersParse(document).map { it.copy(key = baseUrl + it.key) }
+    }
+
+    override fun chaptersSelector(): String = "ul.chapters a"
+
+    override fun chapterFromElement(element: Element): ChapterInfo =
+        ChapterInfo(name = element.text(), key = element.attr("href"))
+
+    override fun pageContentParse(document: Document): List<String> =
+        document.select("article p").map { it.text() }
+
+    override fun detailParse(document: Document): MangaInfo = MangaInfo(title = document.select("h1").text())
+}
+`;
+		const site: Record<string, string> = {
+			'https://read.example.invalid/search?q=needle':
+				'<ul><li class="book"><a href="/b/one">Needle One</a></li></ul>',
+			'https://read.example.invalid/b/one':
+				'<ul class="chapters"><a href="/b/one/1">Chapter 1</a></ul>',
+			'https://read.example.invalid/b/one/1': '<article><p>First.</p><p>Second.</p></article>'
+		};
+		const files = new Map([[`${DIRECTORY}/main/src/ireader/demo/Demo.kt`, parsed]]);
+		const bundle = await openPluginArchive(
+			await ireaderAdapter.convert(listing(), services(files))
+		);
+		const { writeFileSync, mkdtempSync } = await import('node:fs');
+		const { tmpdir } = await import('node:os');
+		const { join } = await import('node:path');
+		const file = join(mkdtempSync(join(tmpdir(), 'yorozo-')), 'bundle.mjs');
+		writeFileSync(file, bundle.entrypointSource, 'utf8');
+		const module = (await import(/* @vite-ignore */ `file:///${file.replace(/\\/g, '/')}`))
+			.default as {
+			searchCatalog(
+				q: string,
+				p: number,
+				ctx: unknown
+			): Promise<{ entries: { sourceMediaId: string }[] }>;
+			listChapters(
+				id: string,
+				ctx: unknown
+			): Promise<{ sourceChapterId: string; number: number }[]>;
+			readChapter(
+				id: string,
+				chapter: { number: number; sourceChapterId: string },
+				ctx: unknown
+			): Promise<{ pages: { url: string }[] }>;
+		};
+		const ctx = {
+			http: {
+				async send(url: string) {
+					const body = site[url] ?? '';
+					return { status: 200, url, headers: {}, text: async () => body, json: async () => ({}) };
+				}
+			},
+			log: { debug() {}, warn() {} }
+		};
+
+		const found = await module.searchCatalog('needle', 1, ctx);
+		expect(found.entries.map((entry) => entry.sourceMediaId)).toEqual(['/b/one']);
+		const chapters = await module.listChapters('/b/one', ctx);
+		expect(chapters.map((chapter) => chapter.sourceChapterId)).toEqual([
+			'https://read.example.invalid/b/one/1'
+		]);
+		const read = await module.readChapter('/b/one', chapters[0], ctx);
+		expect(
+			read.pages.map((page) => decodeURIComponent(page.url.split(',').slice(1).join(',')))
+		).toEqual(['First.', 'Second.']);
+	});
+
 	it('leaves a module’s test sources out of the bundle', async () => {
 		// A module's `src/test` sits beside its source set, and its
 		// backtick-named test functions are not JavaScript names: one such file

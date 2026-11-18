@@ -567,6 +567,7 @@ export function ireaderAliases(source: string, sourceId: string | null): string 
 		.replaceAll('Command.Detail.Fetch', 'CommandDetailFetch')
 		.replaceAll('Command.Chapter.Fetch', 'CommandChapterFetch')
 		.replaceAll('Command.Content.Fetch', 'CommandContentFetch')
+		.replaceAll('Command.Chapter.Select', 'CommandChapterSelect')
 		.replaceAll('SourceFactory.Detail(', 'ireaderDetail(')
 		.replaceAll('SourceFactory.Chapters(', 'ireaderChapters(')
 		.replaceAll('SourceFactory.Content(', 'ireaderContent(')
@@ -1135,6 +1136,95 @@ abstract class SourceFactory(val deps: Dependencies = Dependencies()) {
 }
 
 /*
+ * The ecosystem's older base, which a dozen of its sources still extend: the
+ * selector-and-parse pair (\`chaptersSelector\`, \`chapterFromElement\`,
+ * \`pageContentParse\`, \`detailParse\`) the subclass writes, and the request
+ * plumbing between them. Ported from the ecosystem's own \`ParsedHttpSource\`;
+ * the listing members are the subclass's, as they are there.
+ */
+abstract class ParsedHttpSource(val deps: Dependencies = Dependencies()) {
+    var client: Ktor = Ktor(network.client)
+
+    init {
+        deps.httpClients.browser.http = network.client
+    }
+
+    abstract val lang: String
+    abstract val baseUrl: String
+    abstract val id: Long
+    abstract val name: String
+
+    open fun getFilters(): FilterList = emptyList()
+    open fun getCommands(): CommandList = emptyList()
+    open fun getListings(): List<Listing> = emptyList()
+    open fun getUserAgent(): String = ""
+
+    open fun HttpRequestBuilder.headersBuilder(block: HeadersBuilder.() -> Unit = {}) {
+        ireaderDefaultHeaders(this, getUserAgent())
+        this.headers(block)
+    }
+
+    fun requestBuilder(url: String): HttpRequestBuilder {
+        val request = HttpRequestBuilder(url)
+        ireaderDefaultHeaders(request, getUserAgent())
+        return request
+    }
+
+    open fun detailRequest(manga: MangaInfo): HttpRequestBuilder = requestBuilder(manga.key)
+
+    open suspend fun getMangaDetails(manga: MangaInfo, commands: List<Command<*>>): MangaInfo {
+        return detailParse(client.get(detailRequest(manga)).asJsoup())
+    }
+
+    open fun chaptersRequest(book: MangaInfo): HttpRequestBuilder = requestBuilder(book.key)
+
+    open suspend fun getPageList(chapter: ChapterInfo, commands: List<Command<*>>): List<Page> {
+        val pages = mutableListOf<Page>()
+        for (text in getContents(chapter)) pages.add(Text(text))
+        return pages
+    }
+
+    open suspend fun getContents(chapter: ChapterInfo): List<String> {
+        return pageContentParse(client.get(contentRequest(chapter)).asJsoup())
+    }
+
+    open fun contentRequest(chapter: ChapterInfo): HttpRequestBuilder = requestBuilder(chapter.key)
+
+    abstract fun chapterFromElement(element: Element): ChapterInfo
+
+    fun bookListParse(
+        document: Document,
+        elementSelector: String,
+        nextPageSelector: String?,
+        parser: (Element) -> MangaInfo
+    ): MangasPageInfo {
+        val books = mutableListOf<MangaInfo>()
+        for (element in document.select(elementSelector)) books.add(parser(element))
+        val hasNextPage = nextPageSelector != null && document.select(nextPageSelector).isNotEmpty()
+        return MangasPageInfo(books, hasNextPage)
+    }
+
+    abstract fun chaptersSelector(): String
+
+    open fun chaptersParse(document: Document): List<ChapterInfo> {
+        val chapters = mutableListOf<ChapterInfo>()
+        for (element in document.select(chaptersSelector())) chapters.add(chapterFromElement(element))
+        return chapters
+    }
+
+    abstract fun pageContentParse(document: Document): List<String>
+
+    abstract fun detailParse(document: Document): MangaInfo
+
+    fun getAbsoluteUrl(path: String): String {
+        if (path.startsWith("http://") || path.startsWith("https://")) return path
+        if (path.startsWith("//")) return "https:" + path
+        if (path.startsWith("/")) return baseUrl + path
+        return baseUrl + "/" + path
+    }
+}
+
+/*
  * The ecosystem writes \`SourceFactory.Detail(…)\` with named arguments, and
  * \`ireaderAliases\` rewrites that spelling to these — in every file, this one
  * included. So the body names the nested class bare: written qualified, it
@@ -1220,15 +1310,10 @@ open class MangaInfo(
     var status: Int = 0,
     var genres: List<String> = emptyList()
 ) {
-    fun copy(
-        key: String = this.key,
-        title: String = this.title,
-        cover: String = this.cover,
-        description: String = this.description,
-        author: String = this.author,
-        status: Int = this.status,
-        genres: List<String> = this.genres
-    ): MangaInfo = MangaInfo(key, title, cover, description, author, status, genres)
+    // No \`copy\` is declared here, on purpose: \`copy(key = …)\` is answered by
+    // the runtime's record copy, as a data class's is. Declared on two models
+    // with different parameters, every named \`copy\` in reach was ambiguous
+    // and refused.
 
     fun isValid(): Boolean = key.isNotBlank() && title.isNotBlank()
 
@@ -1254,13 +1339,6 @@ open class ChapterInfo(
     var type: Int = 0,
     var scanlator: String = ""
 ) {
-    fun copy(
-        name: String = this.name,
-        key: String = this.key,
-        number: Float = this.number,
-        dateUpload: Long = this.dateUpload
-    ): ChapterInfo = ChapterInfo(name, key, number, dateUpload, type, scanlator)
-
     fun isValid(): Boolean = key.isNotBlank() && name.isNotBlank()
 
     companion object {
@@ -1297,6 +1375,15 @@ open class CommandDetailFetch : Command<String>()
 open class CommandChapterFetch : Command<String>()
 
 open class CommandContentFetch : Command<String>()
+
+// \`Command.Chapter.Select(name, options, value)\`: a choice the app offers
+// before it lists chapters. Nothing here offers it, so a source reads the
+// value it was built with.
+open class CommandChapterSelect(
+    val name: String = "",
+    val options: Array<String> = emptyArray(),
+    var value: Int = 0
+) : Command<Int>()
 
 typealias CommandList = List<Command<*>>
 

@@ -242,8 +242,12 @@ const ENTRYPOINT = 'source';
  *     Result, withTimeoutOrNull and a main-Looper Handler are supplied. Bundles
  *     that refused, loaded and failed, or resolved nothing at 62 convert
  *     differently. Reconvert every bundle made at 62 or earlier.
+ * 64: an IReader form posts its parameters and headers, the older parsed base
+ *     and the chapter choice exist, records copy by name, a star import
+ *     follows a renamed declaration, and jsoup's `Elements.first()` is null on
+ *     an empty selection. Reconvert every bundle made at 63 or earlier.
  */
-export const CONVERTER_VERSION = 63;
+export const CONVERTER_VERSION = 64;
 
 export interface BundleInput {
 	readonly id: string;

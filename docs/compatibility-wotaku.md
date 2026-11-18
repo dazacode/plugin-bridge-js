@@ -117,6 +117,31 @@ of 174 Tsundoku ones convert, the rest refused by name — and none of those tre
 is reachable from the catalogue link, because both ecosystems publish their index
 as a build artifact. Echo converts nothing by design; its extensions are APKs.
 
+### An IReader conversion count that went down, and why the lower one is true
+
+Counting the members the driver calls under its IReader dialect
+(`getMangaList`, `getChapterList`, `getPageList`) as reachable took the IReader
+conversions measured over the published index from 57 of 147 to 49. All eight
+listings that dropped were built on one template, and all eight were broken
+before they dropped: the template overrides `getListRequest` to post its search
+as a form, that override was refused, and the refusal was pruned as unreachable
+because nothing in the extension calls it — the base class does. So the eight
+converted "complete" and searched the base class's endpoint instead. Re-run
+against the sites with the earlier build, every one of them sent
+`GET /search/index.php` where the template posts to `/e/search/index.php`, and
+every one found nothing — three answered 404, two 403, two an empty page, one a
+certificate the host could not verify.
+
+So 49 was the honest number at that point and 57 overstated it by eight sources
+that could not have searched. The form post they needed was then implemented
+(`submitForm` with its parameters and headers, and the base class's request
+block), and the count is 63 of 147 with all eight converting again — now
+sending the template's own request. Three of them get search results back;
+every result links to the site's front page, because the template's search
+selector is written `a'`, which matches nothing in any selector engine. That is
+the template's bug, and it reads here as "listed no chapters" rather than as a
+conversion failure.
+
 ## What this pass does not claim
 
 - **A converted bundle is not a working source.** Nothing here has been run
