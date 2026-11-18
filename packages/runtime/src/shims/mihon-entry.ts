@@ -670,6 +670,7 @@ function __chapterRef(sourceChapterId) {
       const memo = JSON.parse(decodeURIComponent(id.slice(at + __MEMO_MARK.length)));
       if (memo && typeof memo === 'object' && !Array.isArray(memo)) {
         chapter.url = id.slice(0, at);
+        chapter.key = chapter.url;
         chapter.memo = memo;
         return chapter;
       }
@@ -678,6 +679,9 @@ function __chapterRef(sourceChapterId) {
     }
   }
   chapter.url = id;
+  // IReader's chapter is addressed by \`key\`, as its manga is (\`__mangaRef\`).
+  // Left unset, every chapter it opened requested \`undefined\`.
+  chapter.key = id;
   return chapter;
 }
 

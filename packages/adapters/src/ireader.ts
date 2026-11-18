@@ -173,9 +173,20 @@ function sourceDirectory(
 			return { directory: `sources/${home[1]}/${home[2]}`, theme: null };
 		}
 	}
-	const directory = row.sourceDir ?? directoryOf(row.pkg);
+	// `sourceDir` is either the module's own directory (a renamed module
+	// publishes the one it is really in) or — for most entries the current
+	// toolchain builds — Gradle's default source set, `main`, *inside* the
+	// module beside its `build.gradle.kts`. Read as the module, it sent 63
+	// listings of one catalogue to `sources/<lang>/main`, which exists for none
+	// of them. Then the package names the module.
+	const module = directoryOf(row.pkg);
+	const lang = row.lang || 'all';
+	if (row.sourceDir === 'main' && module !== null) {
+		return { directory: `sources/${lang}/${module}/${row.sourceDir}`, theme: null };
+	}
+	const directory = row.sourceDir ?? module;
 	if (directory === null) return null;
-	return { directory: `sources/${row.lang || 'all'}/${directory}`, theme: null };
+	return { directory: `sources/${lang}/${directory}`, theme: null };
 }
 
 export const ireaderAdapter: ForeignAdapter = {
@@ -476,6 +487,10 @@ async function listKotlin(
 		}
 		const wanted = listed
 			.filter((url) => /\.kt$/i.test(new URL(url).pathname))
+			// A module's test source sets are not the extension: their
+			// backtick-named test functions are not JavaScript names, and one
+			// such file failed a whole bundle at load.
+			.filter((url) => !/\/src\/(?:test|androidTest|[a-zA-Z]*Test)\//.test(new URL(url).pathname))
 			.map((url) => ({ path: url.slice(base.length), url }))
 			.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 		if (wanted.length === 0) continue;
@@ -586,9 +601,13 @@ export function ireaderAliases(source: string, sourceId: string | null): string 
 const IREADER_SHIM = `package ireader.core.source
 
 import com.fleeksoft.ksoup.nodes.Document
+import com.fleeksoft.ksoup.nodes.Element
 import ireader.core.source.model.BaseExploreFetcher
 import ireader.core.source.model.ChapterInfo
 import ireader.core.source.model.Command
+import ireader.core.source.model.CommandChapterFetch
+import ireader.core.source.model.CommandContentFetch
+import ireader.core.source.model.CommandDetailFetch
 import ireader.core.source.model.CommandList
 import ireader.core.source.model.Filter
 import ireader.core.source.model.FilterList
@@ -596,6 +615,7 @@ import ireader.core.source.model.Listing
 import ireader.core.source.model.MangaInfo
 import ireader.core.source.model.MangasPageInfo
 import ireader.core.source.model.Page
+import ireader.core.source.model.Text
 
 class Headers
 
@@ -603,6 +623,10 @@ class HttpRequestBuilder(var url: String) {
     var body: String = ""
     fun header(name: String, value: String): HttpRequestBuilder = this
     fun headers(block: HeadersBuilder.() -> Unit): HttpRequestBuilder = this
+    // The base class's \`HttpRequestBuilder.headersBuilder { … }\`, which a
+    // request block calls on the builder it is given. Headers are not carried
+    // by this client yet (\`Ktor.get\` sends the url), so the block is not run.
+    fun headersBuilder(block: HeadersBuilder.() -> Unit = {}): HttpRequestBuilder = this
     fun url(value: String): HttpRequestBuilder {
         url = value
         return this
@@ -618,7 +642,13 @@ class KtorResponse(val text: String) {
     fun asJsoup(): Document = Jsoup.parse(text)
 }
 
-class Ktor {
+/*
+ * Ktor's client over the runtime's OkHttp one, which the source hands it.
+ * Inside a class a bare \`client\` is that class's own member and \`Ktor\` has
+ * none, so every request this shim made went to an undefined client and
+ * nothing reached a site at all.
+ */
+class Ktor(val http: OkHttpClient) {
     suspend fun submitForm(
         url: String,
         formParameters: Parameters,
@@ -626,21 +656,28 @@ class Ktor {
     ): KtorResponse {
         val builder = HttpRequestBuilder(url)
         builder.block()
-        val response = client.newCall(POST(url, null, null)).execute()
-        return KtorResponse(response.body.string())
+        return KtorResponse(ireaderSend(http, POST(url, null, null)))
     }
     suspend fun get(builder: HttpRequestBuilder): KtorResponse {
-        val response = client.newCall(GET(builder.url, null)).execute()
-        return KtorResponse(response.body.string())
+        return KtorResponse(ireaderSend(http, GET(builder.url, null)))
     }
+}
+
+suspend fun ireaderSend(http: OkHttpClient, request: Request): String {
+    val response = http.newCall(request).execute()
+    return response.body.string()
 }
 
 class BrowserResult(val isSuccess: Boolean, val responseBody: String)
 
+// A plain request where the ecosystem renders the page in a WebView: the
+// same document for a site that does not need its scripts run.
 class Browser {
+    var http: OkHttpClient? = null
     suspend fun fetch(url: String, selector: String = "", timeout: Int = 0): BrowserResult {
-        val response = client.newCall(GET(url, null)).execute()
-        return BrowserResult(true, response.body.string())
+        val through = http
+        if (through == null) return BrowserResult(false, "")
+        return BrowserResult(true, ireaderSend(through, GET(url, null)))
     }
 }
 
@@ -671,6 +708,16 @@ fun ireaderFilters(query: String): FilterList {
 
 fun encodeURLParameter(value: String): String = value
 
+/*
+ * The base class's \`String.toPage()\` and \`List<String>.toPage()\`: a string
+ * is one text page, a list one page each. One function for both receivers,
+ * because two file-scope functions of one name cannot share a module.
+ */
+fun Any.toPage(): Any {
+    if (this is List<*>) return this.map { Text(it.toString()) }
+    return Text(this.toString())
+}
+
 fun logError(message: () -> String) {
     println(message())
 }
@@ -679,17 +726,36 @@ fun logInfo(message: () -> String) {
     println(message())
 }
 
-abstract class SourceFactory(val deps: Dependencies) {
-    var client: Ktor = Ktor()
+/*
+ * The ecosystem's declarative base, ported member for member from its own
+ * \`SourceFactory\`: an extension that declares \`exploreFetchers\`,
+ * \`detailFetcher\`, \`chapterFetcher\` and \`contentFetcher\` and overrides
+ * nothing else is a whole source, and one that calls \`super.getMangaList\`
+ * leans on exactly this. Every default here used to answer an empty list, so
+ * those extensions translated, loaded and searched to nothing.
+ *
+ * Written in the plain Kotlin this build translates (loops and \`if\` where the
+ * original reaches for \`buildList\` and \`runCatching\`); the behaviour, the
+ * member names and the parameter names are the original's, because subclasses
+ * override these members and call them by name.
+ */
+abstract class SourceFactory(val deps: Dependencies = Dependencies()) {
+    var client: Ktor = Ktor(network.client)
+
+    init {
+        deps.httpClients.browser.http = network.client
+    }
     abstract val lang: String
     abstract val baseUrl: String
     abstract val id: Long
     abstract val name: String
 
-    object Type {
-        val Search: Int = 0
-        val Popular: Int = 1
-        val Latest: Int = 2
+    enum class Type {
+        Search,
+        Detail,
+        Chapters,
+        Content,
+        Others
     }
 
     open val exploreFetchers: List<BaseExploreFetcher> get() = emptyList()
@@ -701,31 +767,257 @@ abstract class SourceFactory(val deps: Dependencies) {
     open fun getCommands(): CommandList = emptyList()
     open fun getListings(): List<Listing> = emptyList()
     open fun getUserAgent(): String = ""
+    open fun getCustomBaseUrl(): String = baseUrl
 
     fun requestBuilder(url: String): HttpRequestBuilder = HttpRequestBuilder(url)
 
-    open suspend fun getMangaList(filters: FilterList, page: Int): MangasPageInfo {
-        val found = exploreFetchers
-        if (found.isEmpty()) return MangasPageInfo(emptyList(), false)
-        return MangasPageInfo(emptyList(), false)
+    /* --- lists ------------------------------------------------------------ */
+
+    open fun bookListParse(
+        document: Document,
+        elementSelector: String,
+        baseExploreFetcher: BaseExploreFetcher,
+        parser: (Element) -> MangaInfo,
+        page: Int
+    ): MangasPageInfo {
+        val books = mutableListOf<MangaInfo>()
+        for (element in document.select(elementSelector)) {
+            var book: MangaInfo? = null
+            try {
+                book = parser(element)
+            } catch (e: Exception) {
+                book = null
+            }
+            if (book != null && book.isValid()) books.add(book)
+        }
+        return MangasPageInfo(books, determineHasNextPage(document, baseExploreFetcher, page))
     }
 
-    open suspend fun getMangaDetails(manga: MangaInfo, commands: List<Command<*>>): MangaInfo = manga
+    fun determineHasNextPage(document: Document, fetcher: BaseExploreFetcher, page: Int): Boolean {
+        if (fetcher.infinitePage) return true
+        if (fetcher.maxPage != -1) return page < fetcher.maxPage
+        val nextPageText = selectorReturnerStringType(document, fetcher.nextPageSelector, fetcher.nextPageAtt).trim()
+        val expected = fetcher.nextPageValue
+        if (expected != null) return expected == nextPageText
+        return nextPageText.isNotBlank()
+    }
 
-    open suspend fun getChapterList(manga: MangaInfo, commands: List<Command<*>>): List<ChapterInfo> =
-        emptyList()
+    open suspend fun getListRequest(
+        baseExploreFetcher: BaseExploreFetcher,
+        page: Int,
+        query: String = ""
+    ): Document {
+        val url = buildFetcherUrl(baseExploreFetcher, page, query)
+        return client.get(requestBuilder(url)).asJsoup()
+    }
 
-    open suspend fun getPageList(chapter: ChapterInfo, commands: List<Command<*>>): List<Page> =
-        emptyList()
+    fun buildFetcherUrl(fetcher: BaseExploreFetcher, page: Int, query: String = ""): String {
+        val endpoint = fetcher.endpoint ?: ""
+        val processedQuery = fetcher.onQuery(query)
+        val processedPage = fetcher.onPage(page.toString())
+        return getCustomBaseUrl() + endpoint.replace("{page}", processedPage).replace("{query}", processedQuery)
+    }
 
-    open suspend fun getMangaDetailsRequest(
-        manga: MangaInfo,
-        commands: List<Command<*>>
-    ): Document = Jsoup.parse("")
+    open suspend fun getLists(
+        baseExploreFetcher: BaseExploreFetcher,
+        page: Int,
+        query: String = "",
+        filters: FilterList
+    ): MangasPageInfo {
+        val selector = baseExploreFetcher.selector
+        if (selector == null) return MangasPageInfo(emptyList(), false)
+        val document = getListRequest(baseExploreFetcher, page, query)
+        return bookListParse(document, selector, baseExploreFetcher, { element -> parseMangaFromElement(element, baseExploreFetcher) }, page)
+    }
 
-    open fun chapterFromElement(element: com.fleeksoft.ksoup.nodes.Element): ChapterInfo = ChapterInfo()
+    open fun parseMangaFromElement(element: Element, fetcher: BaseExploreFetcher): MangaInfo {
+        val title = fetcher.onName(selectorReturnerStringType(element, fetcher.nameSelector, fetcher.nameAtt).trim(), fetcher.key)
+        val link = fetcher.onLink(selectorReturnerStringType(element, fetcher.linkSelector, fetcher.linkAtt).trim(), fetcher.key)
+        val url = if (fetcher.addBaseUrlToLink) buildAbsoluteUrl(link) else link
+        val image = fetcher.onCover(selectorReturnerStringType(element, fetcher.coverSelector, fetcher.coverAtt).trim(), fetcher.key)
+        val cover = if (fetcher.addBaseurlToCoverLink) buildAbsoluteUrl(image) else image
+        return MangaInfo(key = url, title = title, cover = cover)
+    }
 
-    open fun parseMangaFromElement(element: com.fleeksoft.ksoup.nodes.Element): MangaInfo = MangaInfo()
+    fun buildAbsoluteUrl(path: String): String {
+        if (path.startsWith("http://") || path.startsWith("https://")) return path
+        if (path.startsWith("//")) return "https:" + path
+        if (baseUrl.isBlank()) return path
+        val base = if (baseUrl.startsWith("http://") || baseUrl.startsWith("https://")) baseUrl else "https://" + baseUrl
+        if (path.startsWith("/")) return base + path
+        if (base.endsWith("/")) return base + path
+        return base + "/" + path
+    }
+
+    open suspend fun getMangaList(filters: FilterList, page: Int): MangasPageInfo {
+        val titleFilter = filters.findInstance<Filter.Title>()
+        val sortFilter = filters.findInstance<Filter.Sort>()
+        val fetchers = exploreFetchers
+
+        val searched = titleFilter?.value
+        if (searched != null && searched.isNotBlank()) {
+            val searchFetcher = fetchers.firstOrNull { it.type == Type.Search }
+            if (searchFetcher == null) return emptyMangaPage()
+            return getLists(searchFetcher, page, searched, filters)
+        }
+
+        val sortIndex = sortFilter?.value?.index
+        if (sortIndex != null) {
+            val sortFetcher = fetchers.filter { it.type != Type.Search }.getOrNull(sortIndex)
+            if (sortFetcher == null) return emptyMangaPage()
+            return getLists(sortFetcher, page, "", filters)
+        }
+
+        // The listing door, \`getMangaList(sort, page)\`: the first fetcher
+        // that is not the search one. The driver reaches the shelf through
+        // this member with no title, which is the same request.
+        val shelf = fetchers.firstOrNull { it.type != Type.Search }
+        if (shelf == null) return emptyMangaPage()
+        return getLists(shelf, page, "", filters)
+    }
+
+    fun emptyMangaPage(): MangasPageInfo = MangasPageInfo(emptyList(), false)
+
+    /* --- chapters --------------------------------------------------------- */
+
+    open fun chapterFromElement(element: Element): ChapterInfo {
+        val fetcher = chapterFetcher
+        val linked = fetcher.onLink(selectorReturnerStringType(element, fetcher.linkSelector, fetcher.linkAtt).trim())
+        val link = if (fetcher.addBaseUrlToLink) buildAbsoluteUrl(linked) else linked
+        val name = fetcher.onName(selectorReturnerStringType(element, fetcher.nameSelector, fetcher.nameAtt).trim())
+        val translator = fetcher.onTranslator(selectorReturnerStringType(element, fetcher.translatorSelector, fetcher.translatorAtt).trim())
+        val releaseDate = fetcher.uploadDateParser(selectorReturnerStringType(element, fetcher.uploadDateSelector, fetcher.uploadDateAtt).trim())
+        val numberText = fetcher.onNumber(selectorReturnerStringType(element, fetcher.numberSelector, fetcher.numberAtt).trim())
+        val number = numberText.toFloatOrNull() ?: ChapterInfo.extractChapterNumber(name)
+        return ChapterInfo(name = name, key = link, number = number, dateUpload = releaseDate, scanlator = translator)
+    }
+
+    open fun chaptersParse(document: Document): List<ChapterInfo> {
+        val selector = chapterFetcher.selector
+        if (selector == null) return emptyList()
+        val chapters = mutableListOf<ChapterInfo>()
+        for (element in document.select(selector)) {
+            var chapter: ChapterInfo? = null
+            try {
+                chapter = chapterFromElement(element)
+            } catch (e: Exception) {
+                chapter = null
+            }
+            if (chapter != null && chapter.isValid()) chapters.add(chapter)
+        }
+        return chapters
+    }
+
+    open suspend fun getChapterListRequest(manga: MangaInfo, commands: List<Command<*>>): Document {
+        return client.get(requestBuilder(manga.key)).asJsoup()
+    }
+
+    open suspend fun getChapterList(manga: MangaInfo, commands: List<Command<*>>): List<ChapterInfo> {
+        val fetched = commands.findInstance<CommandChapterFetch>()
+        if (fetched != null) return applyChapterSorting(chaptersParse(Jsoup.parse(fetched.html)))
+        val document = getChapterListRequest(manga, commands)
+        return applyChapterSorting(chaptersParse(document))
+    }
+
+    open fun applyChapterSorting(chapters: List<ChapterInfo>): List<ChapterInfo> {
+        if (chapterFetcher.reverseChapterList) return chapters
+        return chapters.reversed()
+    }
+
+    /* --- details ---------------------------------------------------------- */
+
+    open fun statusParser(text: String): Long = detailFetcher.onStatus(text)
+
+    open fun detailParse(document: Document): MangaInfo {
+        val fetcher = detailFetcher
+        val title = fetcher.onName(selectorReturnerStringType(document, fetcher.nameSelector, fetcher.nameAtt).trim())
+        val image = fetcher.onCover(selectorReturnerStringType(document, fetcher.coverSelector, fetcher.coverAtt).trim())
+        val cover = if (fetcher.addBaseurlToCoverLink) buildAbsoluteUrl(image) else image
+        val author = fetcher.onAuthor(selectorReturnerStringType(document, fetcher.authorBookSelector, fetcher.authorBookAtt).trim())
+        val status = statusParser(selectorReturnerStringType(document, fetcher.statusSelector, fetcher.statusAtt).trim())
+        val description = fetcher.onDescription(selectorReturnerListType(document, fetcher.descriptionSelector, fetcher.descriptionBookAtt))
+            .filter { it.isNotBlank() }
+            .joinToString("\\n\\n")
+        val genres = fetcher.onCategory(selectorReturnerListType(document, fetcher.categorySelector, fetcher.categoryAtt))
+            .filter { it.isNotBlank() }
+        return MangaInfo(key = "", title = title, cover = cover, description = description, author = author, genres = genres, status = status.toInt())
+    }
+
+    open suspend fun getMangaDetailsRequest(manga: MangaInfo, commands: List<Command<*>>): Document {
+        return client.get(requestBuilder(manga.key)).asJsoup()
+    }
+
+    open suspend fun getMangaDetails(manga: MangaInfo, commands: List<Command<*>>): MangaInfo {
+        // \`.copy(key = …)\` in the original; \`key\` is a \`var\` here, and setting
+        // it is the same value without a named call the two \`copy\`s of this
+        // model would leave ambiguous.
+        val fetched = commands.findInstance<CommandDetailFetch>()
+        val document = if (fetched != null) Jsoup.parse(fetched.html) else getMangaDetailsRequest(manga, commands)
+        val details = detailParse(document)
+        details.key = manga.key
+        return details
+    }
+
+    /* --- content ---------------------------------------------------------- */
+
+    open suspend fun getContentRequest(chapter: ChapterInfo, commands: List<Command<*>>): Document {
+        return client.get(requestBuilder(chapter.key)).asJsoup()
+    }
+
+    open suspend fun getContents(chapter: ChapterInfo, commands: List<Command<*>>): List<Page> {
+        return pageContentParse(getContentRequest(chapter, commands))
+    }
+
+    open fun pageContentParse(document: Document): List<Page> {
+        val fetcher = contentFetcher
+        val content = fetcher.onContent(selectorReturnerListType(document, fetcher.pageContentSelector, fetcher.pageContentAtt))
+            .filter { it.isNotBlank() }
+        val title = fetcher.onTitle(selectorReturnerStringType(document, fetcher.pageTitleSelector, fetcher.pageTitleAtt).trim())
+        val pages = mutableListOf<Page>()
+        if (title.isNotBlank()) pages.add(Text(title))
+        for (paragraph in content) pages.add(Text(paragraph))
+        return pages
+    }
+
+    open suspend fun getPageList(chapter: ChapterInfo, commands: List<Command<*>>): List<Page> {
+        val fetched = commands.findInstance<CommandContentFetch>()
+        if (fetched != null) return pageContentParse(Jsoup.parse(fetched.html))
+        return getContents(chapter, commands)
+    }
+
+    /* --- selectors -------------------------------------------------------- */
+
+    open fun selectorReturnerStringType(element: Element, selector: String? = null, att: String? = null): String {
+        try {
+            if (selector.isNullOrBlank() && !att.isNullOrBlank()) return element.attr(att)
+            if (!selector.isNullOrBlank() && att.isNullOrBlank()) return element.select(selector).text()
+            if (!selector.isNullOrBlank() && !att.isNullOrBlank()) return element.select(selector).attr(att)
+            return ""
+        } catch (e: Exception) {
+            return ""
+        }
+    }
+
+    open fun selectorReturnerListType(element: Element, selector: String? = null, att: String? = null): List<String> {
+        try {
+            if (selector.isNullOrBlank() && !att.isNullOrBlank()) {
+                val value = element.attr(att)
+                if (value.isNotBlank()) return listOf(value)
+                return emptyList()
+            }
+            if (!selector.isNullOrBlank() && att.isNullOrBlank()) {
+                return element.select(selector).eachText().filter { it.isNotBlank() }
+            }
+            if (!selector.isNullOrBlank() && !att.isNullOrBlank()) {
+                val value = element.select(selector).attr(att)
+                if (value.isNotBlank()) return listOf(value)
+                return emptyList()
+            }
+            return emptyList()
+        } catch (e: Exception) {
+            return emptyList()
+        }
+    }
 
     fun chapterUrl(chapter: ChapterInfo): String = chapter.key
 
@@ -735,96 +1027,140 @@ abstract class SourceFactory(val deps: Dependencies) {
 
     fun bookName(manga: MangaInfo): String = manga.title
 
+    /* --- the declarations ------------------------------------------------- */
+
     open class Detail(
-        val nameSelector: String = "",
-        val authorBookSelector: String = "",
-        val authorBookAtt: String = "",
-        val categorySelector: String = "",
-        val categoryAtt: String = "",
-        val descriptionSelector: String = "",
-        val coverSelector: String = "",
-        val coverAtt: String = "",
-        val statusSelector: String = "",
-        val statusAtt: String = "",
         val addBaseurlToCoverLink: Boolean = false,
+        val nameSelector: String? = null,
+        val nameAtt: String? = null,
+        val onName: (String) -> String = { it },
+        val coverSelector: String? = null,
+        val coverAtt: String? = null,
         val onCover: (String) -> String = { it },
-        val onCategory: (String) -> String = { it },
-        val onDescription: (String) -> String = { it },
-        val onStatus: (String) -> Int = { 0 }
+        val descriptionSelector: String? = null,
+        val descriptionBookAtt: String? = null,
+        val onDescription: (List<String>) -> List<String> = { it },
+        val authorBookSelector: String? = null,
+        val authorBookAtt: String? = null,
+        val onAuthor: (String) -> String = { it },
+        val categorySelector: String? = null,
+        val categoryAtt: String? = null,
+        val onCategory: (List<String>) -> List<String> = { it },
+        val statusSelector: String? = null,
+        val statusAtt: String? = null,
+        val onStatus: (String) -> Long = { 0L },
+        val type: Type = Type.Detail
     )
 
     open class Chapters(
-        val selector: String = "",
-        val nameSelector: String = "",
-        val nameAtt: String = "",
-        val linkSelector: String = "",
-        val linkAtt: String = "",
-        val numberSelector: String = "",
-        val uploadDateSelector: String = "",
-        val reverseChapterList: Boolean = false,
+        val selector: String? = null,
         val addBaseUrlToLink: Boolean = false,
+        val reverseChapterList: Boolean = false,
+        val linkSelector: String? = null,
         val onLink: (String) -> String = { it },
-        val onName: (String) -> String = { it }
+        val linkAtt: String? = null,
+        val nameSelector: String? = null,
+        val nameAtt: String? = null,
+        val onName: (String) -> String = { it },
+        val numberSelector: String? = null,
+        val numberAtt: String? = null,
+        val onNumber: (String) -> String = { it },
+        val uploadDateSelector: String? = null,
+        val uploadDateAtt: String? = null,
+        val uploadDateParser: (String) -> Long = { 0L },
+        val translatorSelector: String? = null,
+        val translatorAtt: String? = null,
+        val onTranslator: (String) -> String = { it },
+        val type: Type = Type.Chapters
     )
 
     open class Content(
-        val pageTitleSelector: String = "",
-        val pageContentSelector: String = "",
+        val pageTitleSelector: String? = null,
+        val pageTitleAtt: String? = null,
         val onTitle: (String) -> String = { it },
-        val onContent: (String) -> String = { it }
+        val pageContentSelector: String? = null,
+        val pageContentAtt: String? = null,
+        val onContent: (List<String>) -> List<String> = { it },
+        val type: Type = Type.Content
     )
 }
 
+/*
+ * The ecosystem writes \`SourceFactory.Detail(…)\` with named arguments, and
+ * \`ireaderAliases\` rewrites that spelling to these — in every file, this one
+ * included. So the body names the nested class bare: written qualified, it
+ * was rewritten into a call to itself, and the first source to read its
+ * declarations recursed until the stack ran out.
+ */
 fun ireaderDetail(
-    nameSelector: String = "",
-    authorBookSelector: String = "",
-    authorBookAtt: String = "",
-    categorySelector: String = "",
-    categoryAtt: String = "",
-    descriptionSelector: String = "",
-    coverSelector: String = "",
-    coverAtt: String = "",
-    statusSelector: String = "",
-    statusAtt: String = "",
     addBaseurlToCoverLink: Boolean = false,
+    nameSelector: String? = null,
+    nameAtt: String? = null,
+    onName: (String) -> String = { it },
+    coverSelector: String? = null,
+    coverAtt: String? = null,
     onCover: (String) -> String = { it },
-    onCategory: (String) -> String = { it },
-    onDescription: (String) -> String = { it },
-    onStatus: (String) -> Int = { 0 }
-): SourceFactory.Detail = SourceFactory.Detail(
-    nameSelector, authorBookSelector, authorBookAtt, categorySelector, categoryAtt,
-    descriptionSelector, coverSelector, coverAtt, statusSelector, statusAtt,
-    addBaseurlToCoverLink, onCover, onCategory, onDescription, onStatus
+    descriptionSelector: String? = null,
+    descriptionBookAtt: String? = null,
+    onDescription: (List<String>) -> List<String> = { it },
+    authorBookSelector: String? = null,
+    authorBookAtt: String? = null,
+    onAuthor: (String) -> String = { it },
+    categorySelector: String? = null,
+    categoryAtt: String? = null,
+    onCategory: (List<String>) -> List<String> = { it },
+    statusSelector: String? = null,
+    statusAtt: String? = null,
+    onStatus: (String) -> Long = { 0L },
+    type: SourceFactory.Type = SourceFactory.Type.Detail
+): SourceFactory.Detail = Detail(
+    addBaseurlToCoverLink, nameSelector, nameAtt, onName, coverSelector, coverAtt, onCover,
+    descriptionSelector, descriptionBookAtt, onDescription, authorBookSelector, authorBookAtt,
+    onAuthor, categorySelector, categoryAtt, onCategory, statusSelector, statusAtt, onStatus, type
 )
 
 fun ireaderChapters(
-    selector: String = "",
-    nameSelector: String = "",
-    nameAtt: String = "",
-    linkSelector: String = "",
-    linkAtt: String = "",
-    numberSelector: String = "",
-    uploadDateSelector: String = "",
-    reverseChapterList: Boolean = false,
+    selector: String? = null,
     addBaseUrlToLink: Boolean = false,
+    reverseChapterList: Boolean = false,
+    linkSelector: String? = null,
     onLink: (String) -> String = { it },
-    onName: (String) -> String = { it }
-): SourceFactory.Chapters = SourceFactory.Chapters(
-    selector, nameSelector, nameAtt, linkSelector, linkAtt, numberSelector,
-    uploadDateSelector, reverseChapterList, addBaseUrlToLink, onLink, onName
+    linkAtt: String? = null,
+    nameSelector: String? = null,
+    nameAtt: String? = null,
+    onName: (String) -> String = { it },
+    numberSelector: String? = null,
+    numberAtt: String? = null,
+    onNumber: (String) -> String = { it },
+    uploadDateSelector: String? = null,
+    uploadDateAtt: String? = null,
+    uploadDateParser: (String) -> Long = { 0L },
+    translatorSelector: String? = null,
+    translatorAtt: String? = null,
+    onTranslator: (String) -> String = { it },
+    type: SourceFactory.Type = SourceFactory.Type.Chapters
+): SourceFactory.Chapters = Chapters(
+    selector, addBaseUrlToLink, reverseChapterList, linkSelector, onLink, linkAtt, nameSelector,
+    nameAtt, onName, numberSelector, numberAtt, onNumber, uploadDateSelector, uploadDateAtt,
+    uploadDateParser, translatorSelector, translatorAtt, onTranslator, type
 )
 
 fun ireaderContent(
-    pageTitleSelector: String = "",
-    pageContentSelector: String = "",
+    pageTitleSelector: String? = null,
+    pageTitleAtt: String? = null,
     onTitle: (String) -> String = { it },
-    onContent: (String) -> String = { it }
-): SourceFactory.Content = SourceFactory.Content(
-    pageTitleSelector, pageContentSelector, onTitle, onContent
+    pageContentSelector: String? = null,
+    pageContentAtt: String? = null,
+    onContent: (List<String>) -> List<String> = { it },
+    type: SourceFactory.Type = SourceFactory.Type.Content
+): SourceFactory.Content = Content(
+    pageTitleSelector, pageTitleAtt, onTitle, pageContentSelector, pageContentAtt, onContent, type
 )
 `;
 
 const IREADER_MODEL = `package ireader.core.source.model
+
+import ireader.core.source.SourceFactory
 
 open class MangaInfo(
     var key: String = "",
@@ -845,6 +1181,8 @@ open class MangaInfo(
         genres: List<String> = this.genres
     ): MangaInfo = MangaInfo(key, title, cover, description, author, status, genres)
 
+    fun isValid(): Boolean = key.isNotBlank() && title.isNotBlank()
+
     companion object {
         const val UNKNOWN: Int = 0
         const val ONGOING: Int = 1
@@ -864,14 +1202,35 @@ open class ChapterInfo(
     var key: String = "",
     var number: Float = -1f,
     var dateUpload: Long = 0L,
-    var type: Int = 0
+    var type: Int = 0,
+    var scanlator: String = ""
 ) {
     fun copy(
         name: String = this.name,
         key: String = this.key,
         number: Float = this.number,
         dateUpload: Long = this.dateUpload
-    ): ChapterInfo = ChapterInfo(name, key, number, dateUpload)
+    ): ChapterInfo = ChapterInfo(name, key, number, dateUpload, type, scanlator)
+
+    fun isValid(): Boolean = key.isNotBlank() && name.isNotBlank()
+
+    companion object {
+        // The ecosystem's own patterns, in its order.
+        fun extractChapterNumber(name: String): Float {
+            val patterns = listOf(
+                Regex("""(?:chapter|ch\\.?|episode|ep\\.?)\\s*(\\d+(?:\\.\\d+)?)""", RegexOption.IGNORE_CASE),
+                Regex("""^(\\d+(?:\\.\\d+)?)(?:\\s*[-:.]|\\s+)"""),
+                Regex("""第\\s*(\\d+(?:\\.\\d+)?)\\s*[章话]"""),
+                Regex("""(\\d+(?:\\.\\d+)?)\\s*화"""),
+                Regex("""(\\d+(?:\\.\\d+)?)\\s*話""")
+            )
+            for (pattern in patterns) {
+                val match = pattern.find(name)
+                if (match != null) return match.groupValues[1].toFloatOrNull() ?: -1f
+            }
+            return -1f
+        }
+    }
 }
 
 open class Page
@@ -914,24 +1273,28 @@ typealias FilterList = List<Filter>
 open class Listing(val name: String = "")
 
 open class BaseExploreFetcher(
-    val name: String = "",
-    val endpoint: String = "",
-    val selector: String = "",
-    val nameSelector: String = "",
-    val nameAtt: String = "",
-    val linkSelector: String = "",
-    val linkAtt: String = "",
-    val coverSelector: String = "",
-    val coverAtt: String = "",
-    val nextPageSelector: String = "",
-    val nextPageValue: String = "",
-    val type: Int = 0,
-    val maxPage: Int = 1,
+    val key: String,
+    val endpoint: String? = null,
+    val selector: String? = null,
     val addBaseUrlToLink: Boolean = false,
+    val nextPageSelector: String? = null,
+    val nextPageAtt: String? = null,
+    val nextPageValue: String? = null,
     val addBaseurlToCoverLink: Boolean = false,
-    val onPage: (String) -> String = { it },
-    val onQuery: (String) -> String = { it },
-    val onCover: (String) -> String = { it }
+    val linkSelector: String? = null,
+    val linkAtt: String? = null,
+    val onLink: (String, String) -> String = { url, _ -> url },
+    val nameSelector: String? = null,
+    val nameAtt: String? = null,
+    val onName: (String, String) -> String = { url, _ -> url },
+    val coverSelector: String? = null,
+    val coverAtt: String? = null,
+    val onCover: (String, String) -> String = { url, _ -> url },
+    val onQuery: (String) -> String = { query -> query },
+    val onPage: (String) -> String = { page -> page },
+    val infinitePage: Boolean = false,
+    val maxPage: Int = -1,
+    val type: SourceFactory.Type = SourceFactory.Type.Others
 )
 `;
 
