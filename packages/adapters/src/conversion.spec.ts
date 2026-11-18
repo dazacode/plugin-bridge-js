@@ -569,6 +569,19 @@ describe('the hosts a module’s source text names', () => {
 		);
 	});
 
+	it('reads a minified bundle’s quoted addresses even where its comment reading goes wrong', () => {
+		// A nested template closes the outer one early for a character-level
+		// reader, and the `//` inside it then reads as a comment to the end of
+		// the line — which, minified, is the rest of the bundle.
+		const bundle =
+			'var t=`${a?`//`:``}`;var u="https://api.example.invalid/v1";' + 'var p=0;'.repeat(300);
+		expect(hostsInSource(bundle)).toContain('api.example.invalid');
+		// A person's code with an address only in a comment is still not a host.
+		expect(hostsInSource('// see "https://doc.example.invalid/x"\nvar a = 1;')).not.toContain(
+			'doc.example.invalid'
+		);
+	});
+
 	it('grants the wildcard sibling beside every host it finds', () => {
 		// The failure this prevents, seen for real: the code names one CDN host,
 		// the page it scrapes then hands it a numbered neighbour, and the plugin

@@ -558,6 +558,9 @@ const SHARED_SUFFIXES = new Set([
  * honest limit of reading rather than running, and it surfaces as a refusal
  * naming the host rather than as silence.
  */
+/** A line this long is a minified bundle's, not one a person wrote. */
+const MINIFIED_LINE = 2000;
+
 export function hostsInSource(source: string, limit = 24): string[] {
 	const found = new Set<string>();
 	// Comments first, and this is not a nicety. A real module carries a block
@@ -566,6 +569,7 @@ export function hostsInSource(source: string, limit = 24): string[] {
 	// consent screen as five hosts and five wildcards, next to the real ones,
 	// with nothing to tell a viewer which were which. Prose about a host is not
 	// a host.
+	const raw = source;
 	source = withoutComments(source);
 	const add = (raw: string | undefined): void => {
 		if (raw === undefined || found.size >= limit) return;
@@ -601,6 +605,24 @@ export function hostsInSource(source: string, limit = 24): string[] {
 	 * string.
 	 */
 	const selectorCall = /\.\s*(?:select|selectFirst|closest|is|has|not|matches)\s*\($/;
+
+	/*
+	 * A built bundle's quoted addresses first, read from the text as written.
+	 *
+	 * A minified bundle is one line of several hundred kilobytes, and reading it
+	 * for comments a character at a time is a parse of JavaScript by heuristics:
+	 * one misread — a nested template, a regex after a keyword — and the rest of
+	 * the line is a "comment", every address in it lost, and the source refused
+	 * at request time for a host its own code names. A minifier leaves no
+	 * comments to strip, so on such a line a quoted absolute URL is code. They
+	 * come first because the scan is capped, and the noise later in a bundle's
+	 * polyfills must not crowd out the source's own API.
+	 */
+	const quotedUrl = new RegExp(`["'\`]https?:\\/\\/(${label}(?:\\.${label})+)`, 'gi');
+	for (const line of raw.split('\n')) {
+		if (line.length < MINIFIED_LINE) continue;
+		for (const match of line.matchAll(quotedUrl)) add(match[1]);
+	}
 
 	for (const match of source.matchAll(absolute)) {
 		add(literalTail(match[0].replace(/^https?:\/\//i, '')));
