@@ -214,7 +214,9 @@ const ENTRYPOINT = 'source';
  *     `Track::url`, a lazy reading a constructor parameter and a call the
  *     grammar hands to a whole infix or `if` all translate faithfully; and
  *     `mapTo` into a set, okhttp's reading of backslashes in a url, minBy,
- *     Result, withTimeoutOrNull and a main-Looper Handler are supplied. Bundles
+ *     Result, withTimeoutOrNull, a main-Looper Handler, a builder's live
+ *     `interceptors()`, `isRedirect` and a read of the plugin's own cookies
+ *     (`loadForRequest`, ADR-0005 §3d) are supplied. Bundles
  *     that refused, loaded and failed, or resolved nothing at 60 convert
  *     differently. Reconvert every bundle made at 60 or earlier.
  */
