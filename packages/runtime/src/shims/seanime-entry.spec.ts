@@ -277,3 +277,18 @@ describe('episode numbers a provider did not state', () => {
 		]);
 	});
 });
+
+describe('$store', () => {
+	it('keeps values for the life of the provider, copying on get but not on getUnsafe', async () => {
+		expect(
+			await probe(`const value = { at: 1, list: [1] };
+$store.set('k', value);
+const copy = $store.get('k');
+copy.list.push(2);
+const seen = [];
+$store.watch('w', (v) => seen.push(v));
+$store.set('w', 'x');
+return [$store.has('k'), $store.get('k').list.length, $store.getUnsafe('k') === value, $store.getOrSet('n', () => 5), $store.has('missing'), seen];`)
+		).toEqual([true, 1, true, 5, false, ['x']]);
+	});
+});

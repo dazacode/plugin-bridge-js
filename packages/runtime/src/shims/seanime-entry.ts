@@ -314,6 +314,61 @@ function LoadDoc(html) {
 `;
 
 /**
+ * `$store`: the extension's in-memory key-value store.
+ *
+ * Seanime keeps one per extension runtime, in memory, for its lifetime — a
+ * cache, not storage — which is what an isolate is here, so a map is the whole
+ * of it. `get` answers a copy and `getUnsafe` the value itself, as the host's
+ * do; the copy is deep over arrays, plain objects and dates and leaves anything
+ * else as it was. A `watch` callback runs on each `set` of its key.
+ */
+const STORE = `
+var __storeValues = new Map();
+var __storeWatchers = new Map();
+
+function __storeCopy(value) {
+  if (Array.isArray(value)) return value.map(__storeCopy);
+  if (value instanceof Date) return new Date(value.getTime());
+  if (value !== null && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype) {
+    var out = {};
+    for (var key in value) out[key] = __storeCopy(value[key]);
+    return out;
+  }
+  return value;
+}
+
+var $store = {
+  set: function (key, value) {
+    __storeValues.set(String(key), value);
+    var watchers = __storeWatchers.get(String(key)) || [];
+    for (var i = 0; i < watchers.length; i++) watchers[i](value);
+  },
+  get: function (key) { return __storeCopy(__storeValues.get(String(key))); },
+  getUnsafe: function (key) { return __storeValues.get(String(key)); },
+  has: function (key) { return __storeValues.has(String(key)); },
+  remove: function (key) { __storeValues.delete(String(key)); },
+  getOrSet: function (key, make) {
+    if (!__storeValues.has(String(key))) $store.set(key, make());
+    return $store.get(key);
+  },
+  reset: function () { __storeValues.clear(); },
+  values: function () { return Array.from(__storeValues.values()).map(__storeCopy); },
+  valuesUnsafe: function () { return Array.from(__storeValues.values()); },
+  getAll: function () { return __storeCopy($store.getAllUnsafe()); },
+  getAllUnsafe: function () {
+    var out = {};
+    __storeValues.forEach(function (value, key) { out[key] = value; });
+    return out;
+  },
+  watch: function (key, callback) {
+    var list = __storeWatchers.get(String(key)) || [];
+    list.push(callback);
+    __storeWatchers.set(String(key), list);
+  }
+};
+`;
+
+/**
  * `$getUserPreference`, over `ctx.settings`.
  *
  * Seanime answers a string, or `undefined` for a key nothing set and nothing
@@ -324,7 +379,8 @@ function LoadDoc(html) {
  * declared answers `undefined`, as it does there.
  */
 function preferencesRuntime(preferences: readonly SeanimePreference[]): string {
-	return `
+	return `${STORE}
+
 var __PREFERENCES = ${JSON.stringify(preferences)};
 
 function $getUserPreference(key) {
