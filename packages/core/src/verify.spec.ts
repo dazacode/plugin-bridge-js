@@ -54,7 +54,7 @@ class FakeWorker implements Partial<Worker> {
 
 	postMessage(message: unknown): void {
 		const data = message as
-			| { id: number; kind: string }
+			| { id: number; kind: string; payload?: unknown }
 			| {
 					inboundReply: true;
 					id: number;
@@ -86,8 +86,13 @@ class FakeWorker implements Partial<Worker> {
 			}
 
 			if (typeof answer === 'function') {
+				// Called with what the host asked, so an answer can depend on it;
+				// one that throws is the plugin failing.
+				let value: unknown;
 				try {
-					(answer as () => never)();
+					value = (answer as (payload: unknown) => unknown)(
+						(data as { payload?: unknown }).payload
+					);
 				} catch (error) {
 					const failure = error as Error;
 					this.emit({
@@ -97,6 +102,8 @@ class FakeWorker implements Partial<Worker> {
 					});
 					return;
 				}
+				this.emit({ id: data.id, ok: true, value });
+				return;
 			}
 			this.emit({ id: data.id, ok: true, value: answer });
 		})();
@@ -285,7 +292,7 @@ describe('each way a conversion fails is reported as that way', () => {
 			searchHits: 0
 		});
 		expect(describeVerification('Example', result)).toBe(
-			'Example could not search. Searching this source returned nothing.'
+			'Example could not search. Searching this source returned nothing (searched for "a", then "the").'
 		);
 	});
 
@@ -421,7 +428,7 @@ describe('a run that came to nothing because hosts were refused', () => {
 			failedAt: 'search',
 			searchHits: 0
 		});
-		expect(result.detail).toMatch(/Searching this source returned nothing\./);
+		expect(result.detail).toMatch(/Searching this source returned nothing/);
 		expect(result.detail).toMatch(/one\.embed\.example\.invalid/);
 	});
 });
@@ -554,5 +561,44 @@ describe('a book whose chapter is text', () => {
 			expect(result.ok, url).toBe(false);
 			expect(result.failedAt, url).toBe('pages');
 		}
+	});
+});
+
+describe('a source that answers a word and not a letter', () => {
+	const asked: string[] = [];
+	const searching = (answersFor: readonly string[]) => (payload: unknown) => {
+		const query = (payload as { query: string }).query;
+		asked.push(query);
+		return {
+			entries: answersFor.includes(query)
+				? [{ sourceMediaId: 'https://watch.example.invalid/show/1' }]
+				: []
+		};
+	};
+
+	it('asks one fixed word after "a" finds nothing, and says so in the verdict', async () => {
+		// Two novel catalogues listed, read and served text for "the" and
+		// answered "a" with an empty page; the check read them as empty.
+		asked.length = 0;
+		const result = await run({ ...WORKING, searchCatalog: searching(['the']) });
+		expect(result.ok).toBe(true);
+		expect(asked).toEqual(['a', 'the']);
+		expect(result.detail).toBe('Searched for "the" after "a" found nothing.');
+	});
+
+	it('asks nothing more of a source "a" already answers', async () => {
+		asked.length = 0;
+		const result = await run({ ...WORKING, searchCatalog: searching(['a', 'the']) });
+		expect(result.ok).toBe(true);
+		expect(asked).toEqual(['a']);
+		expect(result.detail).toBeNull();
+	});
+
+	it('is still empty when both words find nothing', async () => {
+		asked.length = 0;
+		const result = await run({ ...WORKING, searchCatalog: searching([]) });
+		expect(result).toMatchObject({ ok: false, failedAt: 'search', searchHits: 0 });
+		expect(asked).toEqual(['a', 'the']);
+		expect(result.detail).toMatch(/searched for "a", then "the"/);
 	});
 });

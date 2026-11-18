@@ -224,6 +224,20 @@ function reachedFurther(candidate: VerificationResult, incumbent: VerificationRe
 const DEFAULT_PROBE = 'a';
 
 /**
+ * The one other word asked, when the default particle finds nothing.
+ *
+ * Some sources search whole words only, or ignore a query of one letter, and
+ * answer "a" with an empty page while answering any real word: measured on
+ * two novel catalogues that listed, read and served text for "the" and
+ * nothing for "a". Asked only after the first query came back empty, and only
+ * when the caller did not choose its own probe, so a source the default
+ * already answers is checked exactly as before. Fixed, and one word: a list
+ * tried until something matched would be searching for a pass. A source empty
+ * for both is still empty, and the verdict says which words were asked.
+ */
+const FALLBACK_PROBE = 'the';
+
+/**
  * What to ask an id-addressed source about, when there is nothing to search.
  *
  * The counterpart to `DEFAULT_PROBE`, and it exists because that probe is
@@ -348,6 +362,8 @@ export async function verifyConvertedPlugin(
 		const idAddressed = declaredKinds.length > 0;
 
 		let entries: CatalogEntry[];
+		/** Said in the verdict when the second word was the one that answered. */
+		let searchedNote: string | null = null;
 		if (idAddressed) {
 			// The caller's own list when it gave one, otherwise the probes this
 			// source's declared namespaces call for.
@@ -367,15 +383,34 @@ export async function verifyConvertedPlugin(
 					...nothing
 				};
 			}
-			const found = entries.find((entry) => typeof entry.sourceMediaId === 'string');
+			let found = entries.find((entry) => typeof entry.sourceMediaId === 'string');
+			const fallback = options.probe === undefined && found === undefined && !outOfTime();
+			if (fallback) {
+				try {
+					const again = (await sandbox.searchCatalog(FALLBACK_PROBE, 1)) as {
+						entries?: CatalogEntry[];
+					} | null;
+					const second = again?.entries ?? [];
+					const usable = second.find((entry) => typeof entry.sourceMediaId === 'string');
+					if (usable !== undefined) {
+						entries = second;
+						found = usable;
+						searchedNote = `Searched for "${FALLBACK_PROBE}" after "${probe}" found nothing.`;
+					}
+				} catch {
+					// The first query's answer stands: a second query that throws
+					// says nothing about what the first one found.
+				}
+			}
 			if (found === undefined || outOfTime()) {
+				const asked = fallback ? ` (searched for "${probe}", then "${FALLBACK_PROBE}")` : '';
 				return {
 					ok: false,
 					failedAt: 'search',
 					detail:
 						(entries.length === 0
-							? 'Searching this source returned nothing.'
-							: 'Search results carried no id this client can use.') + alsoRefused(sandbox),
+							? `Searching this source returned nothing${asked}.`
+							: `Search results carried no id this client can use${asked}.`) + alsoRefused(sandbox),
 					...nothing,
 					searchHits: entries.length
 				};
@@ -700,13 +735,25 @@ export async function verifyConvertedPlugin(
 		const CHAPTER_CANDIDATES = 3;
 		const limit = idAddressed ? candidates.length : readsChapters ? CHAPTER_CANDIDATES : 1;
 
+		// The second search word, said wherever the verdict ends up: a pass or
+		// a failure past search was reached through it, and a reader comparing
+		// two runs has to know the question differed.
+		const noted = (result: VerificationResult): VerificationResult =>
+			searchedNote === null
+				? result
+				: {
+						...result,
+						detail: result.detail === null ? searchedNote : `${result.detail} (${searchedNote})`
+					};
+
 		let worst: VerificationResult | null = null;
 		for (const candidate of candidates.slice(0, limit)) {
 			const outcome = await drive(candidate);
-			if (outcome.ok) return outcome;
+			if (outcome.ok) return noted(outcome);
 			if (worst === null || reachedFurther(outcome, worst)) worst = outcome;
 			if (outOfTime()) break;
 		}
+		if (worst !== null) return noted(worst);
 		return (
 			worst ?? {
 				ok: false,
