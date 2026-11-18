@@ -1130,7 +1130,7 @@ export const RUNTIME_GLOBALS = [
 	'BigDecimal',
 	'RoundingMode',
 
-	/* java.io.File, as far as `File.createTempFile` goes: see `JSOUP_STATICS`. */
+	/* java.io.File: `File(path)` and `File.createTempFile`. See `JSOUP_STATICS`. */
 	'File',
 
 	/* A local HTTP server with no port. An extension that extends NanoHTTPD

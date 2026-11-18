@@ -7237,6 +7237,9 @@ var __k = {
     if (value === null || value === undefined) return 0;
     if (Array.isArray(value) || typeof value === 'string') return value.length;
     if (value instanceof Map || value instanceof Set) return value.size;
+    // A record the runtime made that answers 'length()' itself — java.io.File,
+    // whose length is its size in bytes and not a count of its fields.
+    if (typeof value === 'object' && typeof value.length === 'function') return value.length();
     if (typeof value === 'object') return Object.keys(value).length;
     return 0;
   },
@@ -9792,6 +9795,9 @@ var __KOTLIN_EXCEPTIONS = {
   IndexOutOfBoundsException: 'RuntimeException',
   NoSuchElementException: 'RuntimeException',
   IOException: 'Exception',
+  FileNotFoundException: 'IOException',
+  FileSystemException: 'IOException',
+  NoSuchFileException: 'FileSystemException',
   SocketTimeoutException: 'IOException',
   InterruptedIOException: 'IOException',
   EOFException: 'IOException'
@@ -11137,9 +11143,10 @@ function __uriQuote(part) {
  * the same bytes, which the sidecar guard already accepts and a player loads
  * like any caption file. The repair still runs in the extension's own code.
  *
- * Only the temporary file exists. 'File(path)', 'File.separator' and every
- * other member are refused by name in the emitter ('FILE_STATICS'), and a
- * temp file's methods are the ones this carrier can answer truthfully.
+ * A temp file's methods are the ones this carrier can answer truthfully.
+ * 'File(path)' is a path on the filesystem a plugin does not have ('__KFile'
+ * below); 'File.separator' and every member neither answers are refused by
+ * name in the emitter.
  */
 function __KTempFile(prefix, suffix) {
   this.prefix = __str(prefix);
@@ -11178,8 +11185,90 @@ function __tempFileType(suffix) {
   return 'text/plain';
 }
 
-var File = {
-  createTempFile: function (prefix, suffix) { return new __KTempFile(prefix, suffix); }
+/**
+ * java.io.File for a path, on the filesystem a plugin does not have.
+ *
+ * ABI.md gives a plugin no filesystem, and this does not give it one. What it
+ * gives is the *answer* a device with no usable storage gives: a path can be
+ * named, joined and taken apart, and every question about what is there says
+ * nothing is — 'exists()' and 'isFile' are false, 'length()' is 0, a walk of a
+ * directory finds nothing, 'mkdirs()', 'delete()', 'renameTo()' and
+ * 'setLastModified()' report that they did not happen. Anything that would
+ * read or write bytes throws the IOException the JVM would, so the
+ * extension's own handling of a failed write is what runs.
+ *
+ * That is the honest reading of an extension that caches to disk. One that
+ * downloads fonts into its player's fonts directory, say, wraps that in a
+ * catch-all and carries on without them: here the first write fails before
+ * any download is requested, the catch it wrote runs, and playback goes on.
+ * Nothing pretends the file was written, and no byte is fetched for a file
+ * that could never be kept.
+ *
+ * 'File.createTempFile(prefix, suffix)' with no directory is still the
+ * caption carrier above; given a directory, it fails as it would for one that
+ * does not exist.
+ */
+function __noFilesystem(path, doing, type) {
+  var made = new Error(path + ': this host gives a converted extension no filesystem, so it cannot ' + doing + '.');
+  return __kTagged(made, type || 'IOException');
+}
+function __KFile(path) { this.path = path; }
+Object.defineProperties(__KFile.prototype, {
+  name: { get: function () { var at = this.path.lastIndexOf('/'); return at < 0 ? this.path : this.path.slice(at + 1); } },
+  parent: { get: function () { var at = this.path.lastIndexOf('/'); return at <= 0 ? (at === 0 && this.path.length > 1 ? '/' : null) : this.path.slice(0, at); } },
+  parentFile: { get: function () { var up = this.parent; return up === null ? null : new __KFile(up); } },
+  absolutePath: { get: function () { return this.path; } },
+  isFile: { get: function () { return false; } },
+  isDirectory: { get: function () { return false; } },
+  nameWithoutExtension: { get: function () { var n = this.name; var at = n.lastIndexOf('.'); return at <= 0 ? n : n.slice(0, at); } },
+  extension: { get: function () { var n = this.name; var at = n.lastIndexOf('.'); return at < 0 ? '' : n.slice(at + 1); } }
+});
+__KFile.prototype.getPath = function () { return this.path; };
+__KFile.prototype.getName = function () { return this.name; };
+__KFile.prototype.getParent = function () { return this.parent; };
+__KFile.prototype.getParentFile = function () { return this.parentFile; };
+__KFile.prototype.getAbsolutePath = function () { return this.path; };
+__KFile.prototype.toString = function () { return this.path; };
+__KFile.prototype.exists = function () { return false; };
+__KFile.prototype.length = function () { return 0; };
+__KFile.prototype.lastModified = function () { return 0; };
+__KFile.prototype.setLastModified = function () { return false; };
+__KFile.prototype.mkdirs = function () { return false; };
+__KFile.prototype.mkdir = function () { return false; };
+__KFile.prototype.delete = function () { return false; };
+__KFile.prototype.deleteRecursively = function () { return false; };
+__KFile.prototype.deleteOnExit = function () {};
+__KFile.prototype.renameTo = function () { return false; };
+__KFile.prototype.list = function () { return null; };
+__KFile.prototype.listFiles = function () { return null; };
+/* kotlin.io's walk of a root that does not exist yields nothing. */
+__KFile.prototype.walkTopDown = function () { return []; };
+__KFile.prototype.walkBottomUp = function () { return []; };
+__KFile.prototype.walk = function () { return []; };
+__KFile.prototype.createNewFile = function () { throw __noFilesystem(this.path, 'create a file'); };
+__KFile.prototype.readBytes = function () { throw __noFilesystem(this.path, 'read it', 'FileNotFoundException'); };
+__KFile.prototype.readText = function () { throw __noFilesystem(this.path, 'read it', 'FileNotFoundException'); };
+__KFile.prototype.inputStream = function () { throw __noFilesystem(this.path, 'read it', 'FileNotFoundException'); };
+__KFile.prototype.outputStream = function () { throw __noFilesystem(this.path, 'write it', 'FileNotFoundException'); };
+__KFile.prototype.writeBytes = function () { throw __noFilesystem(this.path, 'write it', 'FileNotFoundException'); };
+__KFile.prototype.writeText = function () { throw __noFilesystem(this.path, 'write it', 'FileNotFoundException'); };
+__KFile.prototype.appendText = function () { throw __noFilesystem(this.path, 'write it', 'FileNotFoundException'); };
+/* kotlin.io's copyTo checks its source first: one that is not there throws. */
+__KFile.prototype.copyTo = function () { throw __noFilesystem(this.path, 'copy it', 'NoSuchFileException'); };
+
+/** 'File(path)' and 'File(parent, child)', with or without 'new'. */
+function File(first, second) {
+  var head = first === null || first === undefined ? '' : (first instanceof __KFile ? first.path : __str(first));
+  if (second === undefined) return new __KFile(head);
+  var tail = __str(second);
+  if (head.length === 0) return new __KFile(tail);
+  return new __KFile(head.replace(/\\/+$/, '') + '/' + tail.replace(/^\\/+/, ''));
+}
+File.createTempFile = function (prefix, suffix, directory) {
+  if (directory !== undefined && directory !== null) {
+    throw __noFilesystem(directory instanceof __KFile ? directory.path : __str(directory), 'create a temporary file in it');
+  }
+  return new __KTempFile(prefix, suffix);
 };
 
 var Uri = {
@@ -13833,6 +13922,13 @@ function preferencesKey(id) { return 'source_' + __str(id); }
  */
 var Application = {
   getSharedPreferences: function () { return __prefStore; },
+  // The app's own directories, on the filesystem a plugin does not have: see
+  // '__KFile'. Asked for, they are paths; written to, they fail as storage
+  // that is not there fails, and the extension's own handling runs.
+  filesDir: new __KFile('/app/files'),
+  cacheDir: new __KFile('/app/cache'),
+  getFilesDir: function () { return Application.filesDir; },
+  getCacheDir: function () { return Application.cacheDir; },
   getApplicationContext: function () { return Application; },
   getPackageName: function () { return 'app'; },
   packageName: 'app'

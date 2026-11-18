@@ -9451,11 +9451,6 @@ class Emitter {
 		expected: string | null = null
 	): string {
 		const name = callee.text;
-		// `File(path)`: a path on a filesystem a plugin does not have. The one
-		// `File` the runtime makes is `File.createTempFile` — see `JSOUP_STATICS`.
-		if (name === 'File' && !this.moduleNames.has(name) && this.lookup(name) === null) {
-			this.refuse(callee, '`File(…)`');
-		}
 
 		// `withContext(dispatcher) { … }` is a thread hop, and the sandbox has
 		// one thread. The dispatcher is dropped and the block is awaited.
@@ -11618,6 +11613,19 @@ class Emitter {
 			!this.classMembers.has(name)
 		) {
 			return 'Json';
+		}
+		// keiyoushi core's `applicationContext`, the injected `Application`,
+		// imported by name. The runtime's `Application` is the one this build
+		// has: the preference store, and the app's directories on the
+		// filesystem a plugin does not have (see `__KFile`). Read as a member it
+		// was `this.applicationContext`, undefined, and the first `.filesDir`
+		// threw a TypeError that only a catch-all happened to swallow.
+		if (
+			name === 'applicationContext' &&
+			this.keiyoushiImports.get(name) === 'keiyoushi.utils' &&
+			!this.classMembers.has(name)
+		) {
+			return 'Application';
 		}
 		const hoisted = this.localTypes.get(name);
 		if (hoisted !== undefined) return this.safe(hoisted);

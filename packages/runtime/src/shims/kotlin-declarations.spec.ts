@@ -694,16 +694,71 @@ describe('a temporary file handed to the player', () => {
 		expect(decoded).toBe(text);
 	});
 
-	it('refuses every other use of File by name', () => {
+	it('refuses the uses of File this runtime does not answer, by name', () => {
 		expect(
 			refusalNames(
 				kt(
-					'fun a(): String = File("/etc/hosts").readText()',
 					'fun b(): String = File.separator',
 					'fun c(): Boolean = File.createTempFile("a", ".b").setReadable(true)'
 				)
 			)
-		).toEqual(['`File(…)`', '`File.separator`', '`.setReadable()`']);
+		).toEqual(['`File.separator`', '`.setReadable()`']);
+	});
+});
+
+describe('a path on the filesystem a plugin does not have', () => {
+	// A font cache written for a device: it asks the app for its directories,
+	// makes them, walks them to trim old files, and writes a download through a
+	// temporary file. A plugin has no filesystem, so every question answers
+	// "nothing there" and the first write throws the IOException the JVM would
+	// — which the extension's own catch-all handles. Nothing pretends a file
+	// was written, and the request for its bytes is never made.
+	const source = kt(
+		'import keiyoushi.utils.applicationContext',
+		'class Demo {',
+		'    var fetched = 0',
+		'    fun dirs(): String {',
+		'        val files = File(applicationContext.filesDir, "player/fonts").apply { mkdirs() }',
+		'        val cache = File(applicationContext.cacheDir, "fonts")',
+		'        return listOf(files.path, files.name, files.parentFile?.path ?: "-", cache.exists().toString(), files.isFile.toString()).joinToString("|")',
+		'    }',
+		'    fun walked(): Int = listOf(File("/a"), File("/b")).flatMap { it.walkTopDown().filter { f -> f.isFile }.toList() }.size',
+		'    fun sizes(): String = listOf(File("/a/x.ttf").length(), File("/a/x.ttf").lastModified()).joinToString(",")',
+		'    fun moved(): String = listOf(File("/a").mkdirs(), File("/a").delete(), File("/a").renameTo(File("/b")), File("/a").setLastModified(1L)).joinToString(",")',
+		'    fun cached(name: String): String {',
+		'        val target = File(File(applicationContext.cacheDir, "fonts"), name)',
+		'        if (target.length() <= 0) {',
+		'            try {',
+		'                val tmp = File.createTempFile("font_", ".tmp", target.parentFile)',
+		'                fetched += 1',
+		'                tmp.copyTo(target, overwrite = true)',
+		'            } catch (e: Exception) {',
+		'                return "failed: ${e.message}"',
+		'            }',
+		'        }',
+		'        return "kept"',
+		'    }',
+		'    fun read(): String = try { File("/a/x").readBytes().size.toString() } catch (e: Exception) { "unreadable" }',
+		'}'
+	);
+
+	it('names, joins and takes apart a path, under the app directories', async () => {
+		const d = await instantiate('Demo', source);
+		expect(d.dirs()).toBe('/app/files/player/fonts|fonts|/app/files/player|false|false');
+	});
+
+	it('answers that nothing is there, and that nothing was changed', async () => {
+		const d = await instantiate('Demo', source);
+		expect(d.walked()).toBe(0);
+		expect(d.sizes()).toBe('0,0');
+		expect(d.moved()).toBe('false,false,false,false');
+	});
+
+	it('fails the first write as storage that is not there fails, before anything is fetched', async () => {
+		const d = await instantiate('Demo', source);
+		expect(d.cached('x.ttf')).toMatch(/^failed: \/app\/cache\/fonts: .*no filesystem/);
+		expect(d.fetched).toBe(0);
+		expect(d.read()).toBe('unreadable');
 	});
 });
 
