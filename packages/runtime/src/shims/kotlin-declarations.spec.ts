@@ -895,6 +895,29 @@ describe('a member with a reified type parameter, called bare', () => {
 		expect(d.nested('dict={"a":{"b":"c"},"d":{}}')).toBe(2);
 	});
 
+	it('infers the type from what the call is returned as', async () => {
+		// `return executeRequest(payload)` in a function declared to return
+		// `Resp` — Kotlin infers T from the return type. The grammar splits
+		// that `return` from its call, and the expected type was looked for on
+		// the bare `return` and not found, so the call was refused.
+		const d = await instantiate(
+			'Demo',
+			kt(
+				'@Serializable',
+				'class Resp(val a: String)',
+				'class Demo {',
+				'    private inline fun <reified T> executeRequest(text: String): T = text.parseAs<T>()',
+				'    suspend fun search(text: String): Resp {',
+				'        val payload = text.trim()',
+				'        return executeRequest(payload)',
+				'    }',
+				'    suspend fun first(text: String): String = search(text).a',
+				'}'
+			)
+		);
+		expect(await d.first(' {"a":"x"} ')).toBe('x');
+	});
+
 	it('decodes a class handed through the type parameter by its serializer, defaults and all', async () => {
 		// The same class decoded through a generic helper and decoded directly
 		// must agree: by shape alone, a field's default and its `with = …`

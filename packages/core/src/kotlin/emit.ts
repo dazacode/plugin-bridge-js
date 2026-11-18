@@ -5804,11 +5804,18 @@ class Emitter {
 			return;
 		}
 		const visit = (node: KNode): void => {
-			for (const child of kids(node)) {
+			const children = kids(node);
+			for (const [index, child] of children.entries()) {
 				// A nested function, class or object returns to itself.
 				if (EXPECTATION_BARRIERS.has(child.type)) continue;
 				if (child.type === 'jump_expression' && /^return(?![@\w])/.test(child.text)) {
-					this.expect(kids(child)[0], type);
+					// The grammar splits some `return f(x)` into a bare `return`
+					// and the call beside it — the emitter rejoins them, and the
+					// value they return is the sibling's.
+					this.expect(
+						kids(child)[0] ?? (child.text === 'return' ? children[index + 1] : undefined),
+						type
+					);
 				}
 				visit(child);
 			}
