@@ -19,14 +19,24 @@ import type { ForeignAdapter } from '@plugin-bridge/core/adapter';
 import type { ForeignFormat } from '@plugin-bridge/core/formats';
 
 import { aniyomiAdapter } from './aniyomi';
+import { aidokuAdapter } from './aidoku';
 import { cloudstreamAdapter } from './cloudstream';
+import { echoAdapter } from './echo';
 import { hayaseAdapter } from './hayase';
+import { ireaderAdapter } from './ireader';
+import { kotatsuAdapter } from './kotatsu';
 import { lnreaderAdapter } from './lnreader';
+import { manaAdapter } from './mana';
 import { mangayomiAdapter } from './mangayomi';
 import { mihonAdapter } from './mihon';
 import { nuvioAdapter } from './nuvio';
+import { paperbackAdapter } from './paperback';
+import { seanimeAdapter } from './seanime';
+import { shosetsuAdapter } from './shosetsu';
 import { soraAdapter } from './sora';
 import { stremioAdapter } from './stremio';
+import { suwatteAdapter } from './suwatte';
+import { tsundokuAdapter } from './tsundoku';
 
 /**
  * Ordered, and the order is a policy.
@@ -50,6 +60,18 @@ import { stremioAdapter } from './stremio';
  */
 export const FOREIGN_ADAPTERS: readonly ForeignAdapter[] = [
 	soraAdapter,
+	/*
+	 * The three object-shaped documents come first, and on the same argument
+	 * Stremio is last for: a parser that insists on an object with one named
+	 * array inside rejects every bare list in one comparison, so asking it early
+	 * costs nothing and asking it late costs every other format a parse.
+	 *
+	 * Each is separated from the other two by the array's *name*, which is the
+	 * only thing that distinguishes them and is enough: `scripts`, `sources` and
+	 * `scrapers` are three different words.
+	 */
+	shosetsuAdapter,
+	aidokuAdapter,
 	// **Ahead of its sibling, deliberately.** It is the same ecosystem's manga
 	// half and its negative is the cheapest here — the index it reads is a
 	// gzipped protobuf, so a text document is refused on the magic bytes. But
@@ -59,11 +81,41 @@ export const FOREIGN_ADAPTERS: readonly ForeignAdapter[] = [
 	// cleanly into a two-row catalogue of placeholders. This adapter answers
 	// with a sentence instead, and has to be asked first to get the chance.
 	mihonAdapter,
+	ireaderAdapter,
+	/*
+	 * **And ahead of the sibling, on a different ground.** A Tsundoku index is
+	 * the sibling array shape exactly, so the sibling accepts it and would list
+	 * a novel as an anime. What separates them is the package name: this
+	 * ecosystem's entries are all under a `.novelextension.` segment, and its
+	 * parse refuses anything else. That check is narrow enough to be a negative
+	 * for every other format and accurate enough to be asked first — the
+	 * sibling's parse has nothing equivalent, which is why the pair is declared
+	 * ambiguous in `adapters.spec.ts` rather than pretended apart.
+	 */
+	tsundokuAdapter,
 	aniyomiAdapter,
+	echoAdapter,
 	lnreaderAdapter,
 	cloudstreamAdapter,
 	hayaseAdapter,
 	mangayomiAdapter,
+	/*
+	 * `paperback` before the list formats that follow, because its index is
+	 * neither a list nor one of the three objects: it is an object keyed by
+	 * repository whose every *value* is another object of build metadata. No
+	 * other format nests two objects deep, so its refusal is one property read.
+	 */
+	paperbackAdapter,
+	/*
+	 * `suwatte` and `mana` are plain lists, so both must sit behind everything
+	 * distinctive. They are ahead of `seanime` and `kotatsu` only because those
+	 * two are told apart by a named field — `manifestURI` and `contentType` —
+	 * which is a cheaper question than "does it have an id and a version".
+	 */
+	seanimeAdapter,
+	kotatsuAdapter,
+	suwatteAdapter,
+	manaAdapter,
 	nuvioAdapter,
 	stremioAdapter
 ];
@@ -78,11 +130,22 @@ export function adapterFor(format: ForeignFormat): ForeignAdapter {
 
 export {
 	aniyomiAdapter,
+	aidokuAdapter,
 	cloudstreamAdapter,
+	echoAdapter,
 	hayaseAdapter,
+	ireaderAdapter,
+	kotatsuAdapter,
 	lnreaderAdapter,
+	manaAdapter,
 	mangayomiAdapter,
+	mihonAdapter,
 	nuvioAdapter,
+	paperbackAdapter,
+	seanimeAdapter,
+	shosetsuAdapter,
 	soraAdapter,
-	stremioAdapter
+	stremioAdapter,
+	suwatteAdapter,
+	tsundokuAdapter
 };

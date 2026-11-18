@@ -50,7 +50,17 @@ export const REPOSITORY_FORMATS = [
 	'aniyomi',
 	'cloudstream',
 	'stremio',
-	'nuvio'
+	'nuvio',
+	'kotatsu',
+	'paperback',
+	'suwatte',
+	'mana',
+	'seanime',
+	'aidoku',
+	'shosetsu',
+	'ireader',
+	'echo',
+	'tsundoku'
 ] as const;
 export type RepositoryFormat = (typeof REPOSITORY_FORMATS)[number];
 
@@ -71,7 +81,17 @@ export const FOREIGN_FORMATS = [
 	'aniyomi',
 	'cloudstream',
 	'stremio',
-	'nuvio'
+	'nuvio',
+	'kotatsu',
+	'paperback',
+	'suwatte',
+	'mana',
+	'seanime',
+	'aidoku',
+	'shosetsu',
+	'ireader',
+	'echo',
+	'tsundoku'
 ] as const satisfies readonly ForeignFormat[];
 
 /**
@@ -616,6 +636,147 @@ const PROFILES: Readonly<Record<ForeignFormat, FormatProfile>> = {
 			'whole runtime it expects. The converter for this format is not built yet — this ' +
 			'repository browses, but nothing here can be installed.',
 		implicitCookies: false
+	},
+	kotatsu: {
+		format: 'kotatsu',
+		label: 'Kotatsu',
+		/*
+		 * The odd one out: the index is not a list of artifacts at all. It is a
+		 * list of parser *names* with a base address, and the parser behind each
+		 * name is compiled into the client's own classpath. So a listing here
+		 * has nothing to download and nothing to read — browsing is the whole of
+		 * what can be done with one, and no amount of translator work changes
+		 * that until an extension's parser is shipped with the listing.
+		 */
+		tier: 'browse-only',
+		keyDocument: 'index',
+		refusal:
+			'A Kotatsu repository lists parser metadata only. The parser itself is compiled ' +
+			'into the Kotatsu client, so there is no source here to translate.',
+		implicitCookies: false
+	},
+	paperback: {
+		format: 'paperback',
+		label: 'Paperback',
+		/*
+		 * What is published is a `stable/<source>/index.js` — already bundled by
+		 * the ecosystem's own toolchain, and reaching a small `Application`
+		 * surface the shim supplies. That is an artifact rather than source, so
+		 * this converts for the same reason Nuvio's do.
+		 */
+		tier: 'convert',
+		keyDocument: 'index',
+		refusal: null,
+		// The framework's cookie store is an explicit interceptor a source
+		// installs itself, not something the base class carries for free.
+		implicitCookies: false
+	},
+	suwatte: {
+		format: 'suwatte',
+		label: 'Suwatte',
+		/*
+		 * Published as TypeScript *source* — one directory per source, with
+		 * `info.ts` beside the runner it exports — rather than as a bundle, so
+		 * the artifact fetched is a set of modules rather than one file.
+		 */
+		tier: 'convert',
+		keyDocument: 'index',
+		refusal: null,
+		// `createRequestManager` installs the cookie store as an interceptor the
+		// source asks for; a source that never asks gets nothing.
+		implicitCookies: false
+	},
+	mana: {
+		format: 'mana',
+		label: 'Mana',
+		tier: 'convert',
+		keyDocument: 'index',
+		refusal: null,
+		implicitCookies: false
+	},
+	seanime: {
+		format: 'seanime',
+		label: 'Seanime',
+		/*
+		 * Two document shapes: a marketplace array naming `manifestURI`s, and a
+		 * per-extension manifest naming its own payload. Both are JSON, and the
+		 * payload is JavaScript or TypeScript source.
+		 */
+		tier: 'convert',
+		keyDocument: 'index',
+		refusal: null,
+		// Its request layer keeps cookies in the extension's own state manager.
+		implicitCookies: false
+	},
+	aidoku: {
+		format: 'aidoku',
+		label: 'Aidoku',
+		/*
+		 * Written in Rust and published as `.aix`, which is a WebAssembly
+		 * module. That is the most promising of the refused formats — a wasm
+		 * module is the one artifact shape a browser can already run — but it
+		 * needs `aidoku-rs`'s own host surface supplied before anything loads,
+		 * and that is not built yet.
+		 */
+		tier: 'browse-only',
+		keyDocument: 'index',
+		refusal:
+			'Extensions in this format are written in Rust and published as WebAssembly ' +
+			'modules. Nothing here provides the host surface they import yet — this ' +
+			'repository browses, but nothing in it can be installed.',
+		implicitCookies: false
+	},
+	shosetsu: {
+		format: 'shosetsu',
+		label: 'Shosetsu',
+		/*
+		 * Lua, and every listing is a novel source.
+		 *
+		 * Refused twice over, and the medium is checked first: a reader learns
+		 * there is nowhere to show it before learning that the language is also
+		 * missing. Both sentences are true and the order is the useful one.
+		 */
+		tier: 'browse-only',
+		keyDocument: 'index',
+		refusal:
+			'Extensions in this format are Lua scripts for a novel client. Nothing here runs ' +
+			'Lua, and there is nowhere to show a novel.',
+		implicitCookies: false
+	},
+	ireader: {
+		format: 'ireader',
+		label: 'IReader',
+		/*
+		 * Kotlin against a Tachiyomi-shaped base class, which is the reason it
+		 * converts at all: the front-end behind the sibling formats reads this
+		 * API already, and the differences are member names rather than a
+		 * different way of describing a site.
+		 */
+		tier: 'convert',
+		keyDocument: 'index',
+		refusal: null,
+		implicitCookies: true
+	},
+	echo: {
+		format: 'echo',
+		label: 'Echo',
+		tier: 'convert',
+		keyDocument: 'index',
+		refusal: null,
+		implicitCookies: true
+	},
+	tsundoku: {
+		format: 'tsundoku',
+		label: 'Tsundoku',
+		/*
+		 * The Kotlin sibling again, and convertible on the same ground. Every
+		 * listing is a novel though, so the medium refuses first and the tier is
+		 * a statement about the day that changes.
+		 */
+		tier: 'convert',
+		keyDocument: 'index',
+		refusal: null,
+		implicitCookies: true
 	}
 };
 

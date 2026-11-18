@@ -15,10 +15,35 @@ describe('which formats carry cookies for an extension that never asked', () => 
 		// the session silently never carries.
 		expect(formatProfile('aniyomi').implicitCookies).toBe(true);
 
+		// The three Kotlin siblings, for the same reason and no wider one: the
+		// same base class hands every extension the same shared client, so a
+		// two-request session there is entitled to carry its first answer into
+		// its second. Nothing about the translator decides this — it is a fact
+		// about the platform each format was written for.
+		expect(formatProfile('ireader').implicitCookies).toBe(true);
+		expect(formatProfile('tsundoku').implicitCookies).toBe(true);
+		expect(formatProfile('echo').implicitCookies).toBe(true);
+
 		// False everywhere else, and that is the honest default: a format whose
 		// framework makes no such guarantee must not have its plugins granted
 		// state they were never written to expect.
-		for (const format of ['sora', 'mangayomi', 'hayase', 'lnreader'] as const) {
+		for (const format of [
+			'sora',
+			'mangayomi',
+			'hayase',
+			'lnreader',
+			'mihon',
+			'nuvio',
+			'stremio',
+			'cloudstream',
+			'kotatsu',
+			'paperback',
+			'suwatte',
+			'mana',
+			'seanime',
+			'aidoku',
+			'shosetsu'
+		] as const) {
 			expect(formatProfile(format).implicitCookies).toBe(false);
 		}
 	});
