@@ -43,11 +43,30 @@
  *
  * ## Chapters
  *
- * The ABI's three manga methods are dispatched to whichever exported class
- * carries the matching interface members (`getSearchResults`, `getChapters`,
- * `getChapterDetails`), discovered by walking the exported prototypes. No class
- * is required to carry all three: a source that implements search only still
- * converts and lists.
+ * The ABI's three manga methods are dispatched to whichever export carries the
+ * matching interface members (`getSearchResults`, `getChapters`,
+ * `getChapterDetails`). No export is required to carry all three: a source that
+ * implements search only still converts and lists.
+ *
+ * The export is the *instance* the bundle builds under the extension's own id
+ * when there is one — `e.Example = new class extends Base { constructor() {
+ * super({ domain: … }) } }` is how a template-built source is published, and
+ * the app reads that object. Constructing a class instead loses whatever the
+ * bundle passed its constructor, and an instance-only bundle had no class to
+ * construct at all. A class is the fallback, built with no arguments.
+ *
+ * ## Paging
+ *
+ * A search answers `{ items, metadata }`: `metadata` is the source's own
+ * cursor, opaque here, and the next page is asked for by handing it back. The
+ * first page is asked for with `undefined`, as the app does — a source writes
+ * `metadata?.page ?? 1`, and one that sends the cursor straight to its API
+ * sent the object this shim made up instead. So the cursor each page returned
+ * is kept, per query, and page N is asked for with page N-1's; a page asked
+ * for out of order walks forward to it. A missing cursor is the last page.
+ *
+ * `items` is what this format's 0.9 toolchain returns. `results` is the older
+ * toolchain's spelling of the same page, read when `items` is absent.
  */
 
 import { JS_RUNTIME } from './js-runtime';
@@ -57,6 +76,11 @@ import { DOM_RUNTIME_SOURCE } from './generated/dom-source';
 export interface PaperbackEntrypointOptions {
 	/** The converted plugin's id, which must equal the manifest's. */
 	readonly pluginId: string;
+	/**
+	 * The extension's own id, which the bundle publishes its instance under.
+	 * Absent, the export is chosen by the interface it carries alone.
+	 */
+	readonly foreignId?: string;
 	/** The extension's published bundle, verbatim. */
 	readonly script: string;
 }
@@ -67,6 +91,7 @@ ${DIGESTS}
 ${JS_RUNTIME}
 
 const __PLUGIN_ID = ${JSON.stringify(options.pluginId)};
+const __FOREIGN_ID = ${JSON.stringify(options.foreignId ?? '')};
 
 /** Whether this realm has a node-shaped global; both have \`globalThis\`. */
 var __root = globalThis;
@@ -513,20 +538,39 @@ ${options.script}
 
 /* --- the ABI -------------------------------------------------------------- */
 
-function __exportedClass() {
+/** How much of the interface a prototype or instance carries; 0 is none. */
+function __interfaceScore(target) {
+  var score = 0;
+  if (typeof target.getSearchResults === 'function') score += 1;
+  if (typeof target.getChapters === 'function') score += 2;
+  if (typeof target.getChapterDetails === 'function') score += 4;
+  return score;
+}
+
+/**
+ * The export to run: an instance the bundle built, or else a class to build.
+ * An instance outranks a class carrying the same interface, and one published
+ * under the extension's own id outranks both.
+ */
+function __exported() {
   var best = null;
-  var bestScore = -1;
+  var bestScore = 0;
   for (var key in source) {
     var candidate = source[key];
-    if (typeof candidate !== 'function' || candidate.prototype === undefined) continue;
     var score = 0;
-    if (typeof candidate.prototype.getSearchResults === 'function') score += 1;
-    if (typeof candidate.prototype.getChapters === 'function') score += 2;
-    if (typeof candidate.prototype.getChapterDetails === 'function') score += 4;
-    // The 'Extension' alias is the interface-bearing class rather than the
-    // implementation base it extends, so it breaks a tie.
-    if (/Extension$/.test(key)) score += 0.5;
-    if (score > bestScore) { best = candidate; bestScore = score; }
+    var instance = false;
+    if (typeof candidate === 'function' && candidate.prototype !== undefined) {
+      score = __interfaceScore(candidate.prototype);
+      // The 'Extension' alias is the interface-bearing class rather than the
+      // implementation base it extends, so it breaks a tie.
+      if (score > 0 && /Extension$/.test(key)) score += 0.5;
+    } else if (candidate !== null && typeof candidate === 'object') {
+      score = __interfaceScore(candidate);
+      instance = true;
+      if (score > 0) score += 1000;
+      if (score > 0 && __FOREIGN_ID.length > 0 && key === __FOREIGN_ID) score += 1000;
+    }
+    if (score > bestScore) { best = { value: candidate, instance: instance }; bestScore = score; }
   }
   return best;
 }
@@ -535,12 +579,13 @@ var __runner = null;
 
 async function __instance() {
   if (__runner !== null) return __runner;
-  var Constructor = __exportedClass();
-  if (Constructor === null) {
-    throw new Error('This converted source exports no class implementing a catalogue, chapter or page interface.');
+  var found = __exported();
+  if (found === null) {
+    throw new Error('This converted source exports nothing implementing a catalogue, chapter or page interface.');
   }
-  __runner = new Constructor();
-  if (typeof __runner.initialise === 'function') await __runner.initialise();
+  var runner = found.instance ? found.value : new found.value();
+  if (typeof runner.initialise === 'function') await runner.initialise();
+  __runner = runner;
   return __runner;
 }
 
@@ -557,7 +602,7 @@ function __mangaInfo() {
 /** A paged answer, in the ABI's shape rather than this format's. */
 function __page(value) {
   var decoded = value || {};
-  var rows = Array.isArray(decoded.results) ? decoded.results : [];
+  var rows = Array.isArray(decoded.items) ? decoded.items : Array.isArray(decoded.results) ? decoded.results : [];
   var entries = [];
   for (var i = 0; i < rows.length; i++) {
     var row = rows[i];
@@ -575,6 +620,32 @@ function __page(value) {
   return { entries: entries, hasMore: entries.length > 0 && decoded.metadata !== undefined && decoded.metadata !== null };
 }
 
+/*
+ * The cursor each search page answered with, by query: \`cursors[q][n]\` is
+ * what page n returned, which is what page n+1 is asked for with. Only the
+ * latest query is kept — a new one starts again from page 1.
+ */
+var __cursorQuery = null;
+var __cursors = [];
+
+async function __searchPage(runner, request, query, page) {
+  if (__cursorQuery !== query) { __cursorQuery = query; __cursors = []; }
+  var wanted = Math.max(1, Math.floor(Number(page) || 1));
+  // Walk forward from the furthest page already read, up to the one before.
+  for (var n = 1; n < wanted; n++) {
+    if (__cursors[n] !== undefined) continue;
+    var before = n === 1 ? undefined : __cursors[n - 1];
+    if (n > 1 && (before === undefined || before === null)) return { entries: [], hasMore: false };
+    var walked = (await runner.getSearchResults(request, before)) || {};
+    __cursors[n] = walked.metadata === undefined ? null : walked.metadata;
+  }
+  var metadata = wanted === 1 ? undefined : __cursors[wanted - 1];
+  if (wanted > 1 && (metadata === undefined || metadata === null)) return { entries: [], hasMore: false };
+  var answered = (await runner.getSearchResults(request, metadata)) || {};
+  __cursors[wanted] = answered.metadata === undefined ? null : answered.metadata;
+  return __page(answered);
+}
+
 export default {
   id: __PLUGIN_ID,
 
@@ -583,8 +654,7 @@ export default {
     var runner = await __instance();
     if (typeof runner.getSearchResults !== 'function') return { entries: [] };
     var request = { title: String(query), includedTags: [], excludedTags: [], parameters: {} };
-    var metadata = { offset: (Math.max(1, Number(page) || 1) - 1) * 20 };
-    return __page(await runner.getSearchResults(request, metadata));
+    return await __searchPage(runner, request, String(query), page);
   },
 
   async listChapters(sourceMediaId, ctx) {
