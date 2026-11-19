@@ -2038,6 +2038,19 @@ class Emitter {
 	 */
 	private ownerLabel: string | null = null;
 	private classMembers = new Set<string>();
+	/**
+	 * The class's properties that plainly hold a value nothing can call — a
+	 * literal number, string or boolean, or a declared `Int`, `String` and the
+	 * like — and that no `fun` of the same name sits beside.
+	 *
+	 * Kotlin keeps a property and a function in different namespaces, so a
+	 * bare `rateLimit(rateLimit)` in a class with `open val rateLimit = 5` is
+	 * not a call of the property: an `Int` has no `invoke`, and the call is
+	 * resolved to the extension `OkHttpClient.Builder.rateLimit` on the
+	 * implicit receiver. Read as a member, it was `this.rateLimit is not a
+	 * function` at the first request of a conversion that refused nothing.
+	 */
+	private valueOnlyMembers = new Set<string>();
 	private suspendMembers = new Set<string>();
 	/**
 	 * Properties of the class being emitted whose value is a Promise here: a
@@ -3019,6 +3032,7 @@ class Emitter {
 		// passthrough onto a shim, naming a method the source had declared
 		// forty lines further down.
 		const outerMembers = this.classMembers;
+		const outerValueOnly = this.valueOnlyMembers;
 		const outerSuspends = this.suspendMembers;
 		const outerAsyncProperties = this.asyncProperties;
 		const outerLabel = this.ownerLabel;
@@ -3086,6 +3100,17 @@ class Emitter {
 							: null
 				)
 				.filter((found): found is string => found !== null)
+		);
+		const functionNames = new Set(
+			members
+				.filter((child) => child.type === 'function_declaration')
+				.map((child) => this.nameOf(child))
+		);
+		this.valueOnlyMembers = new Set(
+			members
+				.filter((child) => child.type === 'property_declaration' && plainValue(child))
+				.map((child) => this.propertyName(child))
+				.filter((found): found is string => found !== null && !functionNames.has(found))
 		);
 		this.suspendMembers = new Set(
 			members
@@ -3341,6 +3366,7 @@ class Emitter {
 		this.enumScope = outerEnum;
 		this.selfClass = outerSelf;
 		this.classMembers = outerMembers;
+		this.valueOnlyMembers = outerValueOnly;
 		this.suspendMembers = outerSuspends;
 		this.asyncProperties = outerAsyncProperties;
 		this.extensionProperties = outerExtensionProperties;
@@ -10166,7 +10192,7 @@ class Emitter {
 		if (
 			implicit !== null &&
 			(name === 'rateLimit' || name === 'rateLimitHost') &&
-			!this.isSourceMember(name) &&
+			(!this.isSourceMember(name) || this.valueOnlyMembers.has(name)) &&
 			!this.extensionFunctions.has(name)
 		) {
 			return this.rateLimitCall(callee, implicit, name, args, lambda);
@@ -14163,6 +14189,30 @@ function receiverOf(node: KNode): string | null {
  * member through the named class, and a guess at which class a spelling means
  * is the wrong member called.
  */
+/**
+ * Whether a property plainly holds a value nothing can call: a number, string
+ * or boolean literal with no type written, or a declared Kotlin primitive or
+ * `String`. Anything else — a user type, which may declare `invoke`, a
+ * function type, a delegate — answers false.
+ */
+function plainValue(property: KNode): boolean {
+	const parts = kids(property);
+	if (parts.some((part) => part.type === 'property_delegate')) return false;
+	const declared = parts.find((part) => part.type === 'variable_declaration');
+	const type = declaredTypeName(kids(declared));
+	if (type !== null) {
+		return /^(?:Int|Long|Short|Byte|Double|Float|Boolean|Char|String)$/.test(type);
+	}
+	if (kids(declared).some((part) => part.type !== 'simple_identifier')) return false;
+	const value = parts[parts.indexOf(declared!) + 1];
+	return (
+		value !== undefined &&
+		/^(?:integer_literal|long_literal|real_literal|boolean_literal|string_literal|hex_literal)$/.test(
+			value.type
+		)
+	);
+}
+
 /** Whether a declaration's type, as written, is a function type (nullable or not). */
 function holdsFunction(children: readonly KNode[]): boolean {
 	let type = children.find(

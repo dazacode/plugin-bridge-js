@@ -6311,3 +6311,35 @@ describe('a class written with its package', () => {
 		expect(emission.js).not.toContain('org.jsoup');
 	});
 });
+
+describe('a bare call named like a plain property of the class', () => {
+	it('reaches the builder extension, since a number cannot be called', () => {
+		// `open val rateLimit = 5` and `configureClient() = rateLimit(rateLimit)`:
+		// Kotlin keeps the two names apart and an Int has no `invoke`, so the
+		// call is keiyoushi's `OkHttpClient.Builder.rateLimit`. Read as the
+		// member, it was `this.rateLimit is not a function` at the first request.
+		const emitted = translate(
+			kt(
+				'abstract class Theme : Source() {',
+				'    open val rateLimit = 5',
+				'    override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = rateLimit(rateLimit)',
+				'}'
+			)
+		);
+		expect(emitted.refusals).toEqual([]);
+		expect(emitted.js).toContain('__k.rateLimit(__recv, this.rateLimit, 1000)');
+	});
+
+	it('still calls a member function that shares the name', () => {
+		const emitted = translate(
+			kt(
+				'class Demo : Source() {',
+				'    val rateLimit = 5',
+				'    fun rateLimit(n: Int): Int = n',
+				'    fun go(): Int = rateLimit(rateLimit)',
+				'}'
+			)
+		);
+		expect(emitted.js).not.toContain('__k.rateLimit(');
+	});
+});
