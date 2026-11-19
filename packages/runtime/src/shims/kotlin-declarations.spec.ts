@@ -3465,3 +3465,35 @@ describe('toInt and toLong with a radix', () => {
 		expect(await demo.dec('42')).toBe(42);
 	});
 });
+
+describe("keiyoushi's top-level rc4", () => {
+	it('runs both ways, discards `skip` keystream bytes first, and keeps its requirements', async () => {
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'import keiyoushi.utils.rc4',
+				'import keiyoushi.utils.toHex',
+				'class Demo {',
+				'    fun plain(): String = rc4("Key".toByteArray(), "Plaintext".toByteArray()).toHex()',
+				'    fun back(): String = String(rc4("Key".toByteArray(), rc4("Key".toByteArray(), "Hi".toByteArray())))',
+				'    fun skipped(): String = rc4("Key".toByteArray(), "text".toByteArray(), 5).toHex()',
+				'    fun empty(): ByteArray = rc4(ByteArray(0), "x".toByteArray())',
+				'}'
+			)
+		);
+		// The classic published vector for key "Key".
+		expect(demo.plain()).toBe('bbf316e8d940af0ad3');
+		expect(demo.back()).toBe('Hi');
+		// Skipping five keystream bytes is the same as encrypting from byte
+		// five of a longer message: "Plaintext"'s ciphertext from index 5 on is
+		// the keystream there XORed with "text".
+		const keystream = [0xbb, 0xf3, 0x16, 0xe8, 0xd9, 0x40, 0xaf, 0x0a, 0xd3].map(
+			(byte, at) => byte ^ 'Plaintext'.charCodeAt(at)
+		);
+		const expected = [...'text']
+			.map((char, at) => (char.charCodeAt(0) ^ keystream[5 + at]).toString(16).padStart(2, '0'))
+			.join('');
+		expect(demo.skipped()).toBe(expected);
+		expect(() => demo.empty()).toThrow(/RC4 key must not be empty/);
+	});
+});

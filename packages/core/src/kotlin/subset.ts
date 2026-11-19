@@ -2048,6 +2048,8 @@ export const AWAITED_HOST_METHODS: ReadonlySet<string> = new Set([
  */
 export const FREE_FUNCTIONS: ReadonlyMap<string, string> = new Map([
 	['listOf', 'listOf'],
+	// keiyoushi's top-level stream cipher, `rc4(key, data, skip = 0)`.
+	['rc4', 'rc4'],
 	['mutableListOf', 'mutableListOf'],
 	['arrayListOf', 'mutableListOf'],
 	['listOfNotNull', 'listOfNotNull'],

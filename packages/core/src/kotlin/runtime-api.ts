@@ -732,6 +732,8 @@ export const RUNTIME_HELPERS = [
 	'initialized',
 	'decodeHex',
 	'decodeHexToString',
+	/* keiyoushi's top-level `rc4(key, data, skip)`. */
+	'rc4',
 	'jsonOpt',
 	'jsonGetString',
 	'jsonGetInt',
@@ -802,6 +804,7 @@ export type RuntimeHelper = (typeof RUNTIME_HELPERS)[number];
 export const HOST_BACKED_HELPERS: ReadonlySet<RuntimeHelper> = new Set([
 	'contentEquals',
 	'decodeHexToString',
+	'rc4',
 	'decodeToString',
 	'encodeToString',
 	'stringOf',

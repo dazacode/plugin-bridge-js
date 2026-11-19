@@ -7688,6 +7688,28 @@ var __k = {
   },
 
   /**
+   * keiyoushi's top-level 'rc4(key, data, skip = 0)': the stream cipher, both
+   * ways, over the same keystream the javax.crypto 'RC4' cipher uses here
+   * ('__rc4'), less 'skip' bytes discarded first. Its three requirements are
+   * kept as the IllegalArgumentException upstream throws, because a wrong key
+   * length decrypts to rubbish rather than failing.
+   */
+  rc4: function (key, data, skip) {
+    var keyBytes = __bytesOf(key);
+    var dropped = skip === undefined || skip === null ? 0 : Number(skip);
+    var fail = function (message) {
+      throw __kTagged(new Error(message), 'IllegalArgumentException');
+    };
+    if (keyBytes.length === 0) fail('RC4 key must not be empty');
+    if (keyBytes.length > 256) fail('RC4 key must not exceed 256 bytes, got ' + keyBytes.length);
+    if (!(dropped >= 0)) fail('RC4 skip must be non-negative, got ' + skip);
+    var input = __bytesOf(data);
+    var padded = new Uint8Array(dropped + input.length);
+    padded.set(input, dropped);
+    return __rc4(keyBytes, padded).slice(dropped);
+  },
+
+  /**
    * Registers a '@Serializable' class as a shape the decoder can recognise.
    *
    * The decoder answers plain JSON — that is deliberate, and everything that
