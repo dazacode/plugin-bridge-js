@@ -347,7 +347,7 @@ function entryFirst(files: readonly { path: string; source: string }[]): typeof 
  * which can only make an answer below *more* inclusive for a name the
  * translator would have had to resolve anyway.
  */
-function supertypesByClass(files: readonly { source: string }[]): Map<string, string[]> {
+export function supertypesByClass(files: readonly { source: string }[]): Map<string, string[]> {
 	const out = new Map<string, string[]>();
 	const declaration = /\bclass\s+([A-Za-z_]\w*)/g;
 	for (const { source } of files) {

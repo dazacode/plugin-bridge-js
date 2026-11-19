@@ -57,6 +57,7 @@ import { namesCookieJar, servesStreams, packageBundle } from '@plugin-bridge/cor
 import { settingKeyMap } from '@plugin-bridge/core/preferences';
 import { aniyomiPreferences } from './aniyomi-preferences';
 import { readMihonBuildFile } from './mihon-build-file';
+import { supertypesByClass } from './mihon';
 import { libraryFileSource, synchronyScriptOf } from './library-shims';
 import {
 	extensionDirectory,
@@ -577,6 +578,7 @@ export const aniyomiAdapter: ForeignAdapter = {
 			settingIds: settingKeyMap(settings),
 			baseUrl,
 			synchronyScript: synchrony?.text,
+			aniSource: descendsFrom(source.files, conversion.className, 'AniSource'),
 			...(generated === null ? {} : { generated: { name: generated.name, lang: generated.lang } })
 		});
 
@@ -735,6 +737,31 @@ function baseUrlFromPreference(
  * answer is a literal in that class, or in its header, or the literal default
  * of its domain setting, or nothing.
  */
+/**
+ * Whether the extension class descends from `base`, through its template or
+ * directly — walked over the files the conversion translated, as the manga
+ * adapter walks to `KeiSource`. See `AniyomiEntrypointOptions.aniSource`.
+ */
+function descendsFrom(
+	files: readonly { source: string }[],
+	className: string,
+	base: string
+): boolean {
+	const supertypes = supertypesByClass(files);
+	const seen = new Set<string>();
+	const pending = [className];
+	while (pending.length > 0) {
+		const name = pending.pop()!;
+		if (seen.has(name)) continue;
+		seen.add(name);
+		for (const parent of supertypes.get(name) ?? []) {
+			if (parent === base) return true;
+			pending.push(parent);
+		}
+	}
+	return false;
+}
+
 function baseUrlOfClass(
 	files: readonly { path: string; source: string }[],
 	className: string

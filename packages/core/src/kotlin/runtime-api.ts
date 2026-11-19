@@ -891,6 +891,11 @@ export const RUNTIME_GLOBALS = [
 	/* Aniyomi's spelling of the same library-refresh hint. */
 	'AnimeUpdateStrategy',
 	'SMangaUpdate',
+	/* keiyoushi's AniSource models: a title with its episodes or its seasons
+	   from one request, and a named group of related titles. */
+	'SAnimeUpdate',
+	'SAnimeSeasonUpdate',
+	'Related',
 	/* okhttp's HttpUrl, for `HttpUrl.Builder()` — a url built from nothing.
 	   Everything else on it is an instance member the runtime already has. */
 	'HttpUrl',

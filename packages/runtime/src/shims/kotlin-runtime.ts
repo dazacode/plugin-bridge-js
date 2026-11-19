@@ -15136,6 +15136,29 @@ function SMangaUpdate(manga, chapters) {
 }
 
 /**
+ * The video half's same pair, from keiyoushi's 'AniSource': 'SAnimeUpdate'
+ * is a title and its episodes from one request, and 'SAnimeSeasonUpdate' a
+ * title and its seasons. 'Related' is one named group of related titles.
+ * Plain holders upstream, with positional constructors, and the driver reads
+ * their fields by name (see 'aniyomi-entry.ts', '__ANI_SOURCE').
+ */
+function SAnimeUpdate(anime, episodes) {
+  if (!(this instanceof SAnimeUpdate)) return new SAnimeUpdate(anime, episodes);
+  this.anime = anime === undefined ? null : anime;
+  this.episodes = episodes === undefined ? null : episodes;
+}
+function SAnimeSeasonUpdate(anime, seasons) {
+  if (!(this instanceof SAnimeSeasonUpdate)) return new SAnimeSeasonUpdate(anime, seasons);
+  this.anime = anime === undefined ? null : anime;
+  this.seasons = seasons === undefined ? null : seasons;
+}
+function Related(name, animes) {
+  if (!(this instanceof Related)) return new Related(name, animes);
+  this.name = name;
+  this.animes = animes === undefined ? null : animes;
+}
+
+/**
  * A chapter, which is where the two ecosystems actually differ.
  *
  * 'chapter_number' rather than 'episode_number', and it is a Float in Kotlin

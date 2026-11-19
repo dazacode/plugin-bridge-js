@@ -2385,6 +2385,10 @@ export const GLOBAL_NAMES: ReadonlySet<string> = new Set([
 	'UpdateStrategy',
 	'AnimeUpdateStrategy',
 	'SMangaUpdate',
+	// keiyoushi's AniSource models — see `RUNTIME_GLOBALS`.
+	'SAnimeUpdate',
+	'SAnimeSeasonUpdate',
+	'Related',
 	'HttpUrl',
 	// androidx's preference types — see `RUNTIME_GLOBALS`.
 	'PreferenceCategory',
@@ -2877,6 +2881,11 @@ export const KNOWN_SIGNATURES: ReadonlyMap<string, readonly string[]> = new Map(
 	// construction site in the measured catalogue names both — 92 listings
 	// were refused on that alone — and the order is the data class's own.
 	['SMangaUpdate', ['manga', 'chapters']],
+	// keiyoushi's AniSource models, in their constructors' order — the
+	// catalogue writes `SAnimeUpdate(anime = …, episodes = …)` as often as not.
+	['SAnimeUpdate', ['anime', 'episodes']],
+	['SAnimeSeasonUpdate', ['anime', 'seasons']],
+	['Related', ['name', 'animes']],
 
 	// `Filter.Sort.Selection(index, ascending)`, the state of a Sort filter,
 	// which HeanCms-style sources build as `Selection(1, ascending = false)`.
@@ -3202,7 +3211,15 @@ export const ABI_MEMBERS: ReadonlySet<string> = new Set([
 	/* Details and chapters from one request — the current API's abstract
 	   member, which `KeiSource` subclasses implement instead of any chapter
 	   list member at all. `listChapters` runs it. */
-	'fetchMangaUpdate'
+	'fetchMangaUpdate',
+	/* The video half's same API, keiyoushi's `AniSource`: the base class makes
+	   `getEpisodeList`, `getHosterList`, `getVideoList` and `resolveVideo`
+	   final and routes each to one of these, so a subclass declares only
+	   these. `aniyomi-entry.ts` runs them under `__ANI_SOURCE`. */
+	'fetchAnimeUpdate',
+	'fetchHosterList',
+	'fetchVideoList',
+	'fetchResolvedVideo'
 ]);
 
 /**

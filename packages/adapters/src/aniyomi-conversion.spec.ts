@@ -187,7 +187,11 @@ interface Stream {
 	headers?: Record<string, string>;
 }
 
-async function convert(translated = TRANSLATED, className = 'Extension'): Promise<Uint8Array> {
+async function convert(
+	translated = TRANSLATED,
+	className = 'Extension',
+	aniSource = false
+): Promise<Uint8Array> {
 	return await packageBundle({
 		id: PLUGIN_ID,
 		name: 'Example',
@@ -207,7 +211,8 @@ async function convert(translated = TRANSLATED, className = 'Extension'): Promis
 			pluginId: PLUGIN_ID,
 			translatedSource: translated,
 			className,
-			baseUrl: BASE_URL
+			baseUrl: BASE_URL,
+			aniSource
 		}),
 		// Exactly as `aniyomi.ts` decides it: the format grants it, and the
 		// translated module is consulted only as the explicit half.
@@ -217,8 +222,12 @@ async function convert(translated = TRANSLATED, className = 'Extension'): Promis
 	});
 }
 
-async function load(translated = TRANSLATED, className = 'Extension'): Promise<Loaded> {
-	const bundle = await openPluginArchive(await convert(translated, className));
+async function load(
+	translated = TRANSLATED,
+	className = 'Extension',
+	aniSource = false
+): Promise<Loaded> {
+	const bundle = await openPluginArchive(await convert(translated, className, aniSource));
 	// A file rather than a `data:` URL: this bundle carries a whole runtime and
 	// is far past the length a data URL can be imported at.
 	const { writeFileSync, mkdtempSync } = await import('node:fs');
@@ -782,6 +791,68 @@ ${TWO_QUALITIES}${extra}
 		expect(
 			await ordering('  sortVideos(__recv) { return __k.reversed(__super.sortVideos(__recv)); }')
 		).toEqual(['1080p', '480p']);
+	});
+});
+
+describe("keiyoushi's AniSource, whose play path is final and routed", () => {
+	// The base class makes getEpisodeList, getHosterList, getVideoList and
+	// resolveVideo final, each running an abstract member the subclass writes.
+	// Walked as an ordinary source, the driver fetched the title page and ran
+	// the default parser over it: search worked and every title listed no
+	// episodes, with nothing refused.
+	const ANI = `
+class Extension {
+  constructor() { this.baseUrl = '${BASE_URL}'; }
+  configureClient(builder) { this.configured = (this.configured || 0) + 1; return builder; }
+  async fetchAnimeUpdate(anime, episodes, fetchDetails, fetchEpisodes) {
+    if (fetchDetails || !fetchEpisodes) throw new Error('asked for the wrong half');
+    const doc = (await this.client.newCall(GET(this.baseUrl + anime.url, {})).execute()).asJsoup();
+    return SAnimeUpdate(anime, __k.map(doc.select('ul.eps li'), (el) => {
+      const ep = SEpisode.create();
+      ep.episode_number = __k.toFloatOrNull(el.attr('data-num')) ?? 0;
+      ep.setUrlWithoutDomain(__k.nn(el.selectFirst('a'), 'a').attr('href'));
+      return ep;
+    }));
+  }
+  async fetchHosterList(episode) {
+    return __k.listOf(Hoster(this.baseUrl + '/host/a', 'Alpha'), Hoster(this.baseUrl + '/host/b', 'Beta'));
+  }
+  async fetchVideoList(hoster) {
+    const doc = (await this.client.newCall(GET(hoster.hosterUrl, {})).execute()).asJsoup();
+    return __k.map(doc.select('source'), (s) => Video(s.attr('src'), s.attr('label'), s.attr('src'), {}));
+  }
+}
+`;
+
+	it('lists episodes through fetchAnimeUpdate, with details off', async () => {
+		const plugin = await load(ANI, 'Extension', true);
+		const episodes = await plugin.listEpisodes(`${BASE_URL}/anime/one`, context().ctx);
+		expect(episodes.map((one) => one.number)).toEqual([1, 2]);
+	});
+
+	it('resolves through fetchHosterList and fetchVideoList', async () => {
+		const plugin = await load(ANI, 'Extension', true);
+		const streams = await plugin.resolve('one', HOSTED, context().ctx);
+		expect(streams.map((one) => one.url)).toEqual([
+			'https://cdn.example.invalid/a/1080.mp4',
+			'https://cdn.example.invalid/b/720.mp4'
+		]);
+	});
+
+	it('refuses by name a source whose base class would proxy its streams locally', async () => {
+		const plugin = await load(
+			ANI.replace('constructor() {', 'constructor() { this.streamInterceptors = __k.listOf({});'),
+			'Extension',
+			true
+		);
+		await expect(plugin.resolve('one', HOSTED, context().ctx)).rejects.toThrow(
+			/AniSource streamInterceptors/
+		);
+	});
+
+	it('is an ordinary source when the class does not descend from it', async () => {
+		const plugin = await load(ANI, 'Extension', false);
+		await expect(plugin.listEpisodes(`${BASE_URL}/anime/one`, context().ctx)).rejects.toThrow();
 	});
 });
 

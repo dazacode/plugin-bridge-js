@@ -139,6 +139,23 @@ export interface AniyomiEntrypointOptions {
 	 * byte-identical to one built before this existed.
 	 */
 	readonly generated?: { readonly name: string; readonly lang: string };
+	/**
+	 * Whether the class descends from keiyoushi's \`AniSource\`, the video
+	 * half's counterpart of the manga \`KeiSource\`.
+	 *
+	 * A different base class, not a style. It makes \`client\` final — the
+	 * shared client with the extension's \`configureClient\` applied, which is
+	 * where its rate limit is declared — and it makes the four play-path
+	 * members final too, each routed to an abstract one the subclass writes
+	 * instead: \`getEpisodeList\` runs \`fetchAnimeUpdate(anime, [], false,
+	 * true).episodes\`, \`getHosterList\` runs \`fetchHosterList\`,
+	 * \`getVideoList(hoster)\` runs \`fetchVideoList\`, and \`resolveVideo\` runs
+	 * \`fetchResolvedVideo\`. None of that is in the translated source, because
+	 * none of it is in the extension, and without it the driver walked the
+	 * request/parse defaults the base class throws from: a title whose search
+	 * worked listed no episodes, with nothing refused.
+	 */
+	readonly aniSource?: boolean;
 }
 
 /**
@@ -242,6 +259,29 @@ if (typeof __source.headersBuilder !== 'function') {
  * extension that overrides \`client\` with its own interceptor chain means
  * that one, and it is already on the object by the time this runs.
  */
+/**
+ * keiyoushi's \`AniSource\` client, which is final: the shared client, rebuilt
+ * with the extension's \`configureClient\` applied — \`configureClient() =
+ * rateLimit(5)\` is where these sources declare their pacing. Lazy, as
+ * upstream's is. See \`AniyomiEntrypointOptions.aniSource\`.
+ */
+if (__ANI_SOURCE) {
+  var __aniClient = null;
+  Object.defineProperty(__source, 'client', {
+    configurable: true,
+    get: function () {
+      if (__aniClient !== null) return __aniClient;
+      var builder = network.client.newBuilder();
+      if (typeof __source.configureClient === 'function') {
+        var configured = __source.configureClient(builder);
+        if (configured !== undefined && configured !== null) builder = configured;
+      }
+      __aniClient = builder.build();
+      return __aniClient;
+    }
+  });
+}
+
 for (const __own of [
   ['client', client],
   ['network', network],
@@ -772,6 +812,7 @@ function __arrayOf(value) {
  * signal that survives translation, unlike the argument types Kotlin used.
  */
 function __hasHosters() {
+  if (__ANI_SOURCE) return true;
   return __overrides('getHosterList', 1) || __declares('hosterListRequest') ||
     __declares('hosterListParse') || __declares('hosterListSelector') ||
     __declares('hosterFromElement');
@@ -809,6 +850,9 @@ async function __hosterListDefault(episode) {
 
 /** The hoster list, with the extension's own override preferred. */
 async function __hosterList(episode) {
+  // AniSource's getHosterList is final and is 'fetchHosterList', which it
+  // declares abstract, so a subclass always writes one.
+  if (__ANI_SOURCE) return __arrayOf(await __call('fetchHosterList', episode));
   return __arrayOf(
     __overrides('getHosterList', 1)
       ? await __call('getHosterList', episode)
@@ -863,6 +907,14 @@ async function __videoListDefault(source) {
 /** The videos one hoster offers, fetched only when it did not carry them. */
 async function __hosterVideos(hoster) {
   if (Array.isArray(hoster.videoList)) return hoster.videoList;
+  if (__ANI_SOURCE) {
+    // Upstream's default throws, so a hoster with no list and no override is
+    // the extension's own unsupported path, said as such.
+    if (!__declares('fetchVideoList')) {
+      throw __unsupported('This extension lists a hoster without its videos and declares no fetchVideoList.');
+    }
+    return __arrayOf(await __call('fetchVideoList', hoster));
+  }
   return __arrayOf(
     __overrides('getVideoList', 1)
       ? await __call('getVideoList', hoster)
@@ -992,8 +1044,9 @@ async function __playable(video) {
   let url = __videoUrlOf(current);
   if (__isPlayable(url)) return { video: current, url: url };
 
-  if (__declares('resolveVideo')) {
-    const resolved = await __call('resolveVideo', current);
+  const resolver = __ANI_SOURCE ? 'fetchResolvedVideo' : 'resolveVideo';
+  if (__declares(resolver)) {
+    const resolved = await __call(resolver, current);
     if (resolved === null || resolved === undefined) return null;
     current = resolved;
     url = __videoUrlOf(current);
@@ -1068,7 +1121,8 @@ function __streamLabel(quality, hoster) {
 export function aniyomiEntrypoint(options: AniyomiEntrypointOptions): string {
 	const constants = [
 		`const __PLUGIN_ID = ${JSON.stringify(options.pluginId)};`,
-		`const __BASE_URL = ${JSON.stringify(options.baseUrl.replace(/\/+$/, ''))};`
+		`const __BASE_URL = ${JSON.stringify(options.baseUrl.replace(/\/+$/, ''))};`,
+		`const __ANI_SOURCE = ${options.aniSource === true};`
 	].join('\n');
 
 	// Before the runtime rather than beside the other constants: the preference
@@ -1163,7 +1217,11 @@ export default {
     // The override first, for the reason '__shelf' gives: a source that wrote
     // its own 'getEpisodeList' usually wrote 'episodeListRequest' as a throw.
     let parsed;
-    if (__overrides('getEpisodeList', 1)) {
+    if (__ANI_SOURCE) {
+      // AniSource's final getEpisodeList: details off, episodes on.
+      const update = await __call('fetchAnimeUpdate', anime, [], false, true);
+      parsed = update && typeof update === 'object' ? update.episodes : null;
+    } else if (__overrides('getEpisodeList', 1)) {
       parsed = await __call('getEpisodeList', anime);
     } else {
       const response = await __client().newCall(__episodeRequest(anime)).execute();
@@ -1210,6 +1268,16 @@ export default {
         '(createHttpServer) and pointing the player at it. Yorozo runs plugins ' +
         'with no ambient capability and no local server, so there is nothing ' +
         'here for that to bind to, and this source cannot be played by this build.'
+      );
+    }
+    // The same server, under AniSource's name for it: a source with stream
+    // interceptors has the base class rewrite those videos to a localhost
+    // proxy it starts (SelfProxy) — ADR-0006's boundary, said up front.
+    if (__ANI_SOURCE && __arr(__source.streamInterceptors || []).length > 0) {
+      throw __unsupported(
+        'This extension plays through a local proxy its base class starts on the ' +
+        'device (AniSource streamInterceptors). Yorozo runs plugins with no local ' +
+        'server, so this source cannot be played by this build.'
       );
     }
 
