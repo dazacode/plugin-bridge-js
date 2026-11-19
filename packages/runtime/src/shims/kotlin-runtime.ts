@@ -2420,7 +2420,29 @@ function __millisOf(value) {
  */
 var System = {
   currentTimeMillis: function () { return Date.now(); },
-  nanoTime: function () { return Date.now() * 1000000; }
+  nanoTime: function () { return Date.now() * 1000000; },
+  /**
+   * 'System.arraycopy(src, srcPos, dest, destPos, length)': copies as if
+   * through a temporary, so an overlapping copy within one array is right,
+   * and throws as Java does when a range falls outside either array — a short
+   * key copied into a 32-byte buffer is how one extractor family pads an AES
+   * key, and a copy that did nothing would decrypt to rubbish.
+   */
+  arraycopy: function (src, srcPos, dest, destPos, length) {
+    if (src === null || src === undefined || dest === null || dest === undefined) {
+      throw __kTagged(new Error('System.arraycopy was handed a null array.'), 'NullPointerException');
+    }
+    var from = Number(srcPos);
+    var to = Number(destPos);
+    var count = Number(length);
+    if (count < 0 || from < 0 || to < 0 || from + count > src.length || to + count > dest.length) {
+      throw __kTagged(new Error('System.arraycopy: last source index ' + (from + count) +
+        ' out of bounds for length ' + src.length + ', or destination ' + (to + count) +
+        ' for length ' + dest.length + '.'), 'IndexOutOfBoundsException');
+    }
+    var held = Array.prototype.slice.call(src, from, from + count);
+    for (var i = 0; i < count; i += 1) dest[to + i] = held[i];
+  }
 };
 
 /**

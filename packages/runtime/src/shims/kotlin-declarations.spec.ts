@@ -3558,3 +3558,33 @@ describe('a `for` over a map', () => {
 		expect(demo.chars()).toBe('a|b');
 	});
 });
+
+describe('java.lang.System', () => {
+	it('copies with arraycopy, overlapping or not, and refuses a static it does not have', async () => {
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    fun padded(): String {',
+				'        val key = ByteArray(6)',
+				'        val src = "abc".toByteArray()',
+				'        System.arraycopy(src, 0, key, 0, src.size.coerceAtMost(6))',
+				'        return key.joinToString(",")',
+				'    }',
+				'    fun shifted(): String {',
+				'        val a = intArrayOf(1, 2, 3, 4)',
+				'        System.arraycopy(a, 0, a, 1, 3)',
+				'        return a.joinToString(",")',
+				'    }',
+				'    fun past(): Unit = System.arraycopy(ByteArray(2), 0, ByteArray(2), 1, 2)',
+				'}'
+			)
+		);
+		expect(demo.padded()).toBe('97,98,99,0,0,0');
+		expect(demo.shifted()).toBe('1,1,2,3');
+		expect(() => demo.past()).toThrow(/out of bounds/);
+		expect(
+			refusalNames(kt('class D {', '    fun e(): String? = System.getenv("X")', '}'))
+		).toContain('`System.getenv()`');
+	});
+});

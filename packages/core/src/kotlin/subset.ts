@@ -2317,7 +2317,12 @@ export const JSOUP_STATICS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
 	// failure a filesystem that is not there gives. Not jsoup, but the same
 	// question: a capitalised receiver the runtime defines only in part.
 	// `File(path)` itself is a path on that filesystem — see `__KFile`.
-	['File', new Set(['createTempFile'])]
+	['File', new Set(['createTempFile'])],
+	// java.lang.System's three this ecosystem calls. Its other statics —
+	// properties, the environment, `exit` — are a process this sandbox does not
+	// have, and one passed through died as "is not a function" inside the
+	// extractor's catch, which reads as a site that returned nothing.
+	['System', new Set(['currentTimeMillis', 'nanoTime', 'arraycopy'])]
 ]);
 
 /**
