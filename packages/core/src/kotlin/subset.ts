@@ -2672,6 +2672,11 @@ const SUPER_MEMBERS_IMAGE: ReadonlySet<string> = new Set([
 	'pageListRequest',
 	'imageUrlRequest',
 	'imageRequest',
+	// KeiSource's: the image request its final `imageRequest` builds from,
+	// and the url-search pair behind its final `getSearchManga`.
+	'getImageRequest',
+	'getMangasByUrl',
+	'getMangaByUrl',
 
 	'popularMangaNextPageSelector',
 	'searchMangaNextPageSelector',
@@ -2800,7 +2805,9 @@ export const SUPER_SUSPEND_MEMBERS: ReadonlySet<string> = new Set([
 	// The manga half's `suspend fun getMangaUpdate(…): SMangaUpdate`. Read as
 	// `.manga` straight off the call, so an unawaited one reads a field off a
 	// promise and hands back undefined as the title.
-	'getMangaUpdate'
+	'getMangaUpdate',
+	'getMangasByUrl',
+	'getMangaByUrl'
 ]);
 
 /**
@@ -3240,6 +3247,10 @@ export const HOST_ENTRY_POINTS: ReadonlySet<string> = new Set([
 	// and the client went out without the rate limit it declares.
 	'configureClient',
 	'configureHeaders',
+	// KeiSource's page image request and how it goes out, which the driver
+	// asks for each page — see `shims/mihon-entry.ts`.
+	'getImageRequest',
+	'imageFetch',
 
 	// requests
 	'animeDetailsRequest',

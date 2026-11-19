@@ -711,4 +711,47 @@ class Extension {
 		);
 		expect(foreign.pages[0].url).toBe('https://cdn.example.invalid|/c/3#yorozo-memo=nope');
 	});
+
+	it('hands the host a KeiSource page image with the headers a browser sends for one', async () => {
+		// KeiSource's final `imageRequest` is the source's `getImageRequest`,
+		// sent as its `imageFetch`. A template extending the base request with
+		// `super.getImageRequest(page).newBuilder().header(…)` keeps both.
+		const module = await load(
+			`
+class Extension {
+  constructor() { this.baseUrl = '${BASE_URL}'; }
+  async fetchMangaUpdate(manga) {
+    const chapter = SChapter.create();
+    chapter.url = '/c/1';
+    return SMangaUpdate(manga, [chapter]);
+  }
+  async getPageList(chapter) {
+    return [{ index: 0, url: '/c/1', imageUrl: 'https://cdn.example.invalid/1.webp' }];
+  }
+  getImageRequest(page) {
+    return __super.getImageRequest(page).newBuilder().header('X-Page', page.url).build();
+  }
+}
+`,
+			{},
+			true
+		);
+		const { ctx } = recording();
+		const chapters = await module.listChapters('/m', ctx);
+		const read = (await module.readChapter(
+			'/m',
+			{ number: 1, sourceChapterId: chapters[0].sourceChapterId },
+			ctx
+		)) as unknown as { pages: { url: string; headers: Record<string, string> }[] };
+		expect(read.pages[0].url).toBe('https://cdn.example.invalid/1.webp');
+		expect(read.pages[0].headers).toMatchObject({
+			'X-Page': '/c/1',
+			Referer: `${BASE_URL}/`,
+			Accept: expect.stringMatching(/^image\/avif,image\/webp/),
+			'Sec-Fetch-Dest': 'image',
+			'Sec-Fetch-Mode': 'no-cors',
+			'Sec-Fetch-Site': 'same-site',
+			Priority: 'i'
+		});
+	});
 });

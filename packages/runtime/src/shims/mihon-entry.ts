@@ -197,6 +197,11 @@ function __supplyBase(proto) {
       set: ownValue('headers')
     });
   }
+  // KeiSource's 'imageFetch': how page images go out, Fetch.IMAGE unless the
+  // source says otherwise ('override val imageFetch = Fetch.NONE').
+  if (__KEI_SOURCE && !('imageFetch' in proto)) {
+    define('imageFetch', { get: function () { return Fetch.IMAGE; }, set: ownValue('imageFetch') });
+  }
   if (__KEI_SOURCE && !('client' in proto)) {
     define('client', {
       get: function () {
@@ -378,6 +383,22 @@ const __super = {
      this is the hook upstream added for exactly that. */
   imageRequest: function (page) {
     return GET(__absolute(page.imageUrl || page.url, __BASE_URL), __headers());
+  },
+  /* KeiSource's own 'getImageRequest(page)', which its final 'imageRequest'
+     builds from and which theme templates extend with
+     'super.getImageRequest(page).newBuilder().header(…)': a GET of the image
+     with the source's headers. */
+  getImageRequest: function (page) {
+    return Request.Builder().url(__absolute(page.imageUrl || page.url, __BASE_URL)).headers(__headers()).build();
+  },
+  /* KeiSource's 'getMangasByUrl(url, page)': the one manga 'getMangaByUrl'
+     resolves, and no next page. Reached when a search query is a url. */
+  getMangasByUrl: async function (url, page) {
+    const manga = await __call('getMangaByUrl', [url]);
+    return { mangas: manga === null || manga === undefined ? [] : [manga], hasNextPage: false };
+  },
+  getMangaByUrl: async function () {
+    throw new Error('getMangaByUrl not implemented');
   },
 
   popularMangaNextPageSelector: function () { return ''; },
@@ -1001,7 +1022,29 @@ export default {
       // reason 'imageRequest' is a separate member upstream and the whole
       // reason 'PageImage.headers' is in the ABI.
       let headers;
-      if (__declares('imageRequest')) {
+      if (__KEI_SOURCE) {
+        // KeiSource's final 'imageRequest': the source's 'getImageRequest',
+        // and a GET with no Fetch of its own goes out as its 'imageFetch' —
+        // the headers a browser sends for an <img>. The host fetches the
+        // image, so those headers are worked out here and handed over.
+        try {
+          const asked = { index: pages.length, url: row.url || '', imageUrl: image };
+          let request = __declares('getImageRequest')
+            ? await __source.getImageRequest(asked)
+            : __super.getImageRequest(asked);
+          if (request && typeof request === 'object' && request.__tags !== undefined) {
+            if (request.method === 'GET' && !request.__tags.has(__FETCH_KIND_TAG)) {
+              const fetch = __source.imageFetch;
+              request = __k.fetchOn(request.newBuilder(), __isFetch(fetch) ? fetch : Fetch.IMAGE).build();
+            }
+            request = __browserRequest(request);
+            image = String(request.url);
+            headers = request.headers;
+          }
+        } catch (error) {
+          /* A builder that throws leaves the page reachable without headers. */
+        }
+      } else if (__declares('imageRequest')) {
         try {
           const request = __source.imageRequest({ index: pages.length, url: row.url || '', imageUrl: image });
           if (request && typeof request === 'object') {
