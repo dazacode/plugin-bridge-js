@@ -4714,6 +4714,29 @@ describe('a decode behind a safe call', () => {
 	});
 });
 
+describe('a template member that returns an interceptor', () => {
+	it('is not awaited from the subclass, while a fetching one still is', () => {
+		// Its `chain.proceed(…)` runs per request, inside the interceptor. Read
+		// as a fetch, a subclass's `apply { addInterceptor(…()) }` became async
+		// and handed the base class a Promise where a builder belongs.
+		const emission = translate(
+			kt(
+				'abstract class Theme : Source() {',
+				'    open fun acceptHeaderInterceptor() = Interceptor { chain -> chain.proceed(chain.request()) }',
+				'    open suspend fun fetchThing(): String = client.get("https://example.invalid").body.string()',
+				'}',
+				'class Demo : Theme() {',
+				'    fun configure(b: OkHttpClient.Builder) = b.apply { addInterceptor(acceptHeaderInterceptor()) }',
+				'    suspend fun thing(): String = fetchThing()',
+				'}'
+			)
+		);
+		expect(emission.js).toContain('\tconfigure(b) {');
+		expect(emission.js).toContain('this.addInterceptor(__self.acceptHeaderInterceptor())');
+		expect(emission.js).toContain('return (await this.fetchThing());');
+	});
+});
+
 describe('a renamed field', () => {
 	it('reads @SerialName as the string its literal spells', () => {
 		// `"\$t"` is the key `$t`, which every Blogger JSON feed keys its text by.

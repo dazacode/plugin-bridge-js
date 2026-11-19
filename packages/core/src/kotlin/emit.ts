@@ -5462,7 +5462,16 @@ class Emitter {
 							this.entrySuspends.add(`${owner}.${method}`);
 						}
 					}
-					for (const name of this.blockingMembers(members)) {
+					// Without `.proceed(` for the reason given above: this set is
+					// read from other files — a helper, and a subclass calling
+					// the template it extends — and a template member that
+					// *returns* an interceptor (`fun acceptHeaderInterceptor() =
+					// Interceptor { chain -> chain.proceed(…) }`) is not async.
+					// Counted, a subclass's `configureClient() = apply {
+					// addInterceptor(acceptHeaderInterceptor()) }` awaited it,
+					// became async, and handed the base class a Promise where a
+					// builder belongs: "builder.build is not a function".
+					for (const name of this.blockingMembers(members, CROSS_FILE_BLOCKING_CALLS)) {
 						this.entrySuspends.add(`${owner}.${name}`);
 					}
 				}
