@@ -474,6 +474,12 @@ const BLOCKING_CALLS =
 	/\.(?:execute|awaitSuccess|await|doFinal|generateKeyPair|setDataSource|verify|proceed)\s*\(|(?<!\bMath)\.sign\s*\(|\bThread\s*\.\s*sleep\s*\(|\b(?:client|[a-z]\w*Client)\s*\.\s*(?:get|post|put|head)\s*\(/;
 
 /**
+ * A property initialiser that reads the host's cookie jar, which is the one
+ * blocking call measured in a constructor here (`blockingProperties`).
+ */
+const EAGER_BLOCKING_INITIALISER = /\.loadForRequest\s*\(/;
+
+/**
  * Members the host calls synchronously, which therefore cannot be emitted
  * `async`: the headers are built inside every request the extension writes,
  * `GET(url, headers)`, with no await anywhere to put.
@@ -2058,6 +2064,13 @@ class Emitter {
 	 * A read of one is awaited, as a call to a blocking member is.
 	 */
 	private asyncProperties = new Set<string>();
+	/**
+	 * Of those, the plain ones — `private val cookies =
+	 * client.cookieJar.loadForRequest(url)` — whose initialiser blocks. Kotlin
+	 * runs it in the constructor; here the constructor stores the Promise, and
+	 * every read awaits it, as for a blocking `lazy`.
+	 */
+	private eagerAsyncProperties = new Set<string>();
 	private readonly signatures = new Map<string, readonly string[]>(KNOWN_SIGNATURES);
 	private readonly ambiguousSignatures = new Set<string>();
 	/** See `ReceiverSlots`. Declared here and next door, merged by name. */
@@ -3035,6 +3048,7 @@ class Emitter {
 		const outerValueOnly = this.valueOnlyMembers;
 		const outerSuspends = this.suspendMembers;
 		const outerAsyncProperties = this.asyncProperties;
+		const outerEagerAsync = this.eagerAsyncProperties;
 		const outerLabel = this.ownerLabel;
 		const outerSelf = this.selfClass;
 		const outerExtensionProperties = this.extensionProperties;
@@ -3121,7 +3135,12 @@ class Emitter {
 				.filter((found): found is string => found !== null)
 		);
 		for (const name of this.blockingMembers(members)) this.suspendMembers.add(name);
-		this.asyncProperties = this.blockingProperties(members, this.suspendMembers);
+		this.eagerAsyncProperties = new Set<string>();
+		this.asyncProperties = this.blockingProperties(
+			members,
+			this.suspendMembers,
+			this.eagerAsyncProperties
+		);
 
 		this.registerExtensions(members, 'method');
 		// A companion's members hoist to module scope, so an extension function
@@ -3369,6 +3388,7 @@ class Emitter {
 		this.valueOnlyMembers = outerValueOnly;
 		this.suspendMembers = outerSuspends;
 		this.asyncProperties = outerAsyncProperties;
+		this.eagerAsyncProperties = outerEagerAsync;
 		this.extensionProperties = outerExtensionProperties;
 		this.extensionSetters = outerSetters;
 		this.preferenceStores = outerStores;
@@ -3689,7 +3709,11 @@ class Emitter {
 	 * initialiser still cannot be awaited, and is refused where it is, as a
 	 * suspending initialiser always was.
 	 */
-	private blockingProperties(members: readonly KNode[], suspends: Set<string>): Set<string> {
+	private blockingProperties(
+		members: readonly KNode[],
+		suspends: Set<string>,
+		eager: Set<string> = new Set<string>()
+	): Set<string> {
 		const properties = new Map<string, string>();
 		for (const [index, child] of members.entries()) {
 			if (child.type !== 'property_declaration') continue;
@@ -3698,6 +3722,19 @@ class Emitter {
 			const delegate = kids(child).find((part) => part.type === 'property_delegate');
 			const lazy = delegate !== undefined && /^by\s+lazy\b/.test(delegate.text);
 			const getter = accessorOf(child, members[index + 1], 'getter');
+			// A plain initialiser that reads the host's cookie jar: the one
+			// blocking call a constructor in this ecosystem makes. Its Promise is
+			// held from construction — see `eagerAsyncProperties`.
+			if (
+				!lazy &&
+				getter === undefined &&
+				delegate === undefined &&
+				EAGER_BLOCKING_INITIALISER.test(child.text)
+			) {
+				eager.add(name);
+				properties.set(name, child.text);
+				continue;
+			}
 			if (!lazy && getter === undefined) continue;
 			properties.set(
 				name,
@@ -3706,7 +3743,7 @@ class Emitter {
 					: child.text
 			);
 		}
-		const found = new Set<string>();
+		const found = new Set<string>(eager);
 		if (properties.size === 0) return found;
 		const functions = new Map<string, string>();
 		for (const child of members) {
@@ -6105,6 +6142,14 @@ class Emitter {
 		}
 		const emitted = this.functionScope('function', null, [], () => this.expr(initialiser));
 		// A property initialiser runs inside a constructor, which cannot await.
+		// One whose every read is awaited — see `blockingProperties` — holds the
+		// Promise instead, started here, at construction, as Kotlin starts it.
+		if (emitted.isAsync && this.eagerAsyncProperties.has(name)) {
+			const started = emitted.usesSelf
+				? `(async () => ${block(['const __self = this;', `return ${emitted.text};`])})()`
+				: `(async () => ${emitted.text})()`;
+			return `${this.helper('pending')}(${started})`;
+		}
 		if (emitted.isAsync) this.refuse(initialiser, 'a suspending property initialiser');
 		if (!emitted.usesSelf) return emitted.text;
 		return `(() => ${block(['const __self = this;', `return ${emitted.text};`])})()`;

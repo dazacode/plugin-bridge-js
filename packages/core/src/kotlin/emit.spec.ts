@@ -417,6 +417,7 @@ const helpers: Record<string, (...args: never[]) => unknown> = {
 	// The runtime's walks a map as entries and a string as chars; the
 	// fixtures here iterate lists and ranges, which it passes through.
 	forIn: (value: Any) => (typeof value === 'string' ? value.split('') : value),
+	pending: (value: Any) => value,
 	trimMargin: (value: string) =>
 		value
 			.split('\n')
@@ -3614,6 +3615,26 @@ describe('a name declared somewhere the emitter had not looked', () => {
 		expect(emitted.js).toContain('await this.page(');
 		// And the member that merely calls it is awaited too, transitively.
 		expect(emitted.js).toContain('async build(');
+	});
+
+	it('holds a jar-reading property initialiser as a Promise its reads await', () => {
+		// `private val cookieList = client.cookieJar.loadForRequest(url)` runs
+		// in Kotlin's constructor; the jar read is the host's, so a Promise
+		// here. Refused as a suspending initialiser, it stopped a shared
+		// extractor's every listing; held, it starts at construction as Kotlin
+		// starts it, and each read waits for it.
+		const emitted = translate(
+			kt(
+				'class Extractor(private val client: OkHttpClient) {',
+				'    private val cookieList = client.cookieJar.loadForRequest("https://example.invalid".toHttpUrl())',
+				'    fun header(): String = cookieList.joinToString("; ") { "${it.name}=${it.value}" }',
+				'}'
+			)
+		);
+		expect(emitted.refusals).toEqual([]);
+		expect(emitted.js).toContain('this.cookieList = __k.pending((async () =>');
+		expect(emitted.js).toContain('(await this.cookieList)');
+		expect(emitted.js).toContain('async header(');
 	});
 
 	it('awaits MediaMetadataRetriever.setDataSource, which reads the file it is given', () => {

@@ -5423,6 +5423,20 @@ var __k = {
 
   /** A small Kotlin-style iterator for code that uses hasNext()/next(). */
   /**
+   * A Promise a constructor started for a property whose initialiser blocks,
+   * held so its reads can await it. Marked handled, because a property nobody
+   * reads must not take the isolate down with an unhandled rejection; a read
+   * still awaits the same Promise and sees the failure, as Kotlin's
+   * constructor would have.
+   */
+  pending: function (promise) {
+    if (promise !== null && promise !== undefined && typeof promise.catch === 'function') {
+      promise.catch(function () {});
+    }
+    return promise;
+  },
+
+  /**
    * What a Kotlin 'for (x in value)' walks.
    *
    * A JavaScript 'for…of' over the value as it stands was right for a list

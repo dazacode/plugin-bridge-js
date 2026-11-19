@@ -106,6 +106,8 @@ export const RUNTIME_HELPERS = [
 	'iterator',
 	/* What `for (x in value)` walks: a map as its entries, a string as chars. */
 	'forIn',
+	/* A constructor's started Promise for a blocking initialiser, kept handled. */
+	'pending',
 	'trimMargin',
 	'encodeToString',
 	'rateLimit',
