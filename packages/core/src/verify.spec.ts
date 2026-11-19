@@ -597,6 +597,30 @@ describe('a source that answers a word and not a letter', () => {
 		expect(result.detail).toBeNull();
 	});
 
+	it('asks for a title its own popular shelf lists before calling search empty', async () => {
+		// A gallery site matches names only: "a" and "the" find nothing there,
+		// and its own titles are found at once.
+		asked.length = 0;
+		const shelf = { entries: [{ sourceMediaId: '/g/1', title: ' Named Gallery ' }] };
+		const result = await run({
+			...WORKING,
+			browse: shelf,
+			searchCatalog: searching(['Named Gallery'])
+		});
+		expect(result.ok).toBe(true);
+		expect(asked).toEqual(['a', 'the', 'Named Gallery']);
+		expect(result.detail).toBe(
+			'Searched for "Named Gallery", from its popular shelf, after "a" and "the" found nothing.'
+		);
+
+		asked.length = 0;
+		const missing = await run({ ...WORKING, browse: shelf, searchCatalog: searching([]) });
+		expect(missing).toMatchObject({ ok: false, failedAt: 'search' });
+		expect(missing.detail).toMatch(
+			/searched for "a", then "the", then "Named Gallery", which its popular shelf lists/
+		);
+	});
+
 	it('is still empty when both words find nothing', async () => {
 		asked.length = 0;
 		const result = await run({ ...WORKING, searchCatalog: searching([]) });

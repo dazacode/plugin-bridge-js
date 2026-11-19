@@ -182,6 +182,7 @@ export type ReachOutcome = { readonly ok: true } | { readonly ok: false; readonl
 
 interface CatalogEntry {
 	readonly sourceMediaId?: unknown;
+	readonly title?: unknown;
 }
 
 interface EpisodeRow {
@@ -421,8 +422,46 @@ export async function verifyConvertedPlugin(
 					// says nothing about what the first one found.
 				}
 			}
+			// Neither word found anything. Before calling search empty, ask it for
+			// a title its own popular shelf lists: a gallery or a name-indexed
+			// site answers "a" and "the" with nothing and its own titles at
+			// once, and a source that cannot find what it lists has a search
+			// that does not work, which the verdict then says in those words.
+			// One title, the first, and only the shelf's — not a list tried
+			// until one matches.
+			let shelfTitle: string | null = null;
+			if (fallback && found === undefined && !outOfTime()) {
+				try {
+					const shelf = (await sandbox.browse('popular', 1)) as {
+						entries?: CatalogEntry[];
+					} | null;
+					const first = (shelf?.entries ?? []).find(
+						(entry) => typeof entry.title === 'string' && entry.title.trim().length > 0
+					);
+					if (first !== undefined) {
+						shelfTitle = String(first.title).trim();
+						const third = (await sandbox.searchCatalog(shelfTitle, 1)) as {
+							entries?: CatalogEntry[];
+						} | null;
+						const listed = third?.entries ?? [];
+						const usable = listed.find((entry) => typeof entry.sourceMediaId === 'string');
+						if (usable !== undefined) {
+							entries = listed;
+							found = usable;
+							searchedNote =
+								`Searched for "${shelfTitle}", from its popular shelf, after ` +
+								`"${probe}" and "${FALLBACK_PROBE}" found nothing.`;
+						}
+					}
+				} catch {
+					// The two words' answer stands, as for the second word above.
+				}
+			}
 			if (found === undefined || outOfTime()) {
-				const asked = fallback ? ` (searched for "${probe}", then "${FALLBACK_PROBE}")` : '';
+				const asked = fallback
+					? ` (searched for "${probe}", then "${FALLBACK_PROBE}"` +
+						(shelfTitle === null ? ')' : `, then "${shelfTitle}", which its popular shelf lists)`)
+					: '';
 				return {
 					ok: false,
 					failedAt: 'search',
