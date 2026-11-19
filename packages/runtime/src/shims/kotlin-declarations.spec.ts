@@ -3655,3 +3655,22 @@ describe('a character class that opens with "]"', () => {
 		expect(demo.brackets('xa]a]y')).toBe('a]a]');
 	});
 });
+
+describe('encodeToString with a generated serializer', () => {
+	it('encodes the value, the serializer naming only its type', async () => {
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'import kotlinx.serialization.json.Json',
+				'import kotlinx.serialization.json.JsonObject',
+				'import kotlinx.serialization.json.buildJsonObject',
+				'import kotlinx.serialization.json.put',
+				'class Demo {',
+				'    private val json = Json { ignoreUnknownKeys = true }',
+				'    fun go(): String = json.encodeToString(JsonObject.serializer(), buildJsonObject { put("n", 1) })',
+				'}'
+			)
+		);
+		expect(demo.go()).toBe('{"n":1}');
+	});
+});

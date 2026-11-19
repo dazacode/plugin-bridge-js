@@ -9286,6 +9286,24 @@ class Emitter {
 			return safe ? `${this.helper('sc')}(${value}, (__r) => ${call('__r')})` : call(value);
 		}
 
+		// The encoding half of kotlinx's serializer spelling:
+		// `json.encodeToString(JsonObject.serializer(), payload)`. A generated
+		// serializer names the type of a value the encoder already holds, so it
+		// is dropped; evaluated, `JsonObject.serializer` is no function here and
+		// the call threw inside the extension's catch. A KSerializer the
+		// extension wrote is not generated, keeps its argument, and is answered
+		// or refused as before.
+		if (
+			(name === 'encodeToString' || name === 'encodeToJsonElement') &&
+			typeArgument === null &&
+			lambda === null &&
+			args.length === 2 &&
+			this.argumentName(args[0]) === null &&
+			defaultSerializerType(this.argumentValue(args[0]).text.replace(/\s+/g, '')) !== null
+		) {
+			args = args.slice(1);
+		}
+
 		if (DECODING_METHODS.has(name)) {
 			// The shape being decoded is named in the type argument, not the
 			// arguments. Without one the runtime would have to guess a
