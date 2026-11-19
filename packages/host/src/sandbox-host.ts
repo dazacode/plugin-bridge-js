@@ -47,7 +47,7 @@ import {
 } from './host';
 import { RequestGate, readPolicy } from './net/request-policy';
 import { FrameReader } from './net/frames';
-import { FRAME_CONTENT_TYPE } from './net/relay';
+import { FRAME_CONTENT_TYPE, forwardsHeader } from './net/relay';
 import type { ConversionRecord } from '@plugin-bridge/core/formats';
 
 /**
@@ -1088,6 +1088,23 @@ export class PluginSandbox {
 					: status >= 500
 						? `answered ${status}`
 						: null;
+			// A refusal, from a request that went out without a header the
+			// plugin set: the relay forwards a fixed list (`relay.ts`), and a
+			// source that checks a custom one answers 401 with nothing to say
+			// why. Named beside the status, because the header is the likelier
+			// reason and the plugin cannot see that it was dropped.
+			const unsent = Object.keys(options.headers ?? {}).filter(
+				(name) => !forwardsHeader(name) && !/^(?:cookie|authorization)$/i.test(name)
+			);
+			if (status >= 400 && unsent.length > 0) {
+				const note =
+					`${host}: answered ${status} to a request sent without its ` +
+					`${unsent.map((name) => `"${name}"`).join(', ')} header${unsent.length === 1 ? '' : 's'}, ` +
+					'which this host does not forward';
+				if (this.failures.length < MAX_REFUSED_REPORTED && !this.failures.includes(note)) {
+					this.failures.push(note);
+				}
+			}
 			if (answeredFor !== null) {
 				const note = `${host}: ${answeredFor}`;
 				if (this.failures.length < MAX_REFUSED_REPORTED && !this.failures.includes(note)) {

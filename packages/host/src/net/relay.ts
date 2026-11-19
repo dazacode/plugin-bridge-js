@@ -153,6 +153,11 @@ const FORWARDABLE = new Set([
 	'sec-fetch-site'
 ]);
 
+/** Whether this route forwards a request header of that name. */
+export function forwardsHeader(name: string): boolean {
+	return FORWARDABLE.has(name.toLowerCase());
+}
+
 /**
  * `authorization` is absent from `FORWARDABLE` for the same reason, and its
  * own field — plugin-authored, declared grant, one origin — is ADR-0005 §3c.
