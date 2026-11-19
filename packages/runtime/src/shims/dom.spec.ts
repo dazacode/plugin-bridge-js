@@ -519,6 +519,32 @@ describe('the structural pseudo-selectors', () => {
 		expect(texts(list.select('li:nth-last-child(-n+2)'))).toEqual(['d', 'e']);
 	});
 
+	it('reads an attribute value the way jsoup does', () => {
+		const form = parseHtml(
+			'<div><input title="Jump to number" value="1"><span data-type="novel">n</span><b>Novel</b></div>'
+		).selectFirst('div')!;
+		// Unquoted, it runs to the bracket, spaces and all.
+		expect(form.select('input[title=Jump to number]')).toHaveLength(1);
+		expect(form.select("input[title='Jump to number']")).toHaveLength(1);
+		// jsoup keeps `"novel" i` as the literal value, which matches nothing;
+		// the alternative after the comma still runs, with Java's inline flag.
+		expect(texts(form.select('[data-type="novel" i], b:matchesOwn((?i)^novel$)'))).toEqual([
+			'Novel'
+		]);
+	});
+
+	it('handles the -of-type family over siblings of one tag', () => {
+		const mixed = parseHtml(
+			'<div><h2>t1</h2><p>a</p><h2>t2</h2><p>b</p><p>c</p><span>s</span></div>'
+		).selectFirst('div')!;
+		expect(texts(mixed.select('p:first-of-type'))).toEqual(['a']);
+		expect(texts(mixed.select('p:last-of-type'))).toEqual(['c']);
+		expect(texts(mixed.select('p:nth-of-type(2)'))).toEqual(['b']);
+		expect(texts(mixed.select('h2:nth-last-of-type(1)'))).toEqual(['t2']);
+		expect(texts(mixed.select('div > :only-of-type'))).toEqual(['s']);
+		expect(texts(mixed.select('span:only-child'))).toEqual([]);
+	});
+
 	it('agrees with :last-child at the one place they overlap', () => {
 		expect(texts(list.select('li:nth-last-child(1)'))).toEqual(texts(list.select('li:last-child')));
 	});

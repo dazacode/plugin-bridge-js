@@ -1805,7 +1805,10 @@ type Simple =
 			readonly offset: number;
 			/** `:nth-last-child`, which counts from the end of the sibling list. */
 			readonly fromEnd: boolean;
+			/** The `-of-type` forms, which count only siblings with this tag. */
+			readonly ofType: boolean;
 	  }
+	| { readonly type: 'only'; readonly ofType: boolean }
 	| { readonly type: 'firstChild' }
 	| { readonly type: 'lastChild' };
 
@@ -1966,34 +1969,43 @@ class SelectorParser {
 		return { type: 'attribute', name, operator, value, pattern };
 	}
 
+	/**
+	 * The value, as jsoup reads it: everything up to the closing `]`, trimmed,
+	 * with one pair of quotes taken off when they enclose the whole of it. So
+	 * `[title=Jump to number]` is the value "Jump to number" — it stopped at the
+	 * first space here and refused the selector as unclosed — and
+	 * `[data-type="novel" i]` is the literal `"novel" i`, which jsoup keeps and
+	 * which therefore matches nothing, as it does there.
+	 */
 	private readAttributeValue(): string {
-		const quote = this.input.charAt(this.position);
-		if (quote === '"' || quote === "'") {
-			this.position++;
-			let out = '';
-			while (this.position < this.input.length) {
-				const character = this.input.charAt(this.position);
-				if (character === '\\') {
-					out += this.input.charAt(this.position + 1);
-					this.position += 2;
-					continue;
-				}
-				if (character === quote) {
-					this.position++;
-					return out;
-				}
-				out += character;
-				this.position++;
-			}
-			throw this.error('unclosed quote');
-		}
 		const start = this.position;
+		let quote = '';
 		while (this.position < this.input.length) {
 			const character = this.input.charAt(this.position);
-			if (character === ']' || isSpace(character)) break;
+			if (character === '\\') {
+				this.position += 2;
+				continue;
+			}
+			if (quote !== '') {
+				if (character === quote) quote = '';
+			} else if (character === '"' || character === "'") {
+				quote = character;
+			} else if (character === ']') {
+				break;
+			}
 			this.position++;
 		}
-		return this.input.slice(start, this.position);
+		if (quote !== '') throw this.error('unclosed quote');
+		const raw = this.input.slice(start, this.position).trim();
+		const first = raw.charAt(0);
+		if (
+			raw.length >= 2 &&
+			(first === '"' || first === "'") &&
+			raw.charAt(raw.length - 1) === first
+		) {
+			return raw.slice(1, -1).replace(/\\(.)/g, '$1');
+		}
+		return raw;
 	}
 
 	private parsePseudo(): Simple {
@@ -2017,6 +2029,26 @@ class SelectorParser {
 			// the sibling list; everything else about it is `:nth-child`.
 			case 'nth-last-child':
 				return this.parseNth(this.argumentOf(argument, ':nth-last-child'), true, 'nth-last-child');
+			// jsoup's `-of-type` family: the same counting over the siblings that
+			// share this element's tag. A selector using one works on the real
+			// page and was refused only here.
+			case 'first-of-type':
+				return { type: 'nth', step: 0, offset: 1, fromEnd: false, ofType: true };
+			case 'last-of-type':
+				return { type: 'nth', step: 0, offset: 1, fromEnd: true, ofType: true };
+			case 'nth-of-type':
+				return this.parseNth(this.argumentOf(argument, ':nth-of-type'), false, 'nth-of-type', true);
+			case 'nth-last-of-type':
+				return this.parseNth(
+					this.argumentOf(argument, ':nth-last-of-type'),
+					true,
+					'nth-last-of-type',
+					true
+				);
+			case 'only-child':
+				return { type: 'only', ofType: false };
+			case 'only-of-type':
+				return { type: 'only', ofType: true };
 			case 'not':
 			case 'has': {
 				const list = new SelectorParser(this.argumentOf(argument, ':' + name)).parseList();
@@ -2046,11 +2078,17 @@ class SelectorParser {
 			case 'matchesown': {
 				// Deliberately not unescaped: those backslashes belong to the pattern.
 				const source = stripQuotes(this.argumentOf(argument, ':' + raw));
+				// jsoup compiles these as Java patterns, which may open with inline
+				// flags — `(?i)^novel$`. JavaScript has the same three as flags.
+				const inline = /^\(\?([ims]+)\)/.exec(source);
 				try {
 					return {
 						type: 'matches',
 						own: name === 'matchesown',
-						pattern: new RegExp(source)
+						pattern:
+							inline === null
+								? new RegExp(source)
+								: new RegExp(source.slice(inline[0].length), [...new Set(inline[1])].join(''))
 					};
 				} catch {
 					throw this.error('"' + source + '" is not a valid regular expression');
@@ -2073,13 +2111,15 @@ class SelectorParser {
 		return argument;
 	}
 
-	private parseNth(argument: string, fromEnd: boolean, name: string): Simple {
+	private parseNth(argument: string, fromEnd: boolean, name: string, ofType = false): Simple {
 		const raw = argument.replace(/[ \t\n\f\r]+/g, '').toLowerCase();
-		if (raw === 'odd') return { type: 'nth', step: 2, offset: 1, fromEnd };
-		if (raw === 'even') return { type: 'nth', step: 2, offset: 0, fromEnd };
+		if (raw === 'odd') return { type: 'nth', step: 2, offset: 1, fromEnd, ofType };
+		if (raw === 'even') return { type: 'nth', step: 2, offset: 0, fromEnd, ofType };
 
 		const plain = /^([+-]?\d+)$/.exec(raw);
-		if (plain !== null) return { type: 'nth', step: 0, offset: parseInt(plain[1], 10), fromEnd };
+		if (plain !== null) {
+			return { type: 'nth', step: 0, offset: parseInt(plain[1], 10), fromEnd, ofType };
+		}
 
 		const stepped = /^([+-]?\d*)n([+-]\d+)?$/.exec(raw);
 		if (stepped === null) {
@@ -2095,7 +2135,8 @@ class SelectorParser {
 			type: 'nth',
 			step,
 			offset: tail === undefined ? 0 : parseInt(tail, 10),
-			fromEnd
+			fromEnd,
+			ofType
 		};
 	}
 
@@ -2298,13 +2339,21 @@ function matchesSimple(scope: ElementImpl, element: ElementImpl, part: Simple): 
 		}
 		case 'nth': {
 			if (element.parent === null) return false;
-			const ordinal = part.fromEnd
-				? element.parent.children.length - element.siblingIndex
-				: element.siblingIndex + 1;
+			const siblings = part.ofType
+				? element.parent.children.filter((one) => one.tagName === element.tagName)
+				: element.parent.children;
+			const at = part.ofType ? siblings.indexOf(element) : element.siblingIndex;
+			const ordinal = part.fromEnd ? siblings.length - at : at + 1;
 			if (part.step === 0) return ordinal === part.offset;
 			const delta = ordinal - part.offset;
 			return delta % part.step === 0 && delta / part.step >= 0;
 		}
+		case 'only':
+			return (
+				element.parent !== null &&
+				element.parent.children.filter((one) => !part.ofType || one.tagName === element.tagName)
+					.length === 1
+			);
 		case 'firstChild':
 			return element.parent !== null && element.siblingIndex === 0;
 		case 'lastChild':
