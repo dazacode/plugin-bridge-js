@@ -452,6 +452,17 @@ describe('the simple selectors', () => {
 		expect(page.select('[href*=watch]').length).toBe(2);
 	});
 
+	it('reads an unquoted value up to the bracket, spaces and all, as jsoup does', () => {
+		// `a[data-text=load more]` is a selector jsoup accepts: the value is
+		// everything up to `]`, trimmed. Stopping at the space refused it.
+		const doc = parseHtml('<a data-text="load more">x</a><a data-text="load">y</a><b>z</b>');
+		expect(texts(doc.select('a[data-text=load more]'))).toEqual(['x']);
+		expect(texts(doc.select('a[data-text= load more ]'))).toEqual(['x']);
+		// And `!=`, which matches an element without the attribute too, since
+		// jsoup compares against `attr()`, the empty string there.
+		expect(texts(doc.select('body > [data-text!=load]'))).toEqual(['x', 'z']);
+	});
+
 	it('treats ~= as jsoup does — a regular expression, not a word list', () => {
 		// Only the single-digit ids match; `30` does not.
 		expect(page.select('[data-id~=^\\d$]').length).toBe(2);
