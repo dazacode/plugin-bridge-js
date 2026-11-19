@@ -255,8 +255,20 @@ const ENTRYPOINT = 'source';
  *     capitalised member path, a package id, a selector — so manifests lose
  *     `array.prototype.indexof`, `java.net.sockettimeoutexception` and their
  *     `*.` siblings. Reconvert every bundle made at 65 or earlier.
+ * 67: keiyoushi core's current request API — a Fetch on every request, sent
+ *     with the headers a browser sends for its kind, page images as
+ *     imageFetch — and the base members its templates call through super;
+ *     okhttp's empty trailing path segment, enqueue, a search handed the
+ *     source's default filters, and a decode behind ?. kept null-safe; a
+ *     positional argument after a named one placed by index, a bare apply,
+ *     an indexed +=, a class name never taken for a file extension, a
+ *     member named like a property resolved by signature, @SerialName read
+ *     as its literal, named rateLimit arguments, a possessive quantifier over
+ *     one character, and jsoup's bare attribute values and -of-type. Bundles
+ *     that refused, loaded and failed, or sent different requests at 66
+ *     convert differently. Reconvert every bundle made at 66 or earlier.
  */
-export const CONVERTER_VERSION = 66;
+export const CONVERTER_VERSION = 67;
 
 export interface BundleInput {
 	readonly id: string;
