@@ -51,6 +51,7 @@ import {
 	type ScoredListing
 } from '@plugin-bridge/host/scoreboard';
 import { checkListing } from '@plugin-bridge/host/catalogue';
+import { streamMediaProbe } from '@plugin-bridge/host/stream-probe';
 import { detectRepository } from '@plugin-bridge/core/detect';
 import { FOREIGN_ADAPTERS } from '@plugin-bridge/adapters';
 import { checkKey, loadChecks, saveChecks, type CheckResult } from '@plugin-bridge/core/check';
@@ -71,6 +72,9 @@ interface Options {
 	readonly fresh: boolean;
 	readonly why: boolean;
 	readonly grants: readonly string[];
+	readonly reach: boolean;
+	/** Listing names to keep, matched case-insensitively as substrings. */
+	readonly only: readonly string[];
 }
 
 const USAGE = `Usage: bun tool/check-catalogue.ts <index-url> [options]
@@ -86,6 +90,12 @@ const USAGE = `Usage: bun tool/check-catalogue.ts <index-url> [options]
                     ${BOUNDARY_GRANTS.join(', ')}. What is counted then is what
                     the boundary costs; nothing it builds is a plugin, and no
                     verdict from it is remembered
+  --only <list>     check only the listings whose name contains one of these,
+                    comma-separated and case-insensitive
+  --reach           after a stream resolves, fetch its first bytes and count the
+                    listing only if they are media (the "verified playable"
+                    stage). Verdicts from such a run are neither read nor kept,
+                    because a remembered one did not take that step
 
 Ctrl-C stops scheduling new checks, lets the ones in flight finish, and still
 writes the report. Nothing is installed and nothing is downloaded twice.
@@ -100,6 +110,8 @@ function parseArgs(argv: readonly string[]): Options | null {
 	let fresh = false;
 	let why = false;
 	let grants: string[] = [];
+	let reach = false;
+	let only: string[] = [];
 
 	for (let at = 0; at < argv.length; at += 1) {
 		const argument = argv[at];
@@ -110,6 +122,12 @@ function parseArgs(argv: readonly string[]): Options | null {
 		else if (argument === '--data-dir') dataDir = next();
 		else if (argument === '--fresh') fresh = true;
 		else if (argument === '--why') why = true;
+		else if (argument === '--reach') reach = true;
+		else if (argument === '--only')
+			only = next()
+				.split(',')
+				.map((one) => one.trim().toLowerCase())
+				.filter((one) => one.length > 0);
 		else if (argument === '--grant')
 			grants = next()
 				.split(',')
@@ -120,7 +138,7 @@ function parseArgs(argv: readonly string[]): Options | null {
 	}
 
 	if (!indexUrl.startsWith('https://')) return null;
-	return { indexUrl, atATime, limit, json, dataDir, fresh, why, grants };
+	return { indexUrl, atATime, limit, json, dataDir, fresh, why, grants, reach, only };
 }
 
 /** Everything about this run that a later reader would need in order to trust it. */
@@ -284,7 +302,13 @@ async function run(): Promise<void> {
 	// sentence about the repository rather than about this tool.
 	const detected = await detectRepository(options.indexUrl, text, FOREIGN_ADAPTERS, bytes);
 	const index = detected.index;
-	const listings = index.plugins.slice(0, options.limit);
+	const listings = index.plugins
+		.filter(
+			(listing) =>
+				options.only.length === 0 ||
+				options.only.some((part) => listing.name.toLowerCase().includes(part))
+		)
+		.slice(0, options.limit);
 	const capabilities = {
 		host,
 		download: bytes,
@@ -305,7 +329,11 @@ async function run(): Promise<void> {
 		// browser, which is the point: this tool exists to answer row for row
 		// what a tab would answer, and it cannot do that with a capability the
 		// tab has and it does not.
-		listFiles: createTreeLister(text)
+		listFiles: createTreeLister(text),
+		// Only when asked. Without it a check stops after `resolve` and says
+		// so; with it, a stream counts once its first bytes are media, which
+		// spends a few kilobytes of each source's bandwidth per listing.
+		...(options.reach ? { reach: streamMediaProbe(host.fetch) } : {})
 	};
 
 	// Before a single listing is judged, the harness proves the capabilities it
@@ -341,8 +369,12 @@ async function run(): Promise<void> {
 	// A verdict reached with a boundary set aside says nothing about the plugin
 	// a viewer would install, so a measuring run neither reads remembered
 	// verdicts nor leaves any behind.
+	// The same holds for a reaching run: a remembered verdict never fetched a
+	// stream, and one written from here would read as a weaker run's later.
 	const remembered =
-		options.fresh || measuring ? new Map<string, CheckResult>() : loadChecks(host.kv);
+		options.fresh || measuring || options.reach
+			? new Map<string, CheckResult>()
+			: loadChecks(host.kv);
 	const results = new Map<string, CheckResult>(remembered);
 
 	let stopped = false;
@@ -390,7 +422,7 @@ async function run(): Promise<void> {
 			results.set(key, result);
 			// Written after every answer rather than at the end, so a run that is
 			// killed outright still keeps what it learned.
-			if (!measuring) saveChecks(host.kv, results);
+			if (!measuring && !options.reach) saveChecks(host.kv, results);
 			process.stderr.write(`  ${liveLine(listing.name, result)}\n`);
 		}
 	);
