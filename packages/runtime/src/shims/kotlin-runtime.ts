@@ -11670,7 +11670,7 @@ __k.httpUrlOrNull = function (value) {
     return null;
   }
   var host = __str(url.host);
-  if (host.length === 0 || /[\s#%/:<>?@\\^|]/.test(host.replace(/^\[.*\]$/, 'v6'))) return null;
+  if (host.length === 0 || /[\\s#%/:<>?@\\\\^|]/.test(host.replace(/^\\[.*\\]$/, 'v6'))) return null;
   var port = Number(url.port);
   if (!(port >= 1 && port <= 65535)) return null;
   return url;

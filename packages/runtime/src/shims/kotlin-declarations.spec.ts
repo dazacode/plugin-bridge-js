@@ -3636,6 +3636,10 @@ describe('toHttpUrlOrNull', () => {
 		expect(demo.isUrl('https://')).toBe(false);
 		expect(demo.isUrl('/relative/path')).toBe(false);
 		expect(demo.host(' https://Example.invalid/a?b=1 ')).toBe('example.invalid');
+		// A host with an `s` in it: a mis-escaped character class once
+		// refused every one, and every HLS variant resolved against nothing.
+		expect(demo.host('https://seiryuu.cdn.example//a//master.m3u8')).toBe('seiryuu.cdn.example');
+		expect(demo.isUrl('https://bad host.example/')).toBe(false);
 	});
 });
 
