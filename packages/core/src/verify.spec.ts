@@ -488,6 +488,29 @@ describe('a run that came to nothing at hosts the proxy could not reach', () => 
 		);
 	});
 
+	it('names them when the module then threw, too', async () => {
+		// A scraper handed a bot check's page instead of JSON throws "expected
+		// JSON", and that sentence alone sent readers to the parser. What the
+		// proxy saw on the way is the reason, whichever way the module failed.
+		const result = await verifyConvertedPlugin(MIRRORS, 'export default {};', {
+			createWorker: () =>
+				new FakeWorker(
+					{
+						...WORKING,
+						resolve: () => {
+							throw new Error('expected JSON');
+						}
+					},
+					ATTEMPTS
+				) as unknown as Worker,
+			fetcher: failing
+		});
+
+		expect(result.failedAt).toBe('resolve');
+		expect(result.detail).toMatch(/expected JSON/);
+		expect(result.detail).toMatch(/Along the way: one\.mirror\.example\.invalid: ENOTFOUND/);
+	});
+
 	it('adds no clause at all when every request was answered', async () => {
 		// The same trap the refusal clause has: a module that simply has no
 		// stream must still read as one plain sentence. A dangling "Along the

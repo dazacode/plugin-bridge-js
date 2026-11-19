@@ -398,7 +398,7 @@ export async function verifyConvertedPlugin(
 				return {
 					ok: false,
 					failedAt: 'search',
-					detail: messageOf(error),
+					detail: messageOf(error) + alsoRefused(sandbox),
 					...nothing
 				};
 			}
@@ -463,7 +463,7 @@ export async function verifyConvertedPlugin(
 				return {
 					ok: false,
 					failedAt: 'chapters',
-					detail: messageOf(error),
+					detail: messageOf(error) + alsoRefused(sandbox),
 					...nothing,
 					searchHits: searchHits
 				};
@@ -496,7 +496,7 @@ export async function verifyConvertedPlugin(
 				return {
 					ok: false,
 					failedAt: 'pages',
-					detail: messageOf(error),
+					detail: messageOf(error) + alsoRefused(sandbox),
 					...nothing,
 					searchHits: searchHits,
 					episodeCount: chapters.length
@@ -603,7 +603,7 @@ export async function verifyConvertedPlugin(
 				return {
 					ok: false,
 					failedAt: 'episodes',
-					detail: messageOf(error),
+					detail: messageOf(error) + alsoRefused(sandbox),
 					...nothing,
 					searchHits: searchHits
 				};
@@ -633,7 +633,7 @@ export async function verifyConvertedPlugin(
 				return {
 					ok: false,
 					failedAt: 'resolve',
-					detail: messageOf(error),
+					detail: messageOf(error) + alsoRefused(sandbox),
 					...nothing,
 					searchHits: searchHits,
 					episodeCount: episodes.length
