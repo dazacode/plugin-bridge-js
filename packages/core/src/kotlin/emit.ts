@@ -10393,6 +10393,12 @@ class Emitter {
 			!SUPER_RECEIVER_MEMBERS.has(name) &&
 			!this.isSourceMember(name) &&
 			!this.declaredMethods.has(name) &&
+			// A template this class really extends may override it: DooPlay's
+			// `searchAnimeNextPageSelector()`, called bare from a subclass that
+			// does not, is DooPlay's, reached through the prototype chain. Sent
+			// to the driver's base it answered "" and every search died on an
+			// empty selector.
+			!(this.ownerBase !== null && this.baseDeclares(this.ownerBase, name)) &&
 			lambda === null
 		) {
 			// Awaited by the same rule the written `super.` uses, so the two

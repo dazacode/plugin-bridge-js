@@ -931,6 +931,39 @@ describe('Kotlin the vendored grammar cannot read, repaired before it is parsed'
 		expect(conversion.js).not.toContain("= 'Two';");
 	});
 
+	it('calls a base-class member bare on the template that overrides it', async () => {
+		// `searchAnimeNextPageSelector()` written bare in a subclass of a
+		// template that overrides it is the template's. Sent to the driver's
+		// base, it answered "" and every search died on an empty selector.
+		const conversion = await convertKotlin(
+			[
+				{
+					path: 'Demo.kt',
+					source: kt(
+						'class Demo : Theme() {',
+						'    fun next() = searchAnimeNextPageSelector()',
+						'    fun head() = headersBuilder()',
+						'}'
+					)
+				},
+				{
+					path: 'theme/Theme.kt',
+					source: kt(
+						'abstract class Theme : ParsedAnimeHttpSource() {',
+						'    override fun searchAnimeNextPageSelector() = "a.next"',
+						'}'
+					)
+				}
+			],
+			{ parser }
+		);
+
+		expect(conversion.js).toMatch(/this\.searchAnimeNextPageSelector\(\)/);
+		expect(conversion.js).not.toMatch(/__super\.searchAnimeNextPageSelector\(/);
+		// One no template declares still goes to the driver's base.
+		expect(conversion.js).toMatch(/__super\.headersBuilder\(\)/);
+	});
+
 	it('calls a translated superclass through real `super`, and the driver through `__super`', async () => {
 		// A multisrc template is a class this build emits and the extension
 		// really `extends`, so `super.chapterFromElement()` there is ordinary
