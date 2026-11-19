@@ -4641,6 +4641,22 @@ describe('a rate limit with named arguments', () => {
 	});
 });
 
+describe('a decode behind a safe call', () => {
+	it('decodes nothing when the receiver is null', () => {
+		// `data?.parseAs<List<Tag>>()` in a filter builder that runs before its
+		// filters were ever fetched: the null went to the parser and threw.
+		const emission = translate(
+			inClass(
+				'    fun tags(data: JsonElement?): Int = data?.parseAs<List<String>>()?.size ?: -1',
+				'    fun body(text: String?): List<String>? = text?.parseAs<List<String>>()'
+			)
+		);
+		expect(emission.refusals).toEqual([]);
+		expect(emission.js).toContain('__k.sc(data, (__r) => __k.decode(__r, "List<String>"))');
+		expect(emission.js).toContain('__k.sc(text, (__r) => __k.decode(__r, "List<String>"))');
+	});
+});
+
 describe('a renamed field', () => {
 	it('reads @SerialName as the string its literal spells', () => {
 		// `"\$t"` is the key `$t`, which every Blogger JSON feed keys its text by.

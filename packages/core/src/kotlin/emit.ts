@@ -9220,20 +9220,32 @@ class Emitter {
 			if (serializerForm !== null) args = args.slice(1);
 			const shape = typeArgument ?? serializerForm ?? expected;
 			if (shape === null) this.refuse(suffix, `\`.${name}()\` with no type argument`);
+			// `data?.parseAs<List<Tag>>()` decodes nothing when `data` is null.
+			// The `?.` was dropped here, so a null went to the parser and every
+			// source whose filter builder reads `data?.parseAs()` before its
+			// filters have been fetched threw "expected JSON" on a plain search.
+			const subject = this.expr(receiver);
+			const decoding = safe ? '__r' : subject;
+			const guarded = (call: string): string =>
+				safe ? `${this.helper('sc')}(${subject}, (__r) => ${call})` : call;
 			// keiyoushi core's `parseGraphQLAs<T>()`: the envelope's `data` decoded
 			// as T, its `errors` thrown — the runtime's reader, over the same type.
 			// Its one parameter is the Json, which the runtime already is.
 			if (name === 'parseGraphQLAs') {
 				if (lambda !== null) this.refuse(lambda, 'a block passed to `.parseGraphQLAs()`');
 				const json = this.plainArguments(name, args);
-				return `${this.helper('parseGraphQLAs')}(${[this.expr(receiver), this.decodeType(shape), ...json].join(', ')})`;
+				return guarded(
+					`${this.helper('parseGraphQLAs')}(${[decoding, this.decodeType(shape), ...json].join(', ')})`
+				);
 			}
 			if (lambda !== null) {
 				// `parseAs<T> { it.substringAfter("…") }` — the block runs BEFORE
 				// the parse, and what it digs out is a JSON document embedded in
 				// an HTML attribute. Dropping it would hand the parser a page.
 				const withBlock = this.callArguments(name, args, lambda, labelled, false);
-				return `${this.helper('decodeWith')}(${[this.expr(receiver), this.decodeType(shape), ...withBlock].join(', ')})`;
+				return guarded(
+					`${this.helper('decodeWith')}(${[decoding, this.decodeType(shape), ...withBlock].join(', ')})`
+				);
 			}
 			// `response.parseAs<Manga>(transform = ::transformJsonResponse)` —
 			// core's overload that runs the text through a function before the
@@ -9248,7 +9260,9 @@ class Emitter {
 					named.every((one) => one === 'transform' || one === 'json')
 				) {
 					const fn = this.expr(this.argumentValue(transform));
-					return `${this.helper('decodeWith')}(${[this.expr(receiver), this.decodeType(shape), fn].join(', ')})`;
+					return guarded(
+						`${this.helper('decodeWith')}(${[decoding, this.decodeType(shape), fn].join(', ')})`
+					);
 				}
 			}
 
@@ -9262,7 +9276,9 @@ class Emitter {
 					: null;
 			const tail =
 				streamed !== null ? [`${this.expr(streamed)}.string()`] : this.plainArguments(name, args);
-			return `${this.helper('decode')}(${[this.expr(receiver), this.decodeType(shape), ...tail].join(', ')})`;
+			return guarded(
+				`${this.helper('decode')}(${[decoding, this.decodeType(shape), ...tail].join(', ')})`
+			);
 		}
 
 		if (RESULT_MEMBERS.has(name) && !safe && runCatchingOf(receiver) !== null) {
