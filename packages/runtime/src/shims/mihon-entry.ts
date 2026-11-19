@@ -867,10 +867,15 @@ export default {
     if (text.length === 0) {
       return await __page('popularManga', ['getPopularManga'], [wanted]);
     }
+    // The source's own default filters, which is what the app hands a search
+    // nobody has narrowed: the sheet opens on 'getFilterList()'. An empty list
+    // here made every 'filters.firstInstance<SortFilter>()' throw on a plain
+    // query, and a source that reads its sort off the list never searched.
+    const filters = typeof __source.getFilterList === 'function' ? await __source.getFilterList() : [];
     return await __page(
       'searchManga',
       ['getSearchMangaList', 'getSearchManga'],
-      [wanted, text, []]
+      [wanted, text, filters === null || filters === undefined ? [] : filters]
     );
   },
 

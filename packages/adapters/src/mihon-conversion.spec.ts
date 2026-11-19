@@ -712,6 +712,25 @@ class Extension {
 		expect(foreign.pages[0].url).toBe('https://cdn.example.invalid|/c/3#yorozo-memo=nope');
 	});
 
+	it("searches with the source's own default filters, as the app does", async () => {
+		const module = await load(
+			`
+class Extension {
+  constructor() { this.baseUrl = '${BASE_URL}'; }
+  getFilterList() { return FilterList(['SORT:latest']); }
+  async getSearchMangaList(page, query, filters) {
+    return { mangas: [{ url: '/m', title: query + ' by ' + filters[0] }], hasNextPage: false };
+  }
+}
+`,
+			{},
+			true
+		);
+		const { ctx } = recording();
+		const found = await module.searchCatalog('one', 1, ctx);
+		expect(found.entries[0].title).toBe('one by SORT:latest');
+	});
+
 	it('hands the host a KeiSource page image with the headers a browser sends for one', async () => {
 		// KeiSource's final `imageRequest` is the source's `getImageRequest`,
 		// sent as its `imageFetch`. A template extending the base request with
