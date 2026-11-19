@@ -247,6 +247,27 @@ function liveLine(name: string, result: CheckResult): string {
 	return `broken  ${name}\n            ${cut}`;
 }
 
+/**
+ * The code host's API, with the token in `GITHUB_TOKEN` when one is set.
+ *
+ * Reading a repository's file tree is one API request per run, and the code
+ * host allows sixty an hour to an address without an account — a budget a
+ * day of fixing and re-checking spends by lunchtime, after which every run
+ * stops at the preflight. The token changes the allowance and nothing that
+ * is read: the same tree comes back, so no verdict depends on it. Only this
+ * tool reads it, and only for that one host; a browser tab never has one.
+ */
+async function codeHostAware(
+	url: string,
+	fetchVia: (url: string) => Promise<Response>
+): Promise<Response> {
+	const token = process.env['GITHUB_TOKEN'];
+	if (token === undefined || token.length === 0 || new URL(url).host !== 'api.github.com') {
+		return await fetchVia(url);
+	}
+	return await fetch(url, { headers: { authorization: `Bearer ${token}` } });
+}
+
 async function run(): Promise<void> {
 	const options = parseArgs(process.argv.slice(2));
 	if (options === null) {
@@ -283,7 +304,7 @@ async function run(): Promise<void> {
 	// directly, and the runtime's own `/api/plugin-fetch` requests are served
 	// in-process by the same relay that serves them under a web server.
 	const text = async (url: string): Promise<string> => {
-		const response = await host.fetch(url);
+		const response = await codeHostAware(url, host.fetch);
 		if (!response.ok) throw new Error(`${response.status} from ${url}`);
 		return await response.text();
 	};
