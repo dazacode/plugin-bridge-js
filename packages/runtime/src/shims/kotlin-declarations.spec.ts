@@ -3638,3 +3638,20 @@ describe('toHttpUrlOrNull', () => {
 		expect(demo.host(' https://Example.invalid/a?b=1 ')).toBe('example.invalid');
 	});
 });
+
+describe('a character class that opens with "]"', () => {
+	it('reads the bracket as a member, as Java does', async () => {
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    fun labels(s: String): String =',
+				'        "\\\\[([^]]+)]".toRegex().findAll(s).map { it.groupValues[1] }.joinToString(",")',
+				'    fun brackets(s: String): String = Regex("[]a]+").find(s)!!.value',
+				'}'
+			)
+		);
+		expect(demo.labels('[SD (480p)]x,[HD]y')).toBe('SD (480p),HD');
+		expect(demo.brackets('xa]a]y')).toBe('a]a]');
+	});
+});

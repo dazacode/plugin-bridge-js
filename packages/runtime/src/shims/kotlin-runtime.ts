@@ -1201,6 +1201,18 @@ function __regexSource(pattern) {
       inClass = true;
       out += ch;
       i += 1;
+      // Java reads a ']' straight after '[' or '[^' as a literal member, so
+      // '[^]]+' is "anything but ]". JavaScript reads '[^]' as "any character"
+      // and the ']+' after it as text, which matched nothing in one source's
+      // quality list. Escaped, it means in JavaScript what it meant in Java.
+      if (text.charAt(i) === '^') {
+        out += '^';
+        i += 1;
+      }
+      if (text.charAt(i) === ']') {
+        out += '\\\\]';
+        i += 1;
+      }
       quantified = false;
       continue;
     }
