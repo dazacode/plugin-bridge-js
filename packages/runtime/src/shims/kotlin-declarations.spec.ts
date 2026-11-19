@@ -3588,3 +3588,31 @@ describe('java.lang.System', () => {
 		).toContain('`System.getenv()`');
 	});
 });
+
+describe('a reified extension that shares its name with another declaration', () => {
+	it('is dispatched with its type slot counted', async () => {
+		// `inline fun <reified R> List<Any>.getFirst(): R` in one file and
+		// `fun Regex.getFirst(item: String)` in another: the dispatcher made
+		// for the shared name did not count the type argument passed first,
+		// so every call was refused on its argument count.
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    fun use(l: List<Any>): String = F.use(l)',
+				'}',
+				'object F {',
+				'    private inline fun <reified R> List<Any>.getFirst(): R = first { it is R } as R',
+				'    fun use(l: List<Any>): String = l.getFirst<String>()',
+				'}'
+			),
+			kt(
+				'class E {',
+				'    private fun Regex.getFirst(item: String): String = find(item)!!.value',
+				'    fun x() = Regex("a").getFirst("abc")',
+				'}'
+			)
+		);
+		expect(demo.use([1, 'x'])).toBe('x');
+	});
+});

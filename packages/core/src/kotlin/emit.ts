@@ -2334,6 +2334,19 @@ class Emitter {
 		let required = 0;
 		let total = 0;
 		let spread = false;
+		// A `reified` type parameter is a value here, passed first —
+		// `getFirst(__type_R, __recv)` — so the dispatcher has to count its
+		// slot. Left out, a reified extension that shared its name with any
+		// other declaration in the build was rejected on argument count at
+		// every call: "getFirst with arguments none of its declarations takes".
+		// The slot holds a type token, which no declared type decides.
+		for (const _ of reifiedParams(node)) {
+			types.push('__reified');
+			nullable.push(false);
+			defaults.push(false);
+			required += 1;
+			total += 1;
+		}
 		const receiver = receiverOf(node);
 		if (receiver !== null) {
 			types.push(simpleTypeName(receiver));
