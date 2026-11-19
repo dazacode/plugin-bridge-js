@@ -3616,3 +3616,25 @@ describe('a reified extension that shares its name with another declaration', ()
 		expect(demo.use([1, 'x'])).toBe('x');
 	});
 });
+
+describe('toHttpUrlOrNull', () => {
+	it('answers null for text that is not an http url, as okhttp does', async () => {
+		// `if (data.toHttpUrlOrNull() == null) <decode base64> else GET(data)`
+		// is how one template tells an encoded mirror from a plain one.
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'import okhttp3.HttpUrl.Companion.toHttpUrlOrNull',
+				'class Demo {',
+				'    fun isUrl(s: String): Boolean = s.toHttpUrlOrNull() != null',
+				'    fun host(s: String): String? = s.toHttpUrlOrNull()?.host',
+				'}'
+			)
+		);
+		expect(demo.isUrl('PGlmcmFtZSBzcmM9Imh0dHBzOi8v')).toBe(false);
+		expect(demo.isUrl('ftp://example.invalid/x')).toBe(false);
+		expect(demo.isUrl('https://')).toBe(false);
+		expect(demo.isUrl('/relative/path')).toBe(false);
+		expect(demo.host(' https://Example.invalid/a?b=1 ')).toBe('example.invalid');
+	});
+});

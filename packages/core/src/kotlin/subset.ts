@@ -886,7 +886,8 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 
 	// the environment the host supplies
 	['toHttpUrl', 'httpUrl'],
-	['toHttpUrlOrNull', 'httpUrl'],
+	// Strict where `toHttpUrl` is lenient: null for text that is no url.
+	['toHttpUrlOrNull', 'httpUrlOrNull'],
 	['asJsoup', 'asJsoup'],
 	['useAsJsoup', 'asJsoup'],
 	// `use` closes a resource and yields the block's value; the shim has nothing

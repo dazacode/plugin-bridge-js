@@ -389,6 +389,7 @@ export const RUNTIME_HELPERS = [
 	   `call.await()`. Each is an extension on a type the runtime owns, so none
 	   of them can be a method without patching a prototype. */
 	'httpUrl',
+	'httpUrlOrNull',
 	'asJsoup',
 	'await',
 	/* `call.execute()` and `call.awaitSuccess()`, both of which suspend. */

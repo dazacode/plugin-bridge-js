@@ -10511,7 +10511,9 @@ function __authorityParts(scheme, authority) {
   return {
     user: colon === -1 ? userinfo : userinfo.slice(0, colon),
     password: colon === -1 ? '' : userinfo.slice(colon + 1),
-    host: port === null ? hostport : hostport.slice(0, port.index),
+    // Lower-cased, as okhttp canonicalises it: 'url.host == "example.com"'
+    // is how an extension recognises its own mirror.
+    host: (port === null ? hostport : hostport.slice(0, port.index)).toLowerCase(),
     port: port === null ? (named === 'https' ? 443 : (named === 'http' ? 80 : -1)) : Number(port[1]),
     written: port !== null
   };
@@ -11635,6 +11637,31 @@ __k.httpUrl = function (value) {
     return value;
   }
   return __httpUrlOf(value);
+};
+
+/**
+ * 'toHttpUrlOrNull()': the url, or null when the text is not an http(s) url
+ * with a host okhttp would accept. It shared 'httpUrl''s lenient reading,
+ * which never answers null, so 'if (data.toHttpUrlOrNull() == null)
+ * <decode base64> else GET(data)' — how one template tells an encoded mirror
+ * from a plain one — fetched the base64 text as an address, every time.
+ */
+__k.httpUrlOrNull = function (value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value.newBuilder === 'function' && value.encodedPath !== undefined) return value;
+  var text = __str(value).trim();
+  if (!/^https?:/i.test(text)) return null;
+  var url;
+  try {
+    url = __httpUrlOf(text);
+  } catch (error) {
+    return null;
+  }
+  var host = __str(url.host);
+  if (host.length === 0 || /[\s#%/:<>?@\\^|]/.test(host.replace(/^\[.*\]$/, 'v6'))) return null;
+  var port = Number(url.port);
+  if (!(port >= 1 && port <= 65535)) return null;
+  return url;
 };
 `;
 
