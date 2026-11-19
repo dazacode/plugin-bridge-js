@@ -25,6 +25,39 @@ Loaded and three-stage counts are the broad, cheap measurements: they cover a
 whole catalogue in minutes, and they move when this software improves. Chain
 replay and verified playback are the strong ones, and they cover a subset.
 
+## Two repositories end to end (2026-11-19, converter 67, unreleased)
+
+The same two families as below, each whole and live, on branch
+`e2e/combined`. Upstream had moved since v0.5.1: the manga repository is now
+1,711 listings on a new shared core (a request kind on every request, new base
+classes), and every listing in it refused on the morning this started. The
+method and what each fix was are in
+[`translation-patterns.md`](translation-patterns.md).
+
+|                                           | start of day | **now**         |
+| ----------------------------------------- | ------------ | --------------- |
+| manga, converted (of 1,711)               | 0            | **1,031 (60%)** |
+| manga, all stages and a page image loaded | 0            | **497 (29%)**   |
+| anime, converted (of 248)                 | 84           | **117 (47%)**   |
+| anime, verified playable (`--reach`)      | — ¹          | **21 (8%)**     |
+
+¹ The start-of-day anime run had no byte check; 14 listings passed the
+three stages then. `--reach` counts a listing only when its stream's first
+bytes are media.
+
+**In the reference web client**, through the settings screen and the source
+screens, headless Chrome: nine manga listings across six templates and two
+standalone sources installed, searched, opened and read with every page image
+loaded; two anime listings installed and played, picture advancing. Of the two
+anime listings that did not play there, one's stream answered 502 through the
+client's relay while the engine's own relay fetched it.
+
+**What is left**, manga: about 200 listings behind a bot check or down, about
+90 that descramble images with Android's bitmap API (no canvas in the
+sandbox), and a long tail. Anime: bot checks and dead hosts, and about 50
+listings refused because one shared extractor reaches a WebView or a
+JavaScript engine.
+
 ## Since v0.5.1 — served playback (2026-09-24, unreleased)
 
 The same two catalogues, the same harness and method as v0.5.1, measured on
