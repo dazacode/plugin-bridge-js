@@ -184,6 +184,7 @@ been measured yet.
 - [`docs/measurements.md`](docs/measurements.md) — every number, dated, and what each one shows
 - [`docs/compatibility.md`](docs/compatibility.md) — what is supported, refused, and how it is measured
 - [`docs/compatibility-aniyomi.md`](docs/compatibility-aniyomi.md) — the Kotlin family, API by API
+- [`docs/translation-patterns.md`](docs/translation-patterns.md) — taking a whole repository end to end: the method, and the patterns it found
 - [`docs/compatibility-sora.md`](docs/compatibility-sora.md) — the second ecosystem, and what it proved
 - [`docs/compatibility-wotaku.md`](docs/compatibility-wotaku.md) — ten ecosystems in one pass, and what the census cost
 - [`docs/phase-2-capability-map.md`](docs/phase-2-capability-map.md) — what the runtime should become, measured
