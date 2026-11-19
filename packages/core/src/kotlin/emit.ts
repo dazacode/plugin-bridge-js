@@ -516,8 +516,20 @@ const CLIENT_VERB_PARAMETERS: ReadonlySet<string> = new Set([
 	'headers',
 	'body',
 	'cacheControl',
-	'ensureSuccess'
+	'ensureSuccess',
+	/* The current core's `Fetch` — how a browser would make the request. */
+	'fetch'
 ]);
+
+/**
+ * What keiyoushi core's `Fetch.from(page)` is called on: one of the five kinds,
+ * or a value the source named for being one — `imageFetch`, its base class's,
+ * or a local `fetch`. Read by name for the reason `CLIENT_RECEIVER` is; the
+ * runtime checks the value is a `Fetch`. A capitalised receiver is left alone,
+ * because `BookDetail.from(x)` is an extension's own companion.
+ */
+const FETCH_RECEIVER =
+	/^(?:Fetch\.(?:DOCUMENT|XHR|SCRIPT|IMAGE|NONE)|(?:this\.)?(?:[a-z]\w*Fetch|fetch))$/;
 
 /**
  * The SharedPreferences readers, which share four names with org.json.
@@ -9048,6 +9060,23 @@ class Emitter {
 			CLIENT_RECEIVER.test(receiver.text.replace(/\s+/g, ''))
 		) {
 			return this.clientVerb(receiver, name, args);
+		}
+
+		// keiyoushi core's `builder.fetch(Fetch.XHR)` and `Fetch.XHR.from(page)`.
+		// Each goes through a helper that checks what it was called on, so a
+		// source's own `fetch` or `from` is still called as written.
+		if (
+			lambda === null &&
+			args.length === 1 &&
+			!safe &&
+			!this.declaredSuspends.has(name) &&
+			this.argumentName(args[0]) === null
+		) {
+			const compact = receiver.text.replace(/\s+/g, '');
+			if (name === 'fetch' || (name === 'from' && FETCH_RECEIVER.test(compact))) {
+				const helper = name === 'fetch' ? 'fetchOn' : 'fetchFrom';
+				return `${this.helper(helper)}(${this.expr(receiver)}, ${this.argumentExpressions(args[0]).join(', ')})`;
+			}
 		}
 
 		// `scope.launch { … }`: a block started and never awaited. See

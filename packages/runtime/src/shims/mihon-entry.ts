@@ -92,8 +92,9 @@ export interface MihonEntrypointOptions {
 	 * own base between the extension and `HttpSource`.
 	 *
 	 * It is a different base class, not a style: it makes `headersBuilder` and
-	 * `client` final and builds them itself — `Referer` and `Origin` on every
-	 * request, then the extension's `configureHeaders`; the extension's
+	 * `client` final and builds them itself — `Referer` on every request, then
+	 * the extension's `configureHeaders` (`Origin` and the rest of a browser's
+	 * headers are per request, from its `Fetch`); the extension's
 	 * `configureClient` on a copy of the shared client, which is where its
 	 * rate limit is declared — and it owns `getMangaUpdate`. None of that is in
 	 * the translated source, because none of it is in the extension. The
@@ -126,8 +127,10 @@ const MIHON_BASE = String.raw`
  * driver closed the same gap long ago; this is its other half.
  *
  * Under 'KeiSource' both are the base class's and final: the builder is the
- * plain one with 'Referer' and 'Origin' set from 'baseUrl', then handed to the
- * extension's own 'configureHeaders' when it declares one. And 'headers' is
+ * plain one with 'Referer' set from 'baseUrl', then handed to the extension's
+ * own 'configureHeaders' when it declares one. 'Origin' is not set here: the
+ * current core adds it per request, only where a browser would send one (see
+ * Fetch in the runtime). And 'headers' is
  * deliberately NOT lazy there — the base class replaces the delegate so a
  * preference that changes the base url changes the next request — so it is
  * rebuilt on each read rather than memoised as 'HttpSource' does.
@@ -172,7 +175,7 @@ function __supplyBase(proto) {
       writable: true,
       value: function () {
         var base = String(this.baseUrl || __BASE_URL);
-        var builder = Headers.Builder().set('Referer', base + '/').set('Origin', base);
+        var builder = Headers.Builder().set('Referer', base + '/');
         if (typeof this.configureHeaders !== 'function') return builder;
         var configured = this.configureHeaders(builder);
         return configured === undefined || configured === null ? builder : configured;

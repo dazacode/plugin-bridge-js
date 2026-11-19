@@ -4726,9 +4726,11 @@ var __k = {
    * taking 'headers', once reading them off the HttpSource context receiver —
    * and the emitter cannot tell which was written, because the second
    * positional argument is 'headers' in one and 'cacheControl' or 'body' in
-   * the other. The values can tell: a Headers value, a request body and a
-   * boolean are each recognisable, and whatever is none of them is the cache
-   * policy, which this runtime leaves to the host exactly as GET does.
+   * the other. The values can tell: a Headers value, a request body, a Fetch
+   * and a boolean are each recognisable, and whatever is none of them is the
+   * cache policy, which this runtime leaves to the host exactly as GET does.
+   * The current core takes the Fetch on every one of them; it rides on the
+   * request as a tag, as upstream's does — see Fetch.
    *
    * With no headers passed, the source's own 'headers' are used, which is what
    * the context-receiver overload reads. A receiver that is not this runtime's
@@ -4757,9 +4759,11 @@ var __k = {
     var headers = options.headers;
     var body = options.body;
     var ensureSuccess = options.ensureSuccess;
+    var fetch = options.fetch;
     for (var i = options.url !== undefined ? 0 : 1; i < args.length; i += 1) {
       var value = args[i];
       if (typeof value === 'boolean') ensureSuccess = value;
+      else if (__isFetch(value)) fetch = value;
       else if (__isHeadersValue(value)) headers = value;
       else if (value !== null && typeof value === 'object' && (value.__kBody === true || typeof value.text === 'string')) {
         body = value;
@@ -4774,7 +4778,9 @@ var __k = {
     }
     if (headers === undefined || headers === null) headers = __sourceHeaders();
 
-    var request = __kRequest(verb.toUpperCase(), url, headers, verb === 'get' || verb === 'head' ? null : body);
+    var labels = new Map();
+    if (fetch !== undefined && fetch !== null) __tagFetch(labels, fetch);
+    var request = __kRequest(verb.toUpperCase(), url, headers, verb === 'get' || verb === 'head' ? null : body, labels);
     var call = client.newCall(request);
     return ensureSuccess === false ? call.await() : call.awaitSuccess();
   },
@@ -4784,6 +4790,25 @@ var __k = {
       return value.await();
     }
     return Promise.resolve(value);
+  },
+
+  /**
+   * keiyoushi's 'builder.fetch(Fetch.XHR)', on this runtime's Request.Builder,
+   * or the receiver's own 'fetch' when it is somebody else's class.
+   */
+  fetchOn: function (receiver, fetch) {
+    if (receiver !== null && receiver !== undefined && typeof receiver.fetch === 'function') {
+      return receiver.fetch(fetch);
+    }
+    throw new Error('This converted extension called fetch() on something that is not a request builder.');
+  },
+
+  /** 'Fetch.XHR.from(page)': the same kind, coming from that page — see Fetch. */
+  fetchFrom: function (receiver, page) {
+    if (receiver !== null && receiver !== undefined && typeof receiver.from === 'function') {
+      return receiver.from(page);
+    }
+    throw new Error('This converted extension called from() on something that is not a Fetch.');
   },
 
   /* -- properties, safe calls and types ----------------------------------- */
@@ -9110,6 +9135,320 @@ function DELETE(url, headers, body) { return __kRequest('DELETE', url, headers, 
 function HEAD(url, headers) { return __kRequest('HEAD', url, headers, null); }
 
 /**
+ * keiyoushi core's 'Fetch': how a browser would make a request — its kind, and
+ * the page it comes from.
+ *
+ * Every request helper in that repository's current core takes one —
+ * 'client.get(url, Fetch.DOCUMENT)', 'client.get(url, Fetch.XHR.from(page))',
+ * 'GET(url).newBuilder().fetch(Fetch.XHR).build()' — and its base class turns
+ * it into the headers a browser sends for that kind of request. Read as
+ * nothing, those requests would go out bare: no Accept a page load sends, no
+ * fetch metadata, no Referer from the page the call comes from. A site that
+ * checks them answers a bot page, and the source reads it as an empty list.
+ *
+ * So the value is carried exactly as upstream carries it, as two request tags,
+ * and '__browserRequest' below turns it into headers at the end of the
+ * interceptor chain, where upstream's network interceptor does. 'from' is a
+ * method here and the page it holds is '__from', because JavaScript cannot
+ * give one name to both the way Kotlin gives 'from' to a val and a fun.
+ */
+var __FETCH_KIND_TAG = { name: 'Fetch.Kind' };
+var __FROM_PAGE_TAG = { name: 'FromPage' };
+
+function __fetchOf(kind, from) {
+  var made = { kind: kind };
+  Object.defineProperty(made, '__kFetch', { value: true, enumerable: false });
+  Object.defineProperty(made, '__from', { value: from, enumerable: false });
+  Object.defineProperty(made, 'from', {
+    value: function (page) { return __fetchOf(kind, __str(page)); },
+    enumerable: false
+  });
+  Object.defineProperty(made, 'toString', {
+    value: function () { return 'Fetch(' + kind + (from === null ? '' : ', ' + from) + ')'; },
+    enumerable: false
+  });
+  return made;
+}
+
+function __isFetch(value) {
+  return value !== null && value !== undefined && value.__kFetch === true;
+}
+
+var Fetch = {
+  Kind: { DOCUMENT: 'DOCUMENT', XHR: 'XHR', SCRIPT: 'SCRIPT', IMAGE: 'IMAGE', NONE: 'NONE' },
+  DOCUMENT: __fetchOf('DOCUMENT', null),
+  XHR: __fetchOf('XHR', null),
+  SCRIPT: __fetchOf('SCRIPT', null),
+  IMAGE: __fetchOf('IMAGE', null),
+  NONE: __fetchOf('NONE', null)
+};
+
+/** 'Request.Builder.fetch(fetch)': the kind, and the page or none. */
+function __tagFetch(labels, fetch) {
+  if (!__isFetch(fetch)) {
+    throw new Error('This converted extension passed ' + __str(fetch) + ' where a Fetch belongs.');
+  }
+  labels.set(__FETCH_KIND_TAG, fetch.kind);
+  if (fetch.__from === null) labels.delete(__FROM_PAGE_TAG);
+  else labels.set(__FROM_PAGE_TAG, fetch.__from);
+}
+
+/*
+ * The user agent upstream's app puts on every request that has none, which is
+ * the one its browser headers are worked out from. Without it a request with
+ * no User-Agent would name no browser and get none of them — on the device it
+ * never has none. Mihon's default, a current Chrome on Android.
+ */
+var __APP_USER_AGENT =
+  'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) ' +
+  'Chrome/142.0.0.0 Mobile Safari/537.36';
+
+var __CHROME_VERSION = /(?:Chrome|Chromium)\\/(\\d+)/;
+var __FIREFOX_VERSION = /Firefox\\/(\\d+)/;
+var __EDGE_VERSION = /EdgA?\\/(\\d+)/;
+var __APPLE_PLATFORM = /\\((?:iPhone|iPad|iPod|Macintosh);/;
+var __CHROMIUM_FORKS = ['OPR/', 'SamsungBrowser/', 'YaBrowser/'];
+var __GREASE_CHARS = [' ', '(', ':', '-', '.', '/', ')', ';', '=', '?', '_'];
+var __GREASE_VERSIONS = ['8', '99', '24'];
+var __BRAND_ORDERS = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
+var __LOCAL_HOSTS = ['localhost', '127.0.0.1', '::1'];
+
+function __versionIn(pattern, userAgent) {
+  var found = pattern.exec(userAgent);
+  return found === null ? null : Number(found[1]);
+}
+
+/** Chromium's Sec-CH-UA brand list, placeholder brand included — upstream's chromeBrands. */
+function __chromeBrands(version, brand, brandVersion) {
+  var brands = [null, null, null];
+  var order = __BRAND_ORDERS[version % __BRAND_ORDERS.length];
+  function grease(offset) { return __GREASE_CHARS[(version + offset) % __GREASE_CHARS.length]; }
+  brands[order[0]] = '"Not' + grease(0) + 'A' + grease(1) + 'Brand";v="' +
+    __GREASE_VERSIONS[version % __GREASE_VERSIONS.length] + '"';
+  brands[order[1]] = '"Chromium";v="' + version + '"';
+  brands[order[2]] = '"' + brand + '";v="' + brandVersion + '"';
+  return brands.join(', ');
+}
+
+function __uaPlatform(userAgent) {
+  if (userAgent.indexOf('Android') !== -1) return 'Android';
+  if (userAgent.indexOf('CrOS') !== -1) return 'Chrome OS';
+  if (userAgent.indexOf('Macintosh') !== -1) return 'macOS';
+  if (userAgent.indexOf('Linux') !== -1) return 'Linux';
+  return 'Windows';
+}
+
+/**
+ * The three browsers upstream's core sends as — Chrome, Firefox and WebKit —
+ * with each one's values per request kind, as its 'Browser' declares them.
+ * Header order, which upstream also matches, is the transport's here: neither
+ * fetch() nor the relay can choose it.
+ */
+var __BROWSERS = {
+  Chrome: {
+    accept: function (kind, userAgent) {
+      var jxl = __versionIn(__CHROME_VERSION, userAgent) >= 155 ? 'image/jxl,' : '';
+      if (kind === 'DOCUMENT') {
+        return 'text/html,application/xhtml+xml,application/xml;q=0.9,' + jxl +
+          'image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7';
+      }
+      if (kind === 'IMAGE') return jxl + 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8';
+      return '*/*';
+    },
+    storageAccess: function (userAgent) {
+      var version = __versionIn(__CHROME_VERSION, userAgent);
+      if (version >= 142) return 'active';
+      if (version >= 133) return 'none';
+      return null;
+    },
+    priority: function (kind) {
+      if (kind === 'DOCUMENT') return 'u=0, i';
+      if (kind === 'IMAGE') return 'i';
+      if (kind === 'XHR') return 'u=1, i';
+      return 'u=1';
+    },
+    clientHints: function (userAgent) {
+      var version = __versionIn(__CHROME_VERSION, userAgent);
+      if (version === null) return [];
+      var hints = [];
+      var brand = null;
+      var edge = __EDGE_VERSION.exec(userAgent);
+      if (userAgent.indexOf('; wv)') !== -1) brand = ['Android WebView', version];
+      else if (edge !== null) brand = ['Microsoft Edge', Number(edge[1])];
+      else if (!__CHROMIUM_FORKS.some(function (fork) { return userAgent.indexOf(fork) !== -1; })) {
+        brand = ['Google Chrome', version];
+      }
+      if (brand !== null) hints.push(['Sec-CH-UA', __chromeBrands(version, brand[0], brand[1])]);
+      hints.push(['Sec-CH-UA-Mobile', userAgent.indexOf('Mobile') !== -1 ? '?1' : '?0']);
+      hints.push(['Sec-CH-UA-Platform', '"' + __uaPlatform(userAgent) + '"']);
+      return hints;
+    },
+    upgradesInsecure: function () { return true; },
+    sendsFetchUser: true
+  },
+  Firefox: {
+    accept: function (kind, userAgent) {
+      var jxl = __versionIn(__FIREFOX_VERSION, userAgent) >= 158 ? 'image/jxl,' : '';
+      if (kind === 'DOCUMENT') return 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8';
+      if (kind === 'IMAGE') return 'image/avif,' + jxl + 'image/webp,image/png,image/svg+xml,image/*;q=0.8,*/*;q=0.5';
+      return '*/*';
+    },
+    storageAccess: function (userAgent) {
+      return __versionIn(__FIREFOX_VERSION, userAgent) >= 147 ? 'none' : null;
+    },
+    priority: function (kind) {
+      if (kind === 'DOCUMENT') return 'u=0, i';
+      if (kind === 'IMAGE') return 'u=5, i';
+      if (kind === 'XHR') return 'u=4';
+      return 'u=2';
+    },
+    clientHints: function () { return []; },
+    upgradesInsecure: function () { return true; },
+    sendsFetchUser: true
+  },
+  WebKit: {
+    accept: function (kind) {
+      if (kind === 'DOCUMENT') return 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8';
+      if (kind === 'IMAGE') {
+        return 'image/webp,image/avif,image/jxl,image/heic,image/heic-sequence,video/*;q=0.8,' +
+          'image/png,image/svg+xml,image/*;q=0.8,*/*;q=0.5';
+      }
+      return '*/*';
+    },
+    storageAccess: function () { return null; },
+    priority: function (kind) {
+      if (kind === 'DOCUMENT') return 'u=0, i';
+      if (kind === 'SCRIPT') return 'u=1, i';
+      if (kind === 'XHR') return 'u=3, i';
+      return 'u=5, i';
+    },
+    clientHints: function () { return []; },
+    upgradesInsecure: function (url) { return !url.isHttps; },
+    sendsFetchUser: false
+  }
+};
+
+function __browserOf(userAgent) {
+  if (__versionIn(__CHROME_VERSION, userAgent) !== null) return __BROWSERS.Chrome;
+  if (__versionIn(__FIREFOX_VERSION, userAgent) !== null) return __BROWSERS.Firefox;
+  if (__APPLE_PLATFORM.test(userAgent) && userAgent.indexOf('AppleWebKit/') !== -1) return __BROWSERS.WebKit;
+  return null;
+}
+
+function __urlOrigin(url) {
+  var host = url.host.indexOf(':') !== -1 ? '[' + url.host + ']' : url.host;
+  var standard = url.scheme === 'https' ? 443 : (url.scheme === 'http' ? 80 : -1);
+  return url.port === standard ? url.scheme + '://' + host : url.scheme + '://' + host + ':' + url.port;
+}
+
+/* Upstream's own fallback where it has no public suffix list: the last two labels. */
+function __registrableDomain(url) {
+  var labels = url.host.split('.');
+  if (labels.length >= 2 && /[a-zA-Z]/.test(labels[labels.length - 1])) return labels.slice(-2).join('.');
+  return url.host;
+}
+
+function __siteRelation(initiator, url) {
+  if (__urlOrigin(initiator) === __urlOrigin(url)) return 'same-origin';
+  if (__registrableDomain(initiator) === __registrableDomain(url)) return 'same-site';
+  return 'cross-site';
+}
+
+/* The page as a browser sends it as Referer by default (strict-origin-when-cross-origin), or null for none. */
+function __referrerFor(page, url) {
+  if (page.isHttps && !url.isHttps) return null;
+  var sent = page.newBuilder().username('').password('').fragment(null);
+  if (__urlOrigin(page) === __urlOrigin(url)) return sent.build();
+  return sent.encodedPath('/').query(null).build();
+}
+
+function __httpUrlOrNull(text) {
+  return /^https?:\\/\\//i.test(text) ? __httpUrlOf(text) : null;
+}
+
+/* The source's base url, as the site its requests come from; null outside one. */
+function __sourceSiteUrl() {
+  var base = null;
+  try {
+    base = typeof __source === 'undefined' || __source === null ? null : __source.baseUrl;
+  } catch (error) {
+    base = null;
+  }
+  if ((base === null || base === undefined) && typeof __BASE_URL !== 'undefined') base = __BASE_URL;
+  return base === null || base === undefined ? null : __httpUrlOrNull(__str(base));
+}
+
+/**
+ * The request with the headers a browser sends for it — upstream's
+ * BrowserCallInterceptor and BrowserHeadersInterceptor, on the first hop.
+ *
+ * A request that carries no Fetch goes out as built, as it does upstream. One
+ * with a page gets that page as its Referer, trimmed the way a browser trims
+ * it. One with a kind, and a User-Agent naming a browser, also gets that
+ * browser's fetch metadata, client hints, Accept, Accept-Language, Priority
+ * and Origin; a header the source set itself is kept.
+ *
+ * What upstream does that this does not, and why each is the transport's:
+ * the redirects are walked by the host, so the per-hop Referer trimming and
+ * Sec-Fetch-Site escalation happen once, for the first url; header order and
+ * HTTP/2's 'te: trailers' are not something fetch() can choose.
+ */
+function __browserRequest(request) {
+  var labels = request.__tags;
+  var kind = labels.has(__FETCH_KIND_TAG) ? labels.get(__FETCH_KIND_TAG) : null;
+  var from = labels.has(__FROM_PAGE_TAG) ? labels.get(__FROM_PAGE_TAG) : null;
+  if (from === null && (kind === null || kind === 'NONE')) return request;
+
+  var url = request.url;
+  var site = __sourceSiteUrl();
+  var page = from === null ? null : (__httpUrlOrNull(from) || (site === null ? null : __k.resolve(site, from)));
+  var builder = request.newBuilder();
+  var userAgent = __str(request.headers.get('User-Agent') || '');
+  if (userAgent.length === 0 && kind !== null && kind !== 'NONE') {
+    userAgent = __APP_USER_AGENT;
+    builder.header('User-Agent', userAgent);
+  }
+  var browser = kind !== null && kind !== 'NONE' && site !== null ? __browserOf(userAgent) : null;
+  if (page === null && browser === null) return request;
+
+  if (page !== null) {
+    var referer = __referrerFor(page, url);
+    if (referer === null) builder.removeHeader('Referer');
+    else builder.header('Referer', referer.toString());
+  }
+  if (browser === null) return builder.build();
+
+  function fill(name, value) {
+    if (value !== null && value !== undefined && !request.headers.get(name)) builder.header(name, value);
+  }
+  var written = request.headers.get('Referer');
+  var initiator = page || (written ? __httpUrlOrNull(__str(written)) : null) || site;
+  var secure = url.isHttps || __LOCAL_HOSTS.indexOf(url.host) !== -1;
+
+  if (secure) {
+    browser.clientHints(userAgent).forEach(function (pair) { fill(pair[0], pair[1]); });
+  }
+  fill('Accept-Language', 'en-US,en;q=0.9');
+  fill('Accept', browser.accept(kind, userAgent));
+  var fetchSite = request.headers.get('Sec-Fetch-Site') || __siteRelation(initiator, url);
+  if (secure) {
+    fill('Sec-Fetch-Site', fetchSite);
+    fill('Sec-Fetch-Mode', kind === 'DOCUMENT' ? 'navigate' : (kind === 'XHR' ? 'cors' : 'no-cors'));
+    if (kind === 'DOCUMENT' && browser.sendsFetchUser) fill('Sec-Fetch-User', '?1');
+    fill('Sec-Fetch-Dest', { DOCUMENT: 'document', XHR: 'empty', IMAGE: 'image', SCRIPT: 'script' }[kind]);
+    if (kind === 'IMAGE' && fetchSite === 'cross-site') fill('Sec-Fetch-Storage-Access', browser.storageAccess(userAgent));
+  }
+  if (kind === 'DOCUMENT' && browser.upgradesInsecure(url)) fill('Upgrade-Insecure-Requests', '1');
+  fill('Priority', browser.priority(kind));
+  if (!request.headers.get('Origin')) {
+    var sendsOrigin = (request.method !== 'GET' && request.method !== 'HEAD') ||
+      (kind === 'XHR' && __urlOrigin(initiator) !== __urlOrigin(url));
+    if (sendsOrigin) builder.header('Origin', __urlOrigin(initiator));
+  }
+  return builder.build();
+}
+
+/**
  * okhttp's Request.Builder — for a request built from nothing, and for
  * 'request.newBuilder()', which is how an interceptor changes the request it
  * was handed before proceeding with it.
@@ -9154,6 +9493,8 @@ function __requestBuilder(method, url, headers, body, tags) {
     patch: function (value) { method = 'PATCH'; body = value; return builder; },
     delete: function (value) { method = 'DELETE'; body = value || null; return builder; },
     cacheControl: function () { return builder; },
+    /* keiyoushi's 'Request.Builder.fetch(Fetch)' — see Fetch. */
+    fetch: function (value) { __tagFetch(labels, value); return builder; },
     /* 'tag(value)', or 'tag(type, value)'; a null value removes the tag. */
     tag: function (a, b) {
       var key = b === undefined ? __OBJECT_TAG : a;
@@ -10209,7 +10550,7 @@ async function __proceed(request, chain, index, follow, cookies) {
   // page to find an id first — arrives as a promise of one. Kotlin would
   // have finished building it before the call; so does this.
   if (__thenable(request)) request = await request;
-  if (index >= chain.length) return await __execute(__withCookies(request, cookies), follow);
+  if (index >= chain.length) return await __execute(__withCookies(__browserRequest(request), cookies), follow);
   var interceptor = chain[index];
   var link = {
     request: function () { return request; },

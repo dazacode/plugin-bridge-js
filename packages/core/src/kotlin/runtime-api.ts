@@ -393,6 +393,9 @@ export const RUNTIME_HELPERS = [
 	/* keiyoushi's `client.get(url)` and its three siblings, which build the
 	   request, send it and await it in one suspend call. See `clientVerb`. */
 	'okhttp',
+	/* keiyoushi core's 'Request.Builder.fetch(Fetch)' and 'Fetch.from(page)'. */
+	'fetchOn',
+	'fetchFrom',
 	/* keiyoushi core's Next.js Flight and page-data extraction. */
 	'extractNextJs',
 	'extractNextJsRsc',
@@ -954,6 +957,9 @@ export const RUNTIME_GLOBALS = [
 	/* okhttp's `CacheControl`, named as the third argument of `GET`. Carried
 	   rather than refused; see the value for why. */
 	'CacheControl',
+	/* keiyoushi core's `Fetch`: a request's kind and the page it comes from,
+	   carried as request tags and sent as a browser's headers. */
+	'Fetch',
 	/* keiyoushi.utils.commonEmptyHeaders — the default `headers` of the shared
 	   extractor modules' constructors. A lowercase name the emitter would
 	   otherwise read as a member of the source, which is undefined. */

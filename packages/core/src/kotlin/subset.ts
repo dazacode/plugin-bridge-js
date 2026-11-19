@@ -2337,6 +2337,8 @@ export const GLOBAL_NAMES: ReadonlySet<string> = new Set([
 	// behaviour; it is here so that naming it resolves.
 	'Interceptor',
 	'CacheControl',
+	/* keiyoushi core's `Fetch` — see `RUNTIME_GLOBALS`. */
+	'Fetch',
 	/* See `RUNTIME_GLOBALS`: the shared modules' default constructor headers. */
 	'commonEmptyHeaders',
 	/* `TimeZone.getTimeZone("UTC")`, which 115 sources set on a date format,

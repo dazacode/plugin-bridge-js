@@ -522,6 +522,10 @@ const helpers: Record<string, (...args: never[]) => unknown> = {
 		sent.push({ receiver, verb: verb as string, positional: positional as Any[], named });
 		return Promise.resolve({ verb, url: (positional as Any[])[0] });
 	},
+	// keiyoushi core's `builder.fetch(f)` and `Fetch.X.from(page)`, as the runtime
+	// answers them: the receiver's own member.
+	fetchOn: (receiver: Any, fetch: Any) => (receiver as { fetch(f: Any): Any }).fetch(fetch),
+	fetchFrom: (receiver: Any, page: Any) => (receiver as { from(p: Any): Any }).from(page),
 	// kotlin.time on a non-literal: the receiver decides, as in the runtime.
 	durationOf: (value: Any, name: Any, factor: Any) =>
 		typeof value === 'number'
@@ -5733,6 +5737,67 @@ describe('keiyoushi request verbs on a client', () => {
 		expect(
 			refusalNames(inClass('    suspend fun page(url: String) = client.get(url, retries = 2)'))
 		).toContain('the argument name `retries` on `get`');
+	});
+
+	it("passes the current core's Fetch along, positional or named", async () => {
+		// Every request in the current half of the catalogue is written this
+		// way, and `Fetch` was a capitalised receiver nothing declared — 1,464
+		// listings of one repository refused on it before anything else.
+		const kind = (name: string) => ({
+			name,
+			from: (page: string) => ({ name, page })
+		});
+		const Fetch = { DOCUMENT: kind('DOCUMENT'), XHR: kind('XHR') };
+		sent.length = 0;
+		const demo = instantiate(
+			inClass(
+				'    suspend fun page(url: String) = client.get(url, Fetch.DOCUMENT)',
+				'    suspend fun api(url: String, from: String) = client.get(url, Fetch.XHR.from(from))',
+				'    suspend fun form(url: String, body: RequestBody) = client.post(url, body = body, fetch = Fetch.XHR)'
+			),
+			{ client: { newCall: () => null }, headers: {} },
+			{ Fetch }
+		);
+		await demo.page('https://example.invalid/a');
+		await demo.api('https://example.invalid/b', '/manga/1');
+		await demo.form('https://example.invalid/c', 'BODY');
+		expect(sent[0].positional).toEqual(['https://example.invalid/a', Fetch.DOCUMENT]);
+		expect(sent[1].positional).toEqual([
+			'https://example.invalid/b',
+			{ name: 'XHR', page: '/manga/1' }
+		]);
+		expect(sent[2].named).toEqual({ body: 'BODY', fetch: Fetch.XHR });
+	});
+
+	it('sets a Fetch on a request builder through the runtime', () => {
+		const tagged: unknown[] = [];
+		const builder = { fetch: (f: unknown) => (tagged.push(f), builder), build: () => tagged };
+		const demo = instantiate(
+			inClass(
+				'    fun request(b: Request.Builder): Any = b.fetch(Fetch.XHR).build()',
+				'    fun image(b: Request.Builder, page: String): Any = b.fetch(imageFetch.from(page)).build()'
+			),
+			{ imageFetch: { from: (page: string) => `IMAGE<-${page}` } },
+			{ Fetch: { XHR: 'XHR' } }
+		);
+		expect(demo.request(builder)).toEqual(['XHR']);
+		expect(demo.image(builder, '/c/1')).toEqual(['XHR', 'IMAGE<-/c/1']);
+	});
+
+	it("leaves a source's own companion `from` alone", () => {
+		const emission = translate(
+			kt(
+				'class Demo : Source() {',
+				'    fun detail(x: String) = BookDetail.from(x)',
+				'}',
+				'class BookDetail(val x: String) {',
+				'    companion object {',
+				'        fun from(x: String) = BookDetail(x)',
+				'    }',
+				'}'
+			)
+		);
+		expect(emission.js).not.toContain('fetchFrom');
 	});
 });
 

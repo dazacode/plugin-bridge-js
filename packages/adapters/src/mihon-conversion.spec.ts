@@ -490,7 +490,7 @@ class Extension {
 		expect(sent[0].url).toBe(`${BASE_URL}/p`);
 	});
 
-	it('builds KeiSource headers with Referer and Origin, then the extension hook', async () => {
+	it('builds KeiSource headers with Referer, then the extension hook', async () => {
 		const module = await load(
 			`
 class Extension {
@@ -509,9 +509,80 @@ class Extension {
 		await module.browse('popular', 1, ctx);
 		expect(sent[0].headers).toMatchObject({
 			Referer: `${BASE_URL}/`,
-			Origin: BASE_URL,
 			'X-Extra': 'yes'
 		});
+		// The current core sets Origin per request, where a browser would send
+		// one — never on a plain GET of the site's own page.
+		expect(sent[0].headers.Origin).toBeUndefined();
+	});
+
+	it('sends a Fetch.DOCUMENT the way a browser loads a page', async () => {
+		const module = await load(
+			`
+class Extension {
+  constructor() { this.baseUrl = '${BASE_URL}'; }
+  async getPopularManga(page) {
+    await __k.okhttp(this.client, 'get', [this.baseUrl + '/popular', Fetch.DOCUMENT], {});
+    return { mangas: [], hasNextPage: false };
+  }
+}
+`,
+			{},
+			true
+		);
+		const { ctx, sent } = recording();
+		await module.browse('popular', 1, ctx);
+		const headers = sent[0].headers;
+		// The app's own user agent, which the browser headers are worked out from.
+		expect(headers['User-Agent']).toMatch(/Chrome\/\d+.*Mobile Safari/);
+		expect(headers).toMatchObject({
+			Referer: `${BASE_URL}/`,
+			Accept: expect.stringMatching(/^text\/html,application\/xhtml\+xml/),
+			'Accept-Language': 'en-US,en;q=0.9',
+			'Sec-CH-UA-Mobile': '?1',
+			'Sec-CH-UA-Platform': '"Android"',
+			'Sec-Fetch-Site': 'same-origin',
+			'Sec-Fetch-Mode': 'navigate',
+			'Sec-Fetch-User': '?1',
+			'Sec-Fetch-Dest': 'document',
+			'Upgrade-Insecure-Requests': '1',
+			Priority: 'u=0, i'
+		});
+		expect(headers['Sec-CH-UA']).toContain('"Google Chrome";v="');
+		expect(headers.Origin).toBeUndefined();
+	});
+
+	it('sends a Fetch.XHR from a page as that page’s call to another host', async () => {
+		const module = await load(
+			`
+class Extension {
+  constructor() { this.baseUrl = '${BASE_URL}'; }
+  async getPopularManga(page) {
+    const fetch = __k.fetchFrom(Fetch.XHR, '/manga/1?x=1#top');
+    await __k.okhttp(this.client, 'get', ['https://cdn.example.invalid/api', fetch], {});
+    const request = __k.fetchOn(GET('https://elsewhere.invalid/p', this.headers).newBuilder(), Fetch.NONE).build();
+    await this.client.newCall(request).execute();
+    return { mangas: [], hasNextPage: false };
+  }
+}
+`,
+			{},
+			true
+		);
+		const { ctx, sent } = recording();
+		await module.browse('popular', 1, ctx);
+		expect(sent[0].headers).toMatchObject({
+			// Cross-origin, so only the page's origin, as a browser trims it.
+			Referer: `${BASE_URL}/`,
+			Origin: BASE_URL,
+			Accept: '*/*',
+			'Sec-Fetch-Site': 'same-site',
+			'Sec-Fetch-Mode': 'cors',
+			'Sec-Fetch-Dest': 'empty',
+			Priority: 'u=1, i'
+		});
+		// Fetch.NONE goes out exactly as built.
+		expect(sent[1].headers).toEqual({ Referer: `${BASE_URL}/` });
 	});
 
 	it('runs configureClient, which is where a KeiSource declares its rate limit', async () => {
