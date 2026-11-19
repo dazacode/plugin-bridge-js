@@ -215,7 +215,7 @@ async function drive(listing: RepositoryPlugin): Promise<Drive> {
 				detail: `${shelf.length} entries${shelf[0] ? `, first "${short(String(shelf[0].title), 40)}"` : along(sandbox)}`
 			};
 		} catch (error) {
-			report.popular = { ok: false, detail: short(message(error)) };
+			report.popular = { ok: false, detail: short(message(error)) + along(sandbox) };
 		}
 
 		let found: Entry[] = [];
@@ -228,7 +228,10 @@ async function drive(listing: RepositoryPlugin): Promise<Drive> {
 				detail: `"${query}": ${found.length} entries${found.length === 0 ? along(sandbox) : ''}`
 			};
 		} catch (error) {
-			report.search = { ok: false, detail: `"${query}": ${short(message(error))}` };
+			report.search = {
+				ok: false,
+				detail: `"${query}": ${short(message(error))}${along(sandbox)}`
+			};
 		}
 
 		const candidates = [...found, ...shelf]
@@ -246,7 +249,7 @@ async function drive(listing: RepositoryPlugin): Promise<Drive> {
 					detail: `${episodes.length} episodes${episodes.length === 0 ? along(sandbox) : ''}`
 				};
 			} catch (error) {
-				report.episodes = { ok: false, detail: short(message(error)) };
+				report.episodes = { ok: false, detail: short(message(error)) + along(sandbox) };
 				continue;
 			}
 			const episode = episodes.find((row) => typeof row.sourceEpisodeId === 'string');
@@ -263,7 +266,7 @@ async function drive(listing: RepositoryPlugin): Promise<Drive> {
 					detail: `${streams.length} streams${streams.length === 0 ? along(sandbox) : ''}`
 				};
 			} catch (error) {
-				report.videos = { ok: false, detail: short(message(error)) };
+				report.videos = { ok: false, detail: short(message(error)) + along(sandbox) };
 				continue;
 			}
 			if (streams.length === 0) continue;
