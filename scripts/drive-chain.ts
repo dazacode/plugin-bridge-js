@@ -65,8 +65,20 @@ if (indexUrl === undefined) {
 }
 
 const host = headlessPluginHost({ dataDir: flag('--data-dir') });
+/**
+ * `GITHUB_TOKEN`, when set, on the code host's API and nowhere else: listing a
+ * source repository's files is the one request per conversion that host
+ * rations, at sixty an hour unauthenticated, and a run over a whole index
+ * spends that in minutes.
+ */
+const apiToken = process.env['GITHUB_TOKEN'];
 const text = async (url: string) => {
-	const response = await host.fetch(url);
+	const response = await host.fetch(
+		url,
+		apiToken !== undefined && url.startsWith('https://api.github.com/')
+			? { headers: { authorization: `Bearer ${apiToken}` } }
+			: undefined
+	);
 	if (!response.ok) throw new Error(`${response.status} from ${url}`);
 	return await response.text();
 };
