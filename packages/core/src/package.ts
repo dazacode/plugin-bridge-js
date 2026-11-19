@@ -255,8 +255,14 @@ const ENTRYPOINT = 'source';
  *     capitalised member path, a package id, a selector — so manifests lose
  *     `array.prototype.indexof`, `java.net.sockettimeoutexception` and their
  *     `*.` siblings. Reconvert every bundle made at 65 or earlier.
+ * 67: keiyoushi's AniSource play path runs; a Kotlin `for` walks a map as
+ *     its entries; a template's fetching member is awaited from a subclass;
+ *     `toHttpUrlOrNull` answers null; a leading `]` in a regex class, a
+ *     literal's bytes, an mp4's picture size and a cookie-jar property
+ *     initialiser are read as Kotlin reads them. Reconvert every bundle made
+ *     at 66 or earlier.
  */
-export const CONVERTER_VERSION = 66;
+export const CONVERTER_VERSION = 67;
 
 export interface BundleInput {
 	readonly id: string;
