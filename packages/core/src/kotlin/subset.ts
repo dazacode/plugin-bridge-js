@@ -1817,6 +1817,10 @@ export const HOST_METHODS: ReadonlySet<string> = new Set([
 	// absent dies in the sandbox rather than refusing here.
 	'closeQuietly',
 	'stop',
+	// `MediaMetadataRetriever`'s three, on the runtime's reader of mp4 boxes.
+	'setDataSource',
+	'extractMetadata',
+	'release',
 	// The two cookie calls the host jar makes true, rather than merely
 	// tolerable. `ADR-0005` §3: the plugin declares intent, the host carries
 	// the state — so both of these are statements of intent the host has
@@ -2028,7 +2032,10 @@ export const AWAITED_HOST_METHODS: ReadonlySet<string> = new Set([
 	'generateKeyPair',
 	'proceed',
 	// The runtime jar's read, which asks the host — see `scanInto`.
-	'loadForRequest'
+	'loadForRequest',
+	// `MediaMetadataRetriever.setDataSource(url, headers)`, which opens the
+	// file: ranged requests for its boxes.
+	'setDataSource'
 ]);
 
 /**
@@ -2396,6 +2403,8 @@ export const GLOBAL_NAMES: ReadonlySet<string> = new Set([
 	'StandardCharsets',
 	'JsonObject',
 	'LruCache',
+	// See `RUNTIME_GLOBALS`: an mp4's picture size, read from its boxes.
+	'MediaMetadataRetriever',
 	// `java.lang.ref`'s two holders, which a template caches a fetched map in.
 	'SoftReference',
 	'WeakReference',

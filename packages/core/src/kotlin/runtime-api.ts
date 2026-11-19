@@ -935,6 +935,10 @@ export const RUNTIME_GLOBALS = [
 	'StandardCharsets',
 	'JsonObject',
 	'LruCache',
+	/* android.media.MediaMetadataRetriever over an mp4 url: the picture size
+	   a shared extractor prints beside a quality, read from the file's boxes
+	   with ranged requests. Anything else it is asked is refused by name. */
+	'MediaMetadataRetriever',
 	/* `SoftReference(map)` / `WeakReference(x)`, then `.get()`. See the runtime
 	   for why holding the value strongly is exact rather than approximate. */
 	'SoftReference',

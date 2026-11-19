@@ -471,7 +471,7 @@ const LOG_CALL = /^Log\.(?:v|d|i|w|e|wtf)$/;
  * that decrypts makes its callers `async` too.
  */
 const BLOCKING_CALLS =
-	/\.(?:execute|awaitSuccess|await|doFinal|generateKeyPair|verify|proceed)\s*\(|(?<!\bMath)\.sign\s*\(|\bThread\s*\.\s*sleep\s*\(|\b(?:client|[a-z]\w*Client)\s*\.\s*(?:get|post|put|head)\s*\(/;
+	/\.(?:execute|awaitSuccess|await|doFinal|generateKeyPair|setDataSource|verify|proceed)\s*\(|(?<!\bMath)\.sign\s*\(|\bThread\s*\.\s*sleep\s*\(|\b(?:client|[a-z]\w*Client)\s*\.\s*(?:get|post|put|head)\s*\(/;
 
 /**
  * Members the host calls synchronously, which therefore cannot be emitted

@@ -3613,6 +3613,39 @@ describe('a name declared somewhere the emitter had not looked', () => {
 		expect(emitted.js).toContain('async build(');
 	});
 
+	it('awaits MediaMetadataRetriever.setDataSource, which reads the file it is given', () => {
+		// The shared mp4 extractor's quality label: Kotlin blocks in
+		// `setDataSource` while the framework opens the url. Here that is ranged
+		// requests, so the call is a promise, and an unawaited one left
+		// `extractMetadata` reading a retriever nothing had filled yet.
+		const source = kt(
+			'class Demo : Source() {',
+			'    fun label(url: String): String = size(url)?.let { "${it.first}x${it.second}" } ?: "Unknown"',
+			'    private fun size(url: String): Pair<Int, Int>? {',
+			'        val retriever = MediaMetadataRetriever()',
+			'        return try {',
+			'            retriever.setDataSource(url, headers.toMap())',
+			'            val w = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull()',
+			'            val h = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull()',
+			'            if (w != null && h != null) w to h else null',
+			'        } catch (_: Exception) {',
+			'            null',
+			'        } finally {',
+			'            retriever.release()',
+			'        }',
+			'    }',
+			'}'
+		);
+
+		const emitted = translate(source);
+
+		expect(emitted.refusals).toEqual([]);
+		expect(emitted.js).toContain('await retriever.setDataSource(');
+		expect(emitted.js).toContain('async size(');
+		expect(emitted.js).toContain('await this.size(');
+		expect(emitted.js).not.toContain('await retriever.extractMetadata(');
+	});
+
 	it('awaits the crypto operations, which are synchronous in Kotlin only', () => {
 		// `crypto.subtle` is promise-returning and `javax.crypto` is not, so the
 		// four operations that touch a key are `async` in the runtime shim and

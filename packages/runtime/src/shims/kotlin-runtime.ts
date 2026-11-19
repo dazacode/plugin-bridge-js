@@ -14611,6 +14611,190 @@ LruCache.prototype.evictAll = function () { this.entries.clear(); };
 LruCache.prototype.size = function () { return this.entries.size; };
 
 /**
+ * android.media.MediaMetadataRetriever, for an MP4 at a url.
+ *
+ * The shared extractors ask it one question: how large is the picture in this
+ * mp4, so a quality can be printed beside it. Android answers by opening the
+ * file through its media framework; this answers by reading the same boxes
+ * that framework reads, with ranged requests through the host's client:
+ * walking the top-level boxes from the start, skipping 'mdat' by its declared
+ * size rather than reading it, and parsing 'moov' wherever it sits. The width
+ * and height are the first video track's sample entry, which is what
+ * Android's MPEG4 extractor sets as kKeyWidth/kKeyHeight and what
+ * METADATA_KEY_VIDEO_WIDTH/HEIGHT report.
+ *
+ * What it does not read, it refuses by name rather than answer null for:
+ * another container (Android would parse a Matroska file, and null there
+ * would read as "this file has no picture"), a key other than the four below,
+ * or the file-descriptor forms of setDataSource. A file whose boxes cannot be
+ * found throws, which is what Android's own does for a file it cannot open.
+ */
+function MediaMetadataRetriever() {
+  if (!(this instanceof MediaMetadataRetriever)) return new MediaMetadataRetriever();
+  this.__read = null;
+}
+MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO = 16;
+MediaMetadataRetriever.METADATA_KEY_HAS_VIDEO = 17;
+MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH = 18;
+MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT = 19;
+/* How many ranged requests one file may cost, and how large a 'moov' may be. */
+var __MMR_HOPS = 6;
+var __MMR_HEAD = 65536;
+var __MMR_MOOV_MAX = 4 * 1024 * 1024;
+
+MediaMetadataRetriever.prototype.setDataSource = async function (source, headers) {
+  if (typeof source !== 'string') {
+    throw __kTagged(new Error(
+      'MediaMetadataRetriever.setDataSource was given a ' + typeof source + ', and only a url ' +
+      'can be read here.'), 'UnsupportedOperationException');
+  }
+  var sent = {};
+  if (headers instanceof Map) headers.forEach(function (value, name) { sent[__str(name)] = __str(value); });
+  else if (headers !== null && headers !== undefined) {
+    Object.keys(headers).forEach(function (name) { sent[name] = __str(headers[name]); });
+  }
+  this.__read = await __mmrRead(source, sent);
+};
+
+MediaMetadataRetriever.prototype.extractMetadata = function (key) {
+  if (this.__read === null) {
+    throw __kTagged(new Error('extractMetadata was called before setDataSource.'), 'IllegalStateException');
+  }
+  var read = this.__read;
+  switch (Number(key)) {
+    case 16: return read.audio ? 'yes' : null;
+    case 17: return read.video === null ? null : 'yes';
+    case 18: return read.video === null ? null : String(read.video.width);
+    case 19: return read.video === null ? null : String(read.video.height);
+    default:
+      throw __kTagged(new Error(
+        'MediaMetadataRetriever key ' + key + ' is not one this build reads; only the picture ' +
+        'size and whether there is audio or video are.'), 'UnsupportedOperationException');
+  }
+};
+MediaMetadataRetriever.prototype.release = function () { this.__read = null; };
+MediaMetadataRetriever.prototype.close = MediaMetadataRetriever.prototype.release;
+
+/* One ranged read: the bytes, and the offset they actually start at. */
+async function __mmrRange(url, headers, from, length) {
+  __syncPolicy();
+  var asked = Object.assign({}, headers, { Range: 'bytes=' + from + '-' + (from + length - 1) });
+  var raw = await __host().http.send(url, { method: 'GET', headers: asked });
+  var status = Number(raw.status);
+  if (status !== 200 && status !== 206) {
+    throw __kTagged(new Error('MediaMetadataRetriever could not open ' + url + ': it answered ' +
+      status + '.'), 'RuntimeException');
+  }
+  var bytes = typeof raw.bytes === 'function' ? await raw.bytes() : new Uint8Array(0);
+  // A host that ignores Range sends the file from its start.
+  return { start: status === 200 ? 0 : from, bytes: bytes };
+}
+
+function __mmrU32(bytes, at) {
+  return ((bytes[at] << 24) >>> 0) + (bytes[at + 1] << 16) + (bytes[at + 2] << 8) + bytes[at + 3];
+}
+function __mmrType(bytes, at) {
+  return String.fromCharCode(bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]);
+}
+
+/* The child boxes of [from, to), as { type, body, end } with body past the header. */
+function __mmrBoxes(bytes, from, to) {
+  var out = [];
+  var at = from;
+  while (at + 8 <= to) {
+    var size = __mmrU32(bytes, at);
+    var header = 8;
+    if (size === 1) {
+      if (at + 16 > to) break;
+      size = __mmrU32(bytes, at + 8) * 4294967296 + __mmrU32(bytes, at + 12);
+      header = 16;
+    } else if (size === 0) {
+      size = to - at;
+    }
+    if (size < header || at + size > to) break;
+    out.push({ type: __mmrType(bytes, at + 4), body: at + header, end: at + size });
+    at += size;
+  }
+  return out;
+}
+function __mmrChild(bytes, box, type) {
+  var found = __mmrBoxes(bytes, box.body, box.end).filter(function (one) { return one.type === type; });
+  return found.length > 0 ? found[0] : null;
+}
+
+/* What 'moov' says: the first video track's sample-entry size, and whether audio is present. */
+function __mmrMoov(bytes, moov) {
+  var video = null;
+  var audio = false;
+  __mmrBoxes(bytes, moov.body, moov.end).forEach(function (trak) {
+    if (trak.type !== 'trak') return;
+    var mdia = __mmrChild(bytes, trak, 'mdia');
+    var hdlr = mdia === null ? null : __mmrChild(bytes, mdia, 'hdlr');
+    if (hdlr === null || hdlr.body + 12 > hdlr.end) return;
+    var handler = __mmrType(bytes, hdlr.body + 8);
+    if (handler === 'soun') { audio = true; return; }
+    if (handler !== 'vide' || video !== null) return;
+    var minf = __mmrChild(bytes, mdia, 'minf');
+    var stbl = minf === null ? null : __mmrChild(bytes, minf, 'stbl');
+    var stsd = stbl === null ? null : __mmrChild(bytes, stbl, 'stsd');
+    // version/flags, entry count, then the first entry: size, format, six
+    // reserved, data reference index, sixteen pre-defined, width, height.
+    var entry = stsd === null ? -1 : stsd.body + 8;
+    if (entry < 0 || entry + 36 > stsd.end) return;
+    video = {
+      width: (bytes[entry + 32] << 8) | bytes[entry + 33],
+      height: (bytes[entry + 34] << 8) | bytes[entry + 35]
+    };
+  });
+  return { video: video, audio: audio };
+}
+
+async function __mmrRead(url, headers) {
+  var at = 0;
+  for (var hop = 0; hop < __MMR_HOPS; hop += 1) {
+    var got = await __mmrRange(url, headers, at, __MMR_HEAD);
+    var bytes = got.bytes;
+    var offset = at - got.start;
+    if (offset < 0 || offset + 8 > bytes.length) break;
+    if (hop === 0 && __mmrType(bytes, 4) !== 'ftyp') {
+      var first = bytes.length >= 4 && bytes[0] === 0x1a && bytes[1] === 0x45 &&
+        bytes[2] === 0xdf && bytes[3] === 0xa3;
+      throw __kTagged(new Error(
+        'MediaMetadataRetriever read ' + (first ? 'a Matroska/WebM file' : 'a file that is not an MP4') +
+        ' at ' + url + ', and only MP4 is read here.'), 'UnsupportedOperationException');
+    }
+    // Walk the boxes this window holds whole, then jump to the first it does not.
+    for (;;) {
+      if (offset + 8 > bytes.length) break;
+      var size = __mmrU32(bytes, offset);
+      var header = 8;
+      if (size === 1) {
+        if (offset + 16 > bytes.length) break;
+        size = __mmrU32(bytes, offset + 8) * 4294967296 + __mmrU32(bytes, offset + 12);
+        header = 16;
+      }
+      if (size !== 0 && size < header) break;
+      var type = __mmrType(bytes, offset + 4);
+      if (type === 'moov') {
+        if (size === 0 || size > __MMR_MOOV_MAX) break;
+        var whole = offset + size <= bytes.length
+          ? { bytes: bytes, at: offset }
+          : await __mmrRange(url, headers, at, size).then(function (read) {
+              return { bytes: read.bytes, at: at - read.start };
+            });
+        if (whole.at < 0 || whole.at + size > whole.bytes.length) break;
+        return __mmrMoov(whole.bytes, { type: 'moov', body: whole.at + header, end: whole.at + size });
+      }
+      if (size === 0) break;
+      at += size;
+      offset += size;
+    }
+  }
+  throw __kTagged(new Error('MediaMetadataRetriever could not find the metadata of ' + url + '.'),
+    'RuntimeException');
+}
+
+/**
  * Constructible with or without 'new', because the emitter writes both.
  *
  * Two constructors live here under one name. The positional arguments are the
