@@ -4582,6 +4582,23 @@ describe('positional arguments after named ones', () => {
 	});
 });
 
+describe('a renamed field', () => {
+	it('reads @SerialName as the string its literal spells', () => {
+		// `"\$t"` is the key `$t`, which every Blogger JSON feed keys its text by.
+		const emission = translate(
+			kt(
+				'class Demo : Source() {',
+				'    fun read(text: String): String = json.decodeFromString<Title>(text).t',
+				'}',
+				'@Serializable',
+				'class Title(@SerialName("\\$t") val t: String, @SerialName("a\\"b") val q: String)'
+			)
+		);
+		expect(emission.js).toContain('{"$t":"t","a\\"b":"q"}');
+		expect(emission.js).not.toContain('\\\\$t');
+	});
+});
+
 describe('a bare apply', () => {
 	it('runs on the implicit receiver and answers it', () => {
 		const emission = translate(

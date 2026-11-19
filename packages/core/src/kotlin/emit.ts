@@ -4030,8 +4030,8 @@ class Emitter {
 			for (const entry of entries) {
 				const entryName = this.nameOf(entry);
 				const written = kids(entry).find((part) => part.type === 'modifiers')?.text ?? '';
-				const serial = /@SerialName\s*\(\s*"([^"]*)"/.exec(written);
-				if (entryName !== null && serial !== null) renamed[entryName] = serial[1];
+				const serial = /@SerialName\s*\(\s*"((?:[^"\\]|\\.)*)"/.exec(written);
+				if (entryName !== null && serial !== null) renamed[entryName] = kotlinEscapes(serial[1]);
 			}
 			if (Object.keys(renamed).length > 0) {
 				lines.push(
@@ -5509,7 +5509,9 @@ class Emitter {
 		const wires = (declared: string, written: string): string[] => {
 			const out = [declared];
 			for (const annotation of written.matchAll(/@(SerialName|JsonNames)\s*\(([^)]*)\)/g)) {
-				const quoted = [...annotation[2].matchAll(/"([^"]*)"/g)].map((one) => one[1]);
+				const quoted = [...annotation[2].matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((one) =>
+					kotlinEscapes(one[1])
+				);
 				if (annotation[1] === 'SerialName' && quoted.length > 0) out[0] = quoted[0];
 				else out.push(...quoted);
 			}
@@ -5649,7 +5651,8 @@ class Emitter {
 			}
 			const written = kids(parameter).find((part) => part.type === 'modifiers')?.text ?? '';
 			for (const found of written.matchAll(/@(?:SerialName|JsonNames)\s*\(([^)]*)\)/g)) {
-				for (const quoted of found[1].matchAll(/"([^"]+)"/g)) aliases[quoted[1]] = declared;
+				for (const quoted of found[1].matchAll(/"((?:[^"\\]|\\.)+)"/g))
+					aliases[kotlinEscapes(quoted[1])] = declared;
 			}
 		}
 		if (fields.length === 0) return null;
@@ -14244,6 +14247,22 @@ interface RecoveryCut {
  * a type seen ahead of the identifier is a receiver and one seen after it is
  * the return type.
  */
+/**
+ * A Kotlin string literal's text as the string it spells.
+ *
+ * Annotation arguments are read off the source text, escapes and all, and
+ * `@SerialName("\$t")` names the key `$t` — the one every Blogger JSON feed
+ * keys its text by. Read raw it was `\$t`, which no feed has, and a template
+ * built on those feeds found no title in any entry.
+ */
+function kotlinEscapes(text: string): string {
+	return text.replace(/\\(u[0-9a-fA-F]{4}|.)/g, (_, escaped: string) => {
+		if (escaped.length === 5) return String.fromCharCode(parseInt(escaped.slice(1), 16));
+		const named: Readonly<Record<string, string>> = { n: '\n', t: '\t', r: '\r', b: '\b' };
+		return named[escaped] ?? escaped;
+	});
+}
+
 /** An extension's receiver type exactly as written, or null for a plain function. */
 function receiverTypeText(node: KNode): string | null {
 	for (const child of node.children) {
