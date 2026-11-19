@@ -5151,6 +5151,24 @@ describe('a property whose value the host has to compute', () => {
 		expect(encodedTexts).toEqual(['Salted__']);
 	});
 
+	it('waits for one that reads such a property, too', () => {
+		// `secretKey = SecretKeySpec(keyBytes, "AES")` beside a deferred
+		// `keyBytes`: in the constructor it ran the getter, and the encoder was
+		// no more there for that read than for the first. One listing died at
+		// load exactly so.
+		encodedTexts.length = 0;
+		const demo = instantiate(
+			inClass(
+				'    private val salted = "Salted__".toByteArray(Charsets.UTF_8)',
+				'    private val size = salted.size'
+			)
+		);
+
+		expect(encodedTexts).toEqual([]);
+		expect(demo.size).toBe(1);
+		expect(encodedTexts).toEqual(['Salted__']);
+	});
+
 	it('still evaluates once, which is what the Kotlin `val` promised', () => {
 		encodedTexts.length = 0;
 		const demo = instantiate(

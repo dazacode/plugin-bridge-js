@@ -2057,6 +2057,8 @@ class Emitter {
 	 * function` at the first request of a conversion that refused nothing.
 	 */
 	private valueOnlyMembers = new Set<string>();
+	/** This class's properties deferred to a memoised getter so far — see `classProperty`. */
+	private deferredProperties = new Set<string>();
 	private suspendMembers = new Set<string>();
 	/**
 	 * Properties of the class being emitted whose value is a Promise here: a
@@ -3046,6 +3048,8 @@ class Emitter {
 		// forty lines further down.
 		const outerMembers = this.classMembers;
 		const outerValueOnly = this.valueOnlyMembers;
+		const outerDeferred = this.deferredProperties;
+		this.deferredProperties = new Set<string>();
 		const outerSuspends = this.suspendMembers;
 		const outerAsyncProperties = this.asyncProperties;
 		const outerEagerAsync = this.eagerAsyncProperties;
@@ -3386,6 +3390,7 @@ class Emitter {
 		this.selfClass = outerSelf;
 		this.classMembers = outerMembers;
 		this.valueOnlyMembers = outerValueOnly;
+		this.deferredProperties = outerDeferred;
 		this.suspendMembers = outerSuspends;
 		this.asyncProperties = outerAsyncProperties;
 		this.eagerAsyncProperties = outerEagerAsync;
@@ -4777,6 +4782,20 @@ class Emitter {
 					break;
 				}
 			}
+			// And one that reads a property deferred for that reason: the
+			// constructor would run the getter it was deferred into, and the
+			// host is no more there for the second read than the first.
+			// `secretKey = SecretKeySpec(keyBytes, "AES")` beside a deferred
+			// `keyBytes = …digest(secret.toByteArray())` died at load exactly so.
+			if (!mutable && !deferred) {
+				for (const other of this.deferredProperties) {
+					if (new RegExp(`\\b(?:this|__self)\\.${other}\\b`).test(value)) {
+						deferred = true;
+						break;
+					}
+				}
+			}
+			if (deferred) this.deferredProperties.add(name);
 			// A getter runs after the template's constructor assignment has
 			// already been replaced by this one's setter, so `this.name` there
 			// is not the base value any more. See `navigation`.
