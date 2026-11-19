@@ -66,6 +66,7 @@ interface Options {
 	readonly indexUrl: string;
 	readonly atATime: number;
 	readonly limit: number;
+	readonly only: readonly string[];
 	readonly json: string | null;
 	readonly dataDir: string | undefined;
 	readonly fresh: boolean;
@@ -77,6 +78,8 @@ const USAGE = `Usage: bun tool/check-catalogue.ts <index-url> [options]
 
   --at-a-time <n>   how many listings to check concurrently (default 3)
   --limit <n>       stop after this many listings
+  --only <list>     check only listings whose name or id contains one of these,
+                    comma-separated and case-insensitive
   --json <path>     also write the machine-readable report there
   --data-dir <path> where remembered verdicts live (default ~/.yorozo)
   --fresh           ignore remembered verdicts and check everything again
@@ -95,6 +98,7 @@ function parseArgs(argv: readonly string[]): Options | null {
 	let indexUrl = '';
 	let atATime = 3;
 	let limit = Number.POSITIVE_INFINITY;
+	let only: string[] = [];
 	let json: string | null = null;
 	let dataDir: string | undefined;
 	let fresh = false;
@@ -106,6 +110,11 @@ function parseArgs(argv: readonly string[]): Options | null {
 		const next = (): string => argv[(at += 1)] ?? '';
 		if (argument === '--at-a-time') atATime = Math.max(1, Number(next()) || 3);
 		else if (argument === '--limit') limit = Math.max(1, Number(next()) || 1);
+		else if (argument === '--only')
+			only = next()
+				.split(',')
+				.map((one) => one.trim().toLowerCase())
+				.filter((one) => one.length > 0);
 		else if (argument === '--json') json = next();
 		else if (argument === '--data-dir') dataDir = next();
 		else if (argument === '--fresh') fresh = true;
@@ -120,7 +129,7 @@ function parseArgs(argv: readonly string[]): Options | null {
 	}
 
 	if (!indexUrl.startsWith('https://')) return null;
-	return { indexUrl, atATime, limit, json, dataDir, fresh, why, grants };
+	return { indexUrl, atATime, limit, only, json, dataDir, fresh, why, grants };
 }
 
 /** Everything about this run that a later reader would need in order to trust it. */
@@ -284,7 +293,16 @@ async function run(): Promise<void> {
 	// sentence about the repository rather than about this tool.
 	const detected = await detectRepository(options.indexUrl, text, FOREIGN_ADAPTERS, bytes);
 	const index = detected.index;
-	const listings = index.plugins.slice(0, options.limit);
+	const listings = index.plugins
+		.filter(
+			(listing) =>
+				options.only.length === 0 ||
+				options.only.some(
+					(one) =>
+						listing.name.toLowerCase().includes(one) || listing.id.toLowerCase().includes(one)
+				)
+		)
+		.slice(0, options.limit);
 	const capabilities = {
 		host,
 		download: bytes,
