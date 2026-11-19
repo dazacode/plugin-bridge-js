@@ -4728,6 +4728,25 @@ describe('an `interface`, which is a membership test here', () => {
 			).join(' ')
 		).toContain('with a body');
 	});
+
+	it('refuses an interface property with a getter, for the same reason', () => {
+		// `val displayTitle: String get() = title.ifEmpty { videoId }` was
+		// dropped: every implementer read undefined, and a shelf of titled
+		// records came back empty with nothing refused.
+		expect(
+			refusalNames(
+				kt(
+					'interface VideoEntry {',
+					'    val title: String',
+					'    val displayTitle: String get() = title.ifEmpty { "x" }',
+					'}',
+					'class Demo : Source() {',
+					'    fun go() = 1',
+					'}'
+				)
+			).join(' ')
+		).toContain('`displayTitle` with a getter');
+	});
 });
 
 describe('the member table a nested class used to overwrite', () => {

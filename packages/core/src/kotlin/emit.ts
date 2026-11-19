@@ -2893,7 +2893,8 @@ class Emitter {
 	private interfaceDeclaration(node: KNode, name: string): string | null {
 		const body = kids(node).find((child) => child.type === 'class_body');
 		const members: string[] = [];
-		for (const member of kids(body)) {
+		const declared = kids(body);
+		for (const [at, member] of declared.entries()) {
 			if (member.type === 'function_declaration') {
 				if (kids(member).some((child) => child.type === 'function_body')) {
 					return this.declineMember(
@@ -2908,6 +2909,18 @@ class Emitter {
 			}
 			if (member.type === 'property_declaration') {
 				const held = this.propertyName(member);
+				// `val displayTitle: String get() = title.ifEmpty { videoId }`:
+				// a default every implementer inherits. Nothing here carries it
+				// to them, so it was dropped, every implementer read undefined,
+				// and a shelf of titled records came back empty with nothing
+				// refused. Refused by name, as a function with a body is.
+				if (accessorOf(member, declared[at + 1], 'getter') !== undefined) {
+					return this.declineMember(
+						name,
+						node,
+						`an \`interface\` property \`${held ?? '?'}\` with a getter`
+					);
+				}
 				if (held !== null) members.push(held);
 			}
 		}
