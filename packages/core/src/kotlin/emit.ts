@@ -10060,7 +10060,21 @@ class Emitter {
 		// And one declared on a base class in the file next door — the same
 		// method on the prototype chain, reached the same way: in a request
 		// block, `headersBuilder()` went to the driver's own namesake instead.
-		const knownExtension = this.extensionFunctions.get(name) ?? this.inheritedExtension(name);
+		// And one imported by name from a shared `object` that declares it as an
+		// extension — `import ….ThemeFilters.addListQueryParameter`, called bare
+		// inside `newBuilder().apply { … }`. The explicit-receiver site already
+		// calls `ThemeFilters.addListQueryParameter(builder, …)`; here the call
+		// fell through to a member of the source, `__self.addListQueryParameter
+		// is not a function`, at the first search of a conversion that refused
+		// nothing.
+		const objectExtension =
+			importedFrom !== null && this.neighbourExtensions.has(`${importedFrom}.${name}`)
+				? importedFrom
+				: null;
+		const knownExtension =
+			this.extensionFunctions.get(name) ??
+			this.inheritedExtension(name) ??
+			(objectExtension !== null ? ('module' as const) : undefined);
 		const blockArity = this.extensionArity.get(name);
 		const blockSlot =
 			lambda !== null &&
@@ -10086,7 +10100,7 @@ class Emitter {
 			return this.suspendMembers.has(name) ? this.awaited(call) : call;
 		}
 		if (implicit !== null && declaredExtension !== undefined) {
-			const owner = this.extensionOwners.get(name);
+			const owner = this.extensionOwners.get(name) ?? objectExtension ?? undefined;
 			const target =
 				declaredExtension === 'method'
 					? `${this.selfReference()}.${name}`

@@ -3497,3 +3497,31 @@ describe("keiyoushi's top-level rc4", () => {
 		expect(() => demo.empty()).toThrow(/RC4 key must not be empty/);
 	});
 });
+
+describe('an extension imported from an object, called bare on an implicit receiver', () => {
+	it('calls the object’s extension with the builder, not a member of the class', async () => {
+		const filters = kt(
+			'package demo.theme',
+			'import okhttp3.HttpUrl',
+			'object ThemeFilters {',
+			'    fun HttpUrl.Builder.addListQueryParameter(query: String, values: List<String>): HttpUrl.Builder {',
+			'        values.forEach { addQueryParameter("$query[]", it) }',
+			'        return this',
+			'    }',
+			'}'
+		);
+		const theme = kt(
+			'package demo.theme',
+			'import demo.theme.ThemeFilters.addListQueryParameter',
+			'import okhttp3.HttpUrl.Companion.toHttpUrl',
+			'class Demo {',
+			'    fun url(): String = "https://example.invalid".toHttpUrl().newBuilder().apply {',
+			'        addPathSegment("filter")',
+			'        addListQueryParameter("genre", listOf("a", "b"))',
+			'    }.build().toString()',
+			'}'
+		);
+		const demo = await instantiate('Demo', filters, theme);
+		expect(demo.url()).toBe('https://example.invalid/filter?genre%5B%5D=a&genre%5B%5D=b');
+	});
+});
