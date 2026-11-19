@@ -5135,15 +5135,38 @@ describe('a getter a subclass overrides with a plain value', () => {
 });
 
 describe('a property whose value the host has to compute', () => {
+	it("needs no host for a literal's bytes, which are the same on every run", () => {
+		// A companion's `val KEY = "simple-hash".toByteArray()` is hoisted to
+		// module scope and evaluated at load, where there is no host encoder.
+		// Folded, it is the bytes; an interpolated template is not folded.
+		const emitted = translate(
+			kt(
+				'class V {',
+				'    private companion object {',
+				'        val KEY = "hé".toByteArray()',
+				'        val LATIN = "hé".toByteArray(Charsets.ISO_8859_1)',
+				'        val BUILT = "a$KEY".toByteArray()',
+				'    }',
+				'}'
+			)
+		);
+		expect(emitted.js).toContain('const KEY = Uint8Array.of(104, 195, 169);');
+		expect(emitted.js).toContain('const LATIN = Uint8Array.of(104, 233);');
+		expect(emitted.js).toContain('__k.toByteArray(`a${KEY}`)');
+	});
+
 	it('waits until something reads it, rather than running in the constructor', () => {
-		// `private val salted = "Salted__".toByteArray(Charsets.UTF_8)` is a
+		// `private val salted = prefix.toByteArray(Charsets.UTF_8)` is a
 		// constant that happens to need an encoder, and the encoder is the
 		// host's. No plugin call has entered while a constructor runs, so this
 		// threw at load in 7 of 300 measured bundles — and the message it threw
 		// said the module had called out to the network, which it had not.
 		encodedTexts.length = 0;
 		const demo = instantiate(
-			inClass('    private val salted = "Salted__".toByteArray(Charsets.UTF_8)')
+			inClass(
+				'    private val prefix = "Salted__"',
+				'    private val salted = prefix.toByteArray(Charsets.UTF_8)'
+			)
 		);
 
 		expect(encodedTexts).toEqual([]);
@@ -5159,7 +5182,8 @@ describe('a property whose value the host has to compute', () => {
 		encodedTexts.length = 0;
 		const demo = instantiate(
 			inClass(
-				'    private val salted = "Salted__".toByteArray(Charsets.UTF_8)',
+				'    private val prefix = "Salted__"',
+				'    private val salted = prefix.toByteArray(Charsets.UTF_8)',
 				'    private val size = salted.size'
 			)
 		);
@@ -5172,7 +5196,10 @@ describe('a property whose value the host has to compute', () => {
 	it('still evaluates once, which is what the Kotlin `val` promised', () => {
 		encodedTexts.length = 0;
 		const demo = instantiate(
-			inClass('    private val salted = "Salted__".toByteArray(Charsets.UTF_8)')
+			inClass(
+				'    private val prefix = "Salted__"',
+				'    private val salted = prefix.toByteArray(Charsets.UTF_8)'
+			)
 		);
 
 		expect(demo.salted).toEqual([8]);
@@ -5183,7 +5210,12 @@ describe('a property whose value the host has to compute', () => {
 	it('leaves a `var` alone, because deferring one would move a side effect', () => {
 		// The deferral is only sound for a value nothing reassigns.
 		encodedTexts.length = 0;
-		instantiate(inClass('    private var salted = "Salted__".toByteArray(Charsets.UTF_8)'));
+		instantiate(
+			inClass(
+				'    private val prefix = "Salted__"',
+				'    private var salted = prefix.toByteArray(Charsets.UTF_8)'
+			)
+		);
 
 		expect(encodedTexts).toEqual(['Salted__']);
 	});

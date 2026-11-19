@@ -9529,6 +9529,15 @@ class Emitter {
 					? name
 					: EXTENSION_METHODS.get(name)
 				: undefined;
+		// `"simple-hash".toByteArray()` — a literal's bytes, which are the same
+		// on every run. Through the helper they need the host's encoder, which
+		// a companion constant (hoisted to module scope, evaluated at load)
+		// does not have: one listing died at load on exactly that. Folded
+		// here, for the charsets whose bytes are fixed by the text alone.
+		if (helper === 'toByteArray' && lambda === null) {
+			const folded = literalBytes(receiver, args);
+			if (folded !== null) return folded;
+		}
 		if (helper !== undefined) {
 			const before = this.asyncLambdas;
 			const receiverText = this.expr(receiver);
@@ -14279,6 +14288,31 @@ function plainValue(property: KNode): boolean {
 			value.type
 		)
 	);
+}
+
+/**
+ * A string literal's bytes as a `Uint8Array.of(…)`, for `toByteArray()` with
+ * no charset or with UTF-8, ISO-8859-1 or US-ASCII named — or null for
+ * anything else: a template with an interpolation, an escape this does not
+ * read, a charset it does not know, or a character the single-byte charset
+ * cannot hold (Java replaces that with `?`, which is left to the runtime).
+ */
+function literalBytes(receiver: KNode, args: readonly KNode[]): string | null {
+	if (receiver.type !== 'string_literal' || args.length > 1) return null;
+	if (receiver.children.some((child) => child.type !== 'string_content')) return null;
+	const text = receiver.children.map((child) => child.text).join('');
+	if (/[\\$]/.test(text)) return null;
+	const charset = args.length === 0 ? 'UTF_8' : args[0].text.replace(/\s+/g, '');
+	const name = /^(?:Charsets\.|StandardCharsets\.)?(UTF_8|ISO_8859_1|US_ASCII)$/.exec(charset)?.[1];
+	if (name === undefined) return null;
+	let bytes: number[];
+	if (name === 'UTF_8') bytes = [...new TextEncoder().encode(text)];
+	else {
+		const limit = name === 'US_ASCII' ? 0x7f : 0xff;
+		bytes = [...text].map((char) => char.charCodeAt(0));
+		if (bytes.some((byte) => byte > limit)) return null;
+	}
+	return `Uint8Array.of(${bytes.join(', ')})`;
 }
 
 /** Whether a declaration's type, as written, is a function type (nullable or not). */
