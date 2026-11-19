@@ -3465,3 +3465,230 @@ describe('toInt and toLong with a radix', () => {
 		expect(await demo.dec('42')).toBe(42);
 	});
 });
+
+describe("keiyoushi's top-level rc4", () => {
+	it('runs both ways, discards `skip` keystream bytes first, and keeps its requirements', async () => {
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'import keiyoushi.utils.rc4',
+				'import keiyoushi.utils.toHex',
+				'class Demo {',
+				'    fun plain(): String = rc4("Key".toByteArray(), "Plaintext".toByteArray()).toHex()',
+				'    fun back(): String = String(rc4("Key".toByteArray(), rc4("Key".toByteArray(), "Hi".toByteArray())))',
+				'    fun skipped(): String = rc4("Key".toByteArray(), "text".toByteArray(), 5).toHex()',
+				'    fun empty(): ByteArray = rc4(ByteArray(0), "x".toByteArray())',
+				'}'
+			)
+		);
+		// The classic published vector for key "Key".
+		expect(demo.plain()).toBe('bbf316e8d940af0ad3');
+		expect(demo.back()).toBe('Hi');
+		// Skipping five keystream bytes is the same as encrypting from byte
+		// five of a longer message: "Plaintext"'s ciphertext from index 5 on is
+		// the keystream there XORed with "text".
+		const keystream = [0xbb, 0xf3, 0x16, 0xe8, 0xd9, 0x40, 0xaf, 0x0a, 0xd3].map(
+			(byte, at) => byte ^ 'Plaintext'.charCodeAt(at)
+		);
+		const expected = [...'text']
+			.map((char, at) => (char.charCodeAt(0) ^ keystream[5 + at]).toString(16).padStart(2, '0'))
+			.join('');
+		expect(demo.skipped()).toBe(expected);
+		expect(() => demo.empty()).toThrow(/RC4 key must not be empty/);
+	});
+});
+
+describe('an extension imported from an object, called bare on an implicit receiver', () => {
+	it('calls the object’s extension with the builder, not a member of the class', async () => {
+		const filters = kt(
+			'package demo.theme',
+			'import okhttp3.HttpUrl',
+			'object ThemeFilters {',
+			'    fun HttpUrl.Builder.addListQueryParameter(query: String, values: List<String>): HttpUrl.Builder {',
+			'        values.forEach { addQueryParameter("$query[]", it) }',
+			'        return this',
+			'    }',
+			'}'
+		);
+		const theme = kt(
+			'package demo.theme',
+			'import demo.theme.ThemeFilters.addListQueryParameter',
+			'import okhttp3.HttpUrl.Companion.toHttpUrl',
+			'class Demo {',
+			'    fun url(): String = "https://example.invalid".toHttpUrl().newBuilder().apply {',
+			'        addPathSegment("filter")',
+			'        addListQueryParameter("genre", listOf("a", "b"))',
+			'    }.build().toString()',
+			'}'
+		);
+		const demo = await instantiate('Demo', filters, theme);
+		expect(demo.url()).toBe('https://example.invalid/filter?genre%5B%5D=a&genre%5B%5D=b');
+	});
+});
+
+describe('a `for` over a map', () => {
+	it('walks a decoded map and a built one as entries, and a string as chars', async () => {
+		// The decoder answers a `Map<String, Dto>` as JSON's own object, which a
+		// JavaScript `for…of` cannot iterate at all: the loop threw inside the
+		// extension's catch and the server list came back empty.
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    fun decoded(text: String): String {',
+				'        val out = mutableListOf<String>()',
+				'        for ((key, value) in text.parseAs<Map<String, Int>>()) out.add("$key=$value")',
+				'        return out.joinToString(",")',
+				'    }',
+				'    fun built(): String {',
+				'        val out = mutableListOf<String>()',
+				'        for (entry in mapOf("a" to 1, "b" to 2)) out.add(entry.key + entry.value)',
+				'        return out.joinToString(",")',
+				'    }',
+				'    fun chars(): String {',
+				'        val out = mutableListOf<Char>()',
+				'        for (c in "ab") out.add(c)',
+				'        return out.joinToString("|")',
+				'    }',
+				'}'
+			)
+		);
+		expect(demo.decoded('{"x":1,"y":2}')).toBe('x=1,y=2');
+		expect(demo.built()).toBe('a1,b2');
+		expect(demo.chars()).toBe('a|b');
+	});
+});
+
+describe('java.lang.System', () => {
+	it('copies with arraycopy, overlapping or not, and refuses a static it does not have', async () => {
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    fun padded(): String {',
+				'        val key = ByteArray(6)',
+				'        val src = "abc".toByteArray()',
+				'        System.arraycopy(src, 0, key, 0, src.size.coerceAtMost(6))',
+				'        return key.joinToString(",")',
+				'    }',
+				'    fun shifted(): String {',
+				'        val a = intArrayOf(1, 2, 3, 4)',
+				'        System.arraycopy(a, 0, a, 1, 3)',
+				'        return a.joinToString(",")',
+				'    }',
+				'    fun past(): Unit = System.arraycopy(ByteArray(2), 0, ByteArray(2), 1, 2)',
+				'}'
+			)
+		);
+		expect(demo.padded()).toBe('97,98,99,0,0,0');
+		expect(demo.shifted()).toBe('1,1,2,3');
+		expect(() => demo.past()).toThrow(/out of bounds/);
+		expect(
+			refusalNames(kt('class D {', '    fun e(): String? = System.getenv("X")', '}'))
+		).toContain('`System.getenv()`');
+	});
+});
+
+describe('a reified extension that shares its name with another declaration', () => {
+	it('is dispatched with its type slot counted', async () => {
+		// `inline fun <reified R> List<Any>.getFirst(): R` in one file and
+		// `fun Regex.getFirst(item: String)` in another: the dispatcher made
+		// for the shared name did not count the type argument passed first,
+		// so every call was refused on its argument count.
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    fun use(l: List<Any>): String = F.use(l)',
+				'}',
+				'object F {',
+				'    private inline fun <reified R> List<Any>.getFirst(): R = first { it is R } as R',
+				'    fun use(l: List<Any>): String = l.getFirst<String>()',
+				'}'
+			),
+			kt(
+				'class E {',
+				'    private fun Regex.getFirst(item: String): String = find(item)!!.value',
+				'    fun x() = Regex("a").getFirst("abc")',
+				'}'
+			)
+		);
+		expect(demo.use([1, 'x'])).toBe('x');
+	});
+});
+
+describe('toHttpUrlOrNull', () => {
+	it('answers null for text that is not an http url, as okhttp does', async () => {
+		// `if (data.toHttpUrlOrNull() == null) <decode base64> else GET(data)`
+		// is how one template tells an encoded mirror from a plain one.
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'import okhttp3.HttpUrl.Companion.toHttpUrlOrNull',
+				'class Demo {',
+				'    fun isUrl(s: String): Boolean = s.toHttpUrlOrNull() != null',
+				'    fun host(s: String): String? = s.toHttpUrlOrNull()?.host',
+				'}'
+			)
+		);
+		expect(demo.isUrl('PGlmcmFtZSBzcmM9Imh0dHBzOi8v')).toBe(false);
+		expect(demo.isUrl('ftp://example.invalid/x')).toBe(false);
+		expect(demo.isUrl('https://')).toBe(false);
+		expect(demo.isUrl('/relative/path')).toBe(false);
+		expect(demo.host(' https://Example.invalid/a?b=1 ')).toBe('example.invalid');
+		// A host with an `s` in it: a mis-escaped character class once
+		// refused every one, and every HLS variant resolved against nothing.
+		expect(demo.host('https://seiryuu.cdn.example//a//master.m3u8')).toBe('seiryuu.cdn.example');
+		expect(demo.isUrl('https://bad host.example/')).toBe(false);
+	});
+});
+
+describe('a character class that opens with "]"', () => {
+	it('reads the bracket as a member, as Java does', async () => {
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    fun labels(s: String): String =',
+				'        "\\\\[([^]]+)]".toRegex().findAll(s).map { it.groupValues[1] }.joinToString(",")',
+				'    fun brackets(s: String): String = Regex("[]a]+").find(s)!!.value',
+				'}'
+			)
+		);
+		expect(demo.labels('[SD (480p)]x,[HD]y')).toBe('SD (480p),HD');
+		expect(demo.brackets('xa]a]y')).toBe('a]a]');
+	});
+});
+
+describe('encodeToString with a generated serializer', () => {
+	it('encodes the value, the serializer naming only its type', async () => {
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'import kotlinx.serialization.json.Json',
+				'import kotlinx.serialization.json.JsonObject',
+				'import kotlinx.serialization.json.buildJsonObject',
+				'import kotlinx.serialization.json.put',
+				'class Demo {',
+				'    private val json = Json { ignoreUnknownKeys = true }',
+				'    fun go(): String = json.encodeToString(JsonObject.serializer(), buildJsonObject { put("n", 1) })',
+				'}'
+			)
+		);
+		expect(demo.go()).toBe('{"n":1}');
+	});
+});
+
+describe('a callable reference inside a receiver block', () => {
+	it('binds to the receiver, as `buildList { …also(::addAll) }` does', async () => {
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    fun go(): String = buildList { listOf(1, 2).also(::addAll); add(3) }.joinToString(",")',
+				'}'
+			)
+		);
+		expect(demo.go()).toBe('1,2,3');
+	});
+});

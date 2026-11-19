@@ -1217,6 +1217,18 @@ function __regexSource(pattern) {
       atomSingle = true;
       out += ch;
       i += 1;
+      // Java reads a ']' straight after '[' or '[^' as a literal member, so
+      // '[^]]+' is "anything but ]". JavaScript reads '[^]' as "any character"
+      // and the ']+' after it as text, which matched nothing in one source's
+      // quality list. Escaped, it means in JavaScript what it meant in Java.
+      if (text.charAt(i) === '^') {
+        out += '^';
+        i += 1;
+      }
+      if (text.charAt(i) === ']') {
+        out += '\\\\]';
+        i += 1;
+      }
       quantified = false;
       continue;
     }
@@ -2463,7 +2475,29 @@ function __millisOf(value) {
  */
 var System = {
   currentTimeMillis: function () { return Date.now(); },
-  nanoTime: function () { return Date.now() * 1000000; }
+  nanoTime: function () { return Date.now() * 1000000; },
+  /**
+   * 'System.arraycopy(src, srcPos, dest, destPos, length)': copies as if
+   * through a temporary, so an overlapping copy within one array is right,
+   * and throws as Java does when a range falls outside either array — a short
+   * key copied into a 32-byte buffer is how one extractor family pads an AES
+   * key, and a copy that did nothing would decrypt to rubbish.
+   */
+  arraycopy: function (src, srcPos, dest, destPos, length) {
+    if (src === null || src === undefined || dest === null || dest === undefined) {
+      throw __kTagged(new Error('System.arraycopy was handed a null array.'), 'NullPointerException');
+    }
+    var from = Number(srcPos);
+    var to = Number(destPos);
+    var count = Number(length);
+    if (count < 0 || from < 0 || to < 0 || from + count > src.length || to + count > dest.length) {
+      throw __kTagged(new Error('System.arraycopy: last source index ' + (from + count) +
+        ' out of bounds for length ' + src.length + ', or destination ' + (to + count) +
+        ' for length ' + dest.length + '.'), 'IndexOutOfBoundsException');
+    }
+    var held = Array.prototype.slice.call(src, from, from + count);
+    for (var i = 0; i < count; i += 1) dest[to + i] = held[i];
+  }
 };
 
 /**
@@ -5476,6 +5510,45 @@ var __k = {
   },
 
   /** A small Kotlin-style iterator for code that uses hasNext()/next(). */
+  /**
+   * A Promise a constructor started for a property whose initialiser blocks,
+   * held so its reads can await it. Marked handled, because a property nobody
+   * reads must not take the isolate down with an unhandled rejection; a read
+   * still awaits the same Promise and sees the failure, as Kotlin's
+   * constructor would have.
+   */
+  pending: function (promise) {
+    if (promise !== null && promise !== undefined && typeof promise.catch === 'function') {
+      promise.catch(function () {});
+    }
+    return promise;
+  },
+
+  /**
+   * What a Kotlin 'for (x in value)' walks.
+   *
+   * A JavaScript 'for…of' over the value as it stands was right for a list
+   * and wrong for both kinds of map: a JS Map gave bare [k, v] arrays, so a
+   * loop reading 'entry.key' read undefined, and a map the JSON decoder
+   * answered — a plain object — is not iterable at all, so 'for ((k, v) in
+   * parseAs<Map<String, Dto>>())' threw "is not iterable" inside whatever
+   * catch the extension wrapped it in, and the list came back empty. A map
+   * walks as its entries here, as '__arr' already walks one for every
+   * collection helper; a string walks as its chars; anything else iterable is
+   * walked as it is, so a lazy sequence stays lazy.
+   */
+  forIn: function (value) {
+    if (value === null || value === undefined) {
+      throw __kTagged(new Error('This converted extension iterated over a value that was null.'),
+        'NullPointerException');
+    }
+    if (typeof value === 'string') return value.split('');
+    if (Array.isArray(value)) return value;
+    if (value instanceof Map || __mapLike(value)) return __mapEntries(value);
+    if (typeof value[Symbol.iterator] === 'function') return value;
+    return __arr(value);
+  },
+
   iterator: function (value) {
     var items = typeof value === 'string' ? value.split('') : __arr(value);
     var at = 0;
@@ -7817,6 +7890,28 @@ var __k = {
   /** The same, decoded as UTF-8 text — which is what the other half of them do. */
   decodeHexToString: function (value) {
     return __host().text.decode(__k.decodeHex(value));
+  },
+
+  /**
+   * keiyoushi's top-level 'rc4(key, data, skip = 0)': the stream cipher, both
+   * ways, over the same keystream the javax.crypto 'RC4' cipher uses here
+   * ('__rc4'), less 'skip' bytes discarded first. Its three requirements are
+   * kept as the IllegalArgumentException upstream throws, because a wrong key
+   * length decrypts to rubbish rather than failing.
+   */
+  rc4: function (key, data, skip) {
+    var keyBytes = __bytesOf(key);
+    var dropped = skip === undefined || skip === null ? 0 : Number(skip);
+    var fail = function (message) {
+      throw __kTagged(new Error(message), 'IllegalArgumentException');
+    };
+    if (keyBytes.length === 0) fail('RC4 key must not be empty');
+    if (keyBytes.length > 256) fail('RC4 key must not exceed 256 bytes, got ' + keyBytes.length);
+    if (!(dropped >= 0)) fail('RC4 skip must be non-negative, got ' + skip);
+    var input = __bytesOf(data);
+    var padded = new Uint8Array(dropped + input.length);
+    padded.set(input, dropped);
+    return __rc4(keyBytes, padded).slice(dropped);
   },
 
   /**
@@ -10912,7 +11007,9 @@ function __authorityParts(scheme, authority) {
   return {
     user: colon === -1 ? userinfo : userinfo.slice(0, colon),
     password: colon === -1 ? '' : userinfo.slice(colon + 1),
-    host: port === null ? hostport : hostport.slice(0, port.index),
+    // Lower-cased, as okhttp canonicalises it: 'url.host == "example.com"'
+    // is how an extension recognises its own mirror.
+    host: (port === null ? hostport : hostport.slice(0, port.index)).toLowerCase(),
     port: port === null ? (named === 'https' ? 443 : (named === 'http' ? 80 : -1)) : Number(port[1]),
     written: port !== null
   };
@@ -12052,6 +12149,31 @@ __k.httpUrl = function (value) {
     return value;
   }
   return __httpUrlOf(value);
+};
+
+/**
+ * 'toHttpUrlOrNull()': the url, or null when the text is not an http(s) url
+ * with a host okhttp would accept. It shared 'httpUrl''s lenient reading,
+ * which never answers null, so 'if (data.toHttpUrlOrNull() == null)
+ * <decode base64> else GET(data)' — how one template tells an encoded mirror
+ * from a plain one — fetched the base64 text as an address, every time.
+ */
+__k.httpUrlOrNull = function (value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value.newBuilder === 'function' && value.encodedPath !== undefined) return value;
+  var text = __str(value).trim();
+  if (!/^https?:/i.test(text)) return null;
+  var url;
+  try {
+    url = __httpUrlOf(text);
+  } catch (error) {
+    return null;
+  }
+  var host = __str(url.host);
+  if (host.length === 0 || /[\\s#%/:<>?@\\\\^|]/.test(host.replace(/^\\[.*\\]$/, 'v6'))) return null;
+  var port = Number(url.port);
+  if (!(port >= 1 && port <= 65535)) return null;
+  return url;
 };
 `;
 
@@ -15111,6 +15233,190 @@ LruCache.prototype.evictAll = function () { this.entries.clear(); };
 LruCache.prototype.size = function () { return this.entries.size; };
 
 /**
+ * android.media.MediaMetadataRetriever, for an MP4 at a url.
+ *
+ * The shared extractors ask it one question: how large is the picture in this
+ * mp4, so a quality can be printed beside it. Android answers by opening the
+ * file through its media framework; this answers by reading the same boxes
+ * that framework reads, with ranged requests through the host's client:
+ * walking the top-level boxes from the start, skipping 'mdat' by its declared
+ * size rather than reading it, and parsing 'moov' wherever it sits. The width
+ * and height are the first video track's sample entry, which is what
+ * Android's MPEG4 extractor sets as kKeyWidth/kKeyHeight and what
+ * METADATA_KEY_VIDEO_WIDTH/HEIGHT report.
+ *
+ * What it does not read, it refuses by name rather than answer null for:
+ * another container (Android would parse a Matroska file, and null there
+ * would read as "this file has no picture"), a key other than the four below,
+ * or the file-descriptor forms of setDataSource. A file whose boxes cannot be
+ * found throws, which is what Android's own does for a file it cannot open.
+ */
+function MediaMetadataRetriever() {
+  if (!(this instanceof MediaMetadataRetriever)) return new MediaMetadataRetriever();
+  this.__read = null;
+}
+MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO = 16;
+MediaMetadataRetriever.METADATA_KEY_HAS_VIDEO = 17;
+MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH = 18;
+MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT = 19;
+/* How many ranged requests one file may cost, and how large a 'moov' may be. */
+var __MMR_HOPS = 6;
+var __MMR_HEAD = 65536;
+var __MMR_MOOV_MAX = 4 * 1024 * 1024;
+
+MediaMetadataRetriever.prototype.setDataSource = async function (source, headers) {
+  if (typeof source !== 'string') {
+    throw __kTagged(new Error(
+      'MediaMetadataRetriever.setDataSource was given a ' + typeof source + ', and only a url ' +
+      'can be read here.'), 'UnsupportedOperationException');
+  }
+  var sent = {};
+  if (headers instanceof Map) headers.forEach(function (value, name) { sent[__str(name)] = __str(value); });
+  else if (headers !== null && headers !== undefined) {
+    Object.keys(headers).forEach(function (name) { sent[name] = __str(headers[name]); });
+  }
+  this.__read = await __mmrRead(source, sent);
+};
+
+MediaMetadataRetriever.prototype.extractMetadata = function (key) {
+  if (this.__read === null) {
+    throw __kTagged(new Error('extractMetadata was called before setDataSource.'), 'IllegalStateException');
+  }
+  var read = this.__read;
+  switch (Number(key)) {
+    case 16: return read.audio ? 'yes' : null;
+    case 17: return read.video === null ? null : 'yes';
+    case 18: return read.video === null ? null : String(read.video.width);
+    case 19: return read.video === null ? null : String(read.video.height);
+    default:
+      throw __kTagged(new Error(
+        'MediaMetadataRetriever key ' + key + ' is not one this build reads; only the picture ' +
+        'size and whether there is audio or video are.'), 'UnsupportedOperationException');
+  }
+};
+MediaMetadataRetriever.prototype.release = function () { this.__read = null; };
+MediaMetadataRetriever.prototype.close = MediaMetadataRetriever.prototype.release;
+
+/* One ranged read: the bytes, and the offset they actually start at. */
+async function __mmrRange(url, headers, from, length) {
+  __syncPolicy();
+  var asked = Object.assign({}, headers, { Range: 'bytes=' + from + '-' + (from + length - 1) });
+  var raw = await __host().http.send(url, { method: 'GET', headers: asked });
+  var status = Number(raw.status);
+  if (status !== 200 && status !== 206) {
+    throw __kTagged(new Error('MediaMetadataRetriever could not open ' + url + ': it answered ' +
+      status + '.'), 'RuntimeException');
+  }
+  var bytes = typeof raw.bytes === 'function' ? await raw.bytes() : new Uint8Array(0);
+  // A host that ignores Range sends the file from its start.
+  return { start: status === 200 ? 0 : from, bytes: bytes };
+}
+
+function __mmrU32(bytes, at) {
+  return ((bytes[at] << 24) >>> 0) + (bytes[at + 1] << 16) + (bytes[at + 2] << 8) + bytes[at + 3];
+}
+function __mmrType(bytes, at) {
+  return String.fromCharCode(bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]);
+}
+
+/* The child boxes of [from, to), as { type, body, end } with body past the header. */
+function __mmrBoxes(bytes, from, to) {
+  var out = [];
+  var at = from;
+  while (at + 8 <= to) {
+    var size = __mmrU32(bytes, at);
+    var header = 8;
+    if (size === 1) {
+      if (at + 16 > to) break;
+      size = __mmrU32(bytes, at + 8) * 4294967296 + __mmrU32(bytes, at + 12);
+      header = 16;
+    } else if (size === 0) {
+      size = to - at;
+    }
+    if (size < header || at + size > to) break;
+    out.push({ type: __mmrType(bytes, at + 4), body: at + header, end: at + size });
+    at += size;
+  }
+  return out;
+}
+function __mmrChild(bytes, box, type) {
+  var found = __mmrBoxes(bytes, box.body, box.end).filter(function (one) { return one.type === type; });
+  return found.length > 0 ? found[0] : null;
+}
+
+/* What 'moov' says: the first video track's sample-entry size, and whether audio is present. */
+function __mmrMoov(bytes, moov) {
+  var video = null;
+  var audio = false;
+  __mmrBoxes(bytes, moov.body, moov.end).forEach(function (trak) {
+    if (trak.type !== 'trak') return;
+    var mdia = __mmrChild(bytes, trak, 'mdia');
+    var hdlr = mdia === null ? null : __mmrChild(bytes, mdia, 'hdlr');
+    if (hdlr === null || hdlr.body + 12 > hdlr.end) return;
+    var handler = __mmrType(bytes, hdlr.body + 8);
+    if (handler === 'soun') { audio = true; return; }
+    if (handler !== 'vide' || video !== null) return;
+    var minf = __mmrChild(bytes, mdia, 'minf');
+    var stbl = minf === null ? null : __mmrChild(bytes, minf, 'stbl');
+    var stsd = stbl === null ? null : __mmrChild(bytes, stbl, 'stsd');
+    // version/flags, entry count, then the first entry: size, format, six
+    // reserved, data reference index, sixteen pre-defined, width, height.
+    var entry = stsd === null ? -1 : stsd.body + 8;
+    if (entry < 0 || entry + 36 > stsd.end) return;
+    video = {
+      width: (bytes[entry + 32] << 8) | bytes[entry + 33],
+      height: (bytes[entry + 34] << 8) | bytes[entry + 35]
+    };
+  });
+  return { video: video, audio: audio };
+}
+
+async function __mmrRead(url, headers) {
+  var at = 0;
+  for (var hop = 0; hop < __MMR_HOPS; hop += 1) {
+    var got = await __mmrRange(url, headers, at, __MMR_HEAD);
+    var bytes = got.bytes;
+    var offset = at - got.start;
+    if (offset < 0 || offset + 8 > bytes.length) break;
+    if (hop === 0 && __mmrType(bytes, 4) !== 'ftyp') {
+      var first = bytes.length >= 4 && bytes[0] === 0x1a && bytes[1] === 0x45 &&
+        bytes[2] === 0xdf && bytes[3] === 0xa3;
+      throw __kTagged(new Error(
+        'MediaMetadataRetriever read ' + (first ? 'a Matroska/WebM file' : 'a file that is not an MP4') +
+        ' at ' + url + ', and only MP4 is read here.'), 'UnsupportedOperationException');
+    }
+    // Walk the boxes this window holds whole, then jump to the first it does not.
+    for (;;) {
+      if (offset + 8 > bytes.length) break;
+      var size = __mmrU32(bytes, offset);
+      var header = 8;
+      if (size === 1) {
+        if (offset + 16 > bytes.length) break;
+        size = __mmrU32(bytes, offset + 8) * 4294967296 + __mmrU32(bytes, offset + 12);
+        header = 16;
+      }
+      if (size !== 0 && size < header) break;
+      var type = __mmrType(bytes, offset + 4);
+      if (type === 'moov') {
+        if (size === 0 || size > __MMR_MOOV_MAX) break;
+        var whole = offset + size <= bytes.length
+          ? { bytes: bytes, at: offset }
+          : await __mmrRange(url, headers, at, size).then(function (read) {
+              return { bytes: read.bytes, at: at - read.start };
+            });
+        if (whole.at < 0 || whole.at + size > whole.bytes.length) break;
+        return __mmrMoov(whole.bytes, { type: 'moov', body: whole.at + header, end: whole.at + size });
+      }
+      if (size === 0) break;
+      at += size;
+      offset += size;
+    }
+  }
+  throw __kTagged(new Error('MediaMetadataRetriever could not find the metadata of ' + url + '.'),
+    'RuntimeException');
+}
+
+/**
  * Constructible with or without 'new', because the emitter writes both.
  *
  * Two constructors live here under one name. The positional arguments are the
@@ -15427,6 +15733,29 @@ function SMangaUpdate(manga, chapters) {
   if (!(this instanceof SMangaUpdate)) return new SMangaUpdate(manga, chapters);
   this.manga = manga === undefined ? null : manga;
   this.chapters = chapters === undefined ? null : chapters;
+}
+
+/**
+ * The video half's same pair, from keiyoushi's 'AniSource': 'SAnimeUpdate'
+ * is a title and its episodes from one request, and 'SAnimeSeasonUpdate' a
+ * title and its seasons. 'Related' is one named group of related titles.
+ * Plain holders upstream, with positional constructors, and the driver reads
+ * their fields by name (see 'aniyomi-entry.ts', '__ANI_SOURCE').
+ */
+function SAnimeUpdate(anime, episodes) {
+  if (!(this instanceof SAnimeUpdate)) return new SAnimeUpdate(anime, episodes);
+  this.anime = anime === undefined ? null : anime;
+  this.episodes = episodes === undefined ? null : episodes;
+}
+function SAnimeSeasonUpdate(anime, seasons) {
+  if (!(this instanceof SAnimeSeasonUpdate)) return new SAnimeSeasonUpdate(anime, seasons);
+  this.anime = anime === undefined ? null : anime;
+  this.seasons = seasons === undefined ? null : seasons;
+}
+function Related(name, animes) {
+  if (!(this instanceof Related)) return new Related(name, animes);
+  this.name = name;
+  this.animes = animes === undefined ? null : animes;
 }
 
 /**

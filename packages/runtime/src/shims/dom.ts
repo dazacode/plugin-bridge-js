@@ -1771,7 +1771,7 @@ export function parseHtml(html: string, baseUrl = ''): KDocument {
 
 type Combinator = ' ' | '>' | '+' | '~';
 
-type AttributeOperator = 'exists' | '=' | '^=' | '$=' | '*=' | '~=';
+type AttributeOperator = 'exists' | '=' | '!=' | '^=' | '$=' | '*=' | '~=';
 
 type Simple =
 	| { readonly type: 'all' }
@@ -1938,7 +1938,13 @@ class SelectorParser {
 		if (character === ']') {
 			this.position++;
 		} else {
-			if (character === '^' || character === '$' || character === '*' || character === '~') {
+			if (
+				character === '^' ||
+				character === '$' ||
+				character === '*' ||
+				character === '~' ||
+				character === '!'
+			) {
 				if (this.input.charAt(this.position + 1) !== '=') {
 					throw this.error('expected "=" after "' + character + '"');
 				}
@@ -2372,6 +2378,10 @@ function matchesAttribute(
 		pattern: RegExp | null;
 	}
 ): boolean {
+	// jsoup's `[a!=v]` compares against `attr(a)`, which is "" where there is
+	// no such attribute — so an element without it matches.
+	if (part.operator === '!=')
+		return element.attr(part.name).toLowerCase() !== part.value.toLowerCase();
 	if (!element.hasAttr(part.name)) return false;
 	if (part.operator === 'exists') return true;
 

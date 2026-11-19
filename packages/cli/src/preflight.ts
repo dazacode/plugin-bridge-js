@@ -177,8 +177,9 @@ export async function runPreflight(
 			// The campaign's own options, assembled by the campaign's own
 			// function. Passing a hand-built object here would check that this
 			// file can open a sandbox, which nobody doubted; what needs
-			// checking is the assembly that went wrong.
-			verifyOptionsFor(capabilities, {})
+			// checking is the assembly that went wrong. Less the reach probe,
+			// for the reason `referencePlugin` gives: its stream is not one.
+			verifyOptionsFor({ ...capabilities, reach: undefined }, {})
 		);
 		checks.push({
 			name: 'sandbox, network and the five steps',

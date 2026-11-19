@@ -471,7 +471,13 @@ const LOG_CALL = /^Log\.(?:v|d|i|w|e|wtf)$/;
  * that decrypts makes its callers `async` too.
  */
 const BLOCKING_CALLS =
-	/\.(?:execute|awaitSuccess|await|doFinal|generateKeyPair|verify|proceed)\s*\(|(?<!\bMath)\.sign\s*\(|\bThread\s*\.\s*sleep\s*\(|\b(?:client|[a-z]\w*Client)\s*\.\s*(?:get|post|put|head)\s*\(/;
+	/\.(?:execute|awaitSuccess|await|doFinal|generateKeyPair|setDataSource|verify|proceed)\s*\(|(?<!\bMath)\.sign\s*\(|\bThread\s*\.\s*sleep\s*\(|\b(?:client|[a-z]\w*Client)\s*\.\s*(?:get|post|put|head)\s*\(/;
+
+/**
+ * A property initialiser that reads the host's cookie jar, which is the one
+ * blocking call measured in a constructor here (`blockingProperties`).
+ */
+const EAGER_BLOCKING_INITIALISER = /\.loadForRequest\s*\(/;
 
 /**
  * Members the host calls synchronously, which therefore cannot be emitted
@@ -2061,6 +2067,21 @@ class Emitter {
 	 */
 	private ownerLabel: string | null = null;
 	private classMembers = new Set<string>();
+	/**
+	 * The class's properties that plainly hold a value nothing can call — a
+	 * literal number, string or boolean, or a declared `Int`, `String` and the
+	 * like — and that no `fun` of the same name sits beside.
+	 *
+	 * Kotlin keeps a property and a function in different namespaces, so a
+	 * bare `rateLimit(rateLimit)` in a class with `open val rateLimit = 5` is
+	 * not a call of the property: an `Int` has no `invoke`, and the call is
+	 * resolved to the extension `OkHttpClient.Builder.rateLimit` on the
+	 * implicit receiver. Read as a member, it was `this.rateLimit is not a
+	 * function` at the first request of a conversion that refused nothing.
+	 */
+	private valueOnlyMembers = new Set<string>();
+	/** This class's properties deferred to a memoised getter so far — see `classProperty`. */
+	private deferredProperties = new Set<string>();
 	private suspendMembers = new Set<string>();
 	/**
 	 * Properties of the class being emitted whose value is a Promise here: a
@@ -2068,6 +2089,13 @@ class Emitter {
 	 * A read of one is awaited, as a call to a blocking member is.
 	 */
 	private asyncProperties = new Set<string>();
+	/**
+	 * Of those, the plain ones — `private val cookies =
+	 * client.cookieJar.loadForRequest(url)` — whose initialiser blocks. Kotlin
+	 * runs it in the constructor; here the constructor stores the Promise, and
+	 * every read awaits it, as for a blocking `lazy`.
+	 */
+	private eagerAsyncProperties = new Set<string>();
 	private readonly signatures = new Map<string, readonly string[]>(KNOWN_SIGNATURES);
 	private readonly ambiguousSignatures = new Set<string>();
 	/** See `ReceiverSlots`. Declared here and next door, merged by name. */
@@ -2336,6 +2364,19 @@ class Emitter {
 		let required = 0;
 		let total = 0;
 		let spread = false;
+		// A `reified` type parameter is a value here, passed first —
+		// `getFirst(__type_R, __recv)` — so the dispatcher has to count its
+		// slot. Left out, a reified extension that shared its name with any
+		// other declaration in the build was rejected on argument count at
+		// every call: "getFirst with arguments none of its declarations takes".
+		// The slot holds a type token, which no declared type decides.
+		for (const _ of reifiedParams(node)) {
+			types.push('__reified');
+			nullable.push(false);
+			defaults.push(false);
+			required += 1;
+			total += 1;
+		}
 		const receiver = receiverOf(node);
 		if (receiver !== null) {
 			types.push(simpleTypeName(receiver));
@@ -2619,6 +2660,20 @@ class Emitter {
 		return false;
 	}
 
+	/** The members a translated base of this class made async — see `entrySuspends`. */
+	private inheritedSuspends(): Set<string> {
+		const found = new Set<string>();
+		const seen = new Set<string>();
+		for (let at = this.ownerBase ?? undefined; at !== undefined && !seen.has(at);) {
+			seen.add(at);
+			for (const key of this.entrySuspends) {
+				if (key.startsWith(`${at}.`)) found.add(key.slice(at.length + 1));
+			}
+			at = this.classBaseIndex.get(at);
+		}
+		return found;
+	}
+
 	private baseDeclares(base: string, name: string): boolean {
 		const seen = new Set<string>();
 		let at: string | undefined = base;
@@ -2895,7 +2950,8 @@ class Emitter {
 	private interfaceDeclaration(node: KNode, name: string): string | null {
 		const body = kids(node).find((child) => child.type === 'class_body');
 		const members: string[] = [];
-		for (const member of kids(body)) {
+		const declared = kids(body);
+		for (const [at, member] of declared.entries()) {
 			if (member.type === 'function_declaration') {
 				if (kids(member).some((child) => child.type === 'function_body')) {
 					return this.declineMember(
@@ -2910,6 +2966,18 @@ class Emitter {
 			}
 			if (member.type === 'property_declaration') {
 				const held = this.propertyName(member);
+				// `val displayTitle: String get() = title.ifEmpty { videoId }`:
+				// a default every implementer inherits. Nothing here carries it
+				// to them, so it was dropped, every implementer read undefined,
+				// and a shelf of titled records came back empty with nothing
+				// refused. Refused by name, as a function with a body is.
+				if (accessorOf(member, declared[at + 1], 'getter') !== undefined) {
+					return this.declineMember(
+						name,
+						node,
+						`an \`interface\` property \`${held ?? '?'}\` with a getter`
+					);
+				}
 				if (held !== null) members.push(held);
 			}
 		}
@@ -3049,8 +3117,12 @@ class Emitter {
 		// passthrough onto a shim, naming a method the source had declared
 		// forty lines further down.
 		const outerMembers = this.classMembers;
+		const outerValueOnly = this.valueOnlyMembers;
+		const outerDeferred = this.deferredProperties;
+		this.deferredProperties = new Set<string>();
 		const outerSuspends = this.suspendMembers;
 		const outerAsyncProperties = this.asyncProperties;
+		const outerEagerAsync = this.eagerAsyncProperties;
 		const outerLabel = this.ownerLabel;
 		const outerSelf = this.selfClass;
 		const outerExtensionProperties = this.extensionProperties;
@@ -3117,6 +3189,17 @@ class Emitter {
 				)
 				.filter((found): found is string => found !== null)
 		);
+		const functionNames = new Set(
+			members
+				.filter((child) => child.type === 'function_declaration')
+				.map((child) => this.nameOf(child))
+		);
+		this.valueOnlyMembers = new Set(
+			members
+				.filter((child) => child.type === 'property_declaration' && plainValue(child))
+				.map((child) => this.propertyName(child))
+				.filter((found): found is string => found !== null && !functionNames.has(found))
+		);
 		this.suspendMembers = new Set(
 			members
 				.filter(
@@ -3126,7 +3209,43 @@ class Emitter {
 				.filter((found): found is string => found !== null)
 		);
 		for (const name of this.blockingMembers(members)) this.suspendMembers.add(name);
-		this.asyncProperties = this.blockingProperties(members, this.suspendMembers);
+		// What the template this class extends made async, which this class
+		// calls: `override fun episodeListParse(r) =
+		// super.episodeListParse(r).reversed()` over a template whose parser
+		// fetches a second page. The template's member is a promise here; read
+		// unawaited, `reversed` walked the promise and answered an empty list.
+		// So an inherited suspending member is awaited where it is called, and
+		// a member of this class that calls one suspends in turn.
+		const inherited = this.inheritedSuspends();
+		if (inherited.size > 0) {
+			const own = new Set(
+				members
+					.filter((child) => child.type === 'function_declaration')
+					.map((child) => this.nameOf(child))
+			);
+			for (const name of inherited) if (!own.has(name)) this.suspendMembers.add(name);
+			for (let grew = true; grew;) {
+				grew = false;
+				for (const child of members) {
+					if (child.type !== 'function_declaration') continue;
+					const name = this.nameOf(child);
+					if (name === null || this.suspendMembers.has(name) || SYNC_HOST_MEMBERS.has(name))
+						continue;
+					const calls = [...inherited, ...this.suspendMembers].some((other) =>
+						new RegExp(`\\b${other}\\s*[({]`).test(child.text)
+					);
+					if (!calls) continue;
+					this.suspendMembers.add(name);
+					grew = true;
+				}
+			}
+		}
+		this.eagerAsyncProperties = new Set<string>();
+		this.asyncProperties = this.blockingProperties(
+			members,
+			this.suspendMembers,
+			this.eagerAsyncProperties
+		);
 
 		this.registerExtensions(members, 'method');
 		// A companion's members hoist to module scope, so an extension function
@@ -3371,8 +3490,11 @@ class Emitter {
 		this.enumScope = outerEnum;
 		this.selfClass = outerSelf;
 		this.classMembers = outerMembers;
+		this.valueOnlyMembers = outerValueOnly;
+		this.deferredProperties = outerDeferred;
 		this.suspendMembers = outerSuspends;
 		this.asyncProperties = outerAsyncProperties;
+		this.eagerAsyncProperties = outerEagerAsync;
 		this.extensionProperties = outerExtensionProperties;
 		this.extensionSetters = outerSetters;
 		this.preferenceStores = outerStores;
@@ -3693,7 +3815,11 @@ class Emitter {
 	 * initialiser still cannot be awaited, and is refused where it is, as a
 	 * suspending initialiser always was.
 	 */
-	private blockingProperties(members: readonly KNode[], suspends: Set<string>): Set<string> {
+	private blockingProperties(
+		members: readonly KNode[],
+		suspends: Set<string>,
+		eager: Set<string> = new Set<string>()
+	): Set<string> {
 		const properties = new Map<string, string>();
 		for (const [index, child] of members.entries()) {
 			if (child.type !== 'property_declaration') continue;
@@ -3702,6 +3828,19 @@ class Emitter {
 			const delegate = kids(child).find((part) => part.type === 'property_delegate');
 			const lazy = delegate !== undefined && /^by\s+lazy\b/.test(delegate.text);
 			const getter = accessorOf(child, members[index + 1], 'getter');
+			// A plain initialiser that reads the host's cookie jar: the one
+			// blocking call a constructor in this ecosystem makes. Its Promise is
+			// held from construction — see `eagerAsyncProperties`.
+			if (
+				!lazy &&
+				getter === undefined &&
+				delegate === undefined &&
+				EAGER_BLOCKING_INITIALISER.test(child.text)
+			) {
+				eager.add(name);
+				properties.set(name, child.text);
+				continue;
+			}
 			if (!lazy && getter === undefined) continue;
 			properties.set(
 				name,
@@ -3710,7 +3849,7 @@ class Emitter {
 					: child.text
 			);
 		}
-		const found = new Set<string>();
+		const found = new Set<string>(eager);
 		if (properties.size === 0) return found;
 		const functions = new Map<string, string>();
 		for (const child of members) {
@@ -4744,6 +4883,20 @@ class Emitter {
 					break;
 				}
 			}
+			// And one that reads a property deferred for that reason: the
+			// constructor would run the getter it was deferred into, and the
+			// host is no more there for the second read than the first.
+			// `secretKey = SecretKeySpec(keyBytes, "AES")` beside a deferred
+			// `keyBytes = …digest(secret.toByteArray())` died at load exactly so.
+			if (!mutable && !deferred) {
+				for (const other of this.deferredProperties) {
+					if (new RegExp(`\\b(?:this|__self)\\.${other}\\b`).test(value)) {
+						deferred = true;
+						break;
+					}
+				}
+			}
+			if (deferred) this.deferredProperties.add(name);
 			// A getter runs after the template's constructor assignment has
 			// already been replaced by this one's setter, so `this.name` there
 			// is not the base value any more. See `navigation`.
@@ -6118,6 +6271,14 @@ class Emitter {
 		}
 		const emitted = this.functionScope('function', null, [], () => this.expr(initialiser));
 		// A property initialiser runs inside a constructor, which cannot await.
+		// One whose every read is awaited — see `blockingProperties` — holds the
+		// Promise instead, started here, at construction, as Kotlin starts it.
+		if (emitted.isAsync && this.eagerAsyncProperties.has(name)) {
+			const started = emitted.usesSelf
+				? `(async () => ${block(['const __self = this;', `return ${emitted.text};`])})()`
+				: `(async () => ${emitted.text})()`;
+			return `${this.helper('pending')}(${started})`;
+		}
 		if (emitted.isAsync) this.refuse(initialiser, 'a suspending property initialiser');
 		if (!emitted.usesSelf) return emitted.text;
 		return `(() => ${block(['const __self = this;', `return ${emitted.text};`])})()`;
@@ -7540,7 +7701,11 @@ class Emitter {
 				this.declare(name);
 				head = `const ${this.safe(name)}`;
 			}
-			return `for (${head} of ${sequence}) ${block(this.loopBody(body))}`;
+			// Through `forIn`, because a JavaScript `for…of` over the value as it
+			// stands iterates neither kind of Kotlin map as Kotlin does — see the
+			// helper. A range the emitter built as an array literal is left bare.
+			const walked = /^\[.*\]$/s.test(sequence) ? sequence : `${this.helper('forIn')}(${sequence})`;
+			return `for (${head} of ${walked}) ${block(this.loopBody(body))}`;
 		} finally {
 			this.popScope();
 		}
@@ -8479,6 +8644,21 @@ class Emitter {
 			// failure lands inside a `let` at the first playback rather than at
 			// load. Locals and the source's own members still win, as they do in
 			// Kotlin and as they do for a bare call.
+			// `buildList { items.also(::addAll) }`: inside a receiver block an
+			// unqualified reference to the receiver's own member is bound to it.
+			// Taken as the free helper, the items became the collection and
+			// nothing was added; one episode list came back empty.
+			const bound = this.receiverAlias();
+			if (
+				bound !== null &&
+				this.lookup(member.text) === null &&
+				!this.isSourceMember(member.text) &&
+				!this.moduleNames.has(member.text) &&
+				!this.extensionFunctions.has(member.text)
+			) {
+				const own = EXTENSION_METHODS.get(member.text);
+				if (own !== undefined) return `((...__a) => ${this.helper(own)}(${bound}, ...__a))`;
+			}
 			if (this.lookup(member.text) === null && !this.isSourceMember(member.text)) {
 				const free = FREE_FUNCTIONS.get(member.text);
 				if (free !== undefined && !this.moduleNames.has(member.text)) {
@@ -9046,7 +9226,9 @@ class Emitter {
 				// marks a translated member `async` when it suspends, so a call
 				// to one is a promise and a promise that is filtered rather
 				// than awaited walks nothing and answers an empty list.
-				return this.declaredSuspends.has(name) ? this.awaited(inherited) : inherited;
+				return this.declaredSuspends.has(name) || this.inheritedSuspends().has(name)
+					? this.awaited(inherited)
+					: inherited;
 			}
 			// The base class is real — `shims/aniyomi-entry.ts` declares it — so a
 			// written `super.foo(x)` is honoured rather than refused. See
@@ -9193,6 +9375,24 @@ class Emitter {
 			const call = (target: string) =>
 				`${this.helper(name)}(${[target, JSON.stringify(shape), ...predicate].join(', ')})`;
 			return safe ? `${this.helper('sc')}(${value}, (__r) => ${call('__r')})` : call(value);
+		}
+
+		// The encoding half of kotlinx's serializer spelling:
+		// `json.encodeToString(JsonObject.serializer(), payload)`. A generated
+		// serializer names the type of a value the encoder already holds, so it
+		// is dropped; evaluated, `JsonObject.serializer` is no function here and
+		// the call threw inside the extension's catch. A KSerializer the
+		// extension wrote is not generated, keeps its argument, and is answered
+		// or refused as before.
+		if (
+			(name === 'encodeToString' || name === 'encodeToJsonElement') &&
+			typeArgument === null &&
+			lambda === null &&
+			args.length === 2 &&
+			this.argumentName(args[0]) === null &&
+			defaultSerializerType(this.argumentValue(args[0]).text.replace(/\s+/g, '')) !== null
+		) {
+			args = args.slice(1);
 		}
 
 		if (DECODING_METHODS.has(name)) {
@@ -9527,6 +9727,15 @@ class Emitter {
 					? name
 					: EXTENSION_METHODS.get(name)
 				: undefined;
+		// `"simple-hash".toByteArray()` — a literal's bytes, which are the same
+		// on every run. Through the helper they need the host's encoder, which
+		// a companion constant (hoisted to module scope, evaluated at load)
+		// does not have: one listing died at load on exactly that. Folded
+		// here, for the charsets whose bytes are fixed by the text alone.
+		if (helper === 'toByteArray' && lambda === null) {
+			const folded = literalBytes(receiver, args);
+			if (folded !== null) return folded;
+		}
 		if (helper !== undefined) {
 			const before = this.asyncLambdas;
 			const receiverText = this.expr(receiver);
@@ -10209,7 +10418,21 @@ class Emitter {
 		// And one declared on a base class in the file next door — the same
 		// method on the prototype chain, reached the same way: in a request
 		// block, `headersBuilder()` went to the driver's own namesake instead.
-		const knownExtension = this.extensionFunctions.get(name) ?? this.inheritedExtension(name);
+		// And one imported by name from a shared `object` that declares it as an
+		// extension — `import ….ThemeFilters.addListQueryParameter`, called bare
+		// inside `newBuilder().apply { … }`. The explicit-receiver site already
+		// calls `ThemeFilters.addListQueryParameter(builder, …)`; here the call
+		// fell through to a member of the source, `__self.addListQueryParameter
+		// is not a function`, at the first search of a conversion that refused
+		// nothing.
+		const objectExtension =
+			importedFrom !== null && this.neighbourExtensions.has(`${importedFrom}.${name}`)
+				? importedFrom
+				: null;
+		const knownExtension =
+			this.extensionFunctions.get(name) ??
+			this.inheritedExtension(name) ??
+			(objectExtension !== null ? ('module' as const) : undefined);
 		const blockArity = this.extensionArity.get(name);
 		const blockSlot =
 			lambda !== null &&
@@ -10235,7 +10458,7 @@ class Emitter {
 			return this.suspendMembers.has(name) ? this.awaited(call) : call;
 		}
 		if (implicit !== null && declaredExtension !== undefined) {
-			const owner = this.extensionOwners.get(name);
+			const owner = this.extensionOwners.get(name) ?? objectExtension ?? undefined;
 			const target =
 				declaredExtension === 'method'
 					? `${this.selfReference()}.${name}`
@@ -10301,7 +10524,7 @@ class Emitter {
 		if (
 			implicit !== null &&
 			(name === 'rateLimit' || name === 'rateLimitHost') &&
-			!this.isSourceMember(name) &&
+			(!this.isSourceMember(name) || this.valueOnlyMembers.has(name)) &&
 			!this.extensionFunctions.has(name)
 		) {
 			return this.rateLimitCall(callee, implicit, name, args, lambda);
@@ -10399,6 +10622,12 @@ class Emitter {
 			!SUPER_RECEIVER_MEMBERS.has(name) &&
 			!this.isSourceMember(name) &&
 			!this.declaredMethods.has(name) &&
+			// A template this class really extends may override it: DooPlay's
+			// `searchAnimeNextPageSelector()`, called bare from a subclass that
+			// does not, is DooPlay's, reached through the prototype chain. Sent
+			// to the driver's base it answered "" and every search died on an
+			// empty selector.
+			!(this.ownerBase !== null && this.baseDeclares(this.ownerBase, name)) &&
 			lambda === null
 		) {
 			// Awaited by the same rule the written `super.` uses, so the two
@@ -14370,6 +14599,55 @@ function receiverOf(node: KNode): string | null {
  * member through the named class, and a guess at which class a spelling means
  * is the wrong member called.
  */
+/**
+ * Whether a property plainly holds a value nothing can call: a number, string
+ * or boolean literal with no type written, or a declared Kotlin primitive or
+ * `String`. Anything else — a user type, which may declare `invoke`, a
+ * function type, a delegate — answers false.
+ */
+function plainValue(property: KNode): boolean {
+	const parts = kids(property);
+	if (parts.some((part) => part.type === 'property_delegate')) return false;
+	const declared = parts.find((part) => part.type === 'variable_declaration');
+	const type = declaredTypeName(kids(declared));
+	if (type !== null) {
+		return /^(?:Int|Long|Short|Byte|Double|Float|Boolean|Char|String)$/.test(type);
+	}
+	if (kids(declared).some((part) => part.type !== 'simple_identifier')) return false;
+	const value = parts[parts.indexOf(declared!) + 1];
+	return (
+		value !== undefined &&
+		/^(?:integer_literal|long_literal|real_literal|boolean_literal|string_literal|hex_literal)$/.test(
+			value.type
+		)
+	);
+}
+
+/**
+ * A string literal's bytes as a `Uint8Array.of(…)`, for `toByteArray()` with
+ * no charset or with UTF-8, ISO-8859-1 or US-ASCII named — or null for
+ * anything else: a template with an interpolation, an escape this does not
+ * read, a charset it does not know, or a character the single-byte charset
+ * cannot hold (Java replaces that with `?`, which is left to the runtime).
+ */
+function literalBytes(receiver: KNode, args: readonly KNode[]): string | null {
+	if (receiver.type !== 'string_literal' || args.length > 1) return null;
+	if (receiver.children.some((child) => child.type !== 'string_content')) return null;
+	const text = receiver.children.map((child) => child.text).join('');
+	if (/[\\$]/.test(text)) return null;
+	const charset = args.length === 0 ? 'UTF_8' : args[0].text.replace(/\s+/g, '');
+	const name = /^(?:Charsets\.|StandardCharsets\.)?(UTF_8|ISO_8859_1|US_ASCII)$/.exec(charset)?.[1];
+	if (name === undefined) return null;
+	let bytes: number[];
+	if (name === 'UTF_8') bytes = [...new TextEncoder().encode(text)];
+	else {
+		const limit = name === 'US_ASCII' ? 0x7f : 0xff;
+		bytes = [...text].map((char) => char.charCodeAt(0));
+		if (bytes.some((byte) => byte > limit)) return null;
+	}
+	return `Uint8Array.of(${bytes.join(', ')})`;
+}
+
 /** Whether a declaration's type, as written, is a function type (nullable or not). */
 function holdsFunction(children: readonly KNode[]): boolean {
 	let type = children.find(

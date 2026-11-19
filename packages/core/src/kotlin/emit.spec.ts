@@ -414,6 +414,10 @@ const helpers: Record<string, (...args: never[]) => unknown> = {
 	elementAt: (value: Any, index: number) =>
 		typeof value === 'string' ? value[index] : (value as unknown[])[index],
 	iterator: (value: Any) => (value as Iterable<unknown>)[Symbol.iterator](),
+	// The runtime's walks a map as entries and a string as chars; the
+	// fixtures here iterate lists and ranges, which it passes through.
+	forIn: (value: Any) => (typeof value === 'string' ? value.split('') : value),
+	pending: (value: Any) => value,
 	trimMargin: (value: string) =>
 		value
 			.split('\n')
@@ -3623,6 +3627,59 @@ describe('a name declared somewhere the emitter had not looked', () => {
 		expect(emitted.js).toContain('async build(');
 	});
 
+	it('holds a jar-reading property initialiser as a Promise its reads await', () => {
+		// `private val cookieList = client.cookieJar.loadForRequest(url)` runs
+		// in Kotlin's constructor; the jar read is the host's, so a Promise
+		// here. Refused as a suspending initialiser, it stopped a shared
+		// extractor's every listing; held, it starts at construction as Kotlin
+		// starts it, and each read waits for it.
+		const emitted = translate(
+			kt(
+				'class Extractor(private val client: OkHttpClient) {',
+				'    private val cookieList = client.cookieJar.loadForRequest("https://example.invalid".toHttpUrl())',
+				'    fun header(): String = cookieList.joinToString("; ") { "${it.name}=${it.value}" }',
+				'}'
+			)
+		);
+		expect(emitted.refusals).toEqual([]);
+		expect(emitted.js).toContain('this.cookieList = __k.pending((async () =>');
+		expect(emitted.js).toContain('(await this.cookieList)');
+		expect(emitted.js).toContain('async header(');
+	});
+
+	it('awaits MediaMetadataRetriever.setDataSource, which reads the file it is given', () => {
+		// The shared mp4 extractor's quality label: Kotlin blocks in
+		// `setDataSource` while the framework opens the url. Here that is ranged
+		// requests, so the call is a promise, and an unawaited one left
+		// `extractMetadata` reading a retriever nothing had filled yet.
+		const source = kt(
+			'class Demo : Source() {',
+			'    fun label(url: String): String = size(url)?.let { "${it.first}x${it.second}" } ?: "Unknown"',
+			'    private fun size(url: String): Pair<Int, Int>? {',
+			'        val retriever = MediaMetadataRetriever()',
+			'        return try {',
+			'            retriever.setDataSource(url, headers.toMap())',
+			'            val w = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull()',
+			'            val h = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull()',
+			'            if (w != null && h != null) w to h else null',
+			'        } catch (_: Exception) {',
+			'            null',
+			'        } finally {',
+			'            retriever.release()',
+			'        }',
+			'    }',
+			'}'
+		);
+
+		const emitted = translate(source);
+
+		expect(emitted.refusals).toEqual([]);
+		expect(emitted.js).toContain('await retriever.setDataSource(');
+		expect(emitted.js).toContain('async size(');
+		expect(emitted.js).toContain('await this.size(');
+		expect(emitted.js).not.toContain('await retriever.extractMetadata(');
+	});
+
 	it('awaits the crypto operations, which are synchronous in Kotlin only', () => {
 		// `crypto.subtle` is promise-returning and `javax.crypto` is not, so the
 		// four operations that touch a key are `async` in the runtime shim and
@@ -4839,6 +4896,25 @@ describe('an `interface`, which is a membership test here', () => {
 			).join(' ')
 		).toContain('with a body');
 	});
+
+	it('refuses an interface property with a getter, for the same reason', () => {
+		// `val displayTitle: String get() = title.ifEmpty { videoId }` was
+		// dropped: every implementer read undefined, and a shelf of titled
+		// records came back empty with nothing refused.
+		expect(
+			refusalNames(
+				kt(
+					'interface VideoEntry {',
+					'    val title: String',
+					'    val displayTitle: String get() = title.ifEmpty { "x" }',
+					'}',
+					'class Demo : Source() {',
+					'    fun go() = 1',
+					'}'
+				)
+			).join(' ')
+		).toContain('`displayTitle` with a getter');
+	});
 });
 
 describe('the member table a nested class used to overwrite', () => {
@@ -5246,15 +5322,38 @@ describe('a getter a subclass overrides with a plain value', () => {
 });
 
 describe('a property whose value the host has to compute', () => {
+	it("needs no host for a literal's bytes, which are the same on every run", () => {
+		// A companion's `val KEY = "simple-hash".toByteArray()` is hoisted to
+		// module scope and evaluated at load, where there is no host encoder.
+		// Folded, it is the bytes; an interpolated template is not folded.
+		const emitted = translate(
+			kt(
+				'class V {',
+				'    private companion object {',
+				'        val KEY = "hé".toByteArray()',
+				'        val LATIN = "hé".toByteArray(Charsets.ISO_8859_1)',
+				'        val BUILT = "a$KEY".toByteArray()',
+				'    }',
+				'}'
+			)
+		);
+		expect(emitted.js).toContain('const KEY = Uint8Array.of(104, 195, 169);');
+		expect(emitted.js).toContain('const LATIN = Uint8Array.of(104, 233);');
+		expect(emitted.js).toContain('__k.toByteArray(`a${KEY}`)');
+	});
+
 	it('waits until something reads it, rather than running in the constructor', () => {
-		// `private val salted = "Salted__".toByteArray(Charsets.UTF_8)` is a
+		// `private val salted = prefix.toByteArray(Charsets.UTF_8)` is a
 		// constant that happens to need an encoder, and the encoder is the
 		// host's. No plugin call has entered while a constructor runs, so this
 		// threw at load in 7 of 300 measured bundles — and the message it threw
 		// said the module had called out to the network, which it had not.
 		encodedTexts.length = 0;
 		const demo = instantiate(
-			inClass('    private val salted = "Salted__".toByteArray(Charsets.UTF_8)')
+			inClass(
+				'    private val prefix = "Salted__"',
+				'    private val salted = prefix.toByteArray(Charsets.UTF_8)'
+			)
 		);
 
 		expect(encodedTexts).toEqual([]);
@@ -5262,10 +5361,32 @@ describe('a property whose value the host has to compute', () => {
 		expect(encodedTexts).toEqual(['Salted__']);
 	});
 
+	it('waits for one that reads such a property, too', () => {
+		// `secretKey = SecretKeySpec(keyBytes, "AES")` beside a deferred
+		// `keyBytes`: in the constructor it ran the getter, and the encoder was
+		// no more there for that read than for the first. One listing died at
+		// load exactly so.
+		encodedTexts.length = 0;
+		const demo = instantiate(
+			inClass(
+				'    private val prefix = "Salted__"',
+				'    private val salted = prefix.toByteArray(Charsets.UTF_8)',
+				'    private val size = salted.size'
+			)
+		);
+
+		expect(encodedTexts).toEqual([]);
+		expect(demo.size).toBe(1);
+		expect(encodedTexts).toEqual(['Salted__']);
+	});
+
 	it('still evaluates once, which is what the Kotlin `val` promised', () => {
 		encodedTexts.length = 0;
 		const demo = instantiate(
-			inClass('    private val salted = "Salted__".toByteArray(Charsets.UTF_8)')
+			inClass(
+				'    private val prefix = "Salted__"',
+				'    private val salted = prefix.toByteArray(Charsets.UTF_8)'
+			)
 		);
 
 		expect(demo.salted).toEqual([8]);
@@ -5276,7 +5397,12 @@ describe('a property whose value the host has to compute', () => {
 	it('leaves a `var` alone, because deferring one would move a side effect', () => {
 		// The deferral is only sound for a value nothing reassigns.
 		encodedTexts.length = 0;
-		instantiate(inClass('    private var salted = "Salted__".toByteArray(Charsets.UTF_8)'));
+		instantiate(
+			inClass(
+				'    private val prefix = "Salted__"',
+				'    private var salted = prefix.toByteArray(Charsets.UTF_8)'
+			)
+		);
 
 		expect(encodedTexts).toEqual(['Salted__']);
 	});
@@ -6505,5 +6631,37 @@ describe('a class written with its package', () => {
 		expect(emission.refusals).toEqual([]);
 		expect(emission.js).toContain('Jsoup.parse(html)');
 		expect(emission.js).not.toContain('org.jsoup');
+	});
+});
+
+describe('a bare call named like a plain property of the class', () => {
+	it('reaches the builder extension, since a number cannot be called', () => {
+		// `open val rateLimit = 5` and `configureClient() = rateLimit(rateLimit)`:
+		// Kotlin keeps the two names apart and an Int has no `invoke`, so the
+		// call is keiyoushi's `OkHttpClient.Builder.rateLimit`. Read as the
+		// member, it was `this.rateLimit is not a function` at the first request.
+		const emitted = translate(
+			kt(
+				'abstract class Theme : Source() {',
+				'    open val rateLimit = 5',
+				'    override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = rateLimit(rateLimit)',
+				'}'
+			)
+		);
+		expect(emitted.refusals).toEqual([]);
+		expect(emitted.js).toContain('__k.rateLimit(__recv, this.rateLimit, 1000)');
+	});
+
+	it('still calls a member function that shares the name', () => {
+		const emitted = translate(
+			kt(
+				'class Demo : Source() {',
+				'    val rateLimit = 5',
+				'    fun rateLimit(n: Int): Int = n',
+				'    fun go(): Int = rateLimit(rateLimit)',
+				'}'
+			)
+		);
+		expect(emitted.js).not.toContain('__k.rateLimit(');
 	});
 });

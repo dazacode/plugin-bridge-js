@@ -104,6 +104,10 @@ export const RUNTIME_HELPERS = [
 	'withLock',
 	'elementAt',
 	'iterator',
+	/* What `for (x in value)` walks: a map as its entries, a string as chars. */
+	'forIn',
+	/* A constructor's started Promise for a blocking initialiser, kept handled. */
+	'pending',
 	'trimMargin',
 	'encodeToString',
 	'rateLimit',
@@ -385,6 +389,7 @@ export const RUNTIME_HELPERS = [
 	   `call.await()`. Each is an extension on a type the runtime owns, so none
 	   of them can be a method without patching a prototype. */
 	'httpUrl',
+	'httpUrlOrNull',
 	'asJsoup',
 	'await',
 	/* `call.execute()` and `call.awaitSuccess()`, both of which suspend. */
@@ -742,6 +747,8 @@ export const RUNTIME_HELPERS = [
 	'initialized',
 	'decodeHex',
 	'decodeHexToString',
+	/* keiyoushi's top-level `rc4(key, data, skip)`. */
+	'rc4',
 	'jsonOpt',
 	'jsonGetString',
 	'jsonGetInt',
@@ -812,6 +819,7 @@ export type RuntimeHelper = (typeof RUNTIME_HELPERS)[number];
 export const HOST_BACKED_HELPERS: ReadonlySet<RuntimeHelper> = new Set([
 	'contentEquals',
 	'decodeHexToString',
+	'rc4',
 	'decodeToString',
 	'encodeToString',
 	'stringOf',
@@ -898,6 +906,11 @@ export const RUNTIME_GLOBALS = [
 	/* Aniyomi's spelling of the same library-refresh hint. */
 	'AnimeUpdateStrategy',
 	'SMangaUpdate',
+	/* keiyoushi's AniSource models: a title with its episodes or its seasons
+	   from one request, and a named group of related titles. */
+	'SAnimeUpdate',
+	'SAnimeSeasonUpdate',
+	'Related',
 	/* okhttp's HttpUrl, for `HttpUrl.Builder()` — a url built from nothing.
 	   Everything else on it is an instance member the runtime already has. */
 	'HttpUrl',
@@ -945,6 +958,10 @@ export const RUNTIME_GLOBALS = [
 	'StandardCharsets',
 	'JsonObject',
 	'LruCache',
+	/* android.media.MediaMetadataRetriever over an mp4 url: the picture size
+	   a shared extractor prints beside a quality, read from the file's boxes
+	   with ranged requests. Anything else it is asked is refused by name. */
+	'MediaMetadataRetriever',
 	/* `SoftReference(map)` / `WeakReference(x)`, then `.get()`. See the runtime
 	   for why holding the value strongly is exact rather than approximate. */
 	'SoftReference',

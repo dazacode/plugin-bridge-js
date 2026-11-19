@@ -886,7 +886,8 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 
 	// the environment the host supplies
 	['toHttpUrl', 'httpUrl'],
-	['toHttpUrlOrNull', 'httpUrl'],
+	// Strict where `toHttpUrl` is lenient: null for text that is no url.
+	['toHttpUrlOrNull', 'httpUrlOrNull'],
 	['asJsoup', 'asJsoup'],
 	['useAsJsoup', 'asJsoup'],
 	// `use` closes a resource and yields the block's value; the shim has nothing
@@ -1825,6 +1826,10 @@ export const HOST_METHODS: ReadonlySet<string> = new Set([
 	// absent dies in the sandbox rather than refusing here.
 	'closeQuietly',
 	'stop',
+	// `MediaMetadataRetriever`'s three, on the runtime's reader of mp4 boxes.
+	'setDataSource',
+	'extractMetadata',
+	'release',
 	// The two cookie calls the host jar makes true, rather than merely
 	// tolerable. `ADR-0005` §3: the plugin declares intent, the host carries
 	// the state — so both of these are statements of intent the host has
@@ -2036,7 +2041,10 @@ export const AWAITED_HOST_METHODS: ReadonlySet<string> = new Set([
 	'generateKeyPair',
 	'proceed',
 	// The runtime jar's read, which asks the host — see `scanInto`.
-	'loadForRequest'
+	'loadForRequest',
+	// `MediaMetadataRetriever.setDataSource(url, headers)`, which opens the
+	// file: ranged requests for its boxes.
+	'setDataSource'
 ]);
 
 /**
@@ -2049,6 +2057,8 @@ export const AWAITED_HOST_METHODS: ReadonlySet<string> = new Set([
  */
 export const FREE_FUNCTIONS: ReadonlyMap<string, string> = new Map([
 	['listOf', 'listOf'],
+	// keiyoushi's top-level stream cipher, `rc4(key, data, skip = 0)`.
+	['rc4', 'rc4'],
 	['mutableListOf', 'mutableListOf'],
 	['arrayListOf', 'mutableListOf'],
 	['listOfNotNull', 'listOfNotNull'],
@@ -2316,7 +2326,12 @@ export const JSOUP_STATICS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
 	// failure a filesystem that is not there gives. Not jsoup, but the same
 	// question: a capitalised receiver the runtime defines only in part.
 	// `File(path)` itself is a path on that filesystem — see `__KFile`.
-	['File', new Set(['createTempFile'])]
+	['File', new Set(['createTempFile'])],
+	// java.lang.System's three this ecosystem calls. Its other statics —
+	// properties, the environment, `exit` — are a process this sandbox does not
+	// have, and one passed through died as "is not a function" inside the
+	// extractor's catch, which reads as a site that returned nothing.
+	['System', new Set(['currentTimeMillis', 'nanoTime', 'arraycopy'])]
 ]);
 
 /**
@@ -2386,6 +2401,10 @@ export const GLOBAL_NAMES: ReadonlySet<string> = new Set([
 	'UpdateStrategy',
 	'AnimeUpdateStrategy',
 	'SMangaUpdate',
+	// keiyoushi's AniSource models — see `RUNTIME_GLOBALS`.
+	'SAnimeUpdate',
+	'SAnimeSeasonUpdate',
+	'Related',
 	'HttpUrl',
 	// androidx's preference types — see `RUNTIME_GLOBALS`.
 	'PreferenceCategory',
@@ -2406,6 +2425,8 @@ export const GLOBAL_NAMES: ReadonlySet<string> = new Set([
 	'StandardCharsets',
 	'JsonObject',
 	'LruCache',
+	// See `RUNTIME_GLOBALS`: an mp4's picture size, read from its boxes.
+	'MediaMetadataRetriever',
 	// `java.lang.ref`'s two holders, which a template caches a fetched map in.
 	'SoftReference',
 	'WeakReference',
@@ -2887,6 +2908,11 @@ export const KNOWN_SIGNATURES: ReadonlyMap<string, readonly string[]> = new Map(
 	// construction site in the measured catalogue names both — 92 listings
 	// were refused on that alone — and the order is the data class's own.
 	['SMangaUpdate', ['manga', 'chapters']],
+	// keiyoushi's AniSource models, in their constructors' order — the
+	// catalogue writes `SAnimeUpdate(anime = …, episodes = …)` as often as not.
+	['SAnimeUpdate', ['anime', 'episodes']],
+	['SAnimeSeasonUpdate', ['anime', 'seasons']],
+	['Related', ['name', 'animes']],
 
 	// `Filter.Sort.Selection(index, ascending)`, the state of a Sort filter,
 	// which HeanCms-style sources build as `Selection(1, ascending = false)`.
@@ -3212,7 +3238,15 @@ export const ABI_MEMBERS: ReadonlySet<string> = new Set([
 	/* Details and chapters from one request — the current API's abstract
 	   member, which `KeiSource` subclasses implement instead of any chapter
 	   list member at all. `listChapters` runs it. */
-	'fetchMangaUpdate'
+	'fetchMangaUpdate',
+	/* The video half's same API, keiyoushi's `AniSource`: the base class makes
+	   `getEpisodeList`, `getHosterList`, `getVideoList` and `resolveVideo`
+	   final and routes each to one of these, so a subclass declares only
+	   these. `aniyomi-entry.ts` runs them under `__ANI_SOURCE`. */
+	'fetchAnimeUpdate',
+	'fetchHosterList',
+	'fetchVideoList',
+	'fetchResolvedVideo'
 ]);
 
 /**

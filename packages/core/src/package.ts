@@ -255,18 +255,22 @@ const ENTRYPOINT = 'source';
  *     capitalised member path, a package id, a selector — so manifests lose
  *     `array.prototype.indexof`, `java.net.sockettimeoutexception` and their
  *     `*.` siblings. Reconvert every bundle made at 65 or earlier.
- * 67: keiyoushi core's current request API — a Fetch on every request, sent
- *     with the headers a browser sends for its kind, page images as
- *     imageFetch — and the base members its templates call through super;
- *     okhttp's empty trailing path segment, enqueue, a search handed the
- *     source's default filters, and a decode behind ?. kept null-safe; a
- *     positional argument after a named one placed by index, a bare apply,
- *     an indexed +=, a class name never taken for a file extension, a
- *     member named like a property resolved by signature, @SerialName read
+ * 67: keiyoushi's current request API and base classes — a Fetch on every
+ *     request, sent with the headers a browser sends for its kind, page
+ *     images as imageFetch, the base members KeiSource templates call through
+ *     super, and AniSource's play path; okhttp's empty trailing path segment,
+ *     enqueue and a null from toHttpUrlOrNull; a search handed the source's
+ *     default filters; a decode behind ?. kept null-safe; a positional
+ *     argument after a named one placed by index, a bare apply, an indexed +=,
+ *     a Kotlin `for` over a map's entries, a class name never taken for a
+ *     file extension, a member named like a property resolved by signature,
+ *     a template's fetching member awaited from a subclass, @SerialName read
  *     as its literal, named rateLimit arguments, a possessive quantifier over
- *     one character, and jsoup's bare attribute values and -of-type. Bundles
- *     that refused, loaded and failed, or sent different requests at 66
- *     convert differently. Reconvert every bundle made at 66 or earlier.
+ *     one character, a leading `]` in a regex class, a literal's bytes, an
+ *     mp4's picture size, a cookie-jar property initialiser, and jsoup's bare
+ *     attribute values, `!=` and -of-type. Bundles that refused, loaded and
+ *     failed, or sent different requests at 66 convert differently.
+ *     Reconvert every bundle made at 66 or earlier.
  */
 export const CONVERTER_VERSION = 67;
 

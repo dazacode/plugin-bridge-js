@@ -429,6 +429,79 @@ describe('what the proxy said about the requests that failed', () => {
 		// two lists are describing genuinely different problems.
 		expect(running.refusedHosts).toEqual([]);
 	});
+
+	it('records a bot check and a down origin, which reach the plugin as pages', async () => {
+		// Both arrive as data — a status and an HTML body — so the scraper
+		// parses an interstitial, finds no rows, and the run returns an empty
+		// shelf. Without these the verdict was "searching returned nothing"
+		// about a source nobody had seen.
+		const fetcher = vi.fn<typeof fetch>(async (_input, init) => {
+			const sent = JSON.parse(String(init?.body)) as { url: string };
+			if (sent.url.startsWith('https://api.example.com/a')) {
+				return Response.json({
+					status: 403,
+					url: sent.url,
+					headers: {},
+					body: 'Just a moment...',
+					challenge: 'cloudflare'
+				});
+			}
+			if (sent.url.startsWith('https://api.example.com/b')) {
+				return Response.json({ status: 522, url: sent.url, headers: {}, body: '' });
+			}
+			return Response.json({ status: 404, url: sent.url, headers: {}, body: 'not here' });
+		});
+		const { sandbox } = start(
+			async (kind, _payload, host) => {
+				if (kind === 'load') return { id: PLUGIN.id };
+				for (const url of [
+					'https://api.example.com/a',
+					'https://api.example.com/a2',
+					'https://api.example.com/b',
+					'https://api.example.com/c'
+				]) {
+					await host('http', url);
+				}
+				return [];
+			},
+			{ fetcher: fetcher as unknown as typeof fetch }
+		);
+
+		const running = await sandbox;
+		expect(await running.listEpisodes('demo')).toEqual([]);
+		// A 404 is the source answering, and stays the plugin's to read.
+		expect(running.outboundFailures).toEqual([
+			'api.example.com: answered 403 from behind a cloudflare check',
+			'api.example.com: answered 522'
+		]);
+	});
+
+	it('names a header the relay did not forward, when the request was refused', async () => {
+		// The relay forwards a fixed list of headers. A source checking a
+		// custom one answers 401 and the plugin cannot see why: the header it
+		// set never left. Named beside the status; an answered request is not.
+		const fetcher = vi.fn<typeof fetch>(async (_input, init) => {
+			const sent = JSON.parse(String(init?.body)) as { url: string };
+			const status = sent.url.endsWith('/denied') ? 401 : 200;
+			return Response.json({ status, url: sent.url, headers: {}, body: '' });
+		});
+		const { sandbox } = start(
+			async (kind, _payload, host) => {
+				if (kind === 'load') return { id: PLUGIN.id };
+				const headers = { 'X-Access-Control': 'web', Referer: 'https://api.example.com/' };
+				await host('http', 'https://api.example.com/ok', { headers });
+				await host('http', 'https://api.example.com/denied', { headers });
+				return [];
+			},
+			{ fetcher: fetcher as unknown as typeof fetch }
+		);
+
+		const running = await sandbox;
+		expect(await running.listEpisodes('demo')).toEqual([]);
+		expect(running.outboundFailures).toEqual([
+			'api.example.com: answered 401 to a request sent without its "X-Access-Control" header, which this host does not forward'
+		]);
+	});
 });
 
 describe('a source that asks us to slow down', () => {

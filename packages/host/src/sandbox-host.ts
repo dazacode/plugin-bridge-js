@@ -47,7 +47,7 @@ import {
 } from './host';
 import { RequestGate, readPolicy } from './net/request-policy';
 import { FrameReader } from './net/frames';
-import { FRAME_CONTENT_TYPE } from './net/relay';
+import { FRAME_CONTENT_TYPE, forwardsHeader } from './net/relay';
 import type { ConversionRecord } from '@plugin-bridge/core/formats';
 
 /**
@@ -250,6 +250,8 @@ interface ProxyPayload {
 	/** What each redirect hop set, tagged with the hop. Deleted before the
 	 *  payload crosses into the isolate — see `fetchForPlugin`. */
 	setCookie?: unknown;
+	/** The relay's name for a bot check that answered instead of the source. */
+	challenge?: unknown;
 }
 
 /**
@@ -1072,6 +1074,43 @@ export class PluginSandbox {
 				);
 			}
 			const answered = await readRelayReply(response);
+
+			// Answered, but not by the source: a bot check standing in front of
+			// it, or the origin down behind its CDN. Both reach the plugin as data
+			// — a status and a page — and a scraper parses that page, finds no
+			// rows and returns an empty list, which the verdict then reported as
+			// "returned nothing" about a source it never saw. Recorded beside the
+			// relay's own failures, so the run that came to nothing says why.
+			const status = typeof answered.status === 'number' ? answered.status : 0;
+			const answeredFor =
+				typeof answered.challenge === 'string'
+					? `answered ${status} from behind a ${answered.challenge} check`
+					: status >= 500
+						? `answered ${status}`
+						: null;
+			// A refusal, from a request that went out without a header the
+			// plugin set: the relay forwards a fixed list (`relay.ts`), and a
+			// source that checks a custom one answers 401 with nothing to say
+			// why. Named beside the status, because the header is the likelier
+			// reason and the plugin cannot see that it was dropped.
+			const unsent = Object.keys(options.headers ?? {}).filter(
+				(name) => !forwardsHeader(name) && !/^(?:cookie|authorization)$/i.test(name)
+			);
+			if (status >= 400 && unsent.length > 0) {
+				const note =
+					`${host}: answered ${status} to a request sent without its ` +
+					`${unsent.map((name) => `"${name}"`).join(', ')} header${unsent.length === 1 ? '' : 's'}, ` +
+					'which this host does not forward';
+				if (this.failures.length < MAX_REFUSED_REPORTED && !this.failures.includes(note)) {
+					this.failures.push(note);
+				}
+			}
+			if (answeredFor !== null) {
+				const note = `${host}: ${answeredFor}`;
+				if (this.failures.length < MAX_REFUSED_REPORTED && !this.failures.includes(note)) {
+					this.failures.push(note);
+				}
+			}
 
 			// The jar takes what each hop set, and the field is then **deleted**.
 			//

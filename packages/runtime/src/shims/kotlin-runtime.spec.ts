@@ -2038,6 +2038,97 @@ describe('generic runtime helpers', () => {
 	});
 });
 
+describe('MediaMetadataRetriever, over ranged requests', () => {
+	const box = (type: string, ...parts: Uint8Array[]): Uint8Array => {
+		const size = 8 + parts.reduce((sum, part) => sum + part.length, 0);
+		const out = new Uint8Array(size);
+		new DataView(out.buffer).setUint32(0, size);
+		out.set(new TextEncoder().encode(type), 4);
+		let at = 8;
+		for (const part of parts) {
+			out.set(part, at);
+			at += part.length;
+		}
+		return out;
+	};
+	const raw = (...values: number[]) => Uint8Array.from(values);
+	const handler = (kind: string) =>
+		box('hdlr', raw(0, 0, 0, 0, 0, 0, 0, 0), new TextEncoder().encode(kind), new Uint8Array(12));
+	const visualEntry = (width: number, height: number) => {
+		const entry = box('avc1', new Uint8Array(70));
+		new DataView(entry.buffer).setUint16(32, width);
+		new DataView(entry.buffer).setUint16(34, height);
+		return entry;
+	};
+	const stsd = (entry: Uint8Array) => box('stsd', raw(0, 0, 0, 0, 0, 0, 0, 1), entry);
+	const moov = box(
+		'moov',
+		box(
+			'trak',
+			box('mdia', handler('vide'), box('minf', box('stbl', stsd(visualEntry(1280, 720)))))
+		),
+		box('trak', box('mdia', handler('soun')))
+	);
+	const ftyp = box('ftyp', new TextEncoder().encode('isom'), new Uint8Array(4));
+	// moov after a large mdat, as a file that was never made "fast start" is.
+	const mdat = box('mdat', new Uint8Array(200_000));
+	const file = new Uint8Array(ftyp.length + mdat.length + moov.length);
+	file.set(ftyp);
+	file.set(mdat, ftyp.length);
+	file.set(moov, ftyp.length + mdat.length);
+
+	/** Serves `bytes` honouring `Range`, and records each range asked for. */
+	function serving(bytes: Uint8Array) {
+		const ranges: string[] = [];
+		const ctx = {
+			...context().ctx,
+			http: {
+				async policy() {},
+				async send(_url: string, request: { headers: Record<string, string> }) {
+					const range = request.headers['Range'] ?? '';
+					ranges.push(range);
+					const [from, to] = /bytes=(\d+)-(\d+)/.exec(range)!.slice(1).map(Number);
+					const slice = bytes.slice(from, to + 1);
+					return { status: 206, url: _url, headers: {}, bytes: async () => slice };
+				}
+			}
+		};
+		return { ctx, ranges };
+	}
+
+	it('reads the picture size from a moov after the media, skipping the mdat unread', async () => {
+		const { ctx, ranges } = serving(file);
+		runtime.enter(ctx);
+		const Retriever = runtime.globals.MediaMetadataRetriever;
+		const retriever = new Retriever();
+		await retriever.setDataSource('https://example.invalid/v.mp4', new Map([['Referer', 'x']]));
+		expect(retriever.extractMetadata(Retriever.METADATA_KEY_VIDEO_WIDTH)).toBe('1280');
+		expect(retriever.extractMetadata(Retriever.METADATA_KEY_VIDEO_HEIGHT)).toBe('720');
+		expect(retriever.extractMetadata(Retriever.METADATA_KEY_HAS_AUDIO)).toBe('yes');
+		// Two reads: the head, then from the box after the mdat. Nothing of the
+		// media itself beyond what the first window happened to hold.
+		expect(ranges).toEqual([
+			'bytes=0-65535',
+			`bytes=${ftyp.length + mdat.length}-${ftyp.length + mdat.length + 65535}`
+		]);
+	});
+
+	it('refuses by name what it does not read, rather than answering null', async () => {
+		const { ctx } = serving(file);
+		runtime.enter(ctx);
+		const Retriever = runtime.globals.MediaMetadataRetriever;
+		const retriever = new Retriever();
+		await retriever.setDataSource('https://example.invalid/v.mp4', {});
+		expect(() => retriever.extractMetadata(9)).toThrow(/key 9 is not one this build reads/);
+
+		const webm = serving(raw(0x1a, 0x45, 0xdf, 0xa3, ...new Uint8Array(60)));
+		runtime.enter(webm.ctx);
+		await expect(
+			new Retriever().setDataSource('https://example.invalid/v.webm', {})
+		).rejects.toThrow(/Matroska\/WebM file .* only MP4 is read here/);
+	});
+});
+
 describe('okhttp, over the host', () => {
 	it('accepts a connection pool without changing host-owned transport', () => {
 		const built = runtime.client.newBuilder().connectionPool({}).build();
