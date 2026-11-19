@@ -2176,6 +2176,34 @@ describe('okhttp, over the host', () => {
 		expect(sent[2].headers['X-A']).toBe('b');
 	});
 
+	it('starts an enqueued call without waiting, and tells the callback', async () => {
+		// Templates report a view count this way beside the page they read.
+		const { ctx, sent } = context({
+			'https://example.invalid/views': { body: 'ok' },
+			'https://example.invalid/gone': { status: 500, body: '' }
+		});
+		runtime.enter(ctx);
+		const heard: string[] = [];
+		const callback = {
+			onResponse: (_: unknown, response: { code: number }) =>
+				heard.push(`response ${response.code}`),
+			onFailure: () => heard.push('failure')
+		};
+		const answer = runtime.client
+			.newCall(runtime.globals.GET('https://example.invalid/views'))
+			.enqueue(callback);
+		expect(answer).toBeUndefined();
+		// Sent at once, inside the call that enqueued it.
+		expect(sent.map((one) => one.url)).toEqual(['https://example.invalid/views']);
+		runtime.client.newCall(runtime.globals.GET('https://example.invalid/gone')).enqueue({
+			onResponse: () => {
+				throw new Error("the callback's own");
+			}
+		});
+		await new Promise((done) => setTimeout(done, 0));
+		expect(heard).toEqual(['response 200']);
+	});
+
 	it('refuses a post with no body rather than sending an empty one', async () => {
 		const { ctx } = context();
 		runtime.enter(ctx);

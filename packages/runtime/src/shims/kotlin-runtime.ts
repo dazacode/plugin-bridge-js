@@ -10754,7 +10754,7 @@ function __clientWith(follow, interceptors, cookieRules, networkInterceptors) {
     interceptors: application,
     networkInterceptors: network,
     newCall: function (request) {
-      return {
+      var call = {
         execute: function () { return __proceed(request, chain, 0, follow, cookies); },
         await: function () { return __proceed(request, chain, 0, follow, cookies); },
         /* The Rx-era doors onto the same two calls. 238 members in one
@@ -10770,12 +10770,37 @@ function __clientWith(follow, interceptors, cookieRules, networkInterceptors) {
           }
           return response;
         },
-        enqueue: function () {
-          throw new Error('This converted extension enqueued a request; Yorozo only executes them.');
+        /*
+         * okhttp's 'enqueue(callback)': the request starts now, nobody waits for
+         * it, and the callback hears how it went. This ecosystem's templates use
+         * it to report a view count beside the page they just read; refusing it
+         * failed the chapter list of every listing built on them, over a request
+         * whose answer each one throws away. The send begins here, inside the
+         * plugin call, under that call's host. A callback that throws is the
+         * extension's own failure and is not allowed to become an unhandled one.
+         */
+        enqueue: function (callback) {
+          __proceed(request, chain, 0, follow, cookies).then(
+            function (response) {
+              try {
+                if (callback && typeof callback.onResponse === 'function') callback.onResponse(call, response);
+              } catch (ignored) {
+                /* The response was the callback's to read; nothing waits on it. */
+              }
+            },
+            function (error) {
+              try {
+                if (callback && typeof callback.onFailure === 'function') callback.onFailure(call, error);
+              } catch (ignored) {
+                /* As above. */
+              }
+            }
+          );
         },
         cancel: function () {},
         stop: function () {}
       };
+      return call;
     },
     newBuilder: function () { return __clientBuilder(follow, application, cookies, network); },
     cookieJar: __cookieJar
