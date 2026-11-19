@@ -2630,6 +2630,20 @@ class Emitter {
 		return false;
 	}
 
+	/** The members a translated base of this class made async — see `entrySuspends`. */
+	private inheritedSuspends(): Set<string> {
+		const found = new Set<string>();
+		const seen = new Set<string>();
+		for (let at = this.ownerBase ?? undefined; at !== undefined && !seen.has(at);) {
+			seen.add(at);
+			for (const key of this.entrySuspends) {
+				if (key.startsWith(`${at}.`)) found.add(key.slice(at.length + 1));
+			}
+			at = this.classBaseIndex.get(at);
+		}
+		return found;
+	}
+
 	private baseDeclares(base: string, name: string): boolean {
 		const seen = new Set<string>();
 		let at: string | undefined = base;
@@ -3165,6 +3179,37 @@ class Emitter {
 				.filter((found): found is string => found !== null)
 		);
 		for (const name of this.blockingMembers(members)) this.suspendMembers.add(name);
+		// What the template this class extends made async, which this class
+		// calls: `override fun episodeListParse(r) =
+		// super.episodeListParse(r).reversed()` over a template whose parser
+		// fetches a second page. The template's member is a promise here; read
+		// unawaited, `reversed` walked the promise and answered an empty list.
+		// So an inherited suspending member is awaited where it is called, and
+		// a member of this class that calls one suspends in turn.
+		const inherited = this.inheritedSuspends();
+		if (inherited.size > 0) {
+			const own = new Set(
+				members
+					.filter((child) => child.type === 'function_declaration')
+					.map((child) => this.nameOf(child))
+			);
+			for (const name of inherited) if (!own.has(name)) this.suspendMembers.add(name);
+			for (let grew = true; grew;) {
+				grew = false;
+				for (const child of members) {
+					if (child.type !== 'function_declaration') continue;
+					const name = this.nameOf(child);
+					if (name === null || this.suspendMembers.has(name) || SYNC_HOST_MEMBERS.has(name))
+						continue;
+					const calls = [...inherited, ...this.suspendMembers].some((other) =>
+						new RegExp(`\\b${other}\\s*[({]`).test(child.text)
+					);
+					if (!calls) continue;
+					this.suspendMembers.add(name);
+					grew = true;
+				}
+			}
+		}
 		this.eagerAsyncProperties = new Set<string>();
 		this.asyncProperties = this.blockingProperties(
 			members,
@@ -9107,7 +9152,9 @@ class Emitter {
 				// marks a translated member `async` when it suspends, so a call
 				// to one is a promise and a promise that is filtered rather
 				// than awaited walks nothing and answers an empty list.
-				return this.declaredSuspends.has(name) ? this.awaited(inherited) : inherited;
+				return this.declaredSuspends.has(name) || this.inheritedSuspends().has(name)
+					? this.awaited(inherited)
+					: inherited;
 			}
 			// The base class is real — `shims/aniyomi-entry.ts` declares it — so a
 			// written `super.foo(x)` is honoured rather than refused. See

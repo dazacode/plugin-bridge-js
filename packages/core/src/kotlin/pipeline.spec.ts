@@ -931,6 +931,40 @@ describe('Kotlin the vendored grammar cannot read, repaired before it is parsed'
 		expect(conversion.js).not.toContain("= 'Two';");
 	});
 
+	it('awaits a template member that fetches, from the subclass that calls it', async () => {
+		// The template's parser fetches a second page, so it is async here.
+		// `super.episodeListParse(r).reversed()` in the subclass reversed the
+		// promise and answered an empty list; a bare call to the template's
+		// helper was a promise read as a document.
+		const conversion = await convertKotlin(
+			[
+				{
+					path: 'Demo.kt',
+					source: kt(
+						'class Demo : Theme() {',
+						'    override fun episodeListParse(response: Response) = super.episodeListParse(response).reversed()',
+						'    fun details(d: Document) = realDoc(d).title()',
+						'}'
+					)
+				},
+				{
+					path: 'theme/Theme.kt',
+					source: kt(
+						'abstract class Theme : ParsedAnimeHttpSource() {',
+						'    override fun episodeListParse(response: Response) = realDoc(response.asJsoup()).select("li").map { SEpisode.create() }',
+						'    protected fun realDoc(d: Document) = client.newCall(GET(d.location())).execute().asJsoup()',
+						'}'
+					)
+				}
+			],
+			{ parser }
+		);
+
+		expect(conversion.js).toMatch(/__k\.reversed\(\(await super\.episodeListParse\(/);
+		expect(conversion.js).toMatch(/async details\(/);
+		expect(conversion.js).toMatch(/\(await this\.realDoc\(d\)\)/);
+	});
+
 	it('calls a base-class member bare on the template that overrides it', async () => {
 		// `searchAnimeNextPageSelector()` written bare in a subclass of a
 		// template that overrides it is the template's. Sent to the driver's
