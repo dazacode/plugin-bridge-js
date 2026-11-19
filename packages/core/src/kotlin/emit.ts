@@ -9803,11 +9803,18 @@ class Emitter {
 			return `${receiverText}${safe ? '?.' : '.'}${name}`;
 		}
 		// A property of the same name holds the plain slot; see `overloadsOf`.
-		const collided = ownMember && this.fieldNames().has(name) ? this.overloadsOf(name) : null;
+		// Whatever the receiver, when anything in the unit declares both: a
+		// DTO's `private val isLocked` beside its `fun isLocked()` is called
+		// as `it.isLocked()` off a decoded list, where nothing here knows the
+		// type, and the plain slot is the field. `__k.overload` calls the
+		// receiver's own plain member when it declares none of these.
+		const collided = this.fieldNames().has(name) ? this.overloadsOf(name) : null;
 		const call =
-			collided !== null
-				? this.overloadCall(receiverText, receiverText, name, argumentsText, collided)
-				: `${receiverText}${safe ? '?.' : '.'}${name}(${argumentsText.join(', ')})`;
+			collided === null
+				? `${receiverText}${safe ? '?.' : '.'}${name}(${argumentsText.join(', ')})`
+				: safe
+					? `${this.helper('sc')}(${receiverText}, (__r) => ${this.overloadCall('__r', '__r', name, argumentsText, collided)})`
+					: this.overloadCall(receiverText, receiverText, name, argumentsText, collided);
 		// A runtime method that returns a promise where the Kotlin returned a
 		// value. Asked before `declaredSuspends`, because a file that declares
 		// its own `sign` has already taken the `declared` branch above.

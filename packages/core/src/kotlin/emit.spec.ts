@@ -4600,6 +4600,28 @@ describe('a member extension named like a property', () => {
 	});
 });
 
+describe('a method named like a field of the same class', () => {
+	it('is resolved by signature on any receiver, plain or safe', () => {
+		// `private val isLocked` beside `fun isLocked()` in a DTO, called off a
+		// decoded list where nothing knows the element's type.
+		const emission = translate(
+			kt(
+				'class Demo : Source() {',
+				'    fun locked(all: List<Chapter>) = all.map { it.isLocked() }',
+				'    fun maybe(one: Chapter?) = one?.isLocked()',
+				'}',
+				'@Serializable',
+				'class Chapter(private val isLocked: Boolean? = false, private val price: Int? = 0) {',
+				'    fun isLocked() = (isLocked == true) || price != 0',
+				'}'
+			)
+		);
+		expect(emission.refusals).toEqual([]);
+		expect(emission.js).toContain('__k.overload(it, it, "isLocked", []');
+		expect(emission.js).toContain('__k.sc(one, (__r) => __k.overload(__r, __r, "isLocked", []');
+	});
+});
+
 describe('a renamed field', () => {
 	it('reads @SerialName as the string its literal spells', () => {
 		// `"\$t"` is the key `$t`, which every Blogger JSON feed keys its text by.
