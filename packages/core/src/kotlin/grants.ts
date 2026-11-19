@@ -135,6 +135,52 @@ export function measurementGrants(): readonly BoundaryGrant[] {
 	return active;
 }
 
+/**
+ * The boundaries refused where they are reached rather than where they are
+ * written: `compatibility-aniyomi.md` §5.4, adopted.
+ *
+ * A WebView or an embedded JavaScript engine is usually one branch of a
+ * member — the captcha a site sometimes asks for, the one mirror of five that
+ * assembles its url in script — and refusing the member refused the whole
+ * source over a path it may never take. So the construct becomes a call that
+ * throws, naming the boundary, on the line that needed it, and the rest of the
+ * source runs. That is a named failure, never a quiet one: what replaces the
+ * construct cannot return a value, only stop. Unlike a measurement grant the
+ * bundle is a plugin, and carries no marker.
+ *
+ * The other two groups stay refused at the member: reading a cookie store and
+ * drawing an image are what the member is *for*, not a branch of it.
+ */
+const AT_CALL_SITE: readonly BoundaryGrant[] = ['webview', 'js-engine'];
+
+/**
+ * The classes those two groups are reached through, which the runtime defines
+ * as stand-ins: constructing one, calling it, or calling anything on what it
+ * answers throws the same named error, and a class that extends one still
+ * loads. Kept to the names the scanner refuses them by.
+ */
+export const CALL_SITE_STAND_INS: readonly string[] = [
+	'WebView',
+	'WebSettings',
+	'WebViewClient',
+	'QuickJs',
+	'Rhino',
+	'JavaScriptEngine'
+];
+
+/** What a deferred refusal of this kind needed, in the words a viewer reads. */
+export function callSiteBoundary(kind: string): string {
+	return GROUPS.webview.test(kind) ? 'a WebView' : 'an embedded JavaScript engine';
+}
+
+/** Whether a refusal of this kind is deferred to its call site; see `AT_CALL_SITE`. */
+export function refusedAtCallSite(kind: string): boolean {
+	// "the WebView cookie store" names a WebView and is the cookie-store group,
+	// which keeps its own path — an interceptor's recovery cut in `emit.ts`.
+	if (GROUPS['cookie-store'].test(kind)) return false;
+	return AT_CALL_SITE.some((group) => GROUPS[group].test(kind));
+}
+
 /** Whether a refusal of this kind is set aside by a grant that is on. */
 export function granted(kind: string): boolean {
 	return active.some((grant) => GROUPS[grant].test(kind));

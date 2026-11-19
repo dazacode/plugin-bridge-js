@@ -401,6 +401,10 @@ export const RUNTIME_HELPERS = [
 	/* keiyoushi core's 'Request.Builder.fetch(Fetch)' and 'Fetch.from(page)'. */
 	'fetchOn',
 	'fetchFrom',
+	/* An interceptor's 'chain.call()'. */
+	'chainCall',
+	/* A LinkedHashMap bounded by its removeEldestEntry. */
+	'boundedMap',
 	/* keiyoushi core's Next.js Flight and page-data extraction. */
 	'extractNextJs',
 	'extractNextJsRsc',
@@ -1023,6 +1027,17 @@ export const RUNTIME_GLOBALS = [
 	'KeyPairGenerator',
 	'ConnectionPool',
 	'Mutex',
+	/* java.util.concurrent's locks, which one thread always holds at once. */
+	'ReentrantLock',
+	'ReentrantReadWriteLock',
+	/* A WebView and an embedded engine, as stand-ins that fail by name when
+	   used: core/kotlin/grants.ts, CALL_SITE_STAND_INS. */
+	'WebView',
+	'WebSettings',
+	'WebViewClient',
+	'QuickJs',
+	'Rhino',
+	'JavaScriptEngine',
 
 	/* android's `Uri`, whose `parse(url).getQueryParameter(name)` is the same
 	   two operations okhttp spells `toHttpUrl().queryParameter(name)`. A

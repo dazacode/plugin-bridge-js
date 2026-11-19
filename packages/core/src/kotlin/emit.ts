@@ -119,6 +119,7 @@ import {
 	BASE_CONSTANTS,
 	ARGUMENT_LAMBDA_METHODS,
 	CLASS_LOADER,
+	CLASS_RESOURCE,
 	SIMPLE_NAME,
 	BUILDER_LAMBDA_METHODS,
 	TOLERATED_JSON_FLAGS,
@@ -131,7 +132,7 @@ import {
 	type Refusal,
 	type Untranslatable
 } from './subset';
-import { granted } from './grants';
+import { CALL_SITE_STAND_INS, callSiteBoundary, granted, refusedAtCallSite } from './grants';
 import { HOST_BACKED_HELPERS, type RuntimeHelper } from './runtime-api';
 
 /**
@@ -508,7 +509,7 @@ if (CROSS_FILE_BLOCKING_CALLS.source === BLOCKING_CALLS.source) {
  * `noRedirectClient`. The runtime checks the value really is a client before
  * sending anything, so the name decides only that the call is awaited.
  */
-const CLIENT_VERBS: ReadonlySet<string> = new Set(['get', 'post', 'put', 'head']);
+const CLIENT_VERBS: ReadonlySet<string> = new Set(['get', 'post', 'put', 'head', 'call']);
 // Any chain of lowercase properties in front of the client, not only
 // `network.`: a template's helper class holds the source and requests through
 // it — `theme.client.get(url, headers)` — and with the prefix fixed that call
@@ -523,6 +524,8 @@ const CLIENT_VERB_PARAMETERS: ReadonlySet<string> = new Set([
 	'body',
 	'cacheControl',
 	'ensureSuccess',
+	/* `client.call(request, ensureSuccess)`'s built request. */
+	'request',
 	/* The current core's `Fetch` — how a browser would make the request. */
 	'fetch'
 ]);
@@ -885,6 +888,21 @@ interface Inlinable {
 class Refused extends Error {}
 
 /**
+ * A refusal deferred to where it is reached (`grants.ts`, `AT_CALL_SITE`):
+ * the nearest expression or statement around it becomes `replacement`, a call
+ * that throws naming the boundary. One that nothing absorbs is an ordinary
+ * refusal of the member, which is why it is one.
+ */
+class DeferredBoundary extends Refused {
+	constructor(
+		readonly replacement: string,
+		readonly entry: Untranslatable
+	) {
+		super(entry.kind);
+	}
+}
+
+/**
  * One name bound in a scope, and whether Kotlin would let it be assigned.
  *
  * The mutability is not decoration: it is what decides where a bare write
@@ -1075,6 +1093,8 @@ export interface Declared {
 	readonly suspends: ReadonlySet<string>;
 	/** The subset of `types` that needs `new` at a construction site. */
 	readonly newable: ReadonlySet<string>;
+	/** Interfaces, which a type test reaches by their emitted `Symbol.hasInstance`. */
+	readonly interfaces: ReadonlySet<string>;
 	/** Parameter names for declarations whose calls can be resolved across files. */
 	readonly signatures: ReadonlyMap<string, readonly string[]>;
 	/**
@@ -1354,6 +1374,7 @@ const EMPTY_DECLARED: Declared = {
 	methods: new Set(),
 	suspends: new Set(),
 	newable: new Set(),
+	interfaces: new Set(),
 	signatures: new Map(),
 	classMembers: new Map(),
 	classBases: new Map(),
@@ -1389,6 +1410,7 @@ export function mergeDeclared(parts: readonly Declared[]): Declared {
 	const methods = new Set<string>();
 	const suspends = new Set<string>();
 	const newable = new Set<string>();
+	const interfaces = new Set<string>();
 	const values = new Set<string>();
 	const valueSuspends = new Set<string>();
 	const getters = new Set<string>();
@@ -1494,6 +1516,7 @@ export function mergeDeclared(parts: readonly Declared[]): Declared {
 		for (const name of part.methods) methods.add(name);
 		for (const name of part.suspends) suspends.add(name);
 		for (const name of part.newable) newable.add(name);
+		for (const name of part.interfaces) interfaces.add(name);
 		for (const name of part.values) values.add(name);
 		for (const name of part.valueSuspends) valueSuspends.add(name);
 		for (const name of part.getters) getters.add(name);
@@ -1512,6 +1535,7 @@ export function mergeDeclared(parts: readonly Declared[]): Declared {
 		methods,
 		suspends,
 		newable,
+		interfaces,
 		signatures,
 		classMembers,
 		classFields,
@@ -1585,6 +1609,7 @@ class Emitter {
 		for (const name of neighbours.methods) this.declaredMethods.add(name);
 		for (const name of neighbours.suspends) this.declaredSuspends.add(name);
 		for (const name of neighbours.newable) this.newableTypes.add(name);
+		for (const name of neighbours.interfaces) this.interfaceTypes.add(name);
 		// A file-scope `fun` or `val` next door. Every emitted file joins one
 		// module, so the name is in scope here by its own spelling — see
 		// `Declared.values` for what it cost to have left these out.
@@ -1857,6 +1882,7 @@ class Emitter {
 	 * at load — late enough to look like the site changed.
 	 */
 	private readonly newableTypes = new Set<string>();
+	private readonly interfaceTypes = new Set<string>();
 	/** Names bound by a destructured lambda parameter, awaiting their scope. */
 	private readonly destructuredParts: string[] = [];
 	/** What each member mentions; see `MemberEdges`. */
@@ -2142,6 +2168,7 @@ class Emitter {
 			methods: this.declaredMethods,
 			suspends: this.declaredSuspends,
 			newable: this.newableTypes,
+			interfaces: this.interfaceTypes,
 			signatures: this.signatures,
 			values: this.moduleValues,
 			valueSuspends: this.moduleSuspends,
@@ -4588,7 +4615,7 @@ class Emitter {
 		// than refused, and remembered, so `memberWithRecovery` decides exactly
 		// as it would have without the grant (`grants.ts`).
 		this.setAside.push(...scanned.filter((one) => granted(one.kind)));
-		const obstacles = scanned.filter((one) => !granted(one.kind));
+		const obstacles = scanned.filter((one) => !granted(one.kind) && !refusedAtCallSite(one.kind));
 		if (obstacles.length > 0) {
 			this.refusals.push({ member: name, obstacles });
 			this.memberName = previousName;
@@ -5251,6 +5278,20 @@ class Emitter {
 		// overridable setter replace the memoised value.
 		if (called === 'lazy' || called === 'LazyMutable') {
 			const lambda = this.lambdaOf(call);
+			if (lambda === null && called === 'lazy') {
+				// `by lazy(getCookieJar)` — Kotlin's `lazy(initializer)` handed a
+				// function value rather than a block: a parameter, a property or a
+				// `::reference`. Its last argument is that function (a leading one
+				// is the thread-safety mode, which one thread has no use for).
+				const suffix = kids(call).find((child) => child.type === 'call_suffix');
+				const passed = kids(kids(suffix).find((child) => child.type === 'value_arguments'));
+				const initializer = passed[passed.length - 1];
+				if (initializer === undefined || this.argumentName(initializer) !== null) {
+					this.refuse(delegate, 'a `lazy` without a block');
+				}
+				const fn = this.expr(this.argumentValue(initializer));
+				return `() => (${fn})()`;
+			}
 			if (lambda === null) this.refuse(delegate, `a \`${called}\` without a block`);
 			const body = this.functionScope('lambda', called, [], () => block(this.lambdaLines(lambda)));
 			return `${body.isAsync ? 'async ' : ''}() => ${body.text}`;
@@ -5529,6 +5570,7 @@ class Emitter {
 				this.moduleNames.add(name);
 				if (child.type === 'object_declaration') this.declaredObjects.add(name);
 				if (isNewable(child)) this.newableTypes.add(name);
+				if (isInterface(child)) this.interfaceTypes.add(name);
 				// Both spellings: a nested type is hoisted to module scope under
 				// the bare one and *written* under the qualified one.
 				if (owner !== null) this.qualifiedTypes.set(`${owner}.${name}`, name);
@@ -6823,6 +6865,15 @@ class Emitter {
 	}
 
 	private stmt(node: KNode, detached?: KNode): string {
+		try {
+			return this.stmtNode(node, detached);
+		} catch (error) {
+			if (!(error instanceof DeferredBoundary)) throw error;
+			return `${this.absorb(error)};`;
+		}
+	}
+
+	private stmtNode(node: KNode, detached?: KNode): string {
 		switch (node.type) {
 			case 'property_declaration':
 				return this.localProperty(node);
@@ -8141,6 +8192,22 @@ class Emitter {
 	/* ── expressions ─────────────────────────────────────────────────────── */
 
 	private expr(node: KNode): string {
+		try {
+			return this.exprNode(node);
+		} catch (error) {
+			if (!(error instanceof DeferredBoundary)) throw error;
+			return this.absorb(error);
+		}
+	}
+
+	/** A deferred boundary's throw, standing in for the construct it replaced. */
+	private absorb(deferred: DeferredBoundary): string {
+		const at = this.pending.indexOf(deferred.entry);
+		if (at !== -1) this.pending.splice(at, 1);
+		return deferred.replacement;
+	}
+
+	private exprNode(node: KNode): string {
 		switch (node.type) {
 			case 'call_expression':
 				return this.call(node);
@@ -8518,6 +8585,12 @@ class Emitter {
 		if (nested !== undefined && this.moduleNames.has(nested)) return this.safe(nested);
 		const hoisted = this.localTypes.get(name) ?? name;
 		if (this.newableTypes.has(name) && this.moduleNames.has(hoisted)) return this.safe(hoisted);
+		// An interface declared anywhere in the unit is emitted with a
+		// `Symbol.hasInstance` that asks for its members. Named as a string it
+		// was a type the runtime does not know, and `filterIsInstance<UriFilter>()`
+		// answered every filter in the list — each of which was then asked for
+		// a member only some have.
+		if (this.interfaceTypes.has(name) && this.moduleNames.has(hoisted)) return this.safe(hoisted);
 		return JSON.stringify(name);
 	}
 
@@ -8910,6 +8983,32 @@ class Emitter {
 	 *   anonymous object and here would mean the enclosing source. The two are
 	 *   different objects and nothing would say which one answered.
 	 */
+	/**
+	 * `object : LinkedHashMap<K, V>() { override fun removeEldestEntry(…) =
+	 * size > N }`, the bounded cache — the one anonymous subclass of a
+	 * constructed base this ecosystem writes over and over, and one whose whole
+	 * behaviour is in that comparison. Recognised only in exactly that shape:
+	 * one member, a bound that is a number, `>` or `>=`; anything else keeps the
+	 * refusal below. `LinkedHashMap(capacity, loadFactor, true)` asks for access
+	 * order, which `__k.boundedMap` keeps too.
+	 */
+	private boundedMap(
+		invoked: { type: string; args: readonly KNode[] },
+		members: readonly KNode[]
+	): string | null {
+		if (!/^(?:java\.util\.)?LinkedHashMap(?:<.*>)?$/.test(invoked.type.replace(/\s+/g, '')))
+			return null;
+		if (members.length !== 1 || members[0].type !== 'function_declaration') return null;
+		if (this.nameOf(members[0]) !== 'removeEldestEntry') return null;
+		const text = members[0].text.replace(/\s+/g, ' ');
+		const rule =
+			/=\s*size\s*(>=|>)\s*(\d+)\s*$/.exec(text) ??
+			/\{\s*return\s+size\s*(>=|>)\s*(\d+)\s*;?\s*\}\s*$/.exec(text);
+		if (rule === null) return null;
+		const accessOrder = invoked.args.length === 3 && invoked.args[2].text.trim() === 'true';
+		return `${this.helper('boundedMap')}(${rule[2]}, ${rule[1] === '>='}, ${accessOrder})`;
+	}
+
 	private objectLiteral(node: KNode): string {
 		const invoked = this.baseInvocation(node);
 		if (invoked !== null) {
@@ -8918,6 +9017,8 @@ class Emitter {
 			// its own inherited scope, which this emitter cannot represent.
 			const base = this.resolvedBase(invoked.type);
 			const members = kids(kids(node).find((child) => child.type === 'class_body'));
+			const bounded = this.boundedMap(invoked, members);
+			if (bounded !== null) return bounded;
 			if (base !== null && members.length === 0) {
 				return `new ${base}(${this.plainArguments(invoked.type, [...invoked.args]).join(', ')})`;
 			}
@@ -9298,6 +9399,30 @@ class Emitter {
 			CLIENT_RECEIVER.test(receiver.text.replace(/\s+/g, ''))
 		) {
 			return this.clientVerb(receiver, name, args);
+		}
+
+		// `javaClass.getResource("/assets/x")` — the classpath read the class
+		// loader already answers; see `CLASS_RESOURCE`.
+		if (
+			(name === 'getResource' || name === 'getResourceAsStream') &&
+			args.length === 1 &&
+			lambda === null &&
+			CLASS_RESOURCE.test(`${receiver.text.replace(/\s+/g, '')}.${name}`)
+		) {
+			return `${this.helper('classLoader')}().${name}(${this.argumentExpressions(args[0]).join(', ')})`;
+		}
+
+		// An interceptor's `chain.call()`: the call it is wrapping, which the
+		// runtime's chain answers (`isCanceled()` and `cancel()`). Through a
+		// helper that checks the receiver has one, as `fetchOn` does.
+		if (
+			name === 'call' &&
+			args.length === 0 &&
+			lambda === null &&
+			!safe &&
+			!this.declaredSuspends.has(name)
+		) {
+			return `${this.helper('chainCall')}(${this.expr(receiver)})`;
 		}
 
 		// keiyoushi core's `builder.fetch(Fetch.XHR)` and `Fetch.XHR.from(page)`.
@@ -9987,7 +10112,22 @@ class Emitter {
 			/\.get(?:Url|Mime)?(?:Decoder|Encoder)\(\)(?:\.withoutPadding\(\))?$/.test(
 				receiver.text.replace(/\s+/g, '')
 			);
-		if (!HOST_METHODS.has(name) && !crossFileObject && !declared && scopeFunction && !javaCoder) {
+		// A call on something that already fails where it is reached — a
+		// WebView or an engine, `grants.ts` — never runs: the receiver throws
+		// first. So it is that throw, not a second refusal of the member.
+		if (receiverText.startsWith('__k.unsupported("This source needs')) return receiverText;
+		// And a call on one of the stand-ins those boundaries are reached
+		// through, which throws the same way when it runs.
+		const root = /^[A-Za-z_]\w*/.exec(receiver.text.trim())?.[0] ?? '';
+		const onStandIn = CALL_SITE_STAND_INS.includes(root) && this.lookup(root) === null;
+		if (
+			!HOST_METHODS.has(name) &&
+			!crossFileObject &&
+			!declared &&
+			scopeFunction &&
+			!javaCoder &&
+			!onStandIn
+		) {
 			// Passthrough is an allowlist. See the file header: a fallback turns
 			// an unrecognised Kotlin helper into a call on a shim that has never
 			// heard of it, and the failure then happens inside a sandbox rather
@@ -13023,6 +13163,19 @@ class Emitter {
 			this.setAside.push({ kind, line: node.line, memberName: this.memberName });
 			return `__grantedBoundary(${JSON.stringify(kind)})` as never;
 		}
+		// A WebView or a JavaScript engine fails where it is reached, by name,
+		// and the rest of the member translates (`grants.ts`, `AT_CALL_SITE`).
+		if (refusedAtCallSite(kind)) {
+			const message =
+				`This source needs ${callSiteBoundary(kind)} here, which Yorozo does not have: ` +
+				'it can run the rest of this source, not this step.';
+			const entry = { kind, line: node.line, memberName: this.memberName };
+			this.pending.push(entry);
+			throw new DeferredBoundary(
+				`${this.helper('unsupported')}(${JSON.stringify(message)})`,
+				entry
+			);
+		}
 		this.pending.push({ kind, line: node.line, memberName: this.memberName });
 		throw new Refused(kind);
 	}
@@ -13747,6 +13900,14 @@ function callEdges(node: KNode): CallEdge[] {
  * the type, so it is dropped rather than refused.
  */
 /** True for a declaration that comes out as an ES6 `class` and needs `new`. */
+function isInterface(node: KNode): boolean {
+	if (node.type !== 'class_declaration') return false;
+	// The keyword is an anonymous token of the declaration itself; read from
+	// its header, so an interface nested in a class body does not count.
+	const head = node.text.split('{')[0] ?? '';
+	return /(?:^|\s)interface\s+\w/.test(head);
+}
+
 function isNewable(node: KNode): boolean {
 	if (node.type !== 'class_declaration') return false;
 	const kinds = new Set(node.allChildren.map((child) => child.type));

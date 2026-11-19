@@ -143,7 +143,7 @@ class ExampleAnime : ParsedAnimeHttpSource() {
     override fun popularAnimeSelector() = "li.card"
 
     override fun videoListParse(response: Response): List<Video> {
-        val view = WebView(context)
+        val view = Injekt.get<Application>()
         return parseFrom(view)
     }
 }
@@ -164,7 +164,7 @@ class ExampleAnime : ParsedAnimeHttpSource() {
     override fun popularAnimeSelector() = "li.card"
 
     override fun videoListParse(response: Response): List<Video> {
-        val view = WebView(context)
+        val view = Injekt.get<Application>()
         val thread = Thread.currentThread()
         val cipher = Cipher.getInstance("AES")
         val engine = QuickJs()
@@ -247,7 +247,7 @@ class ExampleHostExtractor {
     }
 
     fun deepProbe(url: String): List<Video> {
-        val view = WebView(context)
+        val view = Injekt.get<Application>()
         return parseFrom(view)
     }
 }
@@ -266,7 +266,7 @@ package eu.example.lib.${MODULE}
 
 class ExampleHostExtractor {
     fun videosFromPage(document: Document): List<Video> {
-        val view = WebView(context)
+        val view = Injekt.get<Application>()
         return parseFrom(view)
     }
 
@@ -1103,20 +1103,19 @@ describe('what is refused, and in which words', () => {
 		const refusal = await convert(UNTRANSLATABLE_KT).catch((error: Error) => error.message);
 
 		expect(refusal).toContain('videoListParse');
-		expect(refusal).toContain('WebView');
+		expect(refusal).toContain('Injekt.get');
 		expect(refusal).toMatch(/looks like it works and does not/);
 	}, 60_000);
 
 	it('shows every distinct obstacle in the refusal', async () => {
 		const refusal = await convert(MANY_OBSTACLES_KT).catch((error: Error) => error.message);
 
-		expect(refusal).toContain('WebView');
+		expect(refusal).toContain('Injekt.get');
 		expect(refusal).toContain('a background thread');
 		// The algorithm rather than the package: `ctx.crypto` answers AES-CBC
 		// and AES-GCM, and a bare `"AES"` is ECB by the JCE's own default — so
 		// what is refused here is the mode, and the sentence has to say which.
 		expect(refusal).toContain('the `AES` cipher');
-		expect(refusal).toContain('an embedded JavaScript engine');
 		expect(refusal).toContain('the filesystem');
 	}, 60_000);
 });
@@ -1164,7 +1163,7 @@ describe('the extractor modules an extension delegates to', () => {
 			.catch((error: Error) => error.message);
 
 		expect(refusal).toContain('videosFromPage');
-		expect(refusal).toContain('WebView');
+		expect(refusal).toContain('Injekt.get');
 	}, 60_000);
 });
 

@@ -92,6 +92,17 @@ import {
 	type GitRepository
 } from './git-hosts';
 import { TreeError } from './git-trees';
+import {
+	DECODING_METHODS,
+	EXTENSION_METHODS,
+	FREE_FUNCTIONS,
+	GLOBAL_NAMES,
+	HOST_METHODS,
+	HOST_PROPERTY_METHODS,
+	SUPER_MEMBERS
+} from './kotlin/subset';
+import { refusedAtCallSite } from './kotlin/grants';
+import { RUNTIME_HELPERS } from './kotlin/runtime-api';
 import type { TextFetcher } from './adapter';
 
 /** Where one extension's sources sit, in the parts the layout convention fixes. */
@@ -1368,6 +1379,7 @@ async function fetchCoreFiles(
 	cache: SharedCache | null
 ): Promise<Map<string, string>> {
 	const imports = new Set<string>();
+	const functions = new Set<string>();
 	for (const source of sources) {
 		for (const match of source.matchAll(/^import\s+(keiyoushi\.[\w.]+)/gm)) {
 			const imported = match[1];
@@ -1382,10 +1394,23 @@ async function fetchCoreFiles(
 				new RegExp(`\\b${symbol}(?:\\.|::)`).test(source)
 			)
 				imports.add(imported);
+			// A top-level function the runtime does not answer itself, such as
+			// `toMarkdown`: read its file, or the call reaches nothing. Imported
+			// alone, it went unread, while the same file was read for any source
+			// that also used the builder object beside it.
+			else if (
+				!imported.startsWith('keiyoushi.lib.') &&
+				/^[a-z]/.test(symbol) &&
+				!RUNTIME_ANSWERS.some((table) => table.has(symbol)) &&
+				// `runWebViewBlocking` and its kind are not read: a call to one
+				// fails by name where it is reached (`kotlin/grants.ts`).
+				!refusedAtCallSite(`\`${symbol}\``)
+			)
+				functions.add(imported);
 		}
 	}
 	const selected = new Map<string, string>();
-	if (imports.size === 0) return selected;
+	if (imports.size === 0 && functions.size === 0) return selected;
 
 	const base = subdirectoryUrl(rootUrl, CORE_ROOT);
 	if (base === null) return selected;
@@ -1406,9 +1431,33 @@ async function fetchCoreFiles(
 				break;
 			}
 		}
+		for (const imported of functions) {
+			if (!imported.startsWith(`${pkg}.`)) continue;
+			const symbol = imported.slice(pkg.length + 1);
+			if (symbol.includes('.')) continue;
+			// Declared at the top of the file, on a receiver or not.
+			const declaration = new RegExp(
+				`^(?:(?:public|internal|inline)\\s+)*fun\\s+(?:<[^>]*>\\s*)?(?:[\\w.<>?, ]+\\.)?${symbol}\\s*\\(`,
+				'm'
+			);
+			if (declaration.test(body)) selected.set(path, body);
+		}
 	}
 	return selected;
 }
+
+/** What the translator answers itself; see `RUNTIME_KNOWN_CALLS` in `kotlin/emit.ts`. */
+const RUNTIME_ANSWERS: readonly { has(name: string): boolean }[] = [
+	EXTENSION_METHODS,
+	DECODING_METHODS,
+	FREE_FUNCTIONS,
+	HOST_METHODS,
+	HOST_PROPERTY_METHODS,
+	SUPER_MEMBERS,
+	GLOBAL_NAMES,
+	// The runtime's own helpers, several under core's names (`extractNextJs`).
+	new Set<string>(RUNTIME_HELPERS)
+];
 
 /**
  * Reads one located extension: its build file, the Kotlin beside it, the

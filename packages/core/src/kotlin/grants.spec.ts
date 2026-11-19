@@ -36,6 +36,18 @@ const WEBVIEW = [
 	'}'
 ].join('\n');
 
+/** A cookie-store read, which is still refused at the member. */
+const COOKIES = [
+	'class Demo : HttpSource() {',
+	'    override val baseUrl = "https://example.invalid"',
+	'    override fun popularMangaRequest(page: Int) = GET(baseUrl)',
+	'    override fun popularMangaParse(response: Response): MangasPage {',
+	'        val clearance = CookieManager.getInstance().getCookie(baseUrl)',
+	'        return MangasPage(emptyList(), false)',
+	'    }',
+	'}'
+].join('\n');
+
 async function bundle(): Promise<Uint8Array> {
 	return await packageBundle({
 		id: 'org.example.measured',
@@ -69,17 +81,25 @@ describe('measurement grants', () => {
 	});
 
 	it('set aside exactly the refusals that name their boundary', async () => {
-		const refused = await convertKotlin([{ path: 'Demo.kt', source: WEBVIEW }], { parser });
+		const refused = await convertKotlin([{ path: 'Demo.kt', source: COOKIES }], { parser });
 		expect(refused.complete).toBe(false);
 
 		setMeasurementGrants(['image']);
-		expect((await convertKotlin([{ path: 'Demo.kt', source: WEBVIEW }], { parser })).complete).toBe(
+		expect((await convertKotlin([{ path: 'Demo.kt', source: COOKIES }], { parser })).complete).toBe(
 			false
 		);
 
-		setMeasurementGrants(['webview']);
-		const measured = await convertKotlin([{ path: 'Demo.kt', source: WEBVIEW }], { parser });
+		setMeasurementGrants(['cookie-store']);
+		const measured = await convertKotlin([{ path: 'Demo.kt', source: COOKIES }], { parser });
 		expect(measured.complete).toBe(true);
+	});
+
+	it('leave a WebView to fail where it is reached, with no grant at all', async () => {
+		// compatibility-aniyomi §5.4: the member translates, and the WebView is
+		// the runtime's stand-in, which throws by name when it is used.
+		const converted = await convertKotlin([{ path: 'Demo.kt', source: WEBVIEW }], { parser });
+		expect(converted.complete).toBe(true);
+		expect(converted.js).toContain('WebView(this.context)');
 	});
 
 	it('mark every bundle packaged under them, and a host will not open one', async () => {

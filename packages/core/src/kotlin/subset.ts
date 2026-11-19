@@ -661,6 +661,15 @@ export const CLASS_LOADER =
  *
  * `?.` and anything longer than one identifier on the left stay refused.
  */
+/**
+ * `javaClass.getResource("/assets/x")` and `getResourceAsStream`, the class
+ * object's own reads of the classpath — the same files `CLASS_LOADER` reaches,
+ * a leading slash naming them from the root. Exempted from the `javaClass`
+ * refusal whole, like the other two chains; `emit.ts` answers it.
+ */
+export const CLASS_RESOURCE =
+	/^(?:(?:[A-Za-z_][\w.]*|this)::class\.java|(?:this\.)?javaClass)\.getResource(?:AsStream)?$/;
+
 export const SIMPLE_NAME = /^(?:this\.|([a-z_]\w*)\.)?javaClass\.simpleName$/;
 
 /** The obstacle this node's own text names, if any. Checked leaf-first. */
@@ -1438,6 +1447,16 @@ export const RUNTIME_STATIC_REFERENCES: ReadonlyMap<string, ReadonlySet<string>>
  * is a deliberate cost rather than an oversight.
  */
 export const HOST_METHODS: ReadonlySet<string> = new Set([
+	// java.util.concurrent's locks (`ReentrantLock`, `ReentrantReadWriteLock`),
+	// which the runtime defines for its one thread; see there.
+	'readLock',
+	'writeLock',
+	'tryLock',
+	'unlock',
+	'lockInterruptibly',
+	'isHeldByCurrentThread',
+	// The call an interceptor's chain answers for `chain.call()`.
+	'isCanceled',
 	// java.io.File's, on the path the runtime's `File(…)` builds — a path on a
 	// filesystem a plugin does not have, so every query answers "absent" and
 	// every write fails with an IOException the extension sees. See `__KFile`.
@@ -2451,6 +2470,15 @@ export const GLOBAL_NAMES: ReadonlySet<string> = new Set([
 	'Log',
 	'ConnectionPool',
 	'Mutex',
+	'ReentrantLock',
+	'ReentrantReadWriteLock',
+	// Stand-ins that fail by name when used; see `CALL_SITE_STAND_INS`.
+	'WebView',
+	'WebSettings',
+	'WebViewClient',
+	'QuickJs',
+	'Rhino',
+	'JavaScriptEngine',
 	'Uri',
 	'System',
 	'TimeUnit',
@@ -3642,6 +3670,10 @@ function scanInto(node: KNode, memberName: string, found: Untranslatable[]): voi
 	// `javaClass` leaf below from being refused, and keeps the exemption exactly
 	// as long as the chain the emitter recognises.
 	if (node.type === 'navigation_expression' && CLASS_LOADER.test(node.text.replace(/\s+/g, ''))) {
+		return;
+	}
+	// `CLASS_RESOURCE`: the chain, and then its argument as any other.
+	if (node.type === 'navigation_expression' && CLASS_RESOURCE.test(node.text.replace(/\s+/g, ''))) {
 		return;
 	}
 

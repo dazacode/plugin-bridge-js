@@ -698,6 +698,26 @@ describe('fetching the template and the modules an extension shares', () => {
 		expect(asked.slice(afterFirst).some((url) => url.includes('/core/'))).toBe(false);
 	});
 
+	it('reads the core file of an imported function the runtime does not answer', async () => {
+		// `import keiyoushi.utils.toMarkdown`, alone: the file was read only for
+		// a source that also used the builder object beside it.
+		const coreDir = `${RAW}/main/core/`;
+		const markdown = 'package keiyoushi.utils\nfun Element.toMarkdown(): String = text()';
+		const { getText, listFiles } = fakeRepository({
+			[`${dir}build.gradle`]: gradleFor(null, []),
+			[`${dir}src/A.kt`]:
+				'package org.example\nimport keiyoushi.utils.toMarkdown\nimport keiyoushi.utils.runWebViewBlocking\nclass A',
+			[`${coreDir}src/main/kotlin/keiyoushi/utils/Markdown.kt`]: markdown,
+			[`${coreDir}src/main/kotlin/keiyoushi/utils/WebView.kt`]:
+				'package keiyoushi.utils\nfun runWebViewBlocking(call: Any) = Unit'
+		});
+		const source = await fetchExtensionSource(location, listFiles, getText, newSharedCache());
+		// The WebView helper is not read: a call to one fails by name instead.
+		expect([...source.coreFiles]).toEqual([
+			['src/main/kotlin/keiyoushi/utils/Markdown.kt', markdown]
+		]);
+	});
+
 	it('does not fetch a module the build file commented out', async () => {
 		const { getText, listFiles, asked } = fakeRepository({
 			[`${dir}build.gradle`]:

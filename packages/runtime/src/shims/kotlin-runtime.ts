@@ -2028,7 +2028,13 @@ __ClassLoader.prototype.getResourceAsStream = function (name) {
   var path = __str(name).replace(/^\\/+/, '');
   var files = __resources();
   if (!Object.prototype.hasOwnProperty.call(files, path)) return null;
-  return { __text: __str(files[path]), __path: path };
+  var text = __str(files[path]);
+  var stream = { __text: text, __path: path };
+  /* 'getResource(name)!!.readText()' and 'getResourceAsStream(name)
+     .bufferedReader().readText()', read straight off what is held. */
+  stream.readText = function () { return text; };
+  stream.bufferedReader = function () { return stream; };
+  return stream;
 };
 
 __ClassLoader.prototype.getResource = function (name) {
@@ -4842,6 +4848,17 @@ var __k = {
       throw new Error('This converted extension called ' + verb + '() on something that has none.');
     }
 
+    if (verb === 'call') {
+      /* keiyoushi core's 'client.call(request, ensureSuccess = true)': a
+         request built already, sent as it is. */
+      var built = options.request !== undefined ? options.request : args[0];
+      if (built === undefined || built === null) {
+        throw new Error('This converted extension called call() with no request.');
+      }
+      var sureOf = options.ensureSuccess !== undefined ? options.ensureSuccess : args[1];
+      var sent = client.newCall(built);
+      return sureOf === false ? sent.await() : sent.awaitSuccess();
+    }
     var url = options.url !== undefined ? options.url : args[0];
     var headers = options.headers;
     var body = options.body;
@@ -4888,6 +4905,14 @@ var __k = {
       return receiver.fetch(fetch);
     }
     throw new Error('This converted extension called fetch() on something that is not a request builder.');
+  },
+
+  /** An interceptor's 'chain.call()', or the receiver's own 'call()'. */
+  chainCall: function (receiver) {
+    if (receiver !== null && receiver !== undefined && typeof receiver.call === 'function') {
+      return receiver.call();
+    }
+    throw new Error('This converted extension called call() on something that has none.');
   },
 
   /** 'Fetch.XHR.from(page)': the same kind, coming from that page — see Fetch. */
@@ -8060,6 +8085,37 @@ var __k = {
     return __k.toMutableMap(value);
   },
 
+  /**
+   * 'object : LinkedHashMap<K, V>() { override fun removeEldestEntry(…) =
+   * size > N }' — a cache that keeps its newest N entries. After each insertion
+   * the eldest entry goes while the size passes the bound, as LinkedHashMap
+   * asks removeEldestEntry after each put. With access order, a read moves the
+   * entry to the newest end, which is LinkedHashMap's third constructor
+   * argument.
+   */
+  boundedMap: function (limit, inclusive, accessOrder) {
+    var inner = new Map();
+    var bound = Number(limit);
+    inner.set = function (key, value) {
+      if (accessOrder && Map.prototype.has.call(this, key)) Map.prototype.delete.call(this, key);
+      Map.prototype.set.call(this, key, value);
+      while (this.size > 0 && (inclusive ? this.size >= bound : this.size > bound)) {
+        Map.prototype.delete.call(this, this.keys().next().value);
+      }
+      return this;
+    };
+    if (accessOrder) {
+      inner.get = function (key) {
+        if (!Map.prototype.has.call(this, key)) return undefined;
+        var value = Map.prototype.get.call(this, key);
+        Map.prototype.delete.call(this, key);
+        Map.prototype.set.call(this, key, value);
+        return value;
+      };
+    }
+    return __mutableMap(inner);
+  },
+
   /** HashSet() / LinkedHashSet(), and the copying constructor over a collection. */
   hashSet: function (value) {
     if (value === null || value === undefined || typeof value === 'number') return __k.toSet([]);
@@ -10771,7 +10827,14 @@ async function __proceed(request, chain, index, follow, cookies) {
     /* okhttp hands the chain the call and the connection. The call is the
        request this one is wrapping; there is no connection, and a source that
        asks for one is asking about a socket this build does not have. */
-    call: function () { return { request: function () { return request; }, cancel: function () {} }; },
+    call: function () {
+      return {
+        request: function () { return request; },
+        cancel: function () {},
+        /* Nothing here cancels a call once it is made, so none ever is. */
+        isCanceled: function () { return false; }
+      };
+    },
     connection: function () { return null; },
     /* The per-call timeout setters, which answer the chain so the fluent form
        keeps working. Timeouts belong to the host's transport — see
@@ -15183,6 +15246,75 @@ function ConnectionPool(maxIdle, keepAlive, timeUnit) {
 function Mutex(locked) {
   if (!(this instanceof Mutex)) return new Mutex(locked);
   this.isLocked = Boolean(locked);
+}
+
+/**
+ * java.util.concurrent's ReentrantLock and ReentrantReadWriteLock, in a
+ * runtime with one thread: there is never a second holder to wait for, so
+ * taking a lock always succeeds and 'withLock { }' runs its block, as it does
+ * for Mutex above. An interceptor that serialises a challenge behind
+ * 'lock.writeLock().withLock { … }' runs that block once per request here,
+ * which is what one thread would see on the device too.
+ */
+function __kLock() {
+  var held = 0;
+  return {
+    lock: function () { held += 1; },
+    unlock: function () { if (held > 0) held -= 1; },
+    tryLock: function () { held += 1; return true; },
+    lockInterruptibly: function () { held += 1; },
+    isHeldByCurrentThread: function () { return held > 0; },
+    get isLocked() { return held > 0; }
+  };
+}
+
+/*
+ * The classes a WebView or an embedded JavaScript engine is reached through,
+ * as stand-ins (core/kotlin/grants.ts, CALL_SITE_STAND_INS). The converter
+ * translates a member that uses one rather than refusing the source over it —
+ * compatibility-aniyomi section 5.4 — so the use itself has to fail, by name,
+ * on the line that needed it: constructing one, calling it, or calling what it
+ * answers. Reading 'prototype' answers an object, so 'class X : WebViewClient()'
+ * still loads and fails only when an X is made.
+ */
+function __boundaryStandIn(what) {
+  // 'globalThis.Proxy', not 'Proxy': a converted extension may declare a
+  // class of that name (a local streaming proxy), which shadows the global for
+  // the whole bundle and is not initialised while this runs.
+  return new globalThis.Proxy(function () {}, {
+    get: function (target, key) {
+      if (key === 'prototype') return {};
+      if (typeof key === 'symbol') return undefined;
+      return __boundaryStandIn(what);
+    },
+    construct: function () { return __boundaryReached(what); },
+    apply: function () { return __boundaryReached(what); }
+  });
+}
+
+function __boundaryReached(what) {
+  return __k.unsupported(
+    'This source needs ' + what + ' here, which Yorozo does not have: ' +
+    'it can run the rest of this source, not this step.'
+  );
+}
+
+var WebView = __boundaryStandIn('a WebView');
+var WebSettings = __boundaryStandIn('a WebView');
+var WebViewClient = __boundaryStandIn('a WebView');
+var QuickJs = __boundaryStandIn('an embedded JavaScript engine');
+var Rhino = __boundaryStandIn('an embedded JavaScript engine');
+var JavaScriptEngine = __boundaryStandIn('an embedded JavaScript engine');
+
+function ReentrantLock() { return __kLock(); }
+
+function ReentrantReadWriteLock() {
+  var read = __kLock();
+  var write = __kLock();
+  return {
+    readLock: function () { return read; },
+    writeLock: function () { return write; }
+  };
 }
 
 /**

@@ -1772,6 +1772,24 @@ describe('HttpUrl, built by hand', () => {
 		expect(url.encodedPath).toBe('/api/anime/one/1');
 	});
 
+	it('fails a WebView or an embedded engine by name, where it is used', () => {
+		const { WebView, WebViewClient, QuickJs } = runtime.globals;
+		expect(() => WebView({}).loadUrl('x')).toThrow(/needs a WebView here/);
+		expect(() => new WebView({})).toThrow(/needs a WebView here/);
+		expect(() => QuickJs.create().evaluate('1')).toThrow(/needs an embedded JavaScript engine/);
+		// A class over one still loads; making one is the use.
+		class Client extends WebViewClient {}
+		expect(() => new Client()).toThrow(/needs a WebView here/);
+	});
+
+	it('holds a lock for its one thread, and runs what withLock is handed', () => {
+		const lock = new runtime.globals.ReentrantReadWriteLock();
+		expect(k.withLock(lock.readLock(), () => 'r') + k.withLock(lock.writeLock(), () => 'w')).toBe(
+			'rw'
+		);
+		expect(lock.writeLock().tryLock()).toBe(true);
+	});
+
 	it("answers keiyoushi core's jsoup readers as core does", () => {
 		const p = runtime.globals.Jsoup.parse(
 			'<p data-x="  y  " data-e=" ">own <b>bold</b></p>'
@@ -2276,6 +2294,39 @@ describe('okhttp, over the host', () => {
 		expect(sent[1].headers['X-A']).toBeUndefined();
 		expect(sent[2]).toMatchObject({ method: 'GET', body: null });
 		expect(sent[2].headers['X-A']).toBe('b');
+	});
+
+	it("sends core's client.call(request) as built, and answers chain.call()", async () => {
+		const { ctx, sent } = context({
+			'https://example.invalid/built': { body: 'ok' },
+			'https://example.invalid/gone': { status: 404, body: '' }
+		});
+		runtime.enter(ctx);
+		const built = runtime.globals.GET('https://example.invalid/built', { 'X-A': 'b' });
+		const response = await k.okhttp(runtime.client, 'call', [built], {});
+		expect(response.body.string()).toBe('ok');
+		expect(sent[0].headers['X-A']).toBe('b');
+		await expect(
+			k.okhttp(runtime.client, 'call', [runtime.globals.GET('https://example.invalid/gone')], {})
+		).rejects.toThrow(/404/);
+		const gone = await k.okhttp(
+			runtime.client,
+			'call',
+			[runtime.globals.GET('https://example.invalid/gone')],
+			{ ensureSuccess: false }
+		);
+		expect(gone.code).toBe(404);
+
+		const seen: boolean[] = [];
+		const watching = runtime.client
+			.newBuilder()
+			.addInterceptor((chain: any) => {
+				seen.push(k.chainCall(chain).isCanceled());
+				return chain.proceed(chain.request());
+			})
+			.build();
+		await watching.newCall(built).execute();
+		expect(seen).toEqual([false]);
 	});
 
 	it('starts an enqueued call without waiting, and tells the callback', async () => {

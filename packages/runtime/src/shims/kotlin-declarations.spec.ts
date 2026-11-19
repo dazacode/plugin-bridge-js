@@ -2253,17 +2253,33 @@ describe('detached accessors and minimal declarations', () => {
 	});
 
 	it('still refuses an anonymous subclass with its own body', () => {
+		// Any body but the bounded cache below: an override of `get` is the
+		// base plus behaviour a literal cannot carry.
 		expect(
 			refusalNames(
 				kt(
 					'class Demo {',
 					'    val cache = object : LinkedHashMap<String, String>() {',
-					'        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?) = size > 10',
+					'        override fun get(key: String): String? = super.get(key)?.trim()',
 					'    }',
 					'}'
 				)
 			)
 		).toEqual(['an anonymous `object : LinkedHashMap(…)` over a constructed base']);
+	});
+
+	it('reads the bounded LinkedHashMap cache as one, eldest out first', () => {
+		// `removeEldestEntry(…) = size > N`, the one shape of it this catalogue
+		// writes: a cache of the newest N.
+		const source = kt(
+			'class Demo {',
+			'    val cache = object : LinkedHashMap<String, String>() {',
+			'        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?) = size > 2',
+			'    }',
+			'}'
+		);
+		expect(refusalNames(source)).toEqual([]);
+		expect(emitKotlin(parse(source)).js).toContain('__k.boundedMap(2, false, false)');
 	});
 });
 

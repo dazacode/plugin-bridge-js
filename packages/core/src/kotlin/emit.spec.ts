@@ -4025,16 +4025,10 @@ describe('refusing by name', () => {
 			'an anonymous `object : Filter.Sort(…)` over a constructed base'
 		],
 		['a dependency container', inClass('    val app = Injekt.get<Application>()'), 'Injekt.get'],
-		['a WebView', inClass('    fun solve() = WebView(context).loadUrl(baseUrl)'), 'WebView'],
 		[
 			'a key derivation',
 			inClass('    fun key() = KeyGenerator.getInstance("AES").generateKey()'),
 			'javax.crypto'
-		],
-		[
-			'an embedded engine',
-			inClass('    fun unpack(s: String) = QuickJs.create().evaluate(s)'),
-			'an embedded JavaScript engine'
 		],
 		['a coroutine launch', inClass('    fun go() = launch { load() }'), 'launch {}'],
 		[
@@ -4049,6 +4043,32 @@ describe('refusing by name', () => {
 		]
 	])('refuses %s and names it', (_label, source, expected) => {
 		expect(refusalNames(source)).toContain(expected);
+	});
+
+	it.each([
+		['a WebView', inClass('    fun solve() = WebView(context).loadUrl(baseUrl)'), 'WebView('],
+		[
+			'an embedded engine',
+			inClass('    fun unpack(s: String) = QuickJs.create().evaluate(s)'),
+			'QuickJs.create()'
+		],
+		[
+			'a keiyoushi WebView helper',
+			kt(
+				'import keiyoushi.utils.runWebViewBlocking',
+				'class Demo : Source() {',
+				'    fun solve(call: Call) = runWebViewBlocking(call) { loadData("x", "y") }',
+				'}'
+			),
+			'__k.unsupported("This source needs'
+		]
+	])('fails %s by name where it is reached, and translates the rest', (_label, source, emitted) => {
+		// compatibility-aniyomi §5.4, adopted: the member is not refused. The
+		// construct is the runtime's stand-in, or a named throw, on the line
+		// that needed it (`kotlin-runtime.spec.ts` has what each one says).
+		const emission = translate(source);
+		expect(emission.refusals).toEqual([]);
+		expect(emission.js).toContain(emitted);
 	});
 
 	it('reads the source\u2019s own name inside an SManga it is building, and a chapter\u2019s inside a chapter', () => {
@@ -4078,8 +4098,8 @@ describe('refusing by name', () => {
 		expect(refusalNames(inClass('    fun t() = Thread.currentThread()'))).toContain(
 			'a background thread'
 		);
-		expect(refusalNames(inClass('    fun p() { Thread.sleep(WebView(context).x) }'))).toContain(
-			'WebView'
+		expect(refusalNames(inClass('    fun p() { Thread.sleep(Injekt.get<Long>()) }'))).toContain(
+			'Injekt.get'
 		);
 	});
 
@@ -4117,8 +4137,8 @@ describe('refusing by name', () => {
 		expect(() => demo.locked()).toThrow('Log in via WebView');
 
 		// Code interpolated into a string is still code, and is still scanned.
-		expect(refusalNames(inClass('    fun f() = "a ${WebView(context).url} b"'))).toContain(
-			'WebView'
+		expect(refusalNames(inClass('    fun f() = "a ${Injekt.get<Application>().x} b"'))).toContain(
+			'Injekt.get'
 		);
 		// A string is the only place a JCE transformation's mode is written, so
 		// the algorithm question is still asked of one — here in a constant.
@@ -4470,7 +4490,7 @@ describe('refusing by name', () => {
 			inClass(
 				'    override fun videoListParse(response: Response): List<Video> {',
 				'        val a = Injekt.get<Loader>()',
-				'        val b = WebView(context)',
+				'        val b = KeyGenerator.getInstance("AES").generateKey()',
 				'        return emptyList()',
 				'    }'
 			)
@@ -4479,7 +4499,7 @@ describe('refusing by name', () => {
 		expect(emission.refusals).toHaveLength(1);
 		expect(emission.refusals[0].obstacles.map((one) => one.kind)).toEqual([
 			'Injekt.get',
-			'WebView'
+			'javax.crypto'
 		]);
 	});
 
@@ -4734,6 +4754,39 @@ describe('a template member that returns an interceptor', () => {
 		expect(emission.js).toContain('\tconfigure(b) {');
 		expect(emission.js).toContain('this.addInterceptor(__self.acceptHeaderInterceptor())');
 		expect(emission.js).toContain('return (await this.fetchThing());');
+	});
+});
+
+describe('an interface declared in another file', () => {
+	it('is tested by its emitted class, not by a name the runtime does not know', () => {
+		// `filterIsInstance<UriFilter>()` with the interface next door answered
+		// every filter in the list, each then asked for a member only some have.
+		const emission = translate(
+			kt(
+				'interface UriFilter { fun addToUri(b: StringBuilder) }',
+				'class Demo : Source() {',
+				'    fun go(filters: FilterList) = filters.filterIsInstance<UriFilter>().size',
+				'    fun one(x: Any) = x is UriFilter',
+				'}'
+			)
+		);
+		expect(emission.js).toContain('__k.filterIsInstance(filters, UriFilter)');
+		expect(emission.js).toContain('__k.isType(x, UriFilter)');
+	});
+});
+
+describe('a lazy over a function value', () => {
+	it('calls that function once, for the first read', () => {
+		const emission = translate(
+			kt(
+				'class Holder(getValue: () -> String) {',
+				'    private val value by lazy(getValue)',
+				'    fun read(): String = value',
+				'}'
+			)
+		);
+		expect(emission.refusals).toEqual([]);
+		expect(emission.js).toContain('() => (getValue)()');
 	});
 });
 
@@ -5062,13 +5115,22 @@ describe('the class loader', () => {
 		expect(demo.same()).toBe(true);
 	});
 
+	it('reads a resource off the class object as the class loader does', () => {
+		// `javaClass.getResource("/assets/a.js")` names the same classpath the
+		// class loader reads, from its root.
+		const emission = translate(
+			inClass('    val script = javaClass.getResource("/assets/a.js")!!.readText()')
+		);
+		expect(emission.refusals).toEqual([]);
+		expect(emission.js).toContain("__k.classLoader().getResource('/assets/a.js')");
+	});
+
 	it('still refuses the JVM class object asked for anything else', () => {
-		// A class *path* and a class *name* have answers here; a resource read
-		// off the class object does not. Each exemption is the length of its
-		// one chain and no further.
-		expect(
-			refusalNames(inClass('    val script = javaClass.getResource("/assets/a.js")!!.readText()'))
-		).toContain('the JVM class object');
+		// A class *path*, a class *name* and a resource have answers here; the
+		// rest of reflection does not. Each exemption is its one chain.
+		expect(refusalNames(inClass('    val methods = javaClass.declaredMethods'))).toContain(
+			'the JVM class object'
+		);
 	});
 });
 
