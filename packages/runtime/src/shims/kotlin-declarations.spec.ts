@@ -3674,3 +3674,17 @@ describe('encodeToString with a generated serializer', () => {
 		expect(demo.go()).toBe('{"n":1}');
 	});
 });
+
+describe('a callable reference inside a receiver block', () => {
+	it('binds to the receiver, as `buildList { …also(::addAll) }` does', async () => {
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    fun go(): String = buildList { listOf(1, 2).also(::addAll); add(3) }.joinToString(",")',
+				'}'
+			)
+		);
+		expect(demo.go()).toBe('1,2,3');
+	});
+});

@@ -8585,6 +8585,21 @@ class Emitter {
 			// failure lands inside a `let` at the first playback rather than at
 			// load. Locals and the source's own members still win, as they do in
 			// Kotlin and as they do for a bare call.
+			// `buildList { items.also(::addAll) }`: inside a receiver block an
+			// unqualified reference to the receiver's own member is bound to it.
+			// Taken as the free helper, the items became the collection and
+			// nothing was added; one episode list came back empty.
+			const bound = this.receiverAlias();
+			if (
+				bound !== null &&
+				this.lookup(member.text) === null &&
+				!this.isSourceMember(member.text) &&
+				!this.moduleNames.has(member.text) &&
+				!this.extensionFunctions.has(member.text)
+			) {
+				const own = EXTENSION_METHODS.get(member.text);
+				if (own !== undefined) return `((...__a) => ${this.helper(own)}(${bound}, ...__a))`;
+			}
 			if (this.lookup(member.text) === null && !this.isSourceMember(member.text)) {
 				const free = FREE_FUNCTIONS.get(member.text);
 				if (free !== undefined && !this.moduleNames.has(member.text)) {
