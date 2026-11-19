@@ -871,7 +871,25 @@ export default {
     // nobody has narrowed: the sheet opens on 'getFilterList()'. An empty list
     // here made every 'filters.firstInstance<SortFilter>()' throw on a plain
     // query, and a source that reads its sort off the list never searched.
-    const filters = typeof __source.getFilterList === 'function' ? await __source.getFilterList() : [];
+    //
+    // But 'getFilterList' is a host-drawn member (subset.ts): the converter may
+    // refuse it, or leave what only it reads untranslated, without that
+    // blocking the listing — nothing used to call it. So where it cannot be
+    // built, the search goes out as it always did, with no filters, and the
+    // log says why; a source that worked before this cannot be lost to it.
+    let filters = [];
+    if (typeof __source.getFilterList === 'function') {
+      try {
+        filters = await __source.getFilterList();
+      } catch (error) {
+        filters = [];
+        try {
+          __host().log.warn('Searched with no filters: the default filter list could not be built (' + String(error && error.message ? error.message : error) + ').');
+        } catch (ignored) {
+          /* A host without a logger has nowhere to say it. */
+        }
+      }
+    }
     return await __page(
       'searchManga',
       ['getSearchMangaList', 'getSearchManga'],

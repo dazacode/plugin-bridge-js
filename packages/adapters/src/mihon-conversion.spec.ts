@@ -731,6 +731,28 @@ class Extension {
 		expect(found.entries[0].title).toBe('one by SORT:latest');
 	});
 
+	it('searches with no filters when the default list cannot be built', async () => {
+		// `getFilterList` is host-drawn: the converter may leave what only it
+		// reads untranslated without blocking the listing, so a failure to
+		// build it must not cost the search that worked before it was asked.
+		const module = await load(
+			`
+class Extension {
+  constructor() { this.baseUrl = '${BASE_URL}'; }
+  getFilterList() { return __k.index(this.intl, 'x'); }
+  async getSearchMangaList(page, query, filters) {
+    return { mangas: [{ url: '/m', title: query + ' with ' + filters.length }], hasNextPage: false };
+  }
+}
+`,
+			{},
+			true
+		);
+		const { ctx } = recording();
+		const found = await module.searchCatalog('one', 1, ctx);
+		expect(found.entries[0].title).toBe('one with 0');
+	});
+
 	it('hands the host a KeiSource page image with the headers a browser sends for one', async () => {
 		// KeiSource's final `imageRequest` is the source's `getImageRequest`,
 		// sent as its `imageFetch`. A template extending the base request with
