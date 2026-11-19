@@ -4582,6 +4582,24 @@ describe('positional arguments after named ones', () => {
 	});
 });
 
+describe('a member extension named like a property', () => {
+	it('is called under its signature, not as the property', () => {
+		const emission = translate(
+			kt(
+				'abstract class Base : Source() {',
+				'    open val mangaLang: String = ""',
+				'    protected open fun Element.mangaLang() = attr("data-lang")',
+				'    fun keep(e: Element): Boolean = e.mangaLang() == mangaLang',
+				'}'
+			)
+		);
+		expect(emission.refusals).toEqual([]);
+		expect(emission.js).toContain('mangaLang$Element(__recv)');
+		expect(emission.js).toContain('__k.overload(this, this, "mangaLang", [e]');
+		expect(emission.js).not.toContain('this.mangaLang(e)');
+	});
+});
+
 describe('a renamed field', () => {
 	it('reads @SerialName as the string its literal spells', () => {
 		// `"\$t"` is the key `$t`, which every Blogger JSON feed keys its text by.

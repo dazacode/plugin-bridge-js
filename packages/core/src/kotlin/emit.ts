@@ -9672,6 +9672,19 @@ class Emitter {
 				this.receiverTypeOf(receiver)
 			);
 			const tail = this.callArguments(name, args, lambda, labelled, false);
+			// A member extension that shares its name with a property — Kotlin
+			// lets `val mangaLang` and `fun Element.mangaLang()` live side by
+			// side — or with another overload is emitted under its signature
+			// (see `overloadsOf`), so the call is resolved the same way. Called
+			// by its bare name it reached the property's value, and
+			// `this.mangaLang is not a function` ended every search.
+			const shapes = extension === 'method' && !safe ? this.overloadsOf(name) : null;
+			if (shapes !== null) {
+				const self = this.selfReference();
+				const call = this.overloadCall(self, self, name, [...types, receiverText, ...tail], shapes);
+				const suspends = this.suspendMembers.has(name) || this.moduleSuspends.has(name);
+				return suspends ? this.awaited(call) : call;
+			}
 			const call = `${callee}(${[...types, receiverText, ...tail].join(', ')})`;
 			if (!safe) {
 				const suspends = this.suspendMembers.has(name) || this.moduleSuspends.has(name);
