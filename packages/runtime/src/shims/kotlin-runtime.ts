@@ -8145,11 +8145,22 @@ var __k = {
     return text.trim().length === 0 ? null : text;
   },
 
-  /** The same, for an attribute: jsoup answers '' for one that is not there. */
+  /** The same over the element's own text, which jsoup answers trimmed. */
+  ownTextOrNull: function (node) {
+    if (node === null || node === undefined || typeof node.ownText !== 'function') return null;
+    var text = __str(node.ownText());
+    return text.trim().length === 0 ? null : text;
+  },
+
+  /**
+   * The same, for an attribute: jsoup answers '' for one that is not there.
+   * Trimmed, as keiyoushi core's is — 'attr(key).takeUnless { it.isBlank() }
+   * ?.trim()' — so a value padded in the markup reaches a url without it.
+   */
   attrOrNull: function (node, name) {
     if (node === null || node === undefined || typeof node.attr !== 'function') return null;
     var value = __str(node.attr(name));
-    return value.trim().length === 0 ? null : value;
+    return value.trim().length === 0 ? null : value.trim();
   }
 };
 

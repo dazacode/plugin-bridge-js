@@ -1772,6 +1772,17 @@ describe('HttpUrl, built by hand', () => {
 		expect(url.encodedPath).toBe('/api/anime/one/1');
 	});
 
+	it("answers keiyoushi core's jsoup readers as core does", () => {
+		const p = runtime.globals.Jsoup.parse(
+			'<p data-x="  y  " data-e=" ">own <b>bold</b></p>'
+		).selectFirst('p');
+		expect(k.ownTextOrNull(p)).toBe('own');
+		expect(k.ownTextOrNull(p.selectFirst('b'))).toBe('bold');
+		expect(k.attrOrNull(p, 'data-x')).toBe('y');
+		expect(k.attrOrNull(p, 'data-e')).toBeNull();
+		expect(k.attrOrNull(p, 'absent')).toBeNull();
+	});
+
 	it('reads from the end for takeLastWhile and dropLastWhile', () => {
 		const space = (c: string) => c === ' ';
 		expect(k.takeLastWhile('ab  ', space)).toBe('  ');

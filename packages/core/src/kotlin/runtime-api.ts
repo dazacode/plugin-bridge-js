@@ -600,6 +600,7 @@ export const RUNTIME_HELPERS = [
 	   absent. The same template reads its description through it. */
 	'textOrNull',
 	'attrOrNull',
+	'ownTextOrNull',
 
 	/* Request bodies. `__bodyOf` already understands the shape; these two build
 	   it from the extension's own side. */

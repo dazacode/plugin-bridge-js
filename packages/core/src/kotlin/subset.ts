@@ -1062,6 +1062,7 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 	// keiyoushi's two "…or null" readers over jsoup, where blank means absent.
 	['textOrNull', 'textOrNull'],
 	['attrOrNull', 'attrOrNull'],
+	['ownTextOrNull', 'ownTextOrNull'],
 
 	// request bodies, in the shape `__bodyOf` already understands
 	['toMediaType', 'toMediaType'],
@@ -2821,6 +2822,10 @@ export const SUPER_SUSPEND_MEMBERS: ReadonlySet<string> = new Set([
  * up with its headers in the URL.
  */
 export const KNOWN_SIGNATURES: ReadonlyMap<string, readonly string[]> = new Map([
+	// keiyoushi core's `OkHttpClient.Builder.rateLimit`, so that a bare named
+	// call inside `configureClient()` reaches `rateLimitCall`, which places
+	// the names itself and refuses an `interval`.
+	['rateLimit', ['permits', 'period', 'interval', 'shouldLimit']],
 	['GET', ['url', 'headers', 'cache']],
 	// kotlin.io's `File.copyTo(target, overwrite, bufferSize)`. `InputStream.
 	// copyTo(out, bufferSize)` shares the name and never takes `overwrite`, so

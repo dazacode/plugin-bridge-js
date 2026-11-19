@@ -4622,6 +4622,25 @@ describe('a method named like a field of the same class', () => {
 	});
 });
 
+describe('a rate limit with named arguments', () => {
+	it('is placed by name, bare or on a builder, and an interval is refused', () => {
+		const emission = translate(
+			kt(
+				'class Demo : Source() {',
+				'    fun OkHttpClient.Builder.configure(): OkHttpClient.Builder = rateLimit(permits = 2, period = 3.seconds)',
+				'    fun other(b: OkHttpClient.Builder) = b.rateLimit(period = 1.minutes, permits = 4)',
+				'    fun third(b: OkHttpClient.Builder) = b.rateLimit(5, interval = 2.seconds)',
+				'}'
+			)
+		);
+		expect(emission.js).toContain('__k.rateLimit(__recv, 2, 3000)');
+		expect(emission.js).toContain('__k.rateLimit(b, 4, 60000)');
+		expect(emission.refusals.flatMap((one) => one.obstacles.map((o) => o.kind))).toEqual([
+			'`.rateLimit()` with an `interval`'
+		]);
+	});
+});
+
 describe('a renamed field', () => {
 	it('reads @SerialName as the string its literal spells', () => {
 		// `"\$t"` is the key `$t`, which every Blogger JSON feed keys its text by.

@@ -11076,11 +11076,13 @@ class Emitter {
 			this.refuse(predicate, `a lambda passed to \`${name}\``);
 		}
 		if (args.some((arg) => arg.allChildren.some((child) => child.type === '='))) {
-			// Reordering named arguments needs the callee's signature, which is in
-			// a library this converter does not read. `plainArguments` guesses in
-			// that position and is right often enough; here a guess is a wrong
-			// rate rather than a wrong value somebody notices.
-			this.refuse(suffix, `\`.${name}()\` with named arguments`);
+			if (name !== 'rateLimit') {
+				// Reordering named arguments needs the callee's signature, which is
+				// in a library this converter does not read; here a guess is a
+				// wrong rate rather than a wrong value somebody notices.
+				this.refuse(suffix, `\`.${name}()\` with named arguments`);
+			}
+			args = this.rateLimitArguments(suffix, args);
 		}
 		// `rateLimitHost` takes the url first; everything after is the same.
 		const first = name === 'rateLimitHost' ? 1 : 0;
@@ -11093,6 +11095,49 @@ class Emitter {
 		parts.push(...this.argumentExpressions(args[first]));
 		parts.push(String(periodMs));
 		return `${this.helper(name)}(${parts.join(', ')})`;
+	}
+
+	/**
+	 * `rateLimit(permits = 2, period = 1.seconds)`, placed by name.
+	 *
+	 * The signature is keiyoushi core's — `permits`, `period`, `interval`,
+	 * `shouldLimit` — with the older `unit` of the TimeUnit overload, and the
+	 * names say which is which, so this is the one rate helper whose named
+	 * arguments can be placed without a guess. An `interval` other than zero,
+	 * a minimum gap between requests, is a rule the host's policy cannot hold
+	 * beside the rate, and is refused by name. `shouldLimit` is the predicate,
+	 * which `rateLimitCall` applies to every request; see there.
+	 */
+	private rateLimitArguments(suffix: KNode, args: KNode[]): KNode[] {
+		const slots: (KNode | undefined)[] = [];
+		const order = ['permits', 'period', 'unit'];
+		for (const [position, arg] of args.entries()) {
+			const key = this.argumentName(arg);
+			if (key === null) {
+				slots[position] = arg;
+				continue;
+			}
+			if (key === 'shouldLimit') continue;
+			if (key === 'interval') {
+				if (this.argumentValue(arg).text.replace(/\s+/g, '') !== 'Duration.ZERO') {
+					this.refuse(arg, '`.rateLimit()` with an `interval`');
+				}
+				continue;
+			}
+			const index = order.indexOf(key);
+			if (index === -1) this.refuse(arg, `the argument name \`${key}\` on \`rateLimit\``);
+			slots[index] = arg;
+		}
+		if (slots[0] === undefined) this.refuse(suffix, '`.rateLimit()` with no `permits`');
+		const placed: KNode[] = [];
+		for (const slot of slots) {
+			if (slot === undefined) break;
+			placed.push(slot);
+		}
+		if (placed.length !== slots.filter((slot) => slot !== undefined).length) {
+			this.refuse(suffix, '`.rateLimit()` with a `unit` and no `period`');
+		}
+		return placed;
 	}
 
 	/** The period of a rate limit, in milliseconds, or a refusal. */
