@@ -1772,6 +1772,28 @@ describe('HttpUrl, built by hand', () => {
 		expect(url.encodedPath).toBe('/api/anime/one/1');
 	});
 
+	it('keeps the empty segment a trailing slash makes, as okhttp does', () => {
+		// `addPathSegments("search/")` is `/search/` in okhttp. Dropping the
+		// empty segment sent `/search?q=…`, which a site serving its search at
+		// the slashed path answers 404 — every query, with nothing refused.
+		const base = () => k.httpUrl('https://example.invalid').newBuilder();
+		expect(base().addPathSegments('search/').addQueryParameter('q', 'a').build().toString()).toBe(
+			'https://example.invalid/search/?q=a'
+		);
+		expect(base().addPathSegments('a/b').addPathSegment('c').build().toString()).toBe(
+			'https://example.invalid/a/b/c'
+		);
+		expect(base().addPathSegments('a/b/').addPathSegment('c').build().toString()).toBe(
+			'https://example.invalid/a/b/c'
+		);
+		expect(base().addPathSegments('a/./b/../c').build().toString()).toBe(
+			'https://example.invalid/a/c'
+		);
+		expect(base().addEncodedPathSegments('x%20y/').build().toString()).toBe(
+			'https://example.invalid/x%20y/'
+		);
+	});
+
 	it('is idempotent, and survives a url with no query at all', () => {
 		const url = k.httpUrl('https://example.invalid/one');
 		expect(k.httpUrl(url)).toBe(url);

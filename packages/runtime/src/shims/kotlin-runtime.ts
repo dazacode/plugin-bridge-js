@@ -10900,6 +10900,27 @@ function __httpUrlBuilder(scheme, authority, path, pairs, fragment) {
     return '//' + userinfo + parts.host + (parts.port === -1 || standard ? '' : ':' + parts.port);
   }
 
+  /* okhttp's HttpUrl.Builder.push: one segment, and an empty one after it when a '/' followed. */
+  function pushSegments(text, encoded) {
+    var segments = path.length === 0 ? [''] : path.split('/').slice(1);
+    var written = text.split('/');
+    for (var i = 0; i < written.length; i += 1) {
+      var segment = encoded ? written[i] : encode(written[i]);
+      var trailing = i < written.length - 1;
+      var lower = segment.toLowerCase();
+      if (lower === '.' || lower === '%2e') continue;
+      if (lower === '..' || lower === '%2e.' || lower === '.%2e' || lower === '%2e%2e') {
+        var removed = segments.pop();
+        if (removed === '' && segments.length > 0) segments[segments.length - 1] = '';
+        else segments.push('');
+        continue;
+      }
+      if (segments[segments.length - 1] === '') segments[segments.length - 1] = segment;
+      else segments.push(segment);
+      if (trailing) segments.push('');
+    }
+    path = '/' + segments.join('/');
+  }
   var builder = {
     /* okhttp's setters for the parts before the path. */
     scheme: function (value) {
@@ -11036,22 +11057,17 @@ function __httpUrlBuilder(scheme, authority, path, pairs, fragment) {
       path = path.replace(/\\/$/, '') + '/' + __str(segment);
       return builder;
     },
-    addPathSegments: function (segments) {
-      var written = __str(segments).split('/');
-      for (var i = 0; i < written.length; i += 1) {
-        if (written[i].length > 0) builder.addPathSegment(written[i]);
-      }
-      return builder;
-    },
+    /*
+     * okhttp's, segment for segment: a '/' in the text ends a segment and an
+     * empty one is kept, so 'addPathSegments("search/")' is '/search/' and not
+     * '/search'. This dropped the empties, and a site that serves its search
+     * at the slashed path answered 404 to every query; '.' and '..' move
+     * through the path as they do there.
+     */
+    addPathSegments: function (segments) { pushSegments(__str(segments), false); return builder; },
     /* The already-encoded pair of the two above: a path this source composed
        itself, where re-encoding would turn its separators into '%2F'. */
-    addEncodedPathSegments: function (segments) {
-      var written = __str(segments).split('/');
-      for (var i = 0; i < written.length; i += 1) {
-        if (written[i].length > 0) builder.addEncodedPathSegment(written[i]);
-      }
-      return builder;
-    },
+    addEncodedPathSegments: function (segments) { pushSegments(__str(segments), true); return builder; },
     /* 'setPathSegment(i, value)' rewrites one segment in place, which is how a
        source turns a chapter url into its page url. */
     setPathSegment: function (index, value) {
