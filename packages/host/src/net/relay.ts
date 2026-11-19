@@ -150,7 +150,19 @@ const FORWARDABLE = new Set([
 	'x-requested-with',
 	'sec-fetch-dest',
 	'sec-fetch-mode',
-	'sec-fetch-site'
+	'sec-fetch-site',
+	// The rest of what a browser sends with a request of a given kind, which
+	// keiyoushi core's `Fetch` works out for a converted source (see `Fetch` in
+	// the Kotlin runtime). None of them carries a credential, and a source
+	// that checks fetch metadata checks these with the three above: answered
+	// without them it served a bot check, and the verdict said so.
+	'sec-fetch-user',
+	'sec-fetch-storage-access',
+	'sec-ch-ua',
+	'sec-ch-ua-mobile',
+	'sec-ch-ua-platform',
+	'upgrade-insecure-requests',
+	'priority'
 ]);
 
 /** Whether this route forwards a request header of that name. */

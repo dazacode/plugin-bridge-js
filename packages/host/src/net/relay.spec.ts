@@ -29,7 +29,7 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { FRAME_CONTENT_TYPE, relay } from './relay';
+import { FRAME_CONTENT_TYPE, forwardsHeader, relay } from './relay';
 import { FrameReader } from './frames';
 import { isPrivateAddress } from './addresses';
 import type { ChainRepair } from './chain-repair';
@@ -710,5 +710,28 @@ describe('a caller that asks for the body as bytes', () => {
 				new Response('<p>caf\u00e9</p>', { status: 200, headers: { 'content-type': 'text/html' } })
 		);
 		expect(payload.body).toBe('<p>caf\u00e9</p>');
+	});
+});
+
+describe('the headers the relay forwards', () => {
+	it("carries a browser request's fetch metadata and client hints, and no credential", () => {
+		// What keiyoushi core's `Fetch` works out for a request of a given kind.
+		for (const name of [
+			'Sec-Fetch-Site',
+			'Sec-Fetch-Mode',
+			'Sec-Fetch-Dest',
+			'Sec-Fetch-User',
+			'Sec-Fetch-Storage-Access',
+			'Sec-CH-UA',
+			'Sec-CH-UA-Mobile',
+			'Sec-CH-UA-Platform',
+			'Upgrade-Insecure-Requests',
+			'Priority'
+		]) {
+			expect(forwardsHeader(name), name).toBe(true);
+		}
+		for (const name of ['Cookie', 'Authorization', 'Host', 'X-Anything']) {
+			expect(forwardsHeader(name), name).toBe(false);
+		}
 	});
 });
