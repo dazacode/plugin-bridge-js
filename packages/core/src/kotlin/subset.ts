@@ -1014,6 +1014,11 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 	['dropLast', 'dropLast'],
 	['takeLast', 'takeLast'],
 	['takeWhile', 'takeWhile'],
+	['takeLastWhile', 'takeLastWhile'],
+	['isFinite', 'isFinite'],
+	['isInfinite', 'isInfinite'],
+	['isNaN', 'isNaN'],
+	['dropLastWhile', 'dropLastWhile'],
 	['dropWhile', 'dropWhile'],
 	['minOrNull', 'minOrNull'],
 	['maxOrNull', 'maxOrNull'],
@@ -1318,6 +1323,8 @@ export const EXTENSION_PROPERTIES: ReadonlyMap<string, string> = new Map([
 	// over: `list.removeAt(list.lastIndex)` read undefined and removed nothing
 	// it named, and `x < segments.lastIndex` compared against undefined.
 	['lastIndex', 'lastIndex'],
+	// jsoup's `element.isBlock`, which the DOM shim does not answer — see the runtime.
+	['isBlock', 'isBlock'],
 	['groupValues', 'groupValues'],
 	['destructured', 'destructured'],
 	// `Char.code`. A Char is a one-character string here, so the read came out

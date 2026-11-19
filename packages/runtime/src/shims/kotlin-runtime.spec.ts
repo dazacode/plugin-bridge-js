@@ -1772,6 +1772,37 @@ describe('HttpUrl, built by hand', () => {
 		expect(url.encodedPath).toBe('/api/anime/one/1');
 	});
 
+	it('reads from the end for takeLastWhile and dropLastWhile', () => {
+		const space = (c: string) => c === ' ';
+		expect(k.takeLastWhile('ab  ', space)).toBe('  ');
+		expect(k.dropLastWhile('ab  ', space)).toBe('ab');
+		expect(k.takeLastWhile('   ', space)).toBe('   ');
+		expect(k.dropLastWhile('   ', space)).toBe('');
+		expect(k.takeLastWhile([1, 2, 3, 4], (n: number) => n > 2)).toEqual([3, 4]);
+	});
+
+	it('appends every value, or a range, as StringBuilder does', () => {
+		const built = k.buildString(function (this: any) {
+			this.append('*', 'it', '*');
+			this.append('abcdef', 1, 3);
+			this.insert(0, '>');
+			this.append(this.length);
+		});
+		expect(built).toBe('>*it*bc7');
+	});
+
+	it("answers jsoup's isBlock from its tag", () => {
+		const body = runtime.globals.Jsoup.parse('<p>a</p><b>b</b><custom-x>c</custom-x>').body();
+		const [p, b, custom] = body.children;
+		expect([k.isBlock(p), k.isBlock(b), k.isBlock(custom)]).toEqual([true, false, false]);
+		expect([k.isFinite(1.5), k.isFinite(Infinity), k.isInfinite(-Infinity), k.isNaN(NaN)]).toEqual([
+			true,
+			false,
+			true,
+			true
+		]);
+	});
+
 	it('keeps the empty segment a trailing slash makes, as okhttp does', () => {
 		// `addPathSegments("search/")` is `/search/` in okhttp. Dropping the
 		// empty segment sent `/search?q=…`, which a site serving its search at
@@ -1898,11 +1929,30 @@ describe('java.util.regex, translated', () => {
 		expect(() => k.regex('[a\\P{Alpha}]').find('a')).toThrow(/Unicode class/);
 		// Unicode mode rejects an escape the default mode reads as a letter.
 		expect(() => k.regex('\\p{L}\\j').find('a')).toThrow(/Unicode mode rejects/);
-		expect(() => k.regex('a++').find('a')).toThrow(/possessive/);
-		expect(() => k.regex('\\d*+').find('1')).toThrow(/possessive/);
+		// A possessive quantifier over a group, a backreference or a bounded
+		// count has no JavaScript spelling; over one character it does (below).
+		expect(() => k.regex('(ab)++').find('ab')).toThrow(/possessive/);
+		expect(() => k.regex('(a)\\1++').find('aa')).toThrow(/possessive/);
+		expect(() => k.regex('a{1,3}+').find('a')).toThrow(/possessive/);
 		expect(() => k.regex('(?>ab)').find('ab')).toThrow(/atomic/);
 		// A lazy quantifier is not a possessive one and must still compile.
 		expect(k.regex('<(.+?)>').find('<a><b>')?.groupValues[1]).toBe('a');
+	});
+
+	it('matches a possessive quantifier over one character exactly', () => {
+		// The longest run, never given back: `\\d++0` cannot match "100", where
+		// a greedy `\\d+0` would give a digit back and match.
+		expect(k.regex('\\d++0').find('100')).toBeNull();
+		expect(k.regex('\\d+0').find('100')?.value).toBe('100');
+		expect(k.regex('a*+b').find('aaab')?.value).toBe('aaab');
+		expect(k.regex('x?+x').find('x')).toBeNull();
+		expect(k.regex('x?+y').find('xy')?.value).toBe('xy');
+		expect(k.regex('x?+y').find('y')?.value).toBe('y');
+		expect(k.regex('[ \\t]{2,}+b').find('a   b')?.value).toBe('   b');
+		// core's Markdown cleanup, which every description passes through.
+		expect(
+			k.regex('^[ \\t]++(?!- |\\d+\\. )', ['MULTILINE']).replace('  x\n  - y\n 1. z', '')
+		).toBe('x\n  - y\n 1. z');
 	});
 
 	it('holds an inexpressible pattern without failing until it is used', () => {

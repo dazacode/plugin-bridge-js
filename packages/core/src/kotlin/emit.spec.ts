@@ -524,6 +524,12 @@ const helpers: Record<string, (...args: never[]) => unknown> = {
 	},
 	// keiyoushi core's `builder.fetch(f)` and `Fetch.X.from(page)`, as the runtime
 	// answers them: the receiver's own member.
+	buildString: (block: (this: Any) => void) => {
+		let out = '';
+		const builder = { append: (...values: Any[]) => ((out += values.join('')), builder) };
+		block.call(builder);
+		return out;
+	},
 	fetchOn: (receiver: Any, fetch: Any) => (receiver as { fetch(f: Any): Any }).fetch(fetch),
 	fetchFrom: (receiver: Any, page: Any) => (receiver as { from(p: Any): Any }).from(page),
 	// kotlin.time on a non-literal: the receiver decides, as in the runtime.
@@ -4535,17 +4541,83 @@ describe('assigning to a property of something', () => {
 		expect(instantiate(source).build()).toBe('d');
 	});
 
-	it('refuses a compound assignment to an index rather than evaluating it twice', () => {
-		expect(
-			refusalNames(
-				inClass(
-					'    fun build() {',
-					'        val bag = mutableMapOf("a" to 1)',
-					'        bag["a"] += 1',
-					'    }'
-				)
+	it('expands a compound assignment to an index, reading receiver and key once', () => {
+		// `sections[sections.lastIndex] += " · $text"` is `set(i, get(i) + x)`.
+		// Each of the receiver and the key may be a call, so each is read once.
+		let reads = 0;
+		const demo = instantiate(
+			inClass(
+				'    fun build(): List<String> {',
+				'        val parts = mutableListOf("a", "b")',
+				'        target(parts)[next()] += "!"',
+				'        return parts',
+				'    }',
+				'    fun target(list: MutableList<String>) = list',
+				'    fun counted(): Int = 1'
+			),
+			{ next: () => ((reads += 1), 1) }
+		);
+		expect(demo.build()).toEqual(['a', 'b!']);
+		expect(reads).toBe(1);
+	});
+});
+
+describe('positional arguments after named ones', () => {
+	it('places each by its index, as Kotlin does', () => {
+		// Counting positionals alone put `true` in `bold`'s slot over its `false`.
+		const demo = instantiate(
+			kt(
+				'class Demo : Source() {',
+				'    fun plain(e: String): String = join(e, bold = false, true)',
+				'    fun inBuilder(e: String): String = buildString { appendAll(e, bold = false, true) }',
+				'}',
+				'private fun join(e: String, bold: Boolean, keep: Boolean) = "$e|$bold|$keep"',
+				'private fun StringBuilder.appendAll(e: String, bold: Boolean, keep: Boolean) {',
+				'    append(join(e, bold, keep))',
+				'}'
 			)
-		).toEqual(['an indexed `+=`']);
+		);
+		expect(demo.plain('x')).toBe('x|false|true');
+		expect(demo.inBuilder('x')).toBe('x|false|true');
+	});
+});
+
+describe('a bare apply', () => {
+	it('runs on the implicit receiver and answers it', () => {
+		const emission = translate(
+			kt(
+				'class Demo : Source() {',
+				'    fun parts(): String = Parts().add("a").add(null).add("b").text()',
+				'}',
+				'class Parts {',
+				'    private val all = mutableListOf<String>()',
+				'    fun add(part: String?) = apply {',
+				'        if (part.isNullOrBlank()) return@apply',
+				'        all += part',
+				'    }',
+				'    fun text() = all.joinToString(",")',
+				'}'
+			)
+		);
+		expect(emission.refusals).toEqual([]);
+		expect(emission.js).toContain('__k.apply(this, function ()');
+	});
+});
+
+describe('a class name as a receiver', () => {
+	it('calls its static, not a file extension of the same name', () => {
+		// `fun Char?.isLetterOrDigit() = this != null && Character.isLetterOrDigit(this)`
+		// called itself, with `Character` as the receiver, forever.
+		const emission = translate(
+			kt(
+				'class Demo : Source() {',
+				'    fun ok(c: Char?) = c.isLetterOrDigit()',
+				'}',
+				'private fun Char?.isLetterOrDigit() = this != null && Character.isLetterOrDigit(this)'
+			)
+		);
+		expect(emission.js).toContain('Character.isLetterOrDigit(__recv)');
+		expect(emission.js).not.toContain('isLetterOrDigit(Character');
 	});
 });
 

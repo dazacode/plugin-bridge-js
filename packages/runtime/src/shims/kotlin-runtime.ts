@@ -1133,7 +1133,8 @@ function __regexQuote(text) {
  *
  * Refusing is the point. Lookbehind is unavailable on at least one of the three
  * engines a bundle runs on; \\p{...} classes and possessive quantifiers have no
- * JavaScript spelling that matches identically. Emitting them anyway produces a
+ * JavaScript spelling that matches identically, except a possessive quantifier
+ * over one character, which does (see below). Emitting them anyway produces a
  * pattern that either throws at load or, worse, matches something else.
  */
 function __regexSource(pattern) {
@@ -1157,6 +1158,11 @@ function __regexSource(pattern) {
   var inClass = false;
   var quantified = false;
   var i = 0;
+  // Where the last atom and its quantifier begin in 'out', and whether that
+  // atom matches exactly one character — what a possessive quantifier needs.
+  var atomStart = 0;
+  var atomSingle = false;
+  var quantifierStart = 0;
 
   while (i < text.length) {
     var ch = text.charAt(i);
@@ -1166,6 +1172,8 @@ function __regexSource(pattern) {
       if (next === 'p' || next === 'P') {
         var named = __regexNamedClass(text, i, next === 'P', inClass);
         if (named === null) throw __regexRefusal('a \\\\p{...} Unicode class', pattern);
+        atomStart = out.length;
+        atomSingle = !inClass;
         out += named.text;
         if (named.unicode && flags.indexOf('u') === -1) flags += 'u';
         i = named.end;
@@ -1175,6 +1183,7 @@ function __regexSource(pattern) {
       if (next === 'Q') {
         var end = text.indexOf('\\\\E', i + 2);
         var literal = end === -1 ? text.slice(i + 2) : text.slice(i + 2, end);
+        atomSingle = false;
         out += __regexQuote(literal);
         i = end === -1 ? text.length : end + 2;
         quantified = false;
@@ -1182,8 +1191,13 @@ function __regexSource(pattern) {
       }
       // \\A and \\z anchor the whole input in Java; ^ and $ do the same here
       // because no multiline flag is set unless the pattern asked for one.
-      if (next === 'A') { out += '^'; i += 2; quantified = false; continue; }
-      if (next === 'z' || next === 'Z') { out += '$'; i += 2; quantified = false; continue; }
+      if (next === 'A') { out += '^'; i += 2; quantified = false; atomSingle = false; continue; }
+      if (next === 'z' || next === 'Z') { out += '$'; i += 2; quantified = false; atomSingle = false; continue; }
+      if (!inClass) {
+        atomStart = out.length;
+        // A backreference, a boundary and \\G are not one character each.
+        atomSingle = !/[0-9bBkG]/.test(next);
+      }
       out += ch + next;
       i += 2;
       quantified = false;
@@ -1199,6 +1213,8 @@ function __regexSource(pattern) {
 
     if (ch === '[') {
       inClass = true;
+      atomStart = out.length;
+      atomSingle = true;
       out += ch;
       i += 1;
       quantified = false;
@@ -1215,6 +1231,7 @@ function __regexSource(pattern) {
       // one on every episode list since; refusing a converted extension for
       // the same construct was this runtime disagreeing with itself.
       if (text.substr(i, 3) === '(?>') throw __regexRefusal('an atomic group', pattern);
+      atomSingle = false;
       out += ch;
       i += 1;
       quantified = false;
@@ -1223,13 +1240,36 @@ function __regexSource(pattern) {
 
     if (ch === '*' || ch === '+' || ch === '?') {
       if (quantified) {
-        // 'a+?' is lazy and fine; 'a++' and 'a*+' are possessive and are not.
-        if (ch !== '?') throw __regexRefusal('a possessive quantifier', pattern);
+        // 'a+?' is lazy and fine. 'a++', 'a*+', 'a?+' and 'a{n,}+' are
+        // possessive: they take the longest run and never give any of it back.
+        // JavaScript has no such quantifier, but over an atom that matches one
+        // character it has an exact spelling — the greedy run, forbidden to
+        // end where one more of the atom follows, which can only be the
+        // longest run. 'a?+' takes the atom when it is there and is empty only
+        // when it is not. A group, or a bounded '{n,m}+', has no such
+        // spelling and is still refused.
+        if (ch !== '?') {
+          var atom = out.slice(atomStart, quantifierStart);
+          var quantifier = out.slice(quantifierStart);
+          if (!atomSingle || atom.length === 0) throw __regexRefusal('a possessive quantifier', pattern);
+          if (quantifier === '*' || quantifier === '+' || /^\\{[0-9]+,\\}$/.test(quantifier)) {
+            out += '(?!' + atom + ')';
+          } else if (quantifier === '?') {
+            out = out.slice(0, atomStart) + '(?:' + atom + '|(?!' + atom + '))';
+          } else {
+            throw __regexRefusal('a possessive quantifier', pattern);
+          }
+          i += 1;
+          quantified = false;
+          atomSingle = false;
+          continue;
+        }
         out += ch;
         i += 1;
         quantified = false;
         continue;
       }
+      quantifierStart = out.length;
       out += ch;
       i += 1;
       quantified = true;
@@ -1239,6 +1279,7 @@ function __regexSource(pattern) {
     if (ch === '{') {
       var repeat = /^\\{[0-9]+(,[0-9]*)?\\}/.exec(text.slice(i));
       if (repeat !== null) {
+        quantifierStart = out.length;
         out += repeat[0];
         i += repeat[0].length;
         quantified = true;
@@ -1246,6 +1287,8 @@ function __regexSource(pattern) {
       }
     }
 
+    atomStart = out.length;
+    atomSingle = ch !== ')' && ch !== '|' && ch !== '^' && ch !== '$';
     out += ch;
     i += 1;
     quantified = false;
@@ -2755,6 +2798,16 @@ function __splitOptions(value) {
 }
 
 /* --- the helpers the emitter calls ---------------------------------------- */
+
+/* jsoup's Tag.blockTags. */
+var __JSOUP_BLOCK_TAGS = [
+  'html', 'head', 'body', 'frameset', 'script', 'noscript', 'style', 'meta', 'link', 'title', 'frame',
+  'noframes', 'section', 'nav', 'aside', 'hgroup', 'header', 'footer', 'p', 'h1', 'h2', 'h3', 'h4', 'h5',
+  'h6', 'ul', 'ol', 'pre', 'div', 'blockquote', 'hr', 'address', 'figure', 'figcaption', 'form',
+  'fieldset', 'ins', 'del', 'dl', 'dt', 'dd', 'li', 'table', 'caption', 'thead', 'tfoot', 'tbody',
+  'colgroup', 'col', 'tr', 'th', 'td', 'video', 'audio', 'canvas', 'details', 'menu', 'plaintext',
+  'template', 'article', 'main', 'svg', 'math', 'center', 'dir', 'applet', 'marquee', 'listing'
+];
 
 var __k = {
   /**
@@ -5045,16 +5098,14 @@ var __k = {
    * are collected and joined once instead.
    */
   buildString: function (block) {
-    var parts = [];
     // Reached as 'this' inside the block, which is how the emitter writes a
     // receiver lambda — see the scope functions above for why .call matters.
-    var accumulator = {
-      append: function (value) { parts.push(__str(value)); return accumulator; },
-      appendLine: function (value) { parts.push(__str(value) + '\\n'); return accumulator; },
-      toString: function () { return parts.join(''); },
-      isEmpty: function () { return parts.length === 0; }
-    };
-    return __then(block.call(accumulator, accumulator), function () { return parts.join(''); });
+    // The same StringBuilder 'StringBuilder()' builds, so a block can do all
+    // that one can: it had its own with only 'append(value)', and a block that
+    // wrote 'append(marker, text, marker)' kept the first marker and lost the
+    // text it was wrapping.
+    var accumulator = __k.stringBuilder();
+    return __then(block.call(accumulator, accumulator), function () { return accumulator.toString(); });
   },
 
   /* -- collection construction -------------------------------------------- */
@@ -6437,6 +6488,47 @@ var __k = {
     });
   },
 
+  /*
+   * jsoup's 'element.isBlock' — whether its tag is one jsoup lays out as a
+   * block, from jsoup's own list; a tag it does not know is inline there. The
+   * DOM shim has no such member, so the read answered undefined and every
+   * paragraph of a description ran into the next.
+   */
+  isBlock: function (node) {
+    if (node === null || node === undefined) return false;
+    if (typeof node.isBlock === 'boolean') return node.isBlock;
+    if (typeof node.isBlock === 'function') return node.isBlock();
+    var tag = typeof node.normalName === 'function' ? __str(node.normalName()) : __str(node.tagName);
+    return __JSOUP_BLOCK_TAGS.indexOf(tag.toLowerCase()) !== -1;
+  },
+
+  /* Double's three predicates, for a number this runtime holds as a JavaScript one. */
+  isFinite: function (value) { return Number.isFinite(value); },
+  isInfinite: function (value) { return value === Infinity || value === -Infinity; },
+  isNaN: function (value) { return Number.isNaN(value); },
+
+  /* The two above from the other end: the predicate is asked last item first,
+     as Kotlin asks it, and the run kept or dropped is the trailing one. */
+  takeLastWhile: function (list, predicate) {
+    var text = typeof list === 'string';
+    var items = __chars(list);
+    var reversed = items.slice().reverse();
+    return __then(__firstIndex(reversed, function (item) { return __negate(predicate(item)); }), function (index) {
+      var kept = index === -1 ? items.slice() : items.slice(items.length - index);
+      return text ? kept.join('') : kept;
+    });
+  },
+
+  dropLastWhile: function (list, predicate) {
+    var text = typeof list === 'string';
+    var items = __chars(list);
+    var reversed = items.slice().reverse();
+    return __then(__firstIndex(reversed, function (item) { return __negate(predicate(item)); }), function (index) {
+      var kept = index === -1 ? [] : items.slice(0, items.length - index);
+      return text ? kept.join('') : kept;
+    });
+  },
+
   dropWhile: function (list, predicate) {
     var text = typeof list === 'string';
     var items = __chars(list);
@@ -6787,8 +6879,23 @@ var __k = {
     var parts = [];
     if (typeof initial === 'string') parts.push(initial);
     var builder = {
-      append: function (value) { parts.push(__str(value)); return builder; },
-      appendLine: function (value) { parts.push(__str(value) + '\\n'); return builder; },
+      /*
+       * 'append(value)'; Kotlin's 'append(vararg value)', every one in order;
+       * and Java's 'append(text, start, end)', the range of the text — told
+       * from the vararg form by its two numbers.
+       */
+      append: function (value, start, end) {
+        if (arguments.length === 3 && typeof start === 'number' && typeof end === 'number') {
+          parts.push(__str(value).slice(start, end));
+          return builder;
+        }
+        for (var i = 0; i < arguments.length; i += 1) parts.push(__str(arguments[i]));
+        return builder;
+      },
+      appendLine: function (value) {
+        parts.push((arguments.length === 0 ? '' : __str(value)) + '\\n');
+        return builder;
+      },
       insert: function (at, value) { parts.splice(Number(at), 0, __str(value)); return builder; },
       setLength: function (length) {
         parts = [parts.join('').slice(0, Math.max(0, Number(length)))];

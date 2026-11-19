@@ -544,6 +544,15 @@ const FETCH_RECEIVER =
  * `var`. The distinction is the receiver's mutability, which is why only a
  * `val` takes this path.
  */
+/** A compound assignment's operator, for an indexed target that has to be expanded. */
+const COMPOUND_OPERATORS: ReadonlyMap<string, string> = new Map([
+	['+=', '+'],
+	['-=', '-'],
+	['*=', '*'],
+	['/=', '/'],
+	['%=', '%']
+]);
+
 const COLLECTION_ASSIGN: ReadonlyMap<string, string> = new Map([
 	['+=', 'plusAssign'],
 	['-=', 'minusAssign']
@@ -1899,6 +1908,8 @@ class Emitter {
 	 * `element.getInfo("x")` moves the receiver into first position.
 	 */
 	private readonly extensionFunctions = new Map<string, 'method' | 'module'>();
+	/** Each extension's receiver type as written — `Char?`, `Foo.Companion` — by name. */
+	private readonly extensionReceiverTypes = new Map<string, Set<string>>();
 	/**
 	 * The `object` an extension function was declared in, where there was one.
 	 *
@@ -2147,6 +2158,13 @@ class Emitter {
 				}
 				const slots = receiverSlots(child);
 				if (name !== null && slots !== null) mergeReceiverSlots(this.receiverLambdas, name, slots);
+				// An extension's parameters too, which are what a named argument
+				// to it names: the receiver is passed ahead of them, never by
+				// name. Without this, `appendChildren(e, bold = false, keep)` in
+				// a StringBuilder block was refused for an argument it placed.
+				if (name !== null && receiverOf(child) !== null) {
+					this.rememberSignature(name, this.parameterNames(child));
+				}
 				if (name !== null && receiverOf(child) === null) {
 					this.rememberSignature(name, this.parameterNames(child));
 					// Also under the class that declares it.
@@ -5736,6 +5754,12 @@ class Emitter {
 			const known = this.extensionArity.get(name);
 			this.extensionArity.set(name, known === undefined || known === arity ? arity : null);
 			this.extensionFunctions.set(name, shape);
+			const written = receiverTypeText(child);
+			if (written !== null) {
+				const types = this.extensionReceiverTypes.get(name) ?? new Set<string>();
+				types.add(written);
+				this.extensionReceiverTypes.set(name, types);
+			}
 			if (owner !== null) this.extensionOwners.set(name, owner);
 		}
 	}
@@ -7207,7 +7231,27 @@ class Emitter {
 		}
 
 		const indexed = this.isIndexedTarget(target);
-		if (indexed && operator !== '=') this.refuse(node, `an indexed \`${operator}\``);
+		if (indexed && operator !== '=') {
+			// `sections[sections.lastIndex] += " · $text"` is Kotlin's
+			// `set(i, get(i) + x)`. The receiver and the key are read once each,
+			// into temporaries, because either may be a call; the element's
+			// operator is the same one a plain `x += y` gets.
+			const arithmetic = COMPOUND_OPERATORS.get(operator);
+			if (arithmetic === undefined) this.refuse(node, `an indexed \`${operator}\``);
+			const [receiver, key] = this.indexedTarget(target);
+			const held = this.temporary();
+			const at = this.temporary();
+			const current = `${this.helper('getAt')}(${held}, ${at})`;
+			const next =
+				arithmetic === '+' || arithmetic === '-'
+					? `${this.helper(arithmetic === '+' ? 'plus' : 'minus')}(${current}, ${this.expr(value)})`
+					: `${current} ${arithmetic} ${this.expr(value)}`;
+			return [
+				`const ${held} = ${receiver};`,
+				`const ${at} = ${key};`,
+				`${this.helper('setIndex')}(${held}, ${at}, ${next});`
+			].join('\n');
+		}
 
 		// **A safe assignment.** `firstOrNull()?.date_upload = time` writes when
 		// the receiver is there and does nothing at all when it is null — the
@@ -9574,6 +9618,26 @@ class Emitter {
 		if (importedFrom !== null && this.neighbourExtensions.has(`${importedFrom}.${name}`)) {
 			extension = 'module';
 		}
+		// A class's *name* as the receiver is a static call, not a value: Kotlin
+		// reaches a file's extension from there only through the class's
+		// companion. `fun Char?.isLetterOrDigit() = this != null &&
+		// Character.isLetterOrDigit(this)` calls java.lang.Character's static;
+		// taken for the extension, it called itself with `Character` as the
+		// receiver, forever, and every emphasis in a description hung.
+		if (
+			extension !== undefined &&
+			receiver.type === 'simple_identifier' &&
+			/^[A-Z]/.test(receiver.text) &&
+			this.lookup(receiver.text) === null &&
+			!this.declaredObjects.has(receiver.text) &&
+			!this.objectMembers.has(receiver.text) &&
+			!this.companionImports.has(receiver.text) &&
+			![...(this.extensionReceiverTypes.get(name) ?? [])].some(
+				(type) => type === receiver.text || type.startsWith(`${receiver.text}.Companion`)
+			)
+		) {
+			extension = undefined;
+		}
 		if (extension !== undefined) {
 			// `element.getInfo("x")` calls `getInfo(element, "x")`: the receiver
 			// is the first argument, which is where the declaration put it. A
@@ -9866,6 +9930,23 @@ class Emitter {
 			// name and a plain early exit out of a `for` inside the block was
 			// refused as crossing a lambda it never left.
 			return this.iife(() => this.lambdaLines(lambda), labelled ?? name);
+		}
+		if (
+			name === 'apply' &&
+			lambda !== null &&
+			args.length === 0 &&
+			!this.isSourceMember(name) &&
+			this.lookup(name) === null
+		) {
+			// A *bare* `apply { … }` is the receiver form on the implicit
+			// receiver: the innermost one in scope, else the instance. It is how
+			// a builder's members are written — `fun add(x: String?) = apply {
+			// if (x.isNullOrBlank()) return@apply; parts += x }` — and the value
+			// is that receiver, for the next call in the chain.
+			const before = this.asyncLambdas;
+			const subject = this.receiverAlias() ?? this.receiverParam ?? this.selfReference();
+			const call = `${this.helper('apply')}(${subject}, ${this.lambda(lambda, true, labelled ?? name)})`;
+			return this.asyncLambdas > before ? this.awaited(call) : call;
 		}
 		if (name === 'buildString') {
 			// The block is called with a string accumulator as its receiver, so
@@ -10727,8 +10808,12 @@ class Emitter {
 		}
 
 		const slots: (string | null)[] = signature.map(() => null);
-		let position = 0;
-		for (const arg of args) {
+		// A positional argument's slot is its index in the call. Kotlin takes a
+		// positional argument after a named one only when every named one
+		// before it is in its own position, so the index is the parameter.
+		// Counting positionals alone put `f(e, bold = false, true)`'s `true`
+		// in `bold`'s slot, over the `false`, and left the last one unset.
+		for (const [position, arg] of args.entries()) {
 			if (!arg.allChildren.some((child) => child.type === '=')) {
 				if (position >= slots.length) this.refuse(arg, `too many arguments to \`${name}\``);
 				const values = this.argumentExpressions(arg);
@@ -10736,7 +10821,6 @@ class Emitter {
 					this.refuse(arg, 'a spread mixed with named arguments');
 				}
 				slots[position] = values[0];
-				position += 1;
 				continue;
 			}
 			const key = kids(arg)[0]?.text ?? '';
@@ -10794,15 +10878,14 @@ class Emitter {
 		}
 		const signature = fits[0].params;
 		const slots: (string | null)[] = signature.map(() => null);
-		let position = 0;
-		for (const arg of args) {
+		// By index, for the reason `plainArguments` gives.
+		for (const [position, arg] of args.entries()) {
 			const values = this.argumentExpressions(arg);
 			if (values.length !== 1 || values[0]?.startsWith('...')) {
 				this.refuse(arg, 'a spread mixed with named arguments');
 			}
 			if (!arg.allChildren.some((child) => child.type === '=')) {
 				slots[position] = values[0];
-				position += 1;
 				continue;
 			}
 			slots[signature.indexOf(kids(arg)[0]?.text ?? '')] = values[0];
@@ -14161,6 +14244,15 @@ interface RecoveryCut {
  * a type seen ahead of the identifier is a receiver and one seen after it is
  * the return type.
  */
+/** An extension's receiver type exactly as written, or null for a plain function. */
+function receiverTypeText(node: KNode): string | null {
+	for (const child of node.children) {
+		if (child.type === 'simple_identifier') return null;
+		if (child.type.endsWith('type')) return child.text.replace(/\s+/g, '');
+	}
+	return null;
+}
+
 function receiverOf(node: KNode): string | null {
 	for (const child of node.children) {
 		if (child.type === 'simple_identifier') return null;
