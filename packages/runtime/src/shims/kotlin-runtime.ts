@@ -5400,6 +5400,31 @@ var __k = {
   },
 
   /** A small Kotlin-style iterator for code that uses hasNext()/next(). */
+  /**
+   * What a Kotlin 'for (x in value)' walks.
+   *
+   * A JavaScript 'for…of' over the value as it stands was right for a list
+   * and wrong for both kinds of map: a JS Map gave bare [k, v] arrays, so a
+   * loop reading 'entry.key' read undefined, and a map the JSON decoder
+   * answered — a plain object — is not iterable at all, so 'for ((k, v) in
+   * parseAs<Map<String, Dto>>())' threw "is not iterable" inside whatever
+   * catch the extension wrapped it in, and the list came back empty. A map
+   * walks as its entries here, as '__arr' already walks one for every
+   * collection helper; a string walks as its chars; anything else iterable is
+   * walked as it is, so a lazy sequence stays lazy.
+   */
+  forIn: function (value) {
+    if (value === null || value === undefined) {
+      throw __kTagged(new Error('This converted extension iterated over a value that was null.'),
+        'NullPointerException');
+    }
+    if (typeof value === 'string') return value.split('');
+    if (Array.isArray(value)) return value;
+    if (value instanceof Map || __mapLike(value)) return __mapEntries(value);
+    if (typeof value[Symbol.iterator] === 'function') return value;
+    return __arr(value);
+  },
+
   iterator: function (value) {
     var items = typeof value === 'string' ? value.split('') : __arr(value);
     var at = 0;

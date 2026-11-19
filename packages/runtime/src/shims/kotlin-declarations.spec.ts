@@ -3525,3 +3525,36 @@ describe('an extension imported from an object, called bare on an implicit recei
 		expect(demo.url()).toBe('https://example.invalid/filter?genre%5B%5D=a&genre%5B%5D=b');
 	});
 });
+
+describe('a `for` over a map', () => {
+	it('walks a decoded map and a built one as entries, and a string as chars', async () => {
+		// The decoder answers a `Map<String, Dto>` as JSON's own object, which a
+		// JavaScript `for…of` cannot iterate at all: the loop threw inside the
+		// extension's catch and the server list came back empty.
+		const demo = await instantiate(
+			'Demo',
+			kt(
+				'class Demo {',
+				'    fun decoded(text: String): String {',
+				'        val out = mutableListOf<String>()',
+				'        for ((key, value) in text.parseAs<Map<String, Int>>()) out.add("$key=$value")',
+				'        return out.joinToString(",")',
+				'    }',
+				'    fun built(): String {',
+				'        val out = mutableListOf<String>()',
+				'        for (entry in mapOf("a" to 1, "b" to 2)) out.add(entry.key + entry.value)',
+				'        return out.joinToString(",")',
+				'    }',
+				'    fun chars(): String {',
+				'        val out = mutableListOf<Char>()',
+				'        for (c in "ab") out.add(c)',
+				'        return out.joinToString("|")',
+				'    }',
+				'}'
+			)
+		);
+		expect(demo.decoded('{"x":1,"y":2}')).toBe('x=1,y=2');
+		expect(demo.built()).toBe('a1,b2');
+		expect(demo.chars()).toBe('a|b');
+	});
+});

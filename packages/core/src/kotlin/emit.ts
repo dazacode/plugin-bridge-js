@@ -7507,7 +7507,11 @@ class Emitter {
 				this.declare(name);
 				head = `const ${this.safe(name)}`;
 			}
-			return `for (${head} of ${sequence}) ${block(this.loopBody(body))}`;
+			// Through `forIn`, because a JavaScript `for…of` over the value as it
+			// stands iterates neither kind of Kotlin map as Kotlin does — see the
+			// helper. A range the emitter built as an array literal is left bare.
+			const walked = /^\[.*\]$/s.test(sequence) ? sequence : `${this.helper('forIn')}(${sequence})`;
+			return `for (${head} of ${walked}) ${block(this.loopBody(body))}`;
 		} finally {
 			this.popScope();
 		}

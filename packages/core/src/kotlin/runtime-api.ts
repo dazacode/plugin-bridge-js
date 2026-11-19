@@ -104,6 +104,8 @@ export const RUNTIME_HELPERS = [
 	'withLock',
 	'elementAt',
 	'iterator',
+	/* What `for (x in value)` walks: a map as its entries, a string as chars. */
+	'forIn',
 	'trimMargin',
 	'encodeToString',
 	'rateLimit',

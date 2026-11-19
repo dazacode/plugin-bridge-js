@@ -414,6 +414,9 @@ const helpers: Record<string, (...args: never[]) => unknown> = {
 	elementAt: (value: Any, index: number) =>
 		typeof value === 'string' ? value[index] : (value as unknown[])[index],
 	iterator: (value: Any) => (value as Iterable<unknown>)[Symbol.iterator](),
+	// The runtime's walks a map as entries and a string as chars; the
+	// fixtures here iterate lists and ranges, which it passes through.
+	forIn: (value: Any) => (typeof value === 'string' ? value.split('') : value),
 	trimMargin: (value: string) =>
 		value
 			.split('\n')
