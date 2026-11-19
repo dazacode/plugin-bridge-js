@@ -250,6 +250,8 @@ interface ProxyPayload {
 	/** What each redirect hop set, tagged with the hop. Deleted before the
 	 *  payload crosses into the isolate — see `fetchForPlugin`. */
 	setCookie?: unknown;
+	/** The relay's name for a bot check that answered instead of the source. */
+	challenge?: unknown;
 }
 
 /**
@@ -1072,6 +1074,26 @@ export class PluginSandbox {
 				);
 			}
 			const answered = await readRelayReply(response);
+
+			// Answered, but not by the source: a bot check standing in front of
+			// it, or the origin down behind its CDN. Both reach the plugin as data
+			// — a status and a page — and a scraper parses that page, finds no
+			// rows and returns an empty list, which the verdict then reported as
+			// "returned nothing" about a source it never saw. Recorded beside the
+			// relay's own failures, so the run that came to nothing says why.
+			const status = typeof answered.status === 'number' ? answered.status : 0;
+			const answeredFor =
+				typeof answered.challenge === 'string'
+					? `answered ${status} from behind a ${answered.challenge} check`
+					: status >= 500
+						? `answered ${status}`
+						: null;
+			if (answeredFor !== null) {
+				const note = `${host}: ${answeredFor}`;
+				if (this.failures.length < MAX_REFUSED_REPORTED && !this.failures.includes(note)) {
+					this.failures.push(note);
+				}
+			}
 
 			// The jar takes what each hop set, and the field is then **deleted**.
 			//
