@@ -279,7 +279,8 @@ function repairKnownGrammarGaps(source: string): string {
 		...dottedReceiverTypes(masked),
 		...rangeUntil(masked),
 		...nullableCallableReceivers(masked),
-		...delegateOnNextLine(masked)
+		...delegateOnNextLine(masked),
+		...modifierNamedLocals(masked)
 	].sort((left, right) => right.start - left.start);
 	let output = plain;
 	for (const edit of edits) {
@@ -1054,6 +1055,76 @@ function rangeUntil(masked: string): Edit[] {
  * `var` after modifiers, no `=`, no brace, no trailing operator. Anything else
  * ending above a line that starts with `by` is left as it was.
  */
+/**
+ * A local named like a modifier: `val final = …`.
+ *
+ * Kotlin's modifiers are soft keywords — `final`, `open`, `inline` and the
+ * rest are ordinary names wherever a modifier cannot stand — and the pinned
+ * grammar treats them as reserved. One local called `final` turned a whole
+ * file into "a declaration this build could not parse": Re:ANIME's stream
+ * interceptor, whose playlist rewriter ends its lambda in `val final = …`
+ * then `final`, and with it the whole source.
+ *
+ * Renamed by capitalising its last letter (`final` → `finaL`), which is the
+ * same length — no column or line moves — and a name both grammars and
+ * JavaScript read. Only where renaming cannot change what the code means:
+ *
+ * - a `val` or `var` inside a function or lambda body, never a class or
+ *   object member, which another file could read by its real name;
+ * - from the declaration to the end of the block that holds it, so an outer
+ *   name it shadows keeps its own;
+ * - never after a `.` (somebody else's member), never as a named argument,
+ *   and never where the word is a modifier — followed by a declaration;
+ * - not at all if the new name is already in the file.
+ */
+const MODIFIER_NAMES =
+	'final|open|abstract|sealed|annotation|override|lateinit|internal|private|public|protected|const|tailrec|operator|infix|inline|external|suspend|enum|vararg|noinline|crossinline|dynamic';
+
+function modifierNamedLocals(masked: string): Edit[] {
+	const edits: Edit[] = [];
+	const declaration = new RegExp(`\\bva[lr][ \\t]+(${MODIFIER_NAMES})\\b(?=[ \\t]*[:=])`, 'g');
+	for (const match of masked.matchAll(declaration)) {
+		const name = match[1];
+		const at = (match.index ?? 0) + match[0].length - name.length;
+		const renamed = name.slice(0, -1) + name.slice(-1).toUpperCase();
+		if (new RegExp(`\\b${renamed}\\b`).test(masked)) continue;
+
+		const opener = enclosingBraceOpener(masked, match.index ?? 0);
+		if (opener === -1) continue;
+		// A class, object or interface body: a member, which is not ours to rename.
+		const header = masked.slice(0, opener);
+		const statement = header.slice(
+			Math.max(header.lastIndexOf('{'), header.lastIndexOf('}'), header.lastIndexOf(';')) + 1
+		);
+		if (/\b(?:class|object|interface)\b/.test(statement)) continue;
+		const end = braceEnd(masked, opener);
+		if (end === -1) continue;
+
+		const use = new RegExp(`\\b${name}\\b`, 'g');
+		use.lastIndex = at;
+		for (
+			let found = use.exec(masked);
+			found !== null && found.index < end;
+			found = use.exec(masked)
+		) {
+			const before = masked.slice(0, found.index).trimEnd();
+			const after = masked.slice(found.index + name.length);
+			if (before.endsWith('.') || before.endsWith('@') || before.endsWith('`')) continue;
+			// `f(final = x)`: a parameter's name, which belongs to the callee.
+			if ((before.endsWith('(') || before.endsWith(',')) && /^[ \t]*=(?!=)/.test(after)) continue;
+			// `final override fun`: the word in its modifier sense.
+			if (
+				new RegExp(
+					`^[ \\t]+(?:fun|va[lr]|class|object|interface|constructor|${MODIFIER_NAMES})\\b`
+				).test(after)
+			)
+				continue;
+			edits.push({ start: found.index, end: found.index + name.length, text: renamed });
+		}
+	}
+	return edits;
+}
+
 function delegateOnNextLine(masked: string): Edit[] {
 	const edits: Edit[] = [];
 	const header =

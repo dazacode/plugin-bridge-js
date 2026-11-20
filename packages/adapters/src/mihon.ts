@@ -684,7 +684,13 @@ export const mihonAdapter: ForeignAdapter = {
 		// upstream would have supplied it, and the declaration it is generated
 		// *from* is a literal in a file this conversion already fetched.
 		const build = readMihonBuildFile(source.buildGradle ?? '');
-		const declared = build.sources.find((one) => one.lang === lang) ?? build.sources[0];
+		// The listing's own language before the first declared one: a module
+		// under `src/all/` declares a source per language, and the index lists
+		// each under its own — the one this listing is, is the one to build.
+		const declared =
+			build.sources.find((one) => one.lang === lang) ??
+			build.sources.find((one) => one.lang === listing.language) ??
+			build.sources[0];
 		const baseUrl =
 			declared?.baseUrl?.kind === 'static'
 				? declared.baseUrl.url
@@ -704,7 +710,12 @@ export const mihonAdapter: ForeignAdapter = {
 			translatedSource: conversion.js,
 			className: conversion.className,
 			baseUrl,
-			lang,
+			// The declared source's language, not the directory's. `src/all/x`
+			// is "all" only as a folder: upstream generates one subclass per
+			// `source { lang = … }`, each answering its own `lang`, and the
+			// directory's word reached sites as a language. MangaFire sent
+			// `languages[]=all` and every search was refused with a 422.
+			lang: declared?.lang ?? lang,
 			// The `source {}` block's own name when it overrides the module's, as
 			// the generated subclass would have it; the listing's name last, which
 			// is what the index published from the same declaration.

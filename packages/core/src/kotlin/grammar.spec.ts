@@ -513,6 +513,56 @@ class Demo {
 		expect(firstOfType(tree.root, 'infix_expression')?.text).toContain('until');
 	});
 
+	it('reads a local named like a modifier, and renames only that local', async () => {
+		// Re:ANIME's playlist rewriter, reduced: one `val final` made the whole
+		// file "a declaration this build could not parse".
+		const parse = await loadKotlinGrammar(vendorWasm);
+		const tree = parse(`
+class Demo(val other: Demo?) {
+    fun rewrite(uri: String): String {
+        val resolve = { u: String ->
+            val final = u + "/" + other?.final
+            final
+        }
+        return resolve(uri) + "final"
+    }
+    val final: String = "kept"
+}
+`);
+
+		expect(tree.hasError).toBe(false);
+		const text = tree.root.text;
+		expect(text).toContain('val finaL = u');
+		expect(text).toContain('            finaL\n');
+		// Somebody else's member, a string, and the class's own property keep
+		// their names.
+		expect(text).toContain('other?.final');
+		expect(text).toContain('"final"');
+		expect(text).toContain('val final: String');
+	});
+
+	it('leaves a modifier where it is a modifier', async () => {
+		const parse = await loadKotlinGrammar(vendorWasm);
+		const tree = parse(`
+open class Base {
+    open fun go(): Int = 1
+}
+class Demo : Base() {
+    final override fun go(): Int {
+        val pick = { n: Int ->
+            val open = n + 1
+            open
+        }
+        return pick(1)
+    }
+}
+`);
+
+		expect(tree.hasError).toBe(false);
+		expect(tree.root.text).toContain('final override fun go');
+		expect(tree.root.text).toContain('val opeN = n + 1');
+	});
+
 	it('reads a callable reference on a nullable receiver type', async () => {
 		const parse = await loadKotlinGrammar(vendorWasm);
 		const tree = parse(`

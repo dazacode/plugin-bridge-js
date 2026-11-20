@@ -271,8 +271,18 @@ const ENTRYPOINT = 'source';
  *     attribute values, `!=` and -of-type. Bundles that refused, loaded and
  *     failed, or sent different requests at 66 convert differently.
  *     Reconvert every bundle made at 66 or earlier.
+ * 68: okhttp's `queryParameterNames` is a property, as Kotlin reads it, and
+ *     distinct — it was a method, so an interceptor that reads the names,
+ *     clears the query and adds them back (MangaFire's request signer) sent
+ *     every API call with no query at all, and its search answered the same
+ *     page whatever was typed. A Mihon module under `src/all/` is built as
+ *     its declared source's language rather than the directory's "all",
+ *     which MangaFire sent as `languages[]=all` and was refused with a 422.
+ *     A local named like a modifier (`val final = …`) is read rather than
+ *     failing its whole file as "a declaration this build could not parse".
+ *     Reconvert every bundle made at 67 or earlier.
  */
-export const CONVERTER_VERSION = 67;
+export const CONVERTER_VERSION = 68;
 
 export interface BundleInput {
 	readonly id: string;

@@ -10243,7 +10243,7 @@ function __nanoSession(url, method, headers, body) {
   var parsed = __k.httpUrl(url);
   var parameters = new Map();
   var parms = new Map();
-  var names = parsed.queryParameterNames();
+  var names = parsed.queryParameterNames;
   __arr(names).forEach(function (name) {
     var values = __arr(parsed.queryParameterValues(name)).map(function (v) { return v === null ? '' : __str(v); });
     parameters.set(name, values);
@@ -11141,11 +11141,21 @@ function __httpUrlValue(scheme, authority, path, pairs, fragment, original) {
       }
       return null;
     },
-    queryParameterNames: function () {
+    /* A property, as okhttp's 'val queryParameterNames: Set<String>' is, and
+       distinct in first-seen order, as its LinkedHashSet is. It was a method
+       here, which Kotlin never calls: 'url.queryParameterNames' translated to
+       the function itself, iterating it found nothing, and MangaFire's request
+       signer — names, clear the query, re-add, sign — sent every API call with
+       no query at all, so its search answered the same page whatever was
+       typed. android.net.Uri's Java spelling is the getter below. */
+    queryParameterNames: (function () {
       var names = [];
-      for (var i = 0; i < pairs.length; i += 1) names.push(decode(pairs[i][0]));
+      for (var i = 0; i < pairs.length; i += 1) {
+        var name = decode(pairs[i][0]);
+        if (names.indexOf(name) === -1) names.push(name);
+      }
       return names;
-    },
+    }()),
     /* Exactly the text it was parsed from, when it was parsed from one: a
        request's url prints as the url the extension wrote, byte for byte. */
     toString: function () {
@@ -11164,6 +11174,7 @@ function __httpUrlValue(scheme, authority, path, pairs, fragment, original) {
   // android.net.Uri's name for the same builder.
   url.buildUpon = url.newBuilder;
   url.getQueryParameters = url.queryParameterValues;
+  url.getQueryParameterNames = function () { return url.queryParameterNames; };
   return url;
 }
 

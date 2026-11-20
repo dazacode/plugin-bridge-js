@@ -1858,7 +1858,29 @@ describe('HttpUrl, built by hand', () => {
 		const url = k.httpUrl('https://example.invalid/one');
 		expect(k.httpUrl(url)).toBe(url);
 		expect(url.toString()).toBe('https://example.invalid/one');
-		expect(url.queryParameterNames()).toEqual([]);
+		expect(url.queryParameterNames).toEqual([]);
+	});
+
+	it('reads queryParameterNames as Kotlin does: a property, each name once', () => {
+		const url = k.httpUrl('https://example.invalid/api/titles?keyword=a%20b&languages[]=en&languages[]=ja&page=1');
+		expect(url.queryParameterNames).toEqual(['keyword', 'languages[]', 'page']);
+		expect(url.getQueryParameterNames()).toEqual(['keyword', 'languages[]', 'page']);
+	});
+
+	it('survives the sign-and-rebuild a request interceptor does', () => {
+		// MangaFire's VrfSigner, in the shape it translates to: read every
+		// (name, value), clear the query, add them back sorted, then sign.
+		const request = k.httpUrl('https://example.invalid/api/titles?keyword=chainsaw&languages[]=en&page=1');
+		const params = k
+			.flatMap(request.queryParameterNames, (key: string) =>
+				k.map(request.queryParameterValues(key), (value: string) => k.to(key, value))
+			);
+		const builder = request.newBuilder().query(null);
+		for (const pair of params) builder.addQueryParameter(pair.first, pair.second);
+		builder.addQueryParameter('vrf', 'signed');
+		expect(builder.build().toString()).toBe(
+			'https://example.invalid/api/titles?keyword=chainsaw&languages%5B%5D=en&page=1&vrf=signed'
+		);
 	});
 });
 
