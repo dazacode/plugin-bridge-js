@@ -672,6 +672,19 @@ export const CLASS_RESOURCE =
 
 export const SIMPLE_NAME = /^(?:this\.|([a-z_]\w*)\.)?javaClass\.simpleName$/;
 
+/**
+ * A class object written straight into a string: `"Unsupported type: ${default.javaClass}"`.
+ *
+ * The same argument as `SIMPLE_NAME`'s log-line half. Interpolated, the class
+ * object is turned into text on the spot — it cannot be compared, loaded from
+ * or reflected on — so the only thing a less-than-exact answer can change is
+ * the wording of a message. keiyoushi's `Preferences.kt` does this in the
+ * `else` of its delegate's `getValue`, and with `javaClass` refused there, 22
+ * yūzōno listings stopped at a branch whose job is to throw. `emit.ts`
+ * answers it with `classText`: `class <name>` from the runtime value.
+ */
+export const INTERPOLATED_CLASS = /^(?:this\.|[a-z_]\w*\.)?javaClass$/;
+
 /** The obstacle this node's own text names, if any. Checked leaf-first. */
 export function namedObstacle(text: string): string | null {
 	// Asked first, because it is the specific question: `cryptoObstacle` names
@@ -956,6 +969,10 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 	['getBoolean', 'pref'],
 	['getInt', 'pref'],
 	['getLong', 'pref'],
+	// The fifth, which the runtime has always answered and this table never
+	// named: keiyoushi's preference delegate reads a `Float` default this way,
+	// and the whole delegate refused over the one branch.
+	['getFloat', 'pref'],
 	['getStringSet', 'pref'],
 
 	// chars — a Kotlin Char is a one-character string here, and every one of
@@ -1083,10 +1100,14 @@ export const EXTENSION_METHODS: ReadonlyMap<string, string> = new Map([
 	// keiyoushi core's `HttpUrl.Builder.appendGraphQLParams(…)` — see the
 	// GraphQL helpers in the runtime, and `FREE_FUNCTIONS` for the rest.
 	['appendGraphQLParams', 'appendGraphQLParams'],
-	// …and the body an interceptor puts on a response it rewrote. okio's
-	// `asResponseBody` is deliberately absent: it reads a `Buffer`, and there
-	// are no okio streams here to read.
+	// …and the body an interceptor puts on a response it rewrote.
 	['toResponseBody', 'toResponseBody'],
+	// okio's `BufferedSource.asResponseBody(type, length)`: the source drained
+	// into a binary body. Absent until responses carried their bytes; a relay
+	// that decrypts segments through a ForwardingSource builds its body this
+	// way (Re:ANIME's FlixStreamInterceptor). `body.source().asResponseBody(t)`
+	// keeps its text spelling in `emit.ts`, which is tried first.
+	['asResponseBody', 'asResponseBody'],
 
 	// jsoup's two upward calls
 	['closest', 'closest'],
@@ -1314,7 +1335,14 @@ export const ARGUMENT_LAMBDA_METHODS: ReadonlySet<string> = new Set([
 	'doOnNext',
 	'onErrorReturn',
 	// android.os.Handler's `post { … }`: the block is the task, run later.
-	'post'
+	'post',
+	// androidx.preference's change listener: `(pref, newValue) -> Boolean`,
+	// kept on the preference by the runtime. Settings are drawn by the host,
+	// so it never fires here — but keiyoushi's shared `getListPreference`
+	// family installs one in every builder, and refusing the lambda refused
+	// the builder, which name-based reachability then counted as reached from
+	// search (224 of 248 yūzōno listings, 2026-11-20).
+	'setOnPreferenceChangeListener'
 ]);
 
 /**
@@ -1447,6 +1475,16 @@ export const RUNTIME_STATIC_REFERENCES: ReadonlyMap<string, ReadonlySet<string>>
  * is a deliberate cost rather than an oversight.
  */
 export const HOST_METHODS: ReadonlySet<string> = new Set([
+	// `Toast.makeText(…).show()` — the runtime's Toast, which logs the message.
+	// No other receiver answers it: every other Android UI type is refused by
+	// name before a call on it is reached.
+	'show',
+	// okio's `Buffer.readAndWriteUnsafe()`: a cursor over the buffer's bytes for
+	// rewriting them in place. The runtime's Buffer answers it.
+	'readAndWriteUnsafe',
+	// okhttp's `Response.Builder().protocol(Protocol.HTTP_1_1)`: recorded nowhere,
+	// because this runtime does not speak a protocol of its own. See the runtime.
+	'protocol',
 	// java.util.concurrent's locks (`ReentrantLock`, `ReentrantReadWriteLock`),
 	// which the runtime defines for its one thread; see there.
 	'readLock',
@@ -2392,6 +2430,10 @@ export const GLOBAL_NAMES: ReadonlySet<string> = new Set([
 	'GET',
 	'POST',
 	'Request',
+	// okhttp's `Response.Builder()`: a relay's 503 when its upstream timed out.
+	'Response',
+	// `Collections.synchronizedMap(…)` and its siblings, answered as identity.
+	'Collections',
 	'Headers',
 	'FormBody',
 	'Jsoup',
@@ -2468,6 +2510,12 @@ export const GLOBAL_NAMES: ReadonlySet<string> = new Set([
 	'URLEncoder',
 	'URLDecoder',
 	'Log',
+	// `Toast.makeText(context, text, Toast.LENGTH_LONG).show()`, a message to
+	// the person using the app. A plugin draws no UI, so the runtime logs it.
+	// keiyoushi's shared preference builders show one ("restart required")
+	// from a change listener that cannot fire here, because the host draws
+	// settings — refusing it refused every builder that has one.
+	'Toast',
 	'ConnectionPool',
 	'Mutex',
 	'ReentrantLock',
@@ -3400,7 +3448,17 @@ const HOST_DRAWN_MEMBERS: ReadonlySet<string> = new Set([
  * `getFilterList` is host-drawn too and is NOT here: the driver calls it on
  * every search, which is exactly why a refused helper it calls must block.
  */
-export const NEVER_INVOKED_MEMBERS: ReadonlySet<string> = new Set(['setupPreferenceScreen']);
+export const NEVER_INVOKED_MEMBERS: ReadonlySet<string> = new Set([
+	'setupPreferenceScreen',
+	// Seek-preview tiles. Every driver answers `getVideoThumbnails` itself
+	// (`aniyomi-entry.ts`: null) and the player builds its own storyboard from
+	// the stream, so keiyoushi's `AniSource.getVideoThumbnails` and the
+	// `fetchVideoThumbnails` it delegates to never run here. Re:ANIME's
+	// override reads `VideoThumbnails.fromVtt` and was blocking the source
+	// over a feature this host provides another way.
+	'getVideoThumbnails',
+	'fetchVideoThumbnails'
+]);
 
 /** True when refusing this member does not stop a bundle from being built. */
 export function isHostDrawn(member: string): boolean {
@@ -3675,6 +3733,12 @@ function scanInto(node: KNode, memberName: string, found: Untranslatable[]): voi
 	// `CLASS_RESOURCE`: the chain, and then its argument as any other.
 	if (node.type === 'navigation_expression' && CLASS_RESOURCE.test(node.text.replace(/\s+/g, ''))) {
 		return;
+	}
+
+	// `INTERPOLATED_CLASS`: `${x.javaClass}` in a string, where it is only text.
+	if (node.type === 'interpolated_expression') {
+		const inner = node.children.find((child) => !COMMENT_KINDS.has(child.type));
+		if (inner !== undefined && INTERPOLATED_CLASS.test(inner.text.replace(/\s+/g, ''))) return;
 	}
 
 	// And the fourth: `SIMPLE_NAME`, the chain `emit.ts` answers with a class's

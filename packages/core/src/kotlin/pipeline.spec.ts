@@ -1224,8 +1224,8 @@ describe('which refusals stop a build', () => {
 	it('does not block on a member the host draws itself', async () => {
 		// A converted bundle declares no settings, so nothing ever calls
 		// `setupPreferenceScreen` — the same line `themes/convert.ts` draws.
-		// The preference types themselves translate now; the Android toast
-		// beside them is what is refused.
+		// The preference types themselves translate now, and so does a toast;
+		// the background thread beside them is what is refused.
 		const result = await convertKotlin(
 			[
 				{
@@ -1235,7 +1235,7 @@ describe('which refusals stop a build', () => {
 						'    override val baseUrl = "https://example.invalid"',
 						'    override fun setupPreferenceScreen(screen: PreferenceScreen) {',
 						'        screen.addPreference(ListPreference(screen.context))',
-						'        Toast.makeText(screen.context, "saved", Toast.LENGTH_SHORT).show()',
+						'        Thread { screen.context }.start()',
 						'    }',
 						'}'
 					)
@@ -1253,7 +1253,7 @@ describe('which refusals stop a build', () => {
 
 	it('does not block on what a preference screen calls, since nothing runs one', async () => {
 		// The extension's own screen translates now that the preference types
-		// do, and it calls its template's — which refuses on a toast — and a
+		// do, and it calls its template's — which refuses on a thread — and a
 		// shared helper that refuses, which is MangaThemesia's paid-chapter
 		// helper's shape. Neither can run: no driver invokes
 		// `setupPreferenceScreen`. The same helper called from a member the
@@ -1277,7 +1277,7 @@ describe('which refusals stop a build', () => {
 				source: kt(
 					'abstract class Theme : Source() {',
 					'    override fun setupPreferenceScreen(screen: PreferenceScreen) {',
-					'        Toast.makeText(screen.context, "saved", Toast.LENGTH_SHORT).show()',
+					'        Thread { screen.context }.start()',
 					'    }',
 					'}',
 					'',

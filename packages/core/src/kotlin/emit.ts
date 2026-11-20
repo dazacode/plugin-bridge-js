@@ -121,6 +121,7 @@ import {
 	CLASS_LOADER,
 	CLASS_RESOURCE,
 	SIMPLE_NAME,
+	INTERPOLATED_CLASS,
 	BUILDER_LAMBDA_METHODS,
 	TOLERATED_JSON_FLAGS,
 	VARARG_OPTIONS,
@@ -947,7 +948,20 @@ const VALUE_ONLY_TYPES: ReadonlySet<string> = new Set([
 	'Byte',
 	'Float',
 	'Double',
-	'Char'
+	'Char',
+	// okhttp's own types, which are library classes with no `invoke` and which
+	// no extension can reopen. Re:ANIME's segment relay takes `request: Request`
+	// and then, inside `source.peek().run { … }`, calls okio's `request(13)` on
+	// the peeked source; read as a call to the parameter, every segment would
+	// have died with "request is not a function".
+	'Request',
+	'Response',
+	'HttpUrl',
+	'Headers',
+	'OkHttpClient',
+	'MediaType',
+	'RequestBody',
+	'ResponseBody'
 ]);
 
 /** One `function`-ish emission in progress. */
@@ -9001,12 +9015,15 @@ class Emitter {
 		if (members.length !== 1 || members[0].type !== 'function_declaration') return null;
 		if (this.nameOf(members[0]) !== 'removeEldestEntry') return null;
 		const text = members[0].text.replace(/\s+/g, ' ');
+		// The bound is a number, or a constant's name — `size > MAX_STREAMS`,
+		// read the way any other reference to that constant is.
 		const rule =
-			/=\s*size\s*(>=|>)\s*(\d+)\s*$/.exec(text) ??
-			/\{\s*return\s+size\s*(>=|>)\s*(\d+)\s*;?\s*\}\s*$/.exec(text);
+			/=\s*size\s*(>=|>)\s*(\d+|[A-Z_][A-Z0-9_]*)\s*$/.exec(text) ??
+			/\{\s*return\s+size\s*(>=|>)\s*(\d+|[A-Z_][A-Z0-9_]*)\s*;?\s*\}\s*$/.exec(text);
 		if (rule === null) return null;
+		const bound = /^\d+$/.test(rule[2]) ? rule[2] : this.read(rule[2], members[0]);
 		const accessOrder = invoked.args.length === 3 && invoked.args[2].text.trim() === 'true';
-		return `${this.helper('boundedMap')}(${rule[2]}, ${rule[1] === '>='}, ${accessOrder})`;
+		return `${this.helper('boundedMap')}(${bound}, ${rule[1] === '>='}, ${accessOrder})`;
 	}
 
 	private objectLiteral(node: KNode): string {
@@ -10416,8 +10433,14 @@ class Emitter {
 		// the source declares answers to the name, so the call still goes
 		// somewhere real.
 		const bound = this.lookupLocal(name);
+		// …or that the implicit receiver of a scope block answers: inside
+		// `x.run { request(13) }` a non-invocable `request` in scope is not what
+		// Kotlin calls, the receiver's `request` is.
+		const inReceiverScope = this.receiverAlias() !== null || this.receiverParam !== null;
 		const local =
-			bound?.valueOnly === true && this.callableMember(name) ? null : (bound?.text ?? null);
+			bound?.valueOnly === true && (this.callableMember(name) || inReceiverScope)
+				? null
+				: (bound?.text ?? null);
 		if (local !== null) {
 			const call = `${local}(${this.callArguments(name, args, lambda, labelled, false).join(', ')})`;
 			return this.localSuspends.has(name) ? this.awaited(call) : call;
@@ -10743,6 +10766,16 @@ class Emitter {
 				return suspends ? this.awaited(call) : call;
 			}
 			if (implicit !== 'this' || HOST_METHODS.has(name)) {
+				// Except a method whose shim takes the block as its argument —
+				// `ARGUMENT_LAMBDA_METHODS`, the same rule the written-receiver
+				// path applies. `ListPreference(context).apply {
+				// setOnPreferenceChangeListener { pref, value -> … } }` is the
+				// implicit spelling of `pref.setOnPreferenceChangeListener { … }`,
+				// which that path already emitted.
+				if (lambda !== null && ARGUMENT_LAMBDA_METHODS.has(name)) {
+					const argumentsText = this.callArguments(name, args, lambda, labelled, false, null);
+					return `${implicit}.${name}(${argumentsText.join(', ')})`;
+				}
 				// A passthrough onto a shim cannot carry a block: the shim was
 				// written for the call it knows, and handing it one more argument
 				// than it takes is the drop above by another route.
@@ -10862,6 +10895,12 @@ class Emitter {
 			);
 			const blockCall = `${self}.${name}(${withLambda.join(', ')})`;
 			return this.suspendMembers.has(name) ? this.awaited(blockCall) : blockCall;
+		}
+		// A runtime method that takes the block as its argument, reached on the
+		// scope's receiver — `ListPreference(context).apply {
+		// setOnPreferenceChangeListener { … } }`. See `ARGUMENT_LAMBDA_METHODS`.
+		if (lambda !== null && ARGUMENT_LAMBDA_METHODS.has(name)) {
+			return `${self}.${name}(${this.callArguments(name, args, lambda, labelled, false, null).join(', ')})`;
 		}
 		if (lambda !== null) this.refuse(lambda, `a lambda passed to \`${name}\``);
 		return this.suspendMembers.has(name) ? this.awaited(call) : call;
@@ -12508,6 +12547,14 @@ class Emitter {
 				case 'interpolated_expression': {
 					const inner = kids(child)[0];
 					if (inner === undefined) this.refuse(child, 'an empty `${}`');
+					// `${x.javaClass}`: text, never reflection — see `INTERPOLATED_CLASS`.
+					const compact = inner.text.replace(/\s+/g, '');
+					if (INTERPOLATED_CLASS.test(compact)) {
+						const owner =
+							compact === 'javaClass' || compact.startsWith('this.') ? 'this' : this.expr(kids(inner)[0]);
+						chunks.push({ literal: false, text: `${this.helper('classText')}(${owner})` });
+						break;
+					}
 					chunks.push({ literal: false, text: this.expr(inner) });
 					break;
 				}

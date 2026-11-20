@@ -281,8 +281,21 @@ const ENTRYPOINT = 'source';
  *     A local named like a modifier (`val final = …`) is read rather than
  *     failing its whole file as "a declaration this build could not parse".
  *     Reconvert every bundle made at 67 or earlier.
+ * 69: keiyoushi's shared settings helpers and AniSource stream relays
+ *     (Re:ANIME, measured 2026-11-20 against yūzōno). A settings-change
+ *     listener lambda and the toast inside it translate; `getFloat` is a
+ *     preferences getter; `${x.javaClass}` in a string is text; seek-preview
+ *     thumbnails are never invoked. A shared declaration named like one of the
+ *     runtime's own top-level functions (`getPreferences`) is renamed rather
+ *     than redeclared. AniSource stream interceptors are served through the
+ *     virtual NanoHTTPD server instead of refused, with what their relays
+ *     need: okio's `readAndWriteUnsafe`, `request`/`buffer` on a peeked
+ *     source, `asResponseBody` into a binary body that `newBuilder()`
+ *     carries, `Response.Builder()`, `Collections.synchronized…`, a bounded
+ *     map whose bound is a constant, and okhttp types that cannot be invoked.
+ *     Reconvert every bundle made at 68 or earlier.
  */
-export const CONVERTER_VERSION = 68;
+export const CONVERTER_VERSION = 69;
 
 export interface BundleInput {
 	readonly id: string;
@@ -378,6 +391,19 @@ export function namesCookieJar(translatedSource: string): boolean {
  */
 export function servesStreams(translatedSource: string): boolean {
 	return /\bextends NanoHTTPD\b/.test(translatedSource);
+}
+
+/**
+ * Whether a translated AniSource subclass routes its streams through stream
+ * interceptors — `override val streamInterceptors = listOf(…)`, emitted as an
+ * assignment in the constructor or as a getter. The driver serves those
+ * streams through a local proxy of its own (`aniyomi-entry.ts`, `__aniProxied`)
+ * and runs the interceptor on every request the player makes, so it carries
+ * the same permission as a server the extension writes. Asked only of a class
+ * that descends from AniSource; elsewhere the name means nothing.
+ */
+export function declaresStreamInterceptors(translatedSource: string): boolean {
+	return /\bthis\.streamInterceptors\s*=|\bget streamInterceptors\s*\(/.test(translatedSource);
 }
 
 export class PackagingError extends Error {

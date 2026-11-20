@@ -5686,13 +5686,14 @@ describe('a parameter that cannot be invoked', () => {
 });
 
 describe("okio's source, which is only ever the same body under another type", () => {
-	it('rewraps `body.source().asResponseBody(type)` as the body text, and refuses the stream', () => {
+	it('rewraps `body.source().asResponseBody(type)` as the body text, and drains a sized one into bytes', () => {
 		// The Madara interceptors that fix a host serving pages as
 		// `application/octet-stream`. A response here is text, so the same
 		// bytes are its `string()`; the runtime half is proved in
 		// kotlin-runtime.spec.ts. Reading the source as bytes converts now that
-		// a body is held as its bytes (ABI.md section 2); rewrapping it with an
-		// explicit length is still not a shape this reads.
+		// a body is held as its bytes (ABI.md section 2); with an explicit
+		// length it is the source drained into a binary body — how a relay
+		// that decrypts segments builds its answer (`__k.asResponseBody`).
 		const emission = translate(
 			inClass(
 				'    fun fix(response: Response): Response {',
@@ -5706,7 +5707,8 @@ describe("okio's source, which is only ever the same body under another type", (
 		expect(emission.js).toContain(
 			"__k.toResponseBody(response.body.string(), __k.toMediaType('image/jpeg'))"
 		);
-		expect(emission.refusals.map((one) => one.member).sort()).toEqual(['sized']);
+		expect(emission.js).toContain('__k.asResponseBody(response.body.source(), null, -1)');
+		expect(emission.refusals).toEqual([]);
 	});
 });
 
@@ -6750,3 +6752,67 @@ describe('a bare call named like a plain property of the class', () => {
 		expect(emitted.js).not.toContain('__k.rateLimit(');
 	});
 });
+
+describe('what a relay and a settings helper needed (Re:ANIME, 2026-11-20)', () => {
+	it('emits a settings-change listener on a scope receiver, and a toast in it', () => {
+		const emission = translate(
+			kt(
+				'fun PreferenceScreen.pick(): ListPreference = ListPreference(context).apply {',
+				'    setOnPreferenceChangeListener { pref, value ->',
+				'        Toast.makeText(context, "restart", Toast.LENGTH_LONG).show()',
+				'        true',
+				'    }',
+				'}'
+			)
+		);
+		expect(emission.refusals).toEqual([]);
+		expect(emission.js).toContain('.setOnPreferenceChangeListener((pref, value) =>');
+	});
+
+	it('reads a class object written into a string as text', () => {
+		const emission = translate(
+			kt('fun fail(default: Any): Nothing = throw IllegalArgumentException("Unsupported type: ${default.javaClass}")')
+		);
+		expect(emission.refusals).toEqual([]);
+		expect(emission.js).toContain('__k.classText(');
+	});
+
+	it('calls okio\'s request on a peeked source rather than a Request parameter of the same name', () => {
+		const emission = translate(
+			kt(
+				'fun head(request: Request, source: BufferedSource): ByteArray =',
+				'    source.peek().run { request(13); buffer.readByteArray(13) }'
+			)
+		);
+		expect(emission.refusals).toEqual([]);
+		expect(emission.js).toContain('this.request(13)');
+	});
+
+	it('bounds an access-ordered cache by a named constant', () => {
+		const emission = translate(
+			kt(
+				'const val MAX = 64',
+				'val cache = Collections.synchronizedMap(',
+				'    object : LinkedHashMap<String, Int>(16, 0.75f, true) {',
+				'        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Int>) = size > MAX',
+				'    }',
+				')'
+			)
+		);
+		expect(emission.refusals).toEqual([]);
+		expect(emission.js).toContain('__k.boundedMap(MAX, false, true)');
+	});
+
+	it('builds a response from nothing', () => {
+		const emission = translate(
+			kt(
+				'fun busy(request: Request): Response = Response.Builder()',
+				'    .request(request).protocol(Protocol.HTTP_1_1).code(503).message("busy")',
+				'    .body("busy".toResponseBody()).build()'
+			)
+		);
+		expect(emission.refusals).toEqual([]);
+		expect(emission.js).toContain('Response.Builder().request(request).protocol(Protocol.HTTP_1_1).code(503)');
+	});
+});
+

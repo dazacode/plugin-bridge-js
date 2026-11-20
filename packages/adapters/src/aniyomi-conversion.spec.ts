@@ -839,15 +839,21 @@ class Extension {
 		]);
 	});
 
-	it('refuses by name a source whose base class would proxy its streams locally', async () => {
+	it('does not refuse a source whose base class proxies its streams through a local server', async () => {
+		// The base class's SelfProxyServer is a NanoHTTPD subclass, which the
+		// runtime runs virtually and the host reaches through 'serve' — the
+		// same served path a source that wrote its own server takes. It was
+		// refused here up front until Re:ANIME needed it (2026-11-20).
 		const plugin = await load(
 			ANI.replace('constructor() {', 'constructor() { this.streamInterceptors = __k.listOf({});'),
 			'Extension',
 			true
 		);
-		await expect(plugin.resolve('one', HOSTED, context().ctx)).rejects.toThrow(
-			/AniSource streamInterceptors/
+		const outcome = await plugin.resolve('one', HOSTED, context().ctx).then(
+			() => null,
+			(error: unknown) => error
 		);
+		expect(String(outcome ?? '')).not.toMatch(/AniSource streamInterceptors/);
 	});
 
 	it('is an ordinary source when the class does not descend from it', async () => {

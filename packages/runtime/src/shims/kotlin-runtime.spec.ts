@@ -5919,3 +5919,97 @@ describe('jsoup mutation and statics, as the emitter reaches them', () => {
 		).toBe(true);
 	});
 });
+
+/* ── a segment relay: bytes in, bytes out ─────────────────────────────────── */
+
+describe('a relay that rewrites a segment as it passes (Re:ANIME, 2026-11-20)', () => {
+	const g = runtime.globals;
+
+	it('XORs a buffer in place through okio\'s unsafe cursor', () => {
+		const buffer = g.Buffer();
+		buffer.write(new Uint8Array([0x10, 0x20, 0x30]));
+		const cursor = buffer.readAndWriteUnsafe();
+		let rounds = 0;
+		while (cursor.next() !== -1) {
+			rounds += 1;
+			for (let i = cursor.start; i < cursor.end; i += 1) cursor.data[i] = cursor.data[i] ^ 0xff;
+		}
+		cursor.close();
+		expect(rounds).toBe(1);
+		expect([...buffer.readByteArray()]).toEqual([0xef, 0xdf, 0xcf]);
+	});
+
+	it('drains a ForwardingSource into a binary body that a rebuilt response carries', () => {
+		// A source that skips a two-byte fake header and inverts the rest, the
+		// shape of a disguised segment.
+		class Undisguise extends g.ForwardingSource {
+			skipped = 0;
+			read(sink: any, byteCount: number) {
+				while (this.skipped < 2) {
+					const n = super.read(g.Buffer(), 2 - this.skipped);
+					if (n === -1) return -1;
+					this.skipped += n;
+				}
+				const temp = g.Buffer();
+				const n = super.read(temp, byteCount);
+				if (n === -1) return -1;
+				const bytes = temp.readByteArray().map((one: number) => one ^ 0xff);
+				sink.write(new Uint8Array(bytes));
+				return n;
+			}
+		}
+		const segment = new Uint8Array([0x89, 0x50, 0xb8, 0x00, 0xff]);
+		const original = g.Response.Builder()
+			.code(200)
+			.body({ __kBody: true, text: '', bytes: segment, contentType: 'image/png' })
+			.build();
+		const body = k.asResponseBody(new Undisguise(original.body.source()).buffer(), 'video/mp2t', 3);
+		const rebuilt = original.newBuilder().header('Content-Type', 'video/mp2t').body(body).build();
+		expect([...rebuilt.body.source().readByteArray()]).toEqual([0x47, 0xff, 0x00]);
+		expect(rebuilt.body.contentType()).toBe('video/mp2t');
+	});
+
+	it('keeps a response\'s bytes through a header change', () => {
+		const original = g.Response.Builder()
+			.body({ __kBody: true, text: '', bytes: new Uint8Array([1, 2, 3]), contentType: 'video/mp2t' })
+			.build();
+		const rebuilt = original.newBuilder().removeHeader('Content-Length').build();
+		expect([...rebuilt.body.source().readByteArray()]).toEqual([1, 2, 3]);
+	});
+
+	it('builds the 503 a relay answers when its upstream timed out', () => {
+		const answer = g.Response.Builder()
+			.protocol(g.Protocol.HTTP_1_1)
+			.code(503)
+			.message('Service Unavailable')
+			.body(k.toResponseBody('timed out'))
+			.build();
+		expect(answer.code).toBe(503);
+		expect(answer.isSuccessful).toBe(false);
+		expect(answer.body.string()).toBe('timed out');
+	});
+
+	it('peeks a header without consuming it, and measures what it peeked', () => {
+		const original = g.Response.Builder()
+			.body({ __kBody: true, text: '', bytes: new Uint8Array(20).fill(7), contentType: 'image/webp' })
+			.build();
+		const source = original.body.source();
+		const peeked = source.peek();
+		expect(peeked.request(13)).toBe(true);
+		expect(k.size(peeked.buffer)).toBe(20);
+		expect(peeked.buffer.readByteArray(13)).toHaveLength(13);
+		expect(source.readByteArray()).toHaveLength(20);
+	});
+
+	it('answers Collections\' synchronized wrappers with the collection itself', () => {
+		const map = k.boundedMap(2, false, true);
+		expect(g.Collections.synchronizedMap(map)).toBe(map);
+	});
+
+	it('shows a toast as a log line, and names a class as text', () => {
+		expect(() => g.Toast.makeText(null, 'restart required', g.Toast.LENGTH_LONG).show()).not.toThrow();
+		expect(k.classText('x')).toBe('class string');
+		expect(k.classText(null)).toBe('class kotlin.Nothing');
+	});
+});
+

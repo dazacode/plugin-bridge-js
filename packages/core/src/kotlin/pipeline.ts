@@ -71,7 +71,7 @@ import {
 	type MemberEdges
 } from './emit';
 import { readKotlin, type KotlinSource } from './reader';
-import { RUNTIME_GLOBALS } from './runtime-api';
+import { RUNTIME_GLOBALS, RUNTIME_TOP_LEVEL_FUNCTIONS } from './runtime-api';
 import {
 	ABI_MEMBERS,
 	describeRefusals,
@@ -626,7 +626,9 @@ function localRenames(
 	for (const [name, where] of owners) {
 		// Widened: `RUNTIME_GLOBALS` is a literal tuple, and this asks about an
 		// arbitrary declared name rather than about one of its members.
-		const shadowsRuntime = (RUNTIME_GLOBALS as readonly string[]).includes(name);
+		const shadowsRuntime =
+			(RUNTIME_GLOBALS as readonly string[]).includes(name) ||
+			RUNTIME_TOP_LEVEL_FUNCTIONS.includes(name);
 		if (!shadowsRuntime && where.size < 2) continue;
 		// Sorted so a conversion is deterministic: the same input has to emit the
 		// same module, or a bundle digest means nothing (`package.ts`).

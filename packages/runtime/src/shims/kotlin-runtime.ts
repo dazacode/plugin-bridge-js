@@ -5357,6 +5357,10 @@ var __k = {
     if (value instanceof Set || value instanceof Map) return value.size;
     if (typeof value === 'string' || Array.isArray(value)) return value.length;
     if (typeof value.size === 'function') return value.size();
+    // A numeric 'size' property — okio's Buffer, and the buffer view a peeked
+    // source answers. Counting the object's keys instead answered 2 for a
+    // 13-byte header.
+    if (typeof value.size === 'number') return value.size;
     if (typeof value.length === 'number') return value.length;
     return Object.keys(value).length;
   },
@@ -7733,6 +7737,20 @@ var __k = {
   classLoader: function () { return __theClassLoader; },
 
   /**
+   * A class object as Kotlin prints one, for a value interpolated into a
+   * string: 'class <name>'. Only ever text (see INTERPOLATED_CLASS in the
+   * converter), so the JavaScript name standing in for the JVM one changes a
+   * message and nothing a plugin can act on.
+   */
+  classText: function (value) {
+    if (value === null || value === undefined) return 'class kotlin.Nothing';
+    var name = typeof value === 'object' || typeof value === 'function'
+      ? (value.constructor && value.constructor.name) || 'Object'
+      : typeof value;
+    return 'class ' + name;
+  },
+
+  /**
    * java.lang.String.CASE_INSENSITIVE_ORDER, exactly: UTF-16 unit by unit, each
    * pair compared upper-cased and then lower-cased, never by locale, and a unit
    * whose case mapping is longer than one unit ('ß' upper-cases to "SS") left
@@ -9783,6 +9801,74 @@ var Request = {
 };
 
 /**
+ * A body handed to a response builder, as text and — when it is not text —
+ * as the exact bytes. What 'asResponseBody' and 'toResponseBody' build, another
+ * response's body, or a plain value.
+ */
+function __takenBody(value) {
+  if (value === null || value === undefined) return { text: '', bytes: null, type: null };
+  if (value.__kBody === true) {
+    return {
+      text: value.text === null || value.text === undefined ? '' : __str(value.text),
+      bytes: value.bytes instanceof Uint8Array ? value.bytes : null,
+      type: value.contentType === null || value.contentType === undefined ? null : __str(value.contentType)
+    };
+  }
+  if (typeof value.string === 'function') return { text: __str(value.string()), bytes: null, type: null };
+  return { text: __str(value), bytes: null, type: null };
+}
+
+/**
+ * okhttp's Response.Builder, for a response an interceptor makes from nothing:
+ * the 503 a relay answers when its upstream timed out, so the player retries
+ * the segment instead of giving up. Built through '__responseOf' like every
+ * other response here, so it reads the same afterwards.
+ */
+var Response = {
+  Builder: function () {
+    var state = { request: null, code: 200, message: '', headers: {}, text: '', bytes: null, type: null };
+    var made = {
+      request: function (value) { state.request = value; return made; },
+      protocol: function () { return made; },
+      code: function (value) { state.code = Number(value); return made; },
+      message: function (value) { state.message = __str(value); return made; },
+      header: function (name, value) {
+        var kept = __headerPairs(state.headers).filter(function (pair) {
+          return String(pair[0]).toLowerCase() !== String(name).toLowerCase();
+        });
+        kept.push([String(name), __str(value)]);
+        state.headers = __headersObject(kept);
+        return made;
+      },
+      addHeader: function (name, value) {
+        var pairs = __headerPairs(state.headers);
+        pairs.push([String(name), __str(value)]);
+        state.headers = __headersObject(pairs);
+        return made;
+      },
+      headers: function (value) { state.headers = value || {}; return made; },
+      body: function (value) {
+        var taken = __takenBody(value);
+        state.text = taken.text;
+        state.bytes = taken.bytes;
+        if (taken.type !== null) state.type = taken.type;
+        return made;
+      },
+      build: function () {
+        var request = state.request !== null ? state.request : __requestBuilder('GET', '', {}, null, null).build();
+        return __responseOf(
+          { status: state.code, message: state.message, headers: state.headers, url: __str(request.url), bodyType: state.type },
+          state.text,
+          request,
+          state.bytes === null ? undefined : state.bytes
+        );
+      }
+    };
+    return made;
+  }
+};
+
+/**
  * The response, with its body already read.
  *
  * See the file header: everything an extension does with a response is
@@ -9955,6 +10041,9 @@ function __responseOf(raw, text, request, bytes) {
       var nextHeaders = raw.headers;
       var nextText = null;
       var nextType = raw.bodyType;
+      // Bytes from a binary body handed to 'body(…)' — a segment a relay
+      // decrypted. Null until one is, and the response's own while none is.
+      var nextBytes = null;
       var made = {
         code: function (value) { nextCode = Number(value); return made; },
         message: function (value) { nextMessage = __str(value); return made; },
@@ -9989,6 +10078,14 @@ function __responseOf(raw, text, request, bytes) {
         /* What 'toResponseBody' built, another response's 'body', or text. A
            body object stringified would be '[object Object]' on the page. */
         body: function (value) {
+          if (value !== null && value !== undefined && value.__kBody === true && value.bytes instanceof Uint8Array) {
+            var taken = __takenBody(value);
+            nextText = taken.text;
+            nextBytes = taken.bytes;
+            if (taken.type !== null) nextType = taken.type;
+            return made;
+          }
+          nextBytes = null;
           if (value === null || value === undefined) nextText = '';
           else if (value.__kBody === true) {
             nextText = __str(value.text);
@@ -10004,7 +10101,11 @@ function __responseOf(raw, text, request, bytes) {
             headers: nextHeaders,
             bodyType: nextType
           });
-          return __responseOf(next, nextText === null ? text : nextText, request);
+          // The body's bytes go along: the new ones when 'body(…)' was handed
+          // a binary body, the response's own when the body was not replaced.
+          // Dropping them made a header change turn a segment into its text.
+          var carried = nextBytes !== null ? nextBytes : nextText === null && exact ? bytes : undefined;
+          return __responseOf(next, nextText === null ? text : nextText, request, carried);
         }
       };
       return made;
@@ -10386,6 +10487,38 @@ class __KBuffer {
     return chunk.length;
   }
   close() {}
+  /*
+   * okio's 'readAndWriteUnsafe()': a cursor over the buffer's own bytes, for
+   * rewriting them in place — how a relay XORs a segment as it passes. okio
+   * walks a buffer segment by segment; this one is a single contiguous array,
+   * so 'next()' answers it once and then -1. Writes to 'data' are writes to
+   * the buffer: it is the same Uint8Array, not a copy.
+   */
+  readAndWriteUnsafe() {
+    var buffer = this;
+    var served = false;
+    var cursor = {
+      buffer: buffer,
+      data: null,
+      start: -1,
+      end: -1,
+      next: function () {
+        if (served || buffer.__bytes.length === 0) {
+          cursor.data = null;
+          cursor.start = -1;
+          cursor.end = -1;
+          return -1;
+        }
+        served = true;
+        cursor.data = buffer.__bytes;
+        cursor.start = 0;
+        cursor.end = buffer.__bytes.length;
+        return cursor.end - cursor.start;
+      },
+      close: function () { served = true; cursor.data = null; }
+    };
+    return cursor;
+  }
 }
 
 /*
@@ -10415,8 +10548,26 @@ class ForwardingSource {
  */
 function __byteSource(bytes) {
   var at = 0;
+  function __bufferView() {
+    var view = function () { return made; };
+    Object.defineProperty(view, 'size', { get: function () { return bytes.length - at; } });
+    view.readByteArray = function (byteCount) { return made.readByteArray(byteCount); };
+    return view;
+  }
   var made = {
     peek: function () { return __byteSource(bytes.slice(at)); },
+    /*
+     * okio's 'request(n)' / 'require(n)': whether n more bytes can be had. All
+     * of them are in hand, so this only compares — and 'buffer' below is then
+     * the bytes that are, which is what okio's buffer holds after a request.
+     * 'source.peek().run { request(13); buffer.readByteArray(minOf(buffer.size, 13L)) }'
+     * is how a relay looks at a disguised segment's fake header.
+     */
+    request: function (byteCount) { return bytes.length - at >= Number(byteCount); },
+    require: function (byteCount) {
+      if (bytes.length - at < Number(byteCount)) throw new Error('java.io.EOFException');
+    },
+    // 'buffer' is assigned below: one value that is both okio spellings.
     readByteArray: function (byteCount) {
       if (byteCount === undefined) { var rest = bytes.slice(at); at = bytes.length; return rest; }
       var n = Number(byteCount);
@@ -10436,8 +10587,17 @@ function __byteSource(bytes) {
       return __host().text.decode(line);
     },
     exhausted: function () { return at >= bytes.length; },
-    /* Already buffered: okio's 'source.buffer()' on one of these is itself. */
-    buffer: function () { return made; },
+    /*
+     * Already buffered: okio's 'source.buffer()' on one of these is itself.
+     * And okio's 'BufferedSource.buffer' PROPERTY, the bytes a request has
+     * pulled in, is the same name — 'source.peek().run { request(13);
+     * buffer.readByteArray(minOf(buffer.size, 13L)) }'. A JavaScript object
+     * cannot hold both under one key (the later silently won, and a relay read
+     * 'readByteArray' off a function), so it is one function that also answers
+     * 'size' and 'readByteArray'. All the bytes are in hand, so they are the
+     * buffer.
+     */
+    buffer: __bufferView(),
     inputStream: function () { var rest = bytes.slice(at); at = bytes.length; return __inputStream(rest); },
     read: function (sink, byteCount) {
       if (at >= bytes.length) return -1;
@@ -10527,6 +10687,8 @@ function ByteArrayOutputStream() {
  */
 function __bufferedSource(source) {
   return {
+    /* The source behind it, for 'asResponseBody' to drain. */
+    __source: source,
     inputStream: function () {
       return {
         __kDrain: async function () {
@@ -11503,6 +11665,51 @@ __k.toResponseBody = function (value, contentType) {
     'This converted extension replaced a response with a body that is not text. Yorozo keeps a ' +
     'response as the text the host read, so a binary body has no faithful spelling here.'
   );
+};
+
+/**
+ * okio's 'BufferedSource.asResponseBody(contentType, length)': a source drained
+ * into the exact bytes of a response body. A relay decrypting a segment builds
+ * one over its own ForwardingSource, whose 'read' does the decrypting.
+ *
+ * Drained here and now, because a response's body is held whole in this
+ * runtime. Every source a converted extension can build over a response is
+ * synchronous — the bytes are already in hand — so the drain is too; one that
+ * is not (a read that answers a promise) is refused by name rather than
+ * handed on half-read. The length argument is okio's claim about the result
+ * and is answered by the bytes themselves.
+ */
+__k.asResponseBody = function (source, contentType) {
+  var type = contentType === undefined || contentType === null ? null : __str(contentType);
+  var from = source !== null && typeof source === 'object' && source.__source !== undefined ? source.__source : source;
+  if (from === null || typeof from !== 'object' || typeof from.read !== 'function') {
+    throw new Error('asResponseBody was called on something that is not an okio source.');
+  }
+  var sink = new __KBuffer();
+  for (;;) {
+    var count = from.read(sink, 65536);
+    if (count !== null && typeof count === 'object' && typeof count.then === 'function') {
+      throw new Error(
+        'This converted extension builds a response body from a source that reads asynchronously, ' +
+        'which this runtime cannot hold as a body.'
+      );
+    }
+    if (count === -1 || count === null || count === undefined) break;
+  }
+  return { __kBody: true, text: '', bytes: sink.readByteArray(), contentType: type };
+};
+
+/**
+ * java.util.Collections, as far as this ecosystem reaches for it: the
+ * 'synchronized…' wrappers, which guard a collection against threads. This
+ * runtime has one thread, so each answers the collection it was given — the
+ * same object, so an anonymous LinkedHashMap's 'removeEldestEntry' still runs.
+ */
+var Collections = {
+  synchronizedMap: function (map) { return map; },
+  synchronizedList: function (list) { return list; },
+  synchronizedSet: function (set) { return set; },
+  synchronizedCollection: function (collection) { return collection; }
 };
 
 /** Common catalogue shorthand for a JSON request body. */
@@ -13672,6 +13879,22 @@ Json.parseToJsonElement = function (text) { return __k.decode('any', text); };
  * them directly, and everything behind them is this sandbox's own.
  */
 export const KOTLIN_PREFS = `
+/**
+ * android.widget.Toast. A plugin draws no UI — the host does — so a toast is a
+ * message with nowhere to appear, and it goes where Log's do. 'makeText' takes
+ * Android's (context, text, duration) and answers something that can be shown.
+ */
+var Toast = {
+  LENGTH_SHORT: 0,
+  LENGTH_LONG: 1,
+  makeText: function (context, text) {
+    return {
+      show: function () { Log.i('Toast', text); },
+      cancel: function () {}
+    };
+  }
+};
+
 /**
  * android.util.Log, which an extension leaves in and the runtime has to answer.
  *

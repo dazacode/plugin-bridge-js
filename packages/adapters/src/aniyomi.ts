@@ -53,7 +53,12 @@ import {
 import { TreeError } from '@plugin-bridge/core/git-trees';
 import { obstacleSites } from '@plugin-bridge/core/obstacles';
 import { attributionFrom } from '@plugin-bridge/core/attribution';
-import { namesCookieJar, servesStreams, packageBundle } from '@plugin-bridge/core/package';
+import {
+	declaresStreamInterceptors,
+	namesCookieJar,
+	servesStreams,
+	packageBundle
+} from '@plugin-bridge/core/package';
 import { settingKeyMap } from '@plugin-bridge/core/preferences';
 import { aniyomiPreferences } from './aniyomi-preferences';
 import { readMihonBuildFile } from './mihon-build-file';
@@ -571,6 +576,7 @@ export const aniyomiAdapter: ForeignAdapter = {
 		);
 
 		const synchrony = synchronyScriptOf(conversion.js, source.resources);
+		const aniSource = descendsFrom(source.files, conversion.className, 'AniSource');
 		const entrypointSource = aniyomiEntrypoint({
 			pluginId: listing.id,
 			translatedSource: conversion.js,
@@ -578,7 +584,7 @@ export const aniyomiAdapter: ForeignAdapter = {
 			settingIds: settingKeyMap(settings),
 			baseUrl,
 			synchronyScript: synchrony?.text,
-			aniSource: descendsFrom(source.files, conversion.className, 'AniSource'),
+			aniSource,
 			...(generated === null ? {} : { generated: { name: generated.name, lang: generated.lang } })
 		});
 
@@ -630,7 +636,12 @@ export const aniyomiAdapter: ForeignAdapter = {
 			// cookie *API* — it gets the request continuity its own platform
 			// would have given it, and nothing else.
 			usesCookies: formatProfile('aniyomi').implicitCookies || namesCookieJar(conversion.js),
-			servesStreams: servesStreams(conversion.js),
+			// A server the extension writes, or AniSource's stream interceptors,
+			// which the driver serves through a proxy of its own: either way the
+			// extension's code answers the player's requests, which is the
+			// permission a viewer is shown (`segment-transform-js`).
+			servesStreams:
+				servesStreams(conversion.js) || (aniSource && declaresStreamInterceptors(conversion.js)),
 			license: credit.license,
 			licenseText: source.licenseText ?? undefined,
 			embedded: synchrony === undefined ? [] : [synchrony.path],

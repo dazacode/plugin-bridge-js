@@ -848,11 +848,156 @@ async function __hosterListDefault(episode) {
     : await __defaultHosterList(response);
 }
 
+/**
+ * What AniSource's final wrappers do to every hoster and video they hand out:
+ * 'getHosterList(…) = fetchHosterList(…).map(::proxied)', and the same for
+ * 'getVideoList' and 'resolveVideo'. This driver calls the fetch… members
+ * underneath those wrappers and stands in for AniSource itself, so the
+ * translated base class — its 'proxied', 'SelfProxy' and 'StreamProxy' — is
+ * not in the bundle, and the step is taken here, in the same shape.
+ *
+ * A url one of the source's stream interceptors 'handles' is rewritten onto
+ * '__ANI_PROXY', a NanoHTTPD server the runtime runs virtually, so the stream
+ * is reported as served and every request the player makes for it comes back
+ * to this realm: decoded, handed to the interceptor ('intercept(chain)' — where
+ * Re:ANIME's FlixStreamInterceptor decrypts a disguised segment), and, for a
+ * playlist, rewritten so that what IT lists comes back here too. Skipped, the
+ * player fetched the encrypted segments straight from the CDN and every one
+ * failed (2026-11-20).
+ */
+var __ANI_PROXY = null;
+
+function __aniInterceptors() {
+  if (!__ANI_SOURCE) return [];
+  return __arr(__source.streamInterceptors || []).filter(function (one) {
+    return one !== null && typeof one === 'object' && typeof one.handles === 'function';
+  });
+}
+
+function __aniInterceptorFor(url) {
+  var parsed;
+  try { parsed = __k.httpUrl(url); } catch (e) { return null; }
+  if (parsed === null || parsed === undefined) return null;
+  var all = __aniInterceptors();
+  for (var i = 0; i < all.length; i += 1) {
+    try { if (all[i].handles(parsed)) return all[i]; } catch (e) { /* a handles() that throws claims nothing */ }
+  }
+  return null;
+}
+
+/** The url's own target, carried in the path so nothing has to escape it twice. */
+function __aniProxyUrl(target) {
+  if (__ANI_PROXY === null) {
+    __ANI_PROXY = new __AniStreamProxy('127.0.0.1', 0);
+    __ANI_PROXY.start();
+  }
+  var encoded = __host().text.encode(__str(target));
+  var binary = '';
+  for (var i = 0; i < encoded.length; i += 1) binary += String.fromCharCode(encoded[i]);
+  var token = btoa(binary).replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, '');
+  return 'http://127.0.0.1:' + __ANI_PROXY.listeningPort + '/_kp/' + token;
+}
+
+function __aniTargetOf(path) {
+  var match = /^\\/_kp\\/([A-Za-z0-9_-]+)/.exec(__str(path));
+  if (match === null) return null;
+  var base64 = match[1].replace(/-/g, '+').replace(/_/g, '/');
+  while (base64.length % 4 !== 0) base64 += '=';
+  var binary = atob(base64);
+  var bytes = new Uint8Array(binary.length);
+  for (var i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  return __host().text.decode(bytes);
+}
+
+/** A url as the player should ask for it: through the proxy when an interceptor claims it. */
+function __aniRoute(url) {
+  return __aniInterceptorFor(url) === null ? url : __aniProxyUrl(url);
+}
+
+/** Every uri in an HLS playlist, resolved against it and routed. */
+function __aniRewritePlaylist(text, playlistUrl) {
+  return __str(text).split('\\n').map(function (raw) {
+    var line = raw.replace(/\\r$/, '');
+    var trimmed = line.trim();
+    if (trimmed.length === 0) return line;
+    var resolve = function (uri) {
+      try { return __aniRoute(new URL(uri, playlistUrl).toString()); } catch (e) { return uri; }
+    };
+    if (trimmed.charAt(0) === '#') {
+      return line.replace(/URI="([^"]+)"/g, function (_, uri) { return 'URI="' + resolve(uri) + '"'; });
+    }
+    return resolve(trimmed);
+  }).join('\\n');
+}
+
+class __AniStreamProxy extends NanoHTTPD {
+  async handle(session) {
+    var target = __aniTargetOf(session.uri);
+    var interceptor = target === null ? null : __aniInterceptorFor(target);
+    if (target === null || interceptor === null) {
+      return newFixedLengthResponse(Status.NOT_FOUND, MIME_PLAINTEXT, 'Not a stream this source serves.');
+    }
+    var builder = Request.Builder().url(target);
+    var range = session.headers.get('range');
+    if (range !== undefined && range !== null && range !== '') builder = builder.header('Range', range);
+    var request = builder.build();
+    var chain = {
+      request: function () { return request; },
+      call: function () { return null; },
+      proceed: function (next) { return __client().newCall(next).execute(); }
+    };
+    var response = await interceptor.intercept(chain);
+    var code = Number(response.code);
+    var status = Status.lookup(code) || { getRequestStatus: function () { return code; }, getDescription: function () { return String(code); } };
+    var type = response.body.contentType() || response.header('Content-Type');
+    var playlist = /mpegurl/i.test(__str(type)) || /\\.m3u8(\\?|$)/i.test(target);
+    if (code >= 200 && code < 300 && playlist) {
+      var text = response.body.string();
+      if (text.replace(/^\\uFEFF/, '').trimStart().indexOf('#EXTM3U') === 0) {
+        return newFixedLengthResponse(status, type || 'application/vnd.apple.mpegurl', __aniRewritePlaylist(text, target));
+      }
+    }
+    var bytes = response.body.source().readByteArray();
+    return newFixedLengthResponse(status, type || 'application/octet-stream', __inputStream(bytes), bytes.length);
+  }
+}
+
+async function __aniProxied(value) {
+  if (!__ANI_SOURCE || value === null || value === undefined) return value;
+  if (__aniInterceptors().length === 0) return value;
+  if (Array.isArray(value.videoList)) {
+    var videos = [];
+    var changed = false;
+    for (var i = 0; i < value.videoList.length; i += 1) {
+      var made = await __aniProxied(value.videoList[i]);
+      if (made !== value.videoList[i]) changed = true;
+      videos.push(made);
+    }
+    if (!changed) return value;
+    return Object.assign(Object.create(Object.getPrototypeOf(value)), value, { videoList: videos });
+  }
+  if (typeof value.videoUrl === 'string' && value.videoUrl.length > 0) {
+    var routed = __aniRoute(value.videoUrl);
+    var tracks = __arr(value.subtitleTracks || []).map(function (track) {
+      return track && typeof track.url === 'string' ? Object.assign(Object.create(Object.getPrototypeOf(track)), track, { url: __aniRoute(track.url) }) : track;
+    });
+    if (routed === value.videoUrl) return value;
+    return Object.assign(Object.create(Object.getPrototypeOf(value)), value, { videoUrl: routed, url: routed, subtitleTracks: tracks });
+  }
+  return value;
+}
+
+async function __aniProxiedAll(values) {
+  const out = [];
+  for (const value of __arrayOf(values)) out.push(await __aniProxied(value));
+  return out;
+}
+
 /** The hoster list, with the extension's own override preferred. */
 async function __hosterList(episode) {
   // AniSource's getHosterList is final and is 'fetchHosterList', which it
   // declares abstract, so a subclass always writes one.
-  if (__ANI_SOURCE) return __arrayOf(await __call('fetchHosterList', episode));
+  if (__ANI_SOURCE) return await __aniProxiedAll(await __call('fetchHosterList', episode));
   return __arrayOf(
     __overrides('getHosterList', 1)
       ? await __call('getHosterList', episode)
@@ -913,7 +1058,7 @@ async function __hosterVideos(hoster) {
     if (!__declares('fetchVideoList')) {
       throw __unsupported('This extension lists a hoster without its videos and declares no fetchVideoList.');
     }
-    return __arrayOf(await __call('fetchVideoList', hoster));
+    return await __aniProxiedAll(await __call('fetchVideoList', hoster));
   }
   return __arrayOf(
     __overrides('getVideoList', 1)
@@ -1046,7 +1191,7 @@ async function __playable(video) {
 
   const resolver = __ANI_SOURCE ? 'fetchResolvedVideo' : 'resolveVideo';
   if (__declares(resolver)) {
-    const resolved = await __call(resolver, current);
+    const resolved = await __aniProxied(await __call(resolver, current));
     if (resolved === null || resolved === undefined) return null;
     current = resolved;
     url = __videoUrlOf(current);
@@ -1270,16 +1415,16 @@ export default {
         'here for that to bind to, and this source cannot be played by this build.'
       );
     }
-    // The same server, under AniSource's name for it: a source with stream
-    // interceptors has the base class rewrite those videos to a localhost
-    // proxy it starts (SelfProxy) — ADR-0006's boundary, said up front.
-    if (__ANI_SOURCE && __arr(__source.streamInterceptors || []).length > 0) {
-      throw __unsupported(
-        'This extension plays through a local proxy its base class starts on the ' +
-        'device (AniSource streamInterceptors). Yorozo runs plugins with no local ' +
-        'server, so this source cannot be played by this build.'
-      );
-    }
+    // AniSource's stream interceptors are NOT refused, though they look like
+    // the server above. The base class rewrites each video it handles to
+    // 'http://127.0.0.1:<port>/_kp/…' on 'SelfProxyServer', a NanoHTTPD
+    // subclass — and a NanoHTTPD server started by a bundle is the virtual one
+    // in the runtime, answered in this realm through 'serve' below, exactly as
+    // a source that wrote its own server is. Its handler runs the request
+    // through the source's own client and so through the interceptor, which is
+    // what decrypts the segments. Re:ANIME moved to this on 2026-11-18 and was
+    // refused here until then. 'createHttpServer' stays refused: that one asks
+    // the APP to host a server, which no host here provides.
 
     const target = episode && episode.sourceEpisodeId ? episode.sourceEpisodeId : sourceMediaId;
 

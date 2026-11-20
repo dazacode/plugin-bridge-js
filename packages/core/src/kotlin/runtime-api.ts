@@ -765,6 +765,10 @@ export const RUNTIME_HELPERS = [
 	   `CLASS_LOADER` in `subset.ts` for the two spellings that reach it, and
 	   `__RESOURCES` in the entry point for where the files come from. */
 	'classLoader',
+	/* okio's source → binary response body. See the runtime. */
+	'asResponseBody',
+	/* `${x.javaClass}` as text — see `INTERPOLATED_CLASS` in `subset.ts`. */
+	'classText',
 	/* java.lang.String.CASE_INSENSITIVE_ORDER, a Comparator — see the runtime. */
 	'caseInsensitiveOrder',
 	'filterNotNull',
@@ -843,10 +847,32 @@ export const HOST_BACKED_HELPERS: ReadonlySet<RuntimeHelper> = new Set([
  * These are constructed by the converted code directly, so renaming them would
  * mean rewriting every construction site for no gain.
  */
+/**
+ * Plain functions the runtime declares at bundle scope — the settings store
+ * under the several names this ecosystem asks for it by. Not in
+ * `RUNTIME_GLOBALS`, because nothing is emitted *as* them; listed so a shared
+ * file that declares one of these names is renamed rather than redeclaring it.
+ * keiyoushi's `Preferences.kt` declares two `getPreferences` overloads, and
+ * once both translated the dispatcher over them redeclared the runtime's
+ * `getPreferences` and the bundle died at load (2026-11-20).
+ */
+export const RUNTIME_TOP_LEVEL_FUNCTIONS: readonly string[] = [
+	'SharedPreferences',
+	'getSourcePreferences',
+	'sourcePreferences',
+	'getPreferences',
+	'getSharedPreferences',
+	'preferencesKey'
+];
+
 export const RUNTIME_GLOBALS = [
 	'GET',
 	'POST',
 	'Request',
+	/* okhttp's Response.Builder, for a response made from nothing — see the runtime. */
+	'Response',
+	/* java.util.Collections' synchronized wrappers; one thread, so identity. */
+	'Collections',
 	'Headers',
 	'FormBody',
 	'Jsoup',
@@ -971,6 +997,9 @@ export const RUNTIME_GLOBALS = [
 	'SoftReference',
 	'WeakReference',
 	'Log',
+	/* android.widget.Toast: `makeText(…).show()`. A plugin draws no UI, so the
+	   message goes to the host log — see the runtime. */
+	'Toast',
 	/* kotlin.random.Random, which is `Math.random` and promises nothing. Its
 	   neighbour `SecureRandom` is the one that does, and is separate below. */
 	'Random',
